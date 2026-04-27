@@ -14,6 +14,10 @@ on:
       - 'examples/**'
       - 'scripts/render-docs.sh'
       - '.standardoc.json'
+  # Manual trigger: lets us re-run a render pass without pushing (e.g. after
+  # enabling Actions on a fresh repo, or to test a change to the workflow
+  # itself). Targets the `render-and-commit` job when run from `main`.
+  workflow_dispatch:
 
 jobs:
   # On PR: just verify the templates render without crashing. Outputs are
@@ -22,10 +26,10 @@ jobs:
   # surface as a non-zero exit from the script.
   render-check:
     name: Render check (PR)
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Render docs from docs-src/
@@ -37,12 +41,12 @@ jobs:
   # from re-triggering the workflow and looping.
   render-and-commit:
     name: Render + auto-commit (main)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Render docs from docs-src/
