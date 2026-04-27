@@ -265,8 +265,20 @@ mod tests {
         fs::remove_file(&file).unwrap();
 
         let events = recv_batch(&rx);
+        // Linux (inotify) and Windows (ReadDirectoryChangesW) report Removed
+        // reliably; macOS FSEvents sometimes coalesces a remove into Modified
+        // inside its batching window. Per-platform predicate keeps Linux and
+        // Windows strict so a real regression (no event at all, or wrong path)
+        // still fails the test. Drop the cfg once notify upstream guarantees
+        // Removed on macOS too.
+        #[cfg(target_os = "macos")]
+        let acceptable = |e: &WatcherEvent| {
+            matches!(e, WatcherEvent::Removed(_) | WatcherEvent::Modified(_))
+        };
+        #[cfg(not(target_os = "macos"))]
+        let acceptable = |e: &WatcherEvent| matches!(e, WatcherEvent::Removed(_));
         assert!(
-            has_kind_for(&events, &file, |e| matches!(e, WatcherEvent::Removed(_))),
+            has_kind_for(&events, &file, acceptable),
             "expected Removed for {file:?}, got: {events:?}"
         );
     }
