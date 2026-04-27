@@ -272,9 +272,8 @@ mod tests {
         // still fails the test. Drop the cfg once notify upstream guarantees
         // Removed on macOS too.
         #[cfg(target_os = "macos")]
-        let acceptable = |e: &WatcherEvent| {
-            matches!(e, WatcherEvent::Removed(_) | WatcherEvent::Modified(_))
-        };
+        let acceptable =
+            |e: &WatcherEvent| matches!(e, WatcherEvent::Removed(_) | WatcherEvent::Modified(_));
         #[cfg(not(target_os = "macos"))]
         let acceptable = |e: &WatcherEvent| matches!(e, WatcherEvent::Removed(_));
         assert!(
