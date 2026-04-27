@@ -1,0 +1,140 @@
+name: Release
+
+# Triggered when a tag matching `v*` is pushed (e.g. `v0.1.0`).
+# Builds the OSS binaries for Linux x64/arm64, macOS x64/arm64, Windows x64
+# (all without the `embedded-frontend` Cargo feature — Pro binaries live in
+# the private `standardoc-pro` repository), packages them into archives, and
+# attaches everything to a new GitHub Release named after the tag.
+#
+# Manual run via `gh release create vX.Y.Z` is also possible after the fact:
+# this workflow only auto-runs on tag push.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Install cross (for aarch64-linux)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+
+      - name: Build (cargo)
+        if: '!matrix.cross'
+        run: cargo build --release --target ${{ matrix.target }} -p standardoc -p standardoc-server
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }} -p standardoc -p standardoc-server
+
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp README.md QUICKSTART.md CHANGELOG.md LICENSE staging/
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp target/${{ matrix.target }}/release/standardoc-server.exe staging/
+            cp target/${{ matrix.target }}/release/standardoc.exe staging/
+          else
+            cp target/${{ matrix.target }}/release/standardoc-server staging/
+            cp target/${{ matrix.target }}/release/standardoc staging/
+          fi
+
+      - name: Archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          name="standardoc-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mv staging "$name"
+          tar czf "${name}.tar.gz" "$name"
+          shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
+
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $name = "standardoc-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          Move-Item staging $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "$name.zip").Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: standardoc-${{ matrix.target }}
+          path: |
+            standardoc-*.tar.gz
+            standardoc-*.tar.gz.sha256
+            standardoc-*.zip
+            standardoc-*.zip.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" \) -exec cp {} release-assets/ \;
+          ls -lh release-assets
+
+      - name: Extract changelog section
+        id: changelog
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # Pull the section between `## [VERSION]` and the next `## ` header.
+          awk "/^## \\[$version\\]/{flag=1; next} /^## /{flag=0} flag" CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Release $GITHUB_REF_NAME — see CHANGELOG.md for details." > release-notes.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: release-assets/*
+          generate_release_notes: false

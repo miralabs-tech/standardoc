@@ -1,0 +1,118 @@
+# Standardoc — recommended GitHub labels for Issues and Pull Requests.
+#
+# Apply to a fresh repo with the GitHub CLI :
+#
+#   gh label create --file .github/labels.yml --repo miralabs-tech/standardoc
+#
+# (Requires `gh extension install heaths/gh-label` or a small wrapper script.
+# For now: copy each entry to a `gh label create NAME --color HEX --description "..."`
+# command, or use a label-sync action like `EndBug/label-sync@v2`.)
+#
+# Philosophy: small, opinionated set. Too many labels = nobody uses them.
+# Add more only when a clear use case emerges (don't pre-create speculatively).
+
+# ── Type — what kind of contribution / issue ──────────────────────────────
+- name: bug
+  color: 'd73a4a'
+  description: 'Something isn''t working as documented'
+- name: enhancement
+  color: 'a2eeef'
+  description: 'New feature or improvement to existing behavior'
+- name: documentation
+  color: '0075ca'
+  description: 'README, CHANGELOG, code docs, examples — text-only changes'
+- name: question
+  color: 'd876e3'
+  description: 'Usage question — consider GitHub Discussions instead'
+- name: discussion
+  color: 'cccccc'
+  description: 'Open-ended design / architecture conversation'
+- name: dependencies
+  color: '0366d6'
+  description: 'Dependency bump (Cargo, GitHub Actions, etc.)'
+- name: breaking-change
+  color: 'b60205'
+  description: 'PR introduces breaking API or behavior changes'
+
+# ── Status — where the issue is in the triage / fix loop ──────────────────
+- name: triage
+  color: 'fbca04'
+  description: 'Needs initial maintainer review'
+- name: needs-info
+  color: 'd4c5f9'
+  description: 'Waiting on additional context from the reporter'
+- name: blocked
+  color: 'b60205'
+  description: 'Blocked on external decision, upstream fix, or another issue'
+- name: ready
+  color: '0e8a16'
+  description: 'Triage done, scoped, ready for someone to pick up'
+- name: in-progress
+  color: 'fbca04'
+  description: 'Active work in progress (assigned)'
+- name: wontfix
+  color: 'ffffff'
+  description: 'Not aligned with project direction — closed without action'
+- name: duplicate
+  color: 'cfd3d7'
+  description: 'Already tracked elsewhere'
+- name: invalid
+  color: 'e4e669'
+  description: 'Not reproducible / out of scope / spam'
+
+# ── Community signals ─────────────────────────────────────────────────────
+- name: good first issue
+  color: '7057ff'
+  description: 'Newcomer-friendly — small scope, well-defined, mentor available'
+- name: help wanted
+  color: '008672'
+  description: 'Maintainers welcome contribution from the community'
+
+# ── Area — which subsystem the issue / PR touches ─────────────────────────
+- name: 'area/core'
+  color: '5319e7'
+  description: 'standardoc-core (data model, DSL, validator, scanner, watcher)'
+- name: 'area/cli'
+  color: '5319e7'
+  description: 'standardoc-cli (scan, transform, validate)'
+- name: 'area/lsp'
+  color: '5319e7'
+  description: 'LSP server (completion, hover, rename, diagnostics)'
+- name: 'area/mcp'
+  color: '5319e7'
+  description: 'MCP server (tools, resources, agent integration)'
+- name: 'area/web'
+  color: '5319e7'
+  description: 'standardoc-web HTTP/SSE backend (Pro frontend tracked separately)'
+- name: 'area/lang/rust'
+  color: '5319e7'
+  description: 'Rust provider (syn-based)'
+- name: 'area/lang/ts'
+  color: '5319e7'
+  description: 'TypeScript / JavaScript provider (swc-based)'
+- name: 'area/lang/python'
+  color: '5319e7'
+  description: 'Python provider'
+- name: 'area/lang/tree-sitter'
+  color: '5319e7'
+  description: 'Tree-sitter generic provider + dynamic JSON configs'
+- name: 'area/build'
+  color: '5319e7'
+  description: 'CI, release pipeline, install scripts, build scripts'
+- name: 'area/docs'
+  color: '5319e7'
+  description: 'README, CHANGELOG, examples — pure documentation'
+
+# ── Special ───────────────────────────────────────────────────────────────
+- name: pro
+  color: 'e8a33d'
+  description: 'Concerns Standardoc Pro behavior — fix may live in the private repo'
+- name: upstream
+  color: 'fef2c0'
+  description: 'Root cause is in a dependency (syn, swc, tree-sitter, axum, …)'
+- name: 'needs-mvce'
+  color: 'd4c5f9'
+  description: 'Needs minimal verifiable example to reproduce'
+- name: release
+  color: '0e8a16'
+  description: 'PR creates or finalizes a release'

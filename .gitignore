@@ -1,0 +1,35 @@
+target/
+target-dev/
+**/*.rs.bk
+.DS_Store
+*.swp
+*.swo
+
+# Standardoc runtime artifacts (created by the daemon when dogfooding the
+# tool on its own repo). User projects WILL want to commit `.standardoc/pages/`
+# and `.standardoc/keys.lock.json` — but this repo has nothing meaningful to
+# ship there. Pattern is anchored at root (`/`) so the demo `.standardoc/`
+# folders inside `examples/*/` stay tracked.
+/.standardoc/
+
+# IDE / editor metadata — left to contributor preference
+.idea/
+
+# Web frontend = Standardoc Pro (closed-source, separate distribution).
+# The `standardoc-web` crate is feature-gated (`embedded-frontend`):
+# OSS builds skip `web/` entirely. Pro builds require it populated from
+# the private `standardoc-pro` repo before `cargo build --features ...`.
+web/
+
+# Rendered docs — outputs of `scripts/render-docs.sh`. Source of truth lives
+# in `docs-src/`. CI re-renders on push to main and force-commits the result
+# (`git add -f` over this gitignore) so the GitHub view stays current.
+# Contributors edit `docs-src/` and never touch these directly.
+/README.md
+/README.fr.md
+/docs/ai-integration.md
+/docs/ai-integration.fr.md
+/docs/cli-reference.md
+/docs/cli-reference.fr.md
+/docs/mcp-reference.md
+/docs/mcp-reference.fr.md

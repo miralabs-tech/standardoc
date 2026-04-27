@@ -1,0 +1,5 @@
+# standardoc-only ignore — applied on top of .gitignore
+# Same gitignore-style syntax. Prefix `!` to re-include.
+
+# Alternative Cargo target (build artifacts not in main .gitignore)
+target-dev/

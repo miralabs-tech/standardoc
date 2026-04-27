@@ -1,0 +1,27 @@
+[package]
+name = "standardoc-core"
+description = "Core data model, index, DSL, validator and watcher for Standardoc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+dashmap = { workspace = true }
+walkdir = "2.5"
+ignore = "0.4"
+rayon = "1.10"
+notify = "8.2.0"
+notify-debouncer-full = "0.7.0"
+regex = "1.12"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# `crates/.standardoc/` is created by the bootstrap when the MCP server
+# points at `crates/` (dogfood mode). The `crates/*` glob would otherwise
+# pick it up as a fake member — explicit exclude so cargo doesn't try to
+# compile it.
+exclude = ["crates/.standardoc"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-FSL-1.1-MIT"
+repository = "https://github.com/miralabs-tech/standardoc"
+homepage = "https://standardoc.miralabs.tech"
+authors = ["Wesley Cormier (supv-studio / miralabs.tech)"]
+rust-version = "1.89"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+dashmap = "6.1"
+
+standardoc-core = { version = "0.1.0", path = "crates/standardoc-core" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+# Shared lint policy. Each crate opts in via `[lints] workspace = true`.
+# Rationale:
+#  - rust: basic hygiene (no unsafe, no dangling imports, idiomatic 2018+).
+#  - clippy::all + pedantic + nursery: catch dubious patterns at `cargo check`.
+#  - clippy::cargo: Cargo.toml hygiene (missing fields, ambiguous deps).
+# Pragmatic `allow`s below neutralise the lints that are too noisy or actively
+# unhelpful on an evolving codebase — revisit them once the project matures.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+multiple_crate_versions = "allow"
+cargo_common_metadata = "allow"
+# `unreachable_pub` (rustc) and `redundant_pub_crate` (clippy) contradict each
+# other on internal items of a binary crate. We prefer explicit `pub(crate)` so
+# module boundaries stay self-documenting.
+redundant_pub_crate = "allow"
+
+# v0.1.0 release punts — pure style / false positives. Revisit progressively.
+doc_markdown = "allow"                    # false positives on swc, syn, BTreeMap, etc.
+too_long_first_doc_paragraph = "allow"    # docstring style preference
+too_many_lines = "allow"                  # one 132-line fn — refactor later
+manual_let_else = "allow"                 # style preference
+option_if_let_else = "allow"              # style preference
+default_trait_access = "allow"            # style preference
+unnecessary_struct_initialization = "allow"
+needless_collect = "allow"                # only triggers in tests today

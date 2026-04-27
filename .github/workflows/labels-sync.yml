@@ -1,0 +1,29 @@
+name: Sync labels
+
+# Keeps the repository labels in sync with `.github/labels.yml`.
+# Triggers:
+# - whenever the labels file changes on `main` (so accepted PRs auto-apply)
+# - manually via the workflow dispatch button (one-off resync)
+#
+# Uses EndBug/label-sync; DELETE_OBSOLETE is off so manually-added labels
+# (e.g. an experimental tag) survive — flip to true once the catalog is stable.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/labels.yml'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EndBug/label-sync@v2
+        with:
+          config-file: .github/labels.yml
+          delete-other-labels: false
