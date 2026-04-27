@@ -210,11 +210,14 @@ mod tests {
     #[test]
     fn detects_file_creation() {
         let dir = tempdir().unwrap();
-        let (_watcher, rx) = Watcher::start(dir.path()).unwrap();
+        // Canonicalize to resolve symlinks (macOS routes /var → /private/var,
+        // and the notify backend reports the canonical path).
+        let dir_path = dir.path().canonicalize().unwrap();
+        let (_watcher, rx) = Watcher::start(&dir_path).unwrap();
         // Delay for notify backend initialization before modifications.
         thread::sleep(Duration::from_millis(150));
 
-        let file = dir.path().join("hello.rs");
+        let file = dir_path.join("hello.rs");
         fs::write(&file, b"fn main() {}").unwrap();
 
         let events = recv_batch(&rx);
@@ -230,10 +233,11 @@ mod tests {
     #[test]
     fn detects_file_modification() {
         let dir = tempdir().unwrap();
-        let file = dir.path().join("mod.rs");
+        let dir_path = dir.path().canonicalize().unwrap();
+        let file = dir_path.join("mod.rs");
         fs::write(&file, b"// initial").unwrap();
 
-        let (_watcher, rx) = Watcher::start(dir.path()).unwrap();
+        let (_watcher, rx) = Watcher::start(&dir_path).unwrap();
         thread::sleep(Duration::from_millis(150));
 
         fs::write(&file, b"// updated").unwrap();
@@ -251,10 +255,11 @@ mod tests {
     #[test]
     fn detects_file_removal() {
         let dir = tempdir().unwrap();
-        let file = dir.path().join("rm.rs");
+        let dir_path = dir.path().canonicalize().unwrap();
+        let file = dir_path.join("rm.rs");
         fs::write(&file, b"x").unwrap();
 
-        let (_watcher, rx) = Watcher::start(dir.path()).unwrap();
+        let (_watcher, rx) = Watcher::start(&dir_path).unwrap();
         thread::sleep(Duration::from_millis(150));
 
         fs::remove_file(&file).unwrap();
