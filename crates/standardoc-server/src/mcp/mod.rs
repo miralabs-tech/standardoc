@@ -85,7 +85,10 @@ fn dispatch(state: &ServerState, initialized: &mut bool, msg: RawMessage) -> Opt
         }
         "ping" => Some(success_response(&id, &json!({}))),
 
-        "tools/list" => Some(success_response(&id, &json!({ "tools": tools_index::tools() }))),
+        "tools/list" => Some(success_response(
+            &id,
+            &json!({ "tools": tools_index::tools() }),
+        )),
         "tools/call" => {
             let response = tools::call(state, &params);
             if is_notification {

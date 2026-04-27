@@ -62,9 +62,7 @@ fn build() -> Vec<Value> {
                         if tag == "doc-extend" {
                             continue;
                         }
-                        if let Some(value) =
-                            occurrences.first().and_then(|fields| fields.first())
-                        {
+                        if let Some(value) = occurrences.first().and_then(|fields| fields.first()) {
                             entry.insert(tag.clone(), value.clone());
                         }
                     }
@@ -179,9 +177,7 @@ mod tests {
     fn every_derived_tool_has_object_input_schema() {
         for tool in tools() {
             let name = tool.get("name").and_then(Value::as_str).unwrap_or("?");
-            let schema = tool
-                .get("inputSchema")
-                .expect("missing inputSchema");
+            let schema = tool.get("inputSchema").expect("missing inputSchema");
             assert_eq!(
                 schema.get("type").and_then(Value::as_str),
                 Some("object"),

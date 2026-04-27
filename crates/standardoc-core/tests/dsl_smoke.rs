@@ -758,23 +758,23 @@ fn anchor_with_satellites() -> BTreeMap<String, DocBlock> {
     // distinguish dotted vs `::` boundaries.
     let mut anchor = sample_block();
     anchor.key = DocKey::new("tools.get_doc");
-    anchor.label = "get_doc".to_owned();
+    anchor.label = "get_doc".into();
 
     let mut sat_schema = sample_block();
     sat_schema.key = DocKey::new("tools.get_doc::schema");
-    sat_schema.label = "schema".to_owned();
+    sat_schema.label = "schema".into();
 
     let mut sat_examples = sample_block();
     sat_examples.key = DocKey::new("tools.get_doc::examples");
-    sat_examples.label = "examples".to_owned();
+    sat_examples.label = "examples".into();
 
     let mut child = sample_block();
     child.key = DocKey::new("tools.get_doc.helper");
-    child.label = "helper".to_owned();
+    child.label = "helper".into();
 
     let mut other = sample_block();
     other.key = DocKey::new("tools.list_docs");
-    other.label = "list_docs".to_owned();
+    other.label = "list_docs".into();
 
     let mut m = BTreeMap::new();
     m.insert(anchor.key.as_str().to_owned(), anchor);

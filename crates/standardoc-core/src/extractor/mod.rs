@@ -653,10 +653,7 @@ mod tests {
         assert!(b.symbol.is_none());
         assert_eq!(b.origin, BlockOrigin::Annotated);
         assert!(!b.tags.contains_key("doc-extend"));
-        assert_eq!(
-            b.tags.get("description").unwrap()[0][0],
-            "Schema details."
-        );
+        assert_eq!(b.tags.get("description").unwrap()[0][0], "Schema details.");
     }
 
     #[test]

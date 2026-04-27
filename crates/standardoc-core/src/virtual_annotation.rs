@@ -303,7 +303,11 @@ fn infer_description(
             ("delete_", "Deletes the {}.", "verb-delete"),
             ("remove_", "Removes the {}.", "verb-remove"),
             ("find_", "Searches for the {}.", "verb-find"),
-            ("with_", "Returns a copy with the {} configured.", "verb-with-builder"),
+            (
+                "with_",
+                "Returns a copy with the {} configured.",
+                "verb-with-builder",
+            ),
             ("from_", "Constructs a new instance from a {}.", "verb-from"),
             ("to_", "Converts this value into a {}.", "verb-to"),
             ("as_", "Borrows this value as a {}.", "verb-as"),
@@ -536,7 +540,10 @@ fn infer_returns(symbol: &SymbolInfo) -> Option<TagFields> {
     if repr.is_empty() || repr == "()" {
         return None;
     }
-    if let Some(inside) = repr.strip_prefix("Result<").and_then(|r| r.strip_suffix('>')) {
+    if let Some(inside) = repr
+        .strip_prefix("Result<")
+        .and_then(|r| r.strip_suffix('>'))
+    {
         let (ok_ty, err_ty) =
             split_top_level_comma(inside).unwrap_or_else(|| (inside.to_owned(), String::new()));
         let desc = if err_ty.trim().is_empty() {
@@ -550,7 +557,10 @@ fn infer_returns(symbol: &SymbolInfo) -> Option<TagFields> {
         };
         return Some(vec![repr.to_owned(), desc]);
     }
-    if let Some(inside) = repr.strip_prefix("Option<").and_then(|r| r.strip_suffix('>')) {
+    if let Some(inside) = repr
+        .strip_prefix("Option<")
+        .and_then(|r| r.strip_suffix('>'))
+    {
         return Some(vec![
             repr.to_owned(),
             format!("`Some({})` if available, otherwise `None`", inside.trim()),

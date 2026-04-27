@@ -613,9 +613,7 @@ fn is_satellite_of(key: &str, prefix: &str) -> bool {
         return false;
     }
     let bytes = key.as_bytes();
-    bytes.len() > prefix.len() + 2
-        && bytes[prefix.len()] == b':'
-        && bytes[prefix.len() + 1] == b':'
+    bytes.len() > prefix.len() + 2 && bytes[prefix.len()] == b':' && bytes[prefix.len() + 1] == b':'
 }
 
 fn compare_string(op: CompareOp, a: &str, b: &str) -> bool {

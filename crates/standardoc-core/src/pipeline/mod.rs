@@ -286,8 +286,7 @@ pub fn scan_and_extract_file(
         }
     }
 
-    let comment_spans =
-        crate::extractor::comment_scan::scan(&content, provider.comment_styles());
+    let comment_spans = crate::extractor::comment_scan::scan(&content, provider.comment_styles());
 
     let now = unix_seconds_now();
     let source_mtime = file_mtime_unix_seconds(file_path);
@@ -306,17 +305,12 @@ pub fn scan_and_extract_file(
         last_indexed: now,
     };
 
-    let symbol_starts: std::collections::BTreeSet<u32> = symbols
-        .iter()
-        .map(|s| s.source_range.line_start)
-        .collect();
+    let symbol_starts: std::collections::BTreeSet<u32> =
+        symbols.iter().map(|s| s.source_range.line_start).collect();
     let mut blocks = Vec::new();
     for sym in symbols {
         if let Some(mut block) = extract_block(sym, &ctx, config) {
-            crate::virtual_annotation::synthesize(
-                &mut block,
-                config.discovery.virtual_annotations,
-            );
+            crate::virtual_annotation::synthesize(&mut block, config.discovery.virtual_annotations);
             blocks.push(block);
         }
     }

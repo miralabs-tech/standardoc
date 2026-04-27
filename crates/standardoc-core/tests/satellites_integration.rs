@@ -76,11 +76,7 @@ impl LanguageProvider for StubProvider {
                     signature: format!("fn {name}()"),
                     ..SymbolInfo::default()
                 },
-                source_range: SourceRange::single_line(
-                    u32::try_from(i + 1).unwrap_or(1),
-                    1,
-                    20,
-                ),
+                source_range: SourceRange::single_line(u32::try_from(i + 1).unwrap_or(1), 1, 20),
                 leading_comment: leading,
                 leading_comment_line_start: None,
             });
@@ -98,7 +94,10 @@ fn workspace() -> PathBuf {
 }
 
 fn file(name: &str, content: &str) -> (PathBuf, String) {
-    (PathBuf::from(format!("/workspace/{name}")), content.to_owned())
+    (
+        PathBuf::from(format!("/workspace/{name}")),
+        content.to_owned(),
+    )
 }
 
 #[test]
@@ -152,7 +151,12 @@ fn validator_passes_when_anchor_present_for_satellite() {
         ),
     ];
     let report = scan_and_extract_in_memory(files, &workspace(), &registry(), &Config::default());
-    let diags = validate(&report.blocks, &report.collisions, &report.pages, &Config::default());
+    let diags = validate(
+        &report.blocks,
+        &report.collisions,
+        &report.pages,
+        &Config::default(),
+    );
     assert!(
         diags.iter().all(|d| d.code.as_str() != "STD014"),
         "unexpected STD014: {diags:?}"
@@ -167,7 +171,12 @@ fn validator_emits_std014_when_satellite_anchor_missing() {
         "// @doc-extend tools.get_doc schema\n",
     )];
     let report = scan_and_extract_in_memory(files, &workspace(), &registry(), &Config::default());
-    let diags = validate(&report.blocks, &report.collisions, &report.pages, &Config::default());
+    let diags = validate(
+        &report.blocks,
+        &report.collisions,
+        &report.pages,
+        &Config::default(),
+    );
     let std014 = diags
         .iter()
         .find(|d| d.code.as_str() == "STD014")
@@ -212,11 +221,17 @@ fn multiple_satellites_each_get_their_own_block() {
     assert!(report.blocks.contains_key("tools.get_doc::schema"));
     assert!(report.blocks.contains_key("tools.get_doc::examples"));
     assert_eq!(
-        report.blocks["tools.get_doc::schema"].tags.get("description").unwrap()[0][0],
+        report.blocks["tools.get_doc::schema"]
+            .tags
+            .get("description")
+            .unwrap()[0][0],
         "Schema satellite."
     );
     assert_eq!(
-        report.blocks["tools.get_doc::examples"].tags.get("description").unwrap()[0][0],
+        report.blocks["tools.get_doc::examples"]
+            .tags
+            .get("description")
+            .unwrap()[0][0],
         "Examples satellite."
     );
 }
@@ -284,7 +299,12 @@ fn free_floating_anchor_resolves_satellite_in_separate_file() {
         ),
     ];
     let report = scan_and_extract_in_memory(files, &workspace(), &registry(), &Config::default());
-    let diags = validate(&report.blocks, &report.collisions, &report.pages, &Config::default());
+    let diags = validate(
+        &report.blocks,
+        &report.collisions,
+        &report.pages,
+        &Config::default(),
+    );
     assert!(
         diags.iter().all(|d| d.code.as_str() != "STD014"),
         "free-floating anchor should keep satellite happy, got STD014: {diags:?}"
@@ -354,14 +374,8 @@ fn duplicate_satellite_key_triggers_collision() {
             "anchor.stub",
             "/// @doc tools.get_doc\nSTUB-SYMBOL: tools.get_doc\n",
         ),
-        file(
-            "a.stub",
-            "// @doc-extend tools.get_doc schema\n",
-        ),
-        file(
-            "b.stub",
-            "// @doc-extend tools.get_doc schema\n",
-        ),
+        file("a.stub", "// @doc-extend tools.get_doc schema\n"),
+        file("b.stub", "// @doc-extend tools.get_doc schema\n"),
     ];
     let report = scan_and_extract_in_memory(files, &workspace(), &registry(), &Config::default());
     let collision = report

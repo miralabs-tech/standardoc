@@ -795,12 +795,12 @@ fn get_watch_status(state: &ServerState) -> Value {
 }
 
 /// @doc mcp.tools.find_usages
+/// @category cross-ref
 /// @description List every block that references the given short name through its outgoing references — param types, return types, field types, trait implementations. Match is on **short name** (last FQN segment), so an ambiguous name returns all candidates; use the disambiguation filters below to scope the results.
 ///
 /// - `kind` restricts the relation ('param-type', 'return-type', 'field-type', 'implements', 'extends', 'generic-arg', 'call', 'other').
 /// - `from_path_prefix` restricts to the subtree of the referrer file (e.g. 'crates/standardoc-core/' to see only usages in that crate).
 /// - `from_key_prefix` restricts to the subtree of the referrer's FQN module (e.g. 'matchigo.parser' to see only usages in that module). More precise than `from_path_prefix` when file paths don't track the FQN hierarchy.
-/// @category cross-ref
 fn find_usages(state: &ServerState, args: &Value) -> Value {
     let Some(name) = args.get("name").and_then(Value::as_str) else {
         return tool_error_content("missing 'name' argument");

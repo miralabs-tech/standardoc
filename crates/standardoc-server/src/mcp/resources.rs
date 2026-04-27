@@ -55,7 +55,7 @@ pub(crate) const SCHEMA_DSL: ResourceDef = ResourceDef {
 /// @doc mcp.resources.schema_tags
 /// @uri standardoc://schema/tags
 /// @mime application/json
-/// @description Built-in plus user tag schemas (name → [fields], [required fields]).
+/// @description Built-in plus user tag schemas (name → `[fields]`, `[required fields]`).
 pub(crate) const SCHEMA_TAGS: ResourceDef = ResourceDef {
     uri: "standardoc://schema/tags",
     name: "Tag schemas",

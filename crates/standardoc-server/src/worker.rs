@@ -91,8 +91,7 @@ fn run(cfg: WorkerConfig) {
     // simple string equality detects any change (severity, message, range,
     // …). Seeded at boot from current state so the first watcher cycle emits
     // only real deltas, not the full diagnostic set.
-    let mut prev_diag_json: HashMap<PathBuf, String> =
-        seed_diag_cache(&workspace_root, &index);
+    let mut prev_diag_json: HashMap<PathBuf, String> = seed_diag_cache(&workspace_root, &index);
 
     while !shutdown.load(Ordering::Acquire) {
         let Ok(first_batch) = rx.recv_timeout(RECV_POLL) else {

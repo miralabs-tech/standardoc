@@ -234,12 +234,13 @@ fn scan_file_content(
     content: &str,
     provider: &dyn LanguageProvider,
 ) -> Result<FileScan, ScanError> {
-    let mut symbols = provider
-        .discover_symbols(content, path)
-        .map_err(|source| ScanError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let mut symbols =
+        provider
+            .discover_symbols(content, path)
+            .map_err(|source| ScanError::Parse {
+                path: path.to_path_buf(),
+                source,
+            })?;
 
     let prefix = derive_module_prefix(path);
     if !prefix.is_empty() {

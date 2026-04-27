@@ -23,37 +23,37 @@ Global behaviors :
 
 ### `scan`
 
-``{{ @doc.cli.commands.scan:usage }}``
+{{ @doc.cli.commands.scan:usage }}
 
 {{ @doc.cli.commands.scan:description }}
 
 ### `transform`
 
-``{{ @doc.cli.commands.transform:usage }}``
+{{ @doc.cli.commands.transform:usage }}
 
 {{ @doc.cli.commands.transform:description }}
 
 ### `emit`
 
-``{{ @doc.cli.commands.emit:usage }}``
+{{ @doc.cli.commands.emit:usage }}
 
 {{ @doc.cli.commands.emit:description }}
 
 ### `validate`
 
-``{{ @doc.cli.commands.validate:usage }}``
+{{ @doc.cli.commands.validate:usage }}
 
 {{ @doc.cli.commands.validate:description }}
 
 ### `materialize`
 
-``{{ @doc.cli.commands.materialize:usage }}``
+{{ @doc.cli.commands.materialize:usage }}
 
 {{ @doc.cli.commands.materialize:description }}
 
 ### `--help`, `-h`
 
-``{{ @doc.cli.commands.help:usage }}``, `standardoc -h`
+{{ @doc.cli.commands.help:usage }}, `standardoc -h`
 
 {{ @doc.cli.commands.help:description }}
 
@@ -69,25 +69,25 @@ A single binary, four mutually exclusive transports — pick exactly one.
 
 ### `--mcp`
 
-``{{ @doc.cli.transports.mcp:usage }}``
+{{ @doc.cli.transports.mcp:usage }}
 
 {{ @doc.cli.transports.mcp:description }}
 
 ### `--lsp`
 
-``{{ @doc.cli.transports.lsp:usage }}``
+{{ @doc.cli.transports.lsp:usage }}
 
 {{ @doc.cli.transports.lsp:description }}
 
 ### `--web --port <N>`
 
-``{{ @doc.cli.transports.web:usage }}``
+{{ @doc.cli.transports.web:usage }}
 
 {{ @doc.cli.transports.web:description }}
 
 ### `--export --out <dir>`
 
-``{{ @doc.cli.transports.export:usage }}``
+{{ @doc.cli.transports.export:usage }}
 
 {{ @doc.cli.transports.export:description }}
 

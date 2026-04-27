@@ -486,4 +486,3 @@ fn warn_legacy_reference_pages(pages: &BTreeMap<String, DocPage>) {
         }
     }
 }
-

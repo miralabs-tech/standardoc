@@ -264,7 +264,7 @@ enum Mode {
     /// @doc cli.transports.mcp mcp
     /// @category transport
     /// @since 0.1
-    /// @usage standardoc-server --mcp --workspace <path>
+    /// @usage `standardoc-server --mcp --workspace <path>`
     /// @description
     /// Speak the [Model Context Protocol](https://modelcontextprotocol.io/) over
     /// **stdio** (JSON-RPC 2.0). Use this from `.mcp.json` to expose the workspace
@@ -278,7 +278,7 @@ enum Mode {
     /// @doc cli.transports.lsp lsp
     /// @category transport
     /// @since 0.1
-    /// @usage standardoc-server --lsp --workspace <path>
+    /// @usage `standardoc-server --lsp --workspace <path>`
     /// @description
     /// Speak [LSP](https://microsoft.github.io/language-server-protocol/) over **stdio**
     /// for editors (VSCode, Helix, Neovim, Zed, …). Capabilities :
@@ -293,7 +293,7 @@ enum Mode {
     /// @doc cli.transports.web web
     /// @category transport
     /// @since 0.1
-    /// @usage standardoc-server --web --port <N> --workspace <path>
+    /// @usage `standardoc-server --web --port <N> --workspace <path>`
     /// @description
     /// Serve a REST + SSE HTTP API on the given port. Endpoints:
     ///
@@ -318,7 +318,7 @@ enum Mode {
     /// @doc cli.transports.export export
     /// @category transport
     /// @since 0.1
-    /// @usage standardoc-server --export --workspace <path> --out <dir>
+    /// @usage `standardoc-server --export --workspace <path> --out <dir>`
     /// @description
     /// One-shot static export. Writes `static-data.json` (full index snapshot, all
     /// blocks, pre-rendered pages, resolved source-link config) to `<dir>`. If the

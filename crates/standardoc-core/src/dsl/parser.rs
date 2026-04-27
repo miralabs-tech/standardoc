@@ -596,9 +596,9 @@ fn parse_paren_key(lex: &mut Lex<'_>, kind: &'static str) -> Result<String, Pars
     }
     lex.advance();
     lex.skip_ws();
-    let key = lex.take_dotted_ident().ok_or_else(|| {
-        ParseError::InvalidRef(format!("expected key inside '{kind}(...)'"))
-    })?;
+    let key = lex
+        .take_dotted_ident()
+        .ok_or_else(|| ParseError::InvalidRef(format!("expected key inside '{kind}(...)'")))?;
     lex.skip_ws();
     if lex.peek() != Some(')') {
         return Err(ParseError::Expected {

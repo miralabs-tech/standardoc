@@ -109,7 +109,7 @@ fn build_registry(workspace: &Path) -> Registry {
 /// @doc cli.commands.scan scan
 /// @category index
 /// @since 0.1
-/// @usage standardoc scan <path>
+/// @usage `standardoc scan <path>`
 /// @description
 /// Walk `<path>` and emit canonical [`DocBlock`](../crates/standardoc-core/src/model/)
 /// entries as JSON, one block per record.
@@ -180,7 +180,7 @@ fn run_scan(args: &[String]) -> ExitCode {
 /// @doc cli.commands.transform transform
 /// @category render
 /// @since 0.1
-/// @usage standardoc transform <path> <template.md>
+/// @usage `standardoc transform <path> <template.md>`
 /// @description
 /// Scan `<path>`, then render `<template.md>` against the resulting index. The
 /// template uses the standardoc DSL (`{{ @doc.KEY:tag }}`,
@@ -229,7 +229,7 @@ fn run_transform(args: &[String]) -> ExitCode {
 /// @doc cli.commands.emit emit
 /// @category emit
 /// @since 0.1
-/// @usage standardoc emit <format> <path> [--name <project>] [--tagline <line>] [--link-base <url>]
+/// @usage `standardoc emit <format> <path> [--name <project>] [--tagline <line>] [--link-base <url>]`
 /// @description
 /// Generate one of three agent-oriented documentation standards from a workspace scan.
 ///
@@ -307,7 +307,7 @@ fn run_emit(args: &[String]) -> ExitCode {
 /// @doc cli.commands.validate validate
 /// @category validate
 /// @since 0.1
-/// @usage standardoc validate <path>
+/// @usage `standardoc validate <path>`
 /// @description
 /// Run the full validator suite over a workspace, print one diagnostic per line in the
 /// format `<severity> [STD###] <path>:<line>: <message>`. A summary count is printed
@@ -383,7 +383,7 @@ fn run_validate(args: &[String]) -> ExitCode {
 /// @doc cli.commands.materialize materialize
 /// @category migrate
 /// @since 0.1
-/// @usage standardoc materialize <path> [--apply] [--confidence low|medium|high]
+/// @usage `standardoc materialize <path> [--apply] [--confidence low|medium|high]`
 /// @description
 /// Promote virtual annotations (synthesized by the virtual-annotation pass on
 /// `Inferred` blocks) into real source-level `///` doc-comments. Defaults to a dry-run
@@ -416,9 +416,7 @@ fn run_validate(args: &[String]) -> ExitCode {
 /// ```
 fn run_materialize(args: &[String]) -> ExitCode {
     let Some(root) = args.first() else {
-        eprintln!(
-            "usage: standardoc materialize <path> [--apply] [--confidence low|medium|high]"
-        );
+        eprintln!("usage: standardoc materialize <path> [--apply] [--confidence low|medium|high]");
         return ExitCode::from(2);
     };
     let mut apply = false;
@@ -456,7 +454,9 @@ fn run_materialize(args: &[String]) -> ExitCode {
 
     let mp: MaterializePlan = plan(&report.blocks, filter);
     if mp.edits.is_empty() {
-        eprintln!("standardoc materialize: no virtual annotations to write at this confidence tier.");
+        eprintln!(
+            "standardoc materialize: no virtual annotations to write at this confidence tier."
+        );
         return ExitCode::SUCCESS;
     }
 

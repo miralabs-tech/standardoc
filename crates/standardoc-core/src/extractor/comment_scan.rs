@@ -37,12 +37,7 @@ pub fn scan(content: &str, styles: &CommentStyles) -> Vec<CommentSpan> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < lines.len() {
-        if let Some(adv) = try_multi(
-            &lines,
-            i,
-            styles.doc_multi.as_ref(),
-            CommentStyle::DocMulti,
-        ) {
+        if let Some(adv) = try_multi(&lines, i, styles.doc_multi.as_ref(), CommentStyle::DocMulti) {
             out.push(adv.span);
             i = adv.next;
             continue;

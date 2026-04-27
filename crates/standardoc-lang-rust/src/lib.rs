@@ -125,8 +125,8 @@ impl Collector {
 
     fn push(&mut self, fqn: Vec<String>, symbol: SymbolInfo, span: Span, attrs: &[Attribute]) {
         let symbol_line_start = span_to_range(span).line_start;
-        let leading_comment_line_start = first_doc_attr_line(attrs)
-            .filter(|line| *line + 1 < symbol_line_start);
+        let leading_comment_line_start =
+            first_doc_attr_line(attrs).filter(|line| *line + 1 < symbol_line_start);
         self.symbols.push(DiscoveredSymbol {
             fqn,
             symbol,
