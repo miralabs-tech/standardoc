@@ -1,5 +1,5 @@
 [package]
-name = "standardoc-core"
+name = "standardoc-lang-provider"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Standardoc core — pipeline, storage (SQLite), name resolver, WASM plug-in host."
+description = "Native lang providers for standardoc — Rust (syn) + TypeScript/JavaScript (swc)."
 
 [lints]
 workspace = true

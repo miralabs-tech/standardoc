@@ -1,13 +1,13 @@
 [package]
-name = "standardoc-core"
-version.workspace = true
+name = "standardoc-bridge-sdk"
+version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Standardoc core — pipeline, storage (SQLite), name resolver, WASM plug-in host."
+description = "UNSTABLE — cross-lang bridge SDK for standardoc plug-ins (WIT contract, BridgeProvider trait)."
 
 [lints]
 workspace = true
