@@ -53,7 +53,16 @@ enum Command {
     Lsp { path: PathBuf },
 
     /// Run the MCP daemon over stdio (workspace `<path>` is the index root).
-    Mcp { path: PathBuf },
+    Mcp {
+        path: PathBuf,
+
+        /// Open the index in read-only mode: do not acquire the workspace
+        /// lock, do not run cold start, do not spawn the watcher. Polls for
+        /// `.standardoc/index.db` for up to 60 s while a primary writer
+        /// (LSP daemon, `standardoc watch`, ...) initializes the workspace.
+        #[arg(long)]
+        readonly: bool,
+    },
 }
 
 #[derive(Args)]
@@ -112,7 +121,7 @@ fn main_inner() -> Result<(), ServerError> {
         Command::Rescan { path } => cmd_rescan(&path),
         Command::PurgeExcluded { path, yes } => cmd_purge_excluded(&path, yes),
         Command::Lsp { path } => cmd_lsp(&path),
-        Command::Mcp { path } => cmd_mcp(&path),
+        Command::Mcp { path, readonly } => cmd_mcp(&path, readonly),
     }
 }
 
@@ -128,9 +137,13 @@ fn cmd_lsp(path: &Path) -> Result<(), ServerError> {
     runtime.block_on(standardoc_server::serve_lsp(handle, provider, filters))
 }
 
-fn cmd_mcp(path: &Path) -> Result<(), ServerError> {
+fn cmd_mcp(path: &Path, readonly: bool) -> Result<(), ServerError> {
     let provider: Arc<dyn standardoc_core::LanguageProvider> = Arc::new(WorkspaceProvider::new());
-    let handle = IndexHandle::open(path)?;
+    let handle = if readonly {
+        wait_for_db_then_open_readonly(path, READONLY_DB_WAIT)?
+    } else {
+        IndexHandle::open(path)?
+    };
     let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -138,6 +151,36 @@ fn cmd_mcp(path: &Path) -> Result<(), ServerError> {
         .build()
         .map_err(ServerError::Io)?;
     runtime.block_on(standardoc_server::serve_mcp(handle, provider, filters))
+}
+
+const READONLY_DB_WAIT: Duration = Duration::from_secs(60);
+const READONLY_DB_POLL: Duration = Duration::from_millis(250);
+
+/// Poll for `.standardoc/index.db` until it exists, then open the index in
+/// read-only mode. Designed for an MCP daemon spawned in parallel with a
+/// primary writer (LSP daemon) on a workspace that may not have been
+/// indexed yet — the writer creates the DB during its own boot, and this
+/// helper unblocks once the file appears on disk.
+fn wait_for_db_then_open_readonly(
+    path: &Path,
+    timeout: Duration,
+) -> Result<IndexHandle, ServerError> {
+    let db_path = path.join(".standardoc").join("index.db");
+    let deadline = Instant::now() + timeout;
+    loop {
+        if db_path.exists() {
+            return IndexHandle::open_readonly(path).map_err(ServerError::from);
+        }
+        if Instant::now() >= deadline {
+            return Err(ServerError::Io(io::Error::other(format!(
+                "readonly: timed out after {:?} waiting for {} — \
+                 start a primary writer (LSP daemon, `standardoc watch`, ...) on this workspace first",
+                timeout,
+                db_path.display()
+            ))));
+        }
+        std::thread::sleep(READONLY_DB_POLL);
+    }
 }
 
 fn cmd_index(path: &Path) -> Result<(), ServerError> {

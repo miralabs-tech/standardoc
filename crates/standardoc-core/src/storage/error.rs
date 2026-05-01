@@ -25,6 +25,12 @@ pub enum StorageError {
     #[error("database lock held by another process: {path}")]
     LockHeld { path: PathBuf },
 
+    #[error(
+        "read-only open requested but no index database found at {path} — \
+         start a writer (LSP daemon, `standardoc index`, ...) on this workspace first"
+    )]
+    ReadOnlyMissingDatabase { path: PathBuf },
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

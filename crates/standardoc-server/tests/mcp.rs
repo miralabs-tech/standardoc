@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use rmcp::ServerHandler;
 use standardoc_core::{IndexHandle, LanguageProvider, ScanFilters};
 use standardoc_lang_provider::WorkspaceProvider;
-use standardoc_server::{StandardocMcp, build_mcp_handler};
+use standardoc_server::{StandardocMcp, build_mcp_handler, kick_off_indexing};
 use tempfile::TempDir;
 
 fn open_workspace() -> (TempDir, IndexHandle, Arc<dyn LanguageProvider>, Arc<RwLock<ScanFilters>>) {
@@ -81,4 +81,41 @@ fn watcher_slot_is_empty_at_construction_and_shared() {
     assert!(s2.lock().unwrap().is_none());
     // sanity: the two clones point at the same Mutex
     assert!(Arc::ptr_eq(&s1, &s2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn kick_off_indexing_readonly_flips_index_ready_synchronously_and_skips_watcher() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let _writer = IndexHandle::open(dir.path()).unwrap();
+    }
+
+    let reader = IndexHandle::open_readonly(dir.path()).unwrap();
+    assert!(reader.is_readonly());
+
+    let provider: Arc<dyn LanguageProvider> = Arc::new(WorkspaceProvider::new());
+    let filters = Arc::new(RwLock::new(ScanFilters::load(reader.workspace_root())));
+    let mcp = build_mcp_handler(
+        reader.clone(),
+        Arc::clone(&provider),
+        Arc::clone(&filters),
+    );
+    let index_ready = mcp.index_ready();
+    let watcher_slot = mcp.watcher_slot();
+
+    assert!(
+        !index_ready.load(std::sync::atomic::Ordering::Acquire),
+        "fresh handler must report index_ready=false"
+    );
+
+    kick_off_indexing(&mcp, reader, provider, filters);
+
+    assert!(
+        index_ready.load(std::sync::atomic::Ordering::Acquire),
+        "readonly path must flip index_ready synchronously (no cold_start spawn)"
+    );
+    assert!(
+        watcher_slot.lock().unwrap().is_none(),
+        "readonly path must not boot a watcher"
+    );
 }

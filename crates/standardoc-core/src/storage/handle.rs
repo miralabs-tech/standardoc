@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use tokio::sync::mpsc::{self, Sender, error::SendError, error::TrySendError};
 
 use crate::commands::IngestCommand;
@@ -48,7 +48,11 @@ struct IndexHandleInner {
     /// persisted across reboots — caller resumes by clearing the flag.
     paused: Arc<AtomicBool>,
     writer_handle: Mutex<Option<JoinHandle<()>>>,
-    _lock: WorkspaceLock,
+    /// `Some` for read-write opens; `None` for read-only opens that do not
+    /// take the fs4 exclusive lock so they can run alongside a primary
+    /// writer (e.g. MCP `--readonly` next to an LSP daemon, lock 31a).
+    /// The handle reads `Option::is_none` to decide whether it is read-only.
+    lock: Option<WorkspaceLock>,
 }
 
 impl Drop for IndexHandleInner {
@@ -109,10 +113,59 @@ impl IndexHandle {
                 revision,
                 paused,
                 writer_handle: Mutex::new(Some(writer_handle)),
-                _lock: lock,
+                lock: Some(lock),
             }),
             sender,
         })
+    }
+
+    /// Opens an existing workspace index in read-only mode. Skips the fs4
+    /// exclusive lock so a read-only handle can coexist with an active
+    /// writer (LSP daemon, `standardoc watch`, etc.). The SQLite pool is
+    /// configured with `SQLITE_OPEN_READ_ONLY`; any caller-issued write
+    /// (`submit*`, `rescan_from_scratch`, ...) will fail at the SQLite layer
+    /// or the closed writer channel respectively.
+    ///
+    /// Errors with [`StorageError::ReadOnlyMissingDatabase`] when the
+    /// workspace has never been indexed (no `.standardoc/index.db`). Callers
+    /// that race a primary writer should poll on disk before calling this.
+    pub fn open_readonly<P: AsRef<Path>>(workspace_root: P) -> Result<Self, StorageError> {
+        let workspace_root = workspace_root.as_ref().canonicalize()?;
+        let db_path = workspace_root.join(".standardoc").join("index.db");
+        if !db_path.exists() {
+            return Err(StorageError::ReadOnlyMissingDatabase { path: db_path });
+        }
+
+        let pool = build_readonly_pool(&db_path)?;
+        let pool: SharedPool = Arc::new(RwLock::new(Some(pool)));
+        let revision = Arc::new(AtomicU64::new(0));
+        let paused = Arc::new(AtomicBool::new(false));
+
+        // Closed channel: any `submit*` returns SendError immediately, so
+        // attempts to write through a read-only handle fail loudly without
+        // an extra `mode` field on the public API.
+        let (sender, receiver) = mpsc::channel::<IngestCommand>(1);
+        drop(receiver);
+
+        Ok(Self {
+            inner: Arc::new(IndexHandleInner {
+                pool,
+                workspace_root,
+                revision,
+                paused,
+                writer_handle: Mutex::new(None),
+                lock: None,
+            }),
+            sender,
+        })
+    }
+
+    /// Returns `true` when this handle was opened via [`open_readonly`] and
+    /// therefore does not own the workspace's fs4 lock or a writer thread.
+    /// Servers (`serve_mcp`, ...) inspect this to skip cold-start and
+    /// watcher boot when running alongside a primary writer.
+    pub fn is_readonly(&self) -> bool {
+        self.inner.lock.is_none()
     }
 
     pub fn rescan_from_scratch(&self) -> Result<(), StorageError> {
@@ -307,6 +360,21 @@ fn parse_cold_start_progress(value: &str) -> Result<Option<(u64, u64)>, StorageE
 fn build_pool(db_path: &Path) -> Result<Pool<SqliteConnectionManager>, StorageError> {
     let manager = SqliteConnectionManager::file(db_path)
         .with_init(|conn| conn.execute_batch(PRAGMA_BOOT_SQL));
+    let pool = Pool::builder().max_size(POOL_MAX_SIZE).build(manager)?;
+    Ok(pool)
+}
+
+const PRAGMA_READONLY_BOOT_SQL: &str = "
+PRAGMA foreign_keys = ON;
+PRAGMA temp_store = MEMORY;
+PRAGMA mmap_size = 268435456;
+";
+
+fn build_readonly_pool(db_path: &Path) -> Result<Pool<SqliteConnectionManager>, StorageError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
+    let manager = SqliteConnectionManager::file(db_path)
+        .with_flags(flags)
+        .with_init(|conn| conn.execute_batch(PRAGMA_READONLY_BOOT_SQL));
     let pool = Pool::builder().max_size(POOL_MAX_SIZE).build(manager)?;
     Ok(pool)
 }
@@ -864,5 +932,59 @@ mod tests {
                 "target/c.rs".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn open_readonly_returns_err_when_db_missing() {
+        let dir = tempdir().unwrap();
+        let result = IndexHandle::open_readonly(dir.path());
+        assert!(matches!(
+            result,
+            Err(StorageError::ReadOnlyMissingDatabase { .. })
+        ));
+    }
+
+    #[test]
+    fn open_readonly_coexists_with_writer_without_lock_collision() {
+        let dir = tempdir().unwrap();
+        let writer = IndexHandle::open(dir.path()).unwrap();
+        assert!(!writer.is_readonly());
+
+        let reader = IndexHandle::open_readonly(dir.path()).unwrap();
+        assert!(reader.is_readonly());
+
+        let _conn = reader.pool().unwrap().get().unwrap();
+        drop(reader);
+        drop(writer);
+    }
+
+    #[test]
+    fn open_readonly_reads_data_written_by_writer_then_dropped() {
+        let dir = tempdir().unwrap();
+        {
+            let handle = IndexHandle::open(dir.path()).unwrap();
+            handle
+                .submit_blocking(IngestCommand::UpsertFile {
+                    path: "src/main.rs".into(),
+                    extracted: sample_extracted("src/main.rs", "crate::ro_target"),
+                })
+                .unwrap();
+            wait_revision_at_least(&handle, 1, Duration::from_secs(2));
+        }
+
+        let reader = IndexHandle::open_readonly(dir.path()).unwrap();
+        let conn = reader.pool().unwrap().get().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "readonly handle must see writer-committed data");
+
+        let submit_err = reader
+            .submit_blocking(IngestCommand::UpsertFile {
+                path: "src/other.rs".into(),
+                extracted: sample_extracted("src/other.rs", "crate::ro_blocked"),
+            })
+            .unwrap_err();
+        let _ = submit_err;
     }
 }

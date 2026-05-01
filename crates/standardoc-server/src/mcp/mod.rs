@@ -15,4 +15,4 @@ mod progress;
 mod serve;
 
 pub use handler::StandardocMcp;
-pub use serve::{build_mcp_handler, serve_mcp};
+pub use serve::{build_mcp_handler, kick_off_indexing, serve_mcp};

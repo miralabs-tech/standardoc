@@ -23,17 +23,58 @@ use crate::ServerError;
 /// handler so it shares lifetime with the running service: dropping the
 /// service drops the watcher, which joins its dispatch thread before
 /// stdio closes (mirrors `lsp::handler::StandardocLsp`).
+///
+/// When `handle.is_readonly()` is true (lock 31a), cold start and watcher
+/// are skipped and `index_ready` flips immediately: the primary writer
+/// (LSP daemon, `standardoc watch`, ...) owns the fs4 lock and feeds the
+/// shared `.standardoc/index.db`, while this read-only daemon only serves
+/// queries.
 pub async fn serve_mcp(
     handle: IndexHandle,
     provider: Arc<dyn LanguageProvider>,
     filters: Arc<RwLock<ScanFilters>>,
 ) -> Result<(), ServerError> {
     let mcp = StandardocMcp::new(handle.clone(), Arc::clone(&provider), Arc::clone(&filters));
-    let index_ready = mcp.index_ready();
-    let watcher_slot = mcp.watcher_slot();
+    kick_off_indexing(&mcp, handle, provider, filters);
 
+    let service = mcp
+        .serve(stdio())
+        .await
+        .map_err(|e| ServerError::Io(io::Error::other(format!("rmcp serve: {e}"))))?;
+    service
+        .waiting()
+        .await
+        .map_err(|e| ServerError::Io(io::Error::other(format!("rmcp waiting: {e}"))))?;
+    Ok(())
+}
+
+/// Boot the indexing pipeline behind an MCP handler. Synchronous flip of
+/// `index_ready` for read-only handles (a writer owns the workspace lock
+/// elsewhere); background `tokio::spawn` of cold-start + watcher otherwise.
+/// Exposed `pub` so integration tests can drive the boot side-effect
+/// without consuming stdio via `mcp.serve(stdio())`.
+pub fn kick_off_indexing(
+    mcp: &StandardocMcp,
+    handle: IndexHandle,
+    provider: Arc<dyn LanguageProvider>,
+    filters: Arc<RwLock<ScanFilters>>,
+) {
+    let index_ready = mcp.index_ready();
+
+    if handle.is_readonly() {
+        index_ready.store(true, Ordering::Release);
+        return;
+    }
+
+    let watcher_slot = mcp.watcher_slot();
     tokio::spawn(async move {
-        match run_cold_start_with_progress(handle.clone(), Arc::clone(&provider), Arc::clone(&filters)).await {
+        match run_cold_start_with_progress(
+            handle.clone(),
+            Arc::clone(&provider),
+            Arc::clone(&filters),
+        )
+        .await
+        {
             Ok(()) => {
                 index_ready.store(true, Ordering::Release);
                 match spawn_watcher(handle, provider, filters) {
@@ -48,16 +89,6 @@ pub async fn serve_mcp(
             Err(e) => eprintln!("standardoc mcp: cold start failed: {e}"),
         }
     });
-
-    let service = mcp
-        .serve(stdio())
-        .await
-        .map_err(|e| ServerError::Io(io::Error::other(format!("rmcp serve: {e}"))))?;
-    service
-        .waiting()
-        .await
-        .map_err(|e| ServerError::Io(io::Error::other(format!("rmcp waiting: {e}"))))?;
-    Ok(())
 }
 
 /// Build a [`StandardocMcp`] handler without consuming it via
