@@ -1,0 +1,325 @@
+use std::path::Path;
+
+use standardoc_core::ExtractError;
+use standardoc_ir::{
+    Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawSymbol, SourceOrigin,
+    SymbolLocation, Visibility,
+};
+use swc_core::common::{FileName, sync::Lrc, SourceMap};
+use swc_core::ecma::ast::EsVersion;
+use swc_core::ecma::parser::{EsSyntax, Parser, StringInput, Syntax, TsSyntax, lexer::Lexer};
+
+use super::helpers::compute_module_path;
+use super::resolver::TsConfigPaths;
+use super::walk;
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn extract_file(
+    content: &str,
+    workspace_relative_path: &str,
+    package_name: &str,
+    package_relative: &str,
+    from_file_abs_path: &Path,
+    package_root: &Path,
+    tsconfig: Option<TsConfigPaths>,
+) -> Result<ExtractedFile, ExtractError> {
+    let cm: Lrc<SourceMap> = Default::default();
+    let fm = cm.new_source_file(
+        Lrc::new(FileName::Custom(workspace_relative_path.into())),
+        content.to_string(),
+    );
+    let lexer = Lexer::new(
+        syntax_for(workspace_relative_path),
+        EsVersion::EsNext,
+        StringInput::from(&*fm),
+        None,
+    );
+    let mut parser = Parser::new_from(lexer);
+    let module = parser.parse_module().map_err(|e| ExtractError::Parse {
+        file: workspace_relative_path.into(),
+        detail: format!("{e:?}"),
+    })?;
+
+    let module_path = compute_module_path(package_relative);
+    let module_fqdn = if module_path.is_empty() {
+        package_name.to_string()
+    } else {
+        format!("{package_name}::{}", module_path.replace('/', "::"))
+    };
+
+    let content_hash = hash_bytes(content.as_bytes());
+    let module_symbol = RawSymbol {
+        name: last_segment(&module_fqdn).to_string(),
+        fqdn: module_fqdn.clone(),
+        kind: Kind::Module,
+        language_kind: LanguageKind::from("module"),
+        module: parent_module(&module_fqdn),
+        visibility: Visibility::Public,
+        location: file_span(workspace_relative_path, content),
+        signature: None,
+        body_hash: Some(content_hash),
+        attributes: vec![],
+    };
+
+    let mut symbols = vec![module_symbol];
+    let (item_symbols, edges) = walk::walk(
+        &module,
+        package_name,
+        workspace_relative_path,
+        &module_fqdn,
+        cm,
+        from_file_abs_path,
+        package_root,
+        tsconfig,
+    );
+    symbols.extend(item_symbols);
+
+    Ok(ExtractedFile {
+        file: workspace_relative_path.into(),
+        language: language_for(workspace_relative_path),
+        source_origin: SourceOrigin::Workspace,
+        is_external: false,
+        content_hash,
+        byte_size: u64::try_from(content.len()).unwrap_or(u64::MAX),
+        symbols,
+        edges,
+        call_sites: vec![],
+    })
+}
+
+fn syntax_for(path: &str) -> Syntax {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    match ext {
+        "tsx" => Syntax::Typescript(TsSyntax {
+            tsx: true,
+            decorators: false,
+            dts: false,
+            no_early_errors: true,
+            disallow_ambiguous_jsx_like: false,
+        }),
+        "ts" | "mts" | "cts" => Syntax::Typescript(TsSyntax {
+            tsx: false,
+            decorators: false,
+            dts: ext == "ts" && path.ends_with(".d.ts"),
+            no_early_errors: true,
+            disallow_ambiguous_jsx_like: false,
+        }),
+        "jsx" => Syntax::Es(EsSyntax {
+            jsx: true,
+            ..Default::default()
+        }),
+        _ => Syntax::Es(EsSyntax::default()),
+    }
+}
+
+fn language_for(path: &str) -> Language {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    match ext {
+        "ts" | "tsx" | "mts" | "cts" => Language::TypeScript,
+        _ => Language::JavaScript,
+    }
+}
+
+fn hash_bytes(bytes: &[u8]) -> Blake3Hash {
+    Blake3Hash::new(*blake3::hash(bytes).as_bytes())
+}
+
+fn last_segment(fqdn: &str) -> &str {
+    fqdn.rsplit("::").next().unwrap_or(fqdn)
+}
+
+fn parent_module(fqdn: &str) -> Option<String> {
+    fqdn.rsplit_once("::").map(|(parent, _)| parent.to_string())
+}
+
+fn file_span(path: &str, content: &str) -> SymbolLocation {
+    let (end_line, end_col) = content_extent(content);
+    SymbolLocation {
+        file: path.into(),
+        start_line: 1,
+        end_line,
+        start_col: 0,
+        end_col,
+    }
+}
+
+fn content_extent(content: &str) -> (u32, u32) {
+    if content.is_empty() {
+        return (1, 0);
+    }
+    let line_count = u32::try_from(content.lines().count()).unwrap_or(u32::MAX);
+    let last_col = content
+        .lines()
+        .last()
+        .map_or(0, |l| u32::try_from(l.len()).unwrap_or(u32::MAX));
+    (line_count, last_col)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn extract(
+        content: &str,
+        workspace_relative: &str,
+        package_relative: &str,
+    ) -> ExtractedFile {
+        extract_file(
+            content,
+            workspace_relative,
+            "@app",
+            package_relative,
+            &PathBuf::from(format!("/tmp/pkg/{package_relative}")),
+            &PathBuf::from("/tmp/pkg"),
+            None,
+        )
+        .expect("extract ok")
+    }
+
+    #[test]
+    fn empty_file_produces_module_symbol_only() {
+        let r = extract("", "src/index.ts", "src/index.ts");
+        assert_eq!(r.symbols.len(), 1);
+        assert!(r.edges.is_empty());
+        assert_eq!(r.symbols[0].kind, Kind::Module);
+    }
+
+    #[test]
+    fn syntax_error_returns_parse_error() {
+        let err = extract_file(
+            "function foo( {",
+            "src/index.ts",
+            "@app",
+            "src/index.ts",
+            &PathBuf::from("/tmp/pkg/src/index.ts"),
+            &PathBuf::from("/tmp/pkg"),
+            None,
+        )
+        .expect_err("syntax error");
+        assert!(matches!(err, ExtractError::Parse { .. }));
+    }
+
+    #[test]
+    fn module_fqdn_uses_package_name_for_index() {
+        let r = extract("", "src/index.ts", "src/index.ts");
+        assert_eq!(r.symbols[0].fqdn, "@app::src");
+    }
+
+    #[test]
+    fn module_fqdn_for_nested_file() {
+        let r = extract("", "src/auth/login.ts", "src/auth/login.ts");
+        assert_eq!(r.symbols[0].fqdn, "@app::src::auth::login");
+    }
+
+    #[test]
+    fn module_fqdn_for_top_level_index_collapses_to_package_name() {
+        let r = extract("", "index.ts", "index.ts");
+        assert_eq!(r.symbols[0].fqdn, "@app");
+    }
+
+    #[test]
+    fn content_hash_equals_blake3_of_bytes() {
+        let content = "export function foo() {}\n";
+        let r = extract(content, "src/foo.ts", "src/foo.ts");
+        let expected = Blake3Hash::new(*blake3::hash(content.as_bytes()).as_bytes());
+        assert_eq!(r.content_hash, expected);
+    }
+
+    #[test]
+    fn module_body_hash_equals_content_hash() {
+        let r = extract("// hi\n", "src/index.ts", "src/index.ts");
+        assert_eq!(r.symbols[0].body_hash, Some(r.content_hash));
+    }
+
+    #[test]
+    fn byte_size_matches_content_len() {
+        let content = "export const N = 1;\n";
+        let r = extract(content, "src/n.ts", "src/n.ts");
+        assert_eq!(r.byte_size, u64::try_from(content.len()).unwrap());
+    }
+
+    #[test]
+    fn ts_extension_maps_to_typescript_language() {
+        let r = extract("", "src/index.ts", "src/index.ts");
+        assert_eq!(r.language, Language::TypeScript);
+    }
+
+    #[test]
+    fn js_extension_maps_to_javascript_language() {
+        let r = extract("", "src/index.js", "src/index.js");
+        assert_eq!(r.language, Language::JavaScript);
+    }
+
+    #[test]
+    fn tsx_extension_maps_to_typescript_with_jsx_supported() {
+        let r = extract(
+            "export const App = () => <div>Hi</div>;\n",
+            "src/App.tsx",
+            "src/App.tsx",
+        );
+        assert_eq!(r.language, Language::TypeScript);
+    }
+
+    #[test]
+    fn jsx_extension_maps_to_javascript_with_jsx_supported() {
+        let r = extract(
+            "export const App = () => <div>Hi</div>;\n",
+            "src/App.jsx",
+            "src/App.jsx",
+        );
+        assert_eq!(r.language, Language::JavaScript);
+    }
+
+    #[test]
+    fn module_symbol_visibility_is_public() {
+        let r = extract("", "src/index.ts", "src/index.ts");
+        assert_eq!(r.symbols[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn module_location_covers_whole_file() {
+        let content = "// line 1\n// line 2\n// line 3";
+        let r = extract(content, "src/index.ts", "src/index.ts");
+        let loc = &r.symbols[0].location;
+        assert_eq!(loc.start_line, 1);
+        assert_eq!(loc.end_line, 3);
+        assert_eq!(loc.start_col, 0);
+        assert_eq!(loc.end_col, 9);
+    }
+
+    #[test]
+    fn empty_content_extent_is_one_line_zero_col() {
+        assert_eq!(content_extent(""), (1, 0));
+    }
+
+    #[test]
+    fn realistic_file_extracts_module_plus_items() {
+        let src = "
+            export interface User { id: string; }
+            export function makeUser(id: string): User { return { id }; }
+            export class UserService {
+              create(id: string): User { return makeUser(id); }
+            }
+        ";
+        let r = extract(src, "src/user/service.ts", "src/user/service.ts");
+        let names: Vec<&str> = r.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"service"));
+        assert!(names.contains(&"User"));
+        assert!(names.contains(&"makeUser"));
+        assert!(names.contains(&"UserService"));
+        assert!(names.contains(&"create"));
+        let calls = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == standardoc_ir::EdgeKind::Calls)
+            .count();
+        assert!(calls >= 1, "expected at least one CALLS edge");
+    }
+}

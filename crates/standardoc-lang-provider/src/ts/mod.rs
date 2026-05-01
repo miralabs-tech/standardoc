@@ -1,0 +1,266 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::RwLock;
+
+use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
+use standardoc_ir::ExtractedFile;
+
+mod extract;
+mod helpers;
+mod resolver;
+mod visit;
+mod walk;
+
+/// Native TypeScript / JavaScript `LanguageProvider` (swc-based).
+///
+/// Mirrors `RustProvider`: each `.ts/.tsx/.js/.jsx` file is parsed via
+/// `swc_ecma_parser`, the parent `package.json` is located and parsed for the
+/// package name (FQDN namespace), then items + bodies are walked for
+/// symbols / edges. The package name is cached in a per-package.json
+/// `RwLock<HashMap>` keyed by the canonical package.json path.
+#[derive(Debug, Default)]
+pub struct TsProvider {
+    package_name_cache: RwLock<HashMap<PathBuf, String>>,
+}
+
+impl TsProvider {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn resolve_package_name(
+        &self,
+        file_abs_path: &Path,
+        workspace_relative: &str,
+    ) -> Result<(String, PathBuf), ExtractError> {
+        let package_json = helpers::find_package_json(file_abs_path).ok_or_else(|| {
+            ExtractError::Parse {
+                file: workspace_relative.into(),
+                detail: "could not determine package name (no package.json ancestor)".into(),
+            }
+        })?;
+
+        if let Some(hit) = self
+            .package_name_cache
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(&package_json).cloned())
+        {
+            let root = package_json
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            return Ok((hit, root));
+        }
+
+        let content = std::fs::read_to_string(&package_json).map_err(ExtractError::Io)?;
+        let name = helpers::parse_package_name(&content).ok_or_else(|| ExtractError::Parse {
+            file: workspace_relative.into(),
+            detail: "could not determine package name (package.json has no \"name\" field)".into(),
+        })?;
+
+        if let Ok(mut guard) = self.package_name_cache.write() {
+            guard.insert(package_json.clone(), name.clone());
+        }
+        let root = package_json
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        Ok((name, root))
+    }
+}
+
+impl LanguageProvider for TsProvider {
+    fn extract(
+        &self,
+        content: &str,
+        path: &str,
+        ctx: &ExtractContext<'_>,
+    ) -> Result<ExtractedFile, ExtractError> {
+        let file_abs_path = ctx.workspace_root.join(path);
+        let (package_name, package_root) = self.resolve_package_name(&file_abs_path, path)?;
+        let package_relative = file_abs_path.strip_prefix(&package_root).map_or_else(
+            |_| path.to_string(),
+            |p| p.to_string_lossy().replace('\\', "/"),
+        );
+        let tsconfig = load_nearest_tsconfig(&file_abs_path, &package_root);
+        extract::extract_file(
+            content,
+            path,
+            &package_name,
+            &package_relative,
+            &file_abs_path,
+            &package_root,
+            tsconfig,
+        )
+    }
+}
+
+fn load_nearest_tsconfig(
+    from_file: &Path,
+    package_root: &Path,
+) -> Option<resolver::TsConfigPaths> {
+    let mut current = from_file.parent()?;
+    loop {
+        let candidate = current.join("tsconfig.json");
+        if candidate.is_file()
+            && let Ok(content) = std::fs::read_to_string(&candidate)
+            && let Some(cfg) = resolver::parse_tsconfig(&content)
+        {
+            return Some(cfg);
+        }
+        if current == package_root {
+            return None;
+        }
+        current = current.parent()?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
+    use tempfile::tempdir;
+
+    use super::TsProvider;
+
+    fn write(root: &Path, rel: &str, content: &str) {
+        let abs = root.join(rel);
+        if let Some(parent) = abs.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(abs, content).unwrap();
+    }
+
+    #[test]
+    fn extract_resolves_package_name_from_package_json() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(root, "package.json", r#"{"name":"@myorg/api"}"#);
+        let src = "export function foo(): void {}\n";
+        write(root, "src/index.ts", src);
+
+        let provider = TsProvider::new();
+        let ctx = ExtractContext { workspace_root: root };
+        let extracted = provider.extract(src, "src/index.ts", &ctx).expect("extract ok");
+
+        let module = &extracted.symbols[0];
+        assert_eq!(module.fqdn, "@myorg/api::src");
+        let foo = extracted
+            .symbols
+            .iter()
+            .find(|s| s.name == "foo")
+            .expect("foo symbol");
+        assert_eq!(foo.fqdn, "@myorg/api::src::foo");
+    }
+
+    #[test]
+    fn extract_returns_parse_error_when_no_package_json() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let src = "export function foo() {}\n";
+        write(root, "src/index.ts", src);
+
+        let provider = TsProvider::new();
+        let ctx = ExtractContext { workspace_root: root };
+        let err = provider
+            .extract(src, "src/index.ts", &ctx)
+            .expect_err("must fail without package.json");
+        match err {
+            ExtractError::Parse { file, detail } => {
+                assert_eq!(file, "src/index.ts");
+                assert!(detail.contains("package.json"));
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_returns_parse_error_when_package_json_has_no_name() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(root, "package.json", r#"{"private": true}"#);
+        let src = "export function foo() {}\n";
+        write(root, "src/index.ts", src);
+
+        let provider = TsProvider::new();
+        let ctx = ExtractContext { workspace_root: root };
+        let err = provider
+            .extract(src, "src/index.ts", &ctx)
+            .expect_err("must fail without name");
+        match err {
+            ExtractError::Parse { file, detail } => {
+                assert_eq!(file, "src/index.ts");
+                assert!(detail.contains("\"name\""));
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cache_hit_avoids_repeated_io_for_same_package_json() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(root, "package.json", r#"{"name":"foo"}"#);
+        write(root, "src/a.ts", "export const a = 1;\n");
+        write(root, "src/b.ts", "export const b = 2;\n");
+
+        let provider = TsProvider::new();
+        let ctx = ExtractContext { workspace_root: root };
+
+        let _ = provider
+            .extract("export const a = 1;\n", "src/a.ts", &ctx)
+            .unwrap();
+
+        // Overwrite package.json — cache hit must keep returning "foo".
+        write(root, "package.json", r#"{"name":"DIFFERENT"}"#);
+
+        let extracted_b = provider
+            .extract("export const b = 2;\n", "src/b.ts", &ctx)
+            .unwrap();
+        let module_b = &extracted_b.symbols[0];
+        assert_eq!(module_b.fqdn, "foo::src::b");
+    }
+
+    #[test]
+    fn provider_is_send_sync_via_arc() {
+        let provider: Arc<dyn LanguageProvider> = Arc::new(TsProvider::new());
+        let _ = provider.clone();
+    }
+
+    #[test]
+    fn extract_consumes_tsconfig_paths_when_present() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(root, "package.json", r#"{"name":"@myorg/api"}"#);
+        write(
+            root,
+            "tsconfig.json",
+            r#"{"compilerOptions":{"baseUrl":"./","paths":{"@lib/*":["src/lib/*"]}}}"#,
+        );
+        let src =
+            "import { helper } from '@lib/utils';\nexport function caller() { helper(); }\n";
+        write(root, "src/caller.ts", src);
+
+        let provider = TsProvider::new();
+        let ctx = ExtractContext { workspace_root: root };
+        let extracted = provider.extract(src, "src/caller.ts", &ctx).expect("ok");
+
+        let imports: Vec<_> = extracted
+            .edges
+            .iter()
+            .filter(|e| e.kind == standardoc_ir::EdgeKind::Imports)
+            .collect();
+        assert_eq!(imports.len(), 1);
+        match &imports[0].to {
+            standardoc_ir::ResolvedOrUnresolved::Unresolved { name } => {
+                assert_eq!(name, "@myorg/api::src::lib::utils::helper");
+            }
+            other => panic!("expected unresolved canonical via tsconfig, got {other:?}"),
+        }
+    }
+}
