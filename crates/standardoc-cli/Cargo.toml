@@ -7,7 +7,25 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Standardoc CLI — scan / query / context."
+description = "Standardoc CLI — single user-facing binary `standardoc`. Subcommands: index / watch / query / rescan. Future LSP/MCP added as subcommands."
+
+[[bin]]
+name = "standardoc"
+path = "src/main.rs"
+
+[dependencies]
+standardoc-core          = { workspace = true }
+standardoc-ir            = { workspace = true }
+standardoc-lang-provider = { workspace = true }
+standardoc-server        = { workspace = true }
+clap                     = { workspace = true }
+ctrlc                    = { workspace = true }
+tokio                    = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile   = { workspace = true }
 
 [lints]
 workspace = true
