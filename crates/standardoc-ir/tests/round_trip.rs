@@ -1,8 +1,8 @@
 use standardoc_ir::{
     Blake3Hash, BridgeKind, EdgeKind, ExtractedFile, Kind, Language, LanguageKind, Modifiers,
-    Param, RawAttribute, RawAttributeArg, RawCallArg, RawCallSite, RawEdge, RawSymbol,
-    ResolvedOrUnresolved, Signature, SignatureMeta, Site, SourceOrigin, SymbolLocation, TypeRef,
-    Visibility,
+    Param, RawAttribute, RawAttributeArg, RawCallArg, RawCallSite, RawDocument, RawEdge,
+    RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SourceOrigin,
+    SymbolLocation, TypeRef, Visibility,
 };
 
 fn fixture() -> ExtractedFile {
@@ -117,6 +117,11 @@ fn fixture() -> ExtractedFile {
         },
     };
 
+    let doc = RawDocument {
+        symbol_fqdn: "crate::auth::create_user".into(),
+        description: "Creates a new user in the database.".into(),
+    };
+
     ExtractedFile {
         file: "src/auth.rs".into(),
         language: Language::Rust,
@@ -127,6 +132,7 @@ fn fixture() -> ExtractedFile {
         symbols: vec![module_root, create_user],
         edges: vec![calls_edge, unresolved_edge, bridge_edge],
         call_sites: vec![call_site],
+        documents: vec![doc],
     }
 }
 
@@ -172,4 +178,5 @@ fn missing_optional_vec_fields_default_to_empty() {
     assert!(parsed.symbols.is_empty());
     assert!(parsed.edges.is_empty());
     assert!(parsed.call_sites.is_empty());
+    assert!(parsed.documents.is_empty());
 }

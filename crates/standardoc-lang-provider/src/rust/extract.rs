@@ -1,10 +1,10 @@
 use standardoc_core::ExtractError;
 use standardoc_ir::{
-    Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawSymbol, SourceOrigin,
-    SymbolLocation, Visibility,
+    Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol,
+    SourceOrigin, SymbolLocation, Visibility,
 };
 
-use super::{module_path, walk};
+use super::{extract_doc, module_path, walk};
 
 pub(crate) fn extract_file(
     content: &str,
@@ -35,9 +35,19 @@ pub(crate) fn extract_file(
         attributes: vec![],
     };
 
+    let mut documents = Vec::new();
+    if let Some(description) = extract_doc::extract_inner(&parsed.attrs) {
+        documents.push(RawDocument {
+            symbol_fqdn: module_fqdn.clone(),
+            description,
+        });
+    }
+
     let mut symbols = vec![module_symbol];
-    let (item_symbols, edges) = walk::walk(&parsed, &module_fqdn, path, crate_name);
+    let (item_symbols, edges, item_documents) =
+        walk::walk(&parsed, &module_fqdn, path, crate_name);
     symbols.extend(item_symbols);
+    documents.extend(item_documents);
 
     Ok(ExtractedFile {
         file: path.into(),
@@ -49,6 +59,7 @@ pub(crate) fn extract_file(
         symbols,
         edges,
         call_sites: vec![],
+        documents,
     })
 }
 

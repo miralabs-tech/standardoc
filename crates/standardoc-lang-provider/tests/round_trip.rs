@@ -358,6 +358,119 @@ fn concurrent_ts_extracts_share_package_name_cache_safely() {
 }
 
 #[test]
+fn rust_outer_doc_comment_captured_as_raw_document() {
+    let dir = fresh_workspace("docs_rust");
+    let root = dir.path();
+    let src = "\
+/// Top-level helper.
+pub fn helper() {}
+
+/// User-facing record.
+pub struct User { pub id: u32 }
+";
+    write(root, "src/lib.rs", src);
+    let provider = WorkspaceProvider::new();
+    let ctx = ExtractContext { workspace_root: root };
+    let extracted = provider.extract(src, "src/lib.rs", &ctx).unwrap();
+
+    assert_eq!(extracted.documents.len(), 2);
+    let helper_doc = extracted
+        .documents
+        .iter()
+        .find(|d| d.symbol_fqdn == "docs_rust::helper")
+        .expect("helper doc");
+    assert_eq!(helper_doc.description, "Top-level helper.");
+    let user_doc = extracted
+        .documents
+        .iter()
+        .find(|d| d.symbol_fqdn == "docs_rust::User")
+        .expect("User doc");
+    assert_eq!(user_doc.description, "User-facing record.");
+}
+
+#[test]
+fn rust_inner_doc_attaches_to_module_symbol() {
+    let dir = fresh_workspace("docs_inner");
+    let root = dir.path();
+    let src = "\
+//! Crate-level docs for the foo module.
+
+pub fn x() {}
+";
+    write(root, "src/foo.rs", src);
+    let provider = WorkspaceProvider::new();
+    let ctx = ExtractContext { workspace_root: root };
+    let extracted = provider.extract(src, "src/foo.rs", &ctx).unwrap();
+
+    let module_doc = extracted
+        .documents
+        .iter()
+        .find(|d| d.symbol_fqdn == "docs_inner::foo")
+        .expect("module doc");
+    assert_eq!(
+        module_doc.description,
+        "Crate-level docs for the foo module."
+    );
+}
+
+#[test]
+fn ts_jsdoc_block_captured_as_raw_document() {
+    let dir = fresh_ts_package("@app/docs");
+    let root = dir.path();
+    let src = "\
+/**
+ * Creates a new user.
+ */
+export function makeUser(): void {}
+
+/**
+ * The user record.
+ */
+export interface User { id: string }
+";
+    write(root, "src/index.ts", src);
+    let provider = WorkspaceProvider::new();
+    let ctx = ExtractContext { workspace_root: root };
+    let extracted = provider.extract(src, "src/index.ts", &ctx).unwrap();
+
+    let make_user_doc = extracted
+        .documents
+        .iter()
+        .find(|d| d.symbol_fqdn == "@app/docs::src::makeUser")
+        .expect("makeUser doc");
+    assert_eq!(make_user_doc.description, "Creates a new user.");
+    let user_doc = extracted
+        .documents
+        .iter()
+        .find(|d| d.symbol_fqdn == "@app/docs::src::User")
+        .expect("User doc");
+    assert_eq!(user_doc.description, "The user record.");
+}
+
+#[test]
+fn ts_top_of_file_jsdoc_attaches_to_module_symbol() {
+    let dir = fresh_ts_package("@app/top");
+    let root = dir.path();
+    let src = "\
+/**
+ * Top-of-file module description.
+ */
+export const N = 1;
+";
+    write(root, "src/lib.ts", src);
+    let provider = WorkspaceProvider::new();
+    let ctx = ExtractContext { workspace_root: root };
+    let extracted = provider.extract(src, "src/lib.ts", &ctx).unwrap();
+
+    let module_doc = extracted
+        .documents
+        .iter()
+        .find(|d| d.symbol_fqdn == "@app/top::src::lib")
+        .expect("module-level JSDoc");
+    assert_eq!(module_doc.description, "Top-of-file module description.");
+}
+
+#[test]
 fn ts_content_hash_stable_across_provider_instances() {
     let dir = fresh_ts_package("foo");
     let root = dir.path();

@@ -19,6 +19,7 @@ use standardoc_server::{index_once, open_workspace, rescan};
 const RUST_LIB_RS: &str = "\
 pub mod helpers;
 
+/// Alpha entry point.
 pub fn alpha() {}
 
 pub fn beta() {
@@ -37,6 +38,9 @@ export function main() {
 ";
 
 const TS_AUTH_TS: &str = "\
+/**
+ * Authenticate the current user.
+ */
 export function login(): string {
     return \"ok\";
 }
@@ -370,5 +374,32 @@ fn pause_blocks_cold_start_then_resume_completes() {
             .unwrap()
             .is_some(),
         "resumed cold_start did not index TS"
+    );
+}
+
+#[test]
+fn cold_start_persists_user_documents_for_both_languages() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_mix_workspace(dir.path());
+
+    let provider = WorkspaceProvider::new();
+    let handle = index_once(dir.path(), &provider).unwrap();
+
+    let alpha_ctx = query::context_for_symbol(&handle, "sample-api::alpha")
+        .unwrap()
+        .expect("alpha context");
+    assert_eq!(
+        alpha_ctx.document_description.as_deref(),
+        Some("Alpha entry point."),
+        "Rust /// did not persist on alpha"
+    );
+
+    let login_ctx = query::context_for_symbol(&handle, "@app/web::src::auth::login")
+        .unwrap()
+        .expect("login context");
+    assert_eq!(
+        login_ctx.document_description.as_deref(),
+        Some("Authenticate the current user."),
+        "TS /** */ did not persist on login"
     );
 }

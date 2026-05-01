@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use proc_macro2::Span;
 use quote::ToTokens;
 use standardoc_ir::{
-    EdgeKind, Kind, LanguageKind, Modifiers, Param, RawAttribute, RawAttributeArg, RawEdge,
-    RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation, TypeRef,
-    Visibility,
+    EdgeKind, Kind, LanguageKind, Modifiers, Param, RawAttribute, RawAttributeArg, RawDocument,
+    RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation,
+    TypeRef, Visibility,
 };
 use syn::spanned::Spanned;
 
@@ -13,6 +13,7 @@ use crate::walk_core::WalkContextCore;
 
 use super::body_hash;
 use super::extract_call;
+use super::extract_doc;
 use super::extract_use;
 use super::visibility;
 
@@ -37,6 +38,23 @@ impl WalkContext {
 
     pub(crate) fn push_edge(&mut self, edge: RawEdge) {
         self.core.push_edge(edge);
+    }
+
+    pub(crate) fn push_document(&mut self, doc: RawDocument) {
+        self.core.push_document(doc);
+    }
+
+    /// Push the symbol and, if `attrs` carries an outer doc-comment chain,
+    /// also push a `RawDocument` keyed by the symbol's FQDN.
+    pub(crate) fn push_symbol_with_doc(&mut self, sym: RawSymbol, attrs: &[syn::Attribute]) {
+        let fqdn = sym.fqdn.clone();
+        self.push_symbol(sym);
+        if let Some(description) = extract_doc::extract_outer(attrs) {
+            self.push_document(RawDocument {
+                symbol_fqdn: fqdn,
+                description,
+            });
+        }
     }
 
     pub(crate) fn add_alias(&mut self, alias: String, canonical: String) {
@@ -134,11 +152,11 @@ pub(crate) fn walk(
     module_fqdn: &str,
     file_path: &str,
     crate_name: &str,
-) -> (Vec<RawSymbol>, Vec<RawEdge>) {
+) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
     let mut ctx = WalkContext::new(file_path, crate_name, module_fqdn.to_string());
     walk_p1(&mut ctx, &parsed.items, module_fqdn);
     walk_p2(&mut ctx, &parsed.items, module_fqdn);
-    (ctx.core.symbols, ctx.core.edges)
+    (ctx.core.symbols, ctx.core.edges, ctx.core.documents)
 }
 
 // Pass 1: items → symbols + IMPORTS (use/extern_crate) + IMPLEMENTS + alias-table.
@@ -152,38 +170,38 @@ fn process_item_p1(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
     match item {
         syn::Item::Fn(it) => {
             let path = ctx.core.file_path.clone();
-            ctx.push_symbol(extract_fn(it, current_module, &path));
+            ctx.push_symbol_with_doc(extract_fn(it, current_module, &path), &it.attrs);
         }
         syn::Item::Struct(it) => {
             let path = ctx.core.file_path.clone();
-            ctx.push_symbol(extract_struct(it, current_module, &path));
+            ctx.push_symbol_with_doc(extract_struct(it, current_module, &path), &it.attrs);
         }
         syn::Item::Enum(it) => {
             let path = ctx.core.file_path.clone();
-            ctx.push_symbol(extract_enum(it, current_module, &path));
+            ctx.push_symbol_with_doc(extract_enum(it, current_module, &path), &it.attrs);
         }
         syn::Item::Union(it) => {
             let path = ctx.core.file_path.clone();
-            ctx.push_symbol(extract_union(it, current_module, &path));
+            ctx.push_symbol_with_doc(extract_union(it, current_module, &path), &it.attrs);
         }
         syn::Item::Trait(it) => extract_trait(ctx, it, current_module),
         syn::Item::Impl(it) => extract_impl(ctx, it, current_module),
         syn::Item::Type(it) => {
             let path = ctx.core.file_path.clone();
-            ctx.push_symbol(extract_type_alias(it, current_module, &path));
+            ctx.push_symbol_with_doc(extract_type_alias(it, current_module, &path), &it.attrs);
         }
         syn::Item::Const(it) => {
             let path = ctx.core.file_path.clone();
-            ctx.push_symbol(extract_const(it, current_module, &path));
+            ctx.push_symbol_with_doc(extract_const(it, current_module, &path), &it.attrs);
         }
         syn::Item::Static(it) => {
             let path = ctx.core.file_path.clone();
-            ctx.push_symbol(extract_static(it, current_module, &path));
+            ctx.push_symbol_with_doc(extract_static(it, current_module, &path), &it.attrs);
         }
         syn::Item::Macro(it) => {
             let path = ctx.core.file_path.clone();
             if let Some(sym) = extract_macro_def(it, current_module, &path) {
-                ctx.push_symbol(sym);
+                ctx.push_symbol_with_doc(sym, &it.attrs);
             }
         }
         syn::Item::Use(it) => extract_use::process_use(ctx, it, current_module),
@@ -346,18 +364,21 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
     let trait_fqdn = format!("{parent_fqdn}::{name}");
     let trait_visibility = visibility::map(&item.vis);
 
-    ctx.push_symbol(RawSymbol {
-        name,
-        fqdn: trait_fqdn.clone(),
-        kind: Kind::Type,
-        language_kind: LanguageKind::from("trait"),
-        module: Some(parent_fqdn.to_string()),
-        visibility: trait_visibility,
-        location: span_to_location(item.span(), &path),
-        signature: None,
-        body_hash: Some(body_hash::hash_tokens(&item.to_token_stream())),
-        attributes: extract_attributes(&item.attrs, &path),
-    });
+    ctx.push_symbol_with_doc(
+        RawSymbol {
+            name,
+            fqdn: trait_fqdn.clone(),
+            kind: Kind::Type,
+            language_kind: LanguageKind::from("trait"),
+            module: Some(parent_fqdn.to_string()),
+            visibility: trait_visibility,
+            location: span_to_location(item.span(), &path),
+            signature: None,
+            body_hash: Some(body_hash::hash_tokens(&item.to_token_stream())),
+            attributes: extract_attributes(&item.attrs, &path),
+        },
+        &item.attrs,
+    );
 
     for trait_item in &item.items {
         if let syn::TraitItem::Fn(item_fn) = trait_item {
@@ -365,18 +386,21 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
             let fn_fqdn = format!("{trait_fqdn}::{fn_name}");
             let mut sig = extract_signature(&item_fn.sig);
             sig.modifiers.deprecated = extract_deprecated(&item_fn.attrs);
-            ctx.push_symbol(RawSymbol {
-                name: fn_name,
-                fqdn: fn_fqdn,
-                kind: Kind::Function,
-                language_kind: LanguageKind::from("trait_fn"),
-                module: Some(trait_fqdn.clone()),
-                visibility: trait_visibility,
-                location: span_to_location(item_fn.span(), &path),
-                signature: Some(sig),
-                body_hash: Some(body_hash::hash_tokens(&item_fn.to_token_stream())),
-                attributes: extract_attributes(&item_fn.attrs, &path),
-            });
+            ctx.push_symbol_with_doc(
+                RawSymbol {
+                    name: fn_name,
+                    fqdn: fn_fqdn,
+                    kind: Kind::Function,
+                    language_kind: LanguageKind::from("trait_fn"),
+                    module: Some(trait_fqdn.clone()),
+                    visibility: trait_visibility,
+                    location: span_to_location(item_fn.span(), &path),
+                    signature: Some(sig),
+                    body_hash: Some(body_hash::hash_tokens(&item_fn.to_token_stream())),
+                    attributes: extract_attributes(&item_fn.attrs, &path),
+                },
+                &item_fn.attrs,
+            );
         }
     }
 }
@@ -408,18 +432,21 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
             let fn_fqdn = format!("{target_fqdn}::{fn_name}");
             let mut sig = extract_signature(&item_fn.sig);
             sig.modifiers.deprecated = extract_deprecated(&item_fn.attrs);
-            ctx.push_symbol(RawSymbol {
-                name: fn_name,
-                fqdn: fn_fqdn,
-                kind: Kind::Function,
-                language_kind: LanguageKind::from("impl_fn"),
-                module: Some(target_fqdn.clone()),
-                visibility: visibility::map(&item_fn.vis),
-                location: span_to_location(item_fn.span(), &path),
-                signature: Some(sig),
-                body_hash: Some(body_hash::hash_tokens(&item_fn.to_token_stream())),
-                attributes: extract_attributes(&item_fn.attrs, &path),
-            });
+            ctx.push_symbol_with_doc(
+                RawSymbol {
+                    name: fn_name,
+                    fqdn: fn_fqdn,
+                    kind: Kind::Function,
+                    language_kind: LanguageKind::from("impl_fn"),
+                    module: Some(target_fqdn.clone()),
+                    visibility: visibility::map(&item_fn.vis),
+                    location: span_to_location(item_fn.span(), &path),
+                    signature: Some(sig),
+                    body_hash: Some(body_hash::hash_tokens(&item_fn.to_token_stream())),
+                    attributes: extract_attributes(&item_fn.attrs, &path),
+                },
+                &item_fn.attrs,
+            );
         }
     }
 }
@@ -647,7 +674,7 @@ mod tests {
     #[test]
     fn walks_simple_fn_emits_function_symbol() {
         let parsed = parse("fn foo() {}");
-        let (symbols, edges) = walk(&parsed, "mycrate", "src/lib.rs", "mycrate");
+        let (symbols, edges, _docs) = walk(&parsed, "mycrate", "src/lib.rs", "mycrate");
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].kind, Kind::Function);
         assert_eq!(symbols[0].fqdn, "mycrate::foo");
@@ -659,14 +686,14 @@ mod tests {
     #[test]
     fn pub_fn_visibility_is_public() {
         let parsed = parse("pub fn foo() {}");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].visibility, Visibility::Public);
     }
 
     #[test]
     fn fn_signature_captures_params_and_return() {
         let parsed = parse("pub fn add(a: u32, b: u32) -> u32 { a + b }");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let sig = symbols[0].signature.as_ref().unwrap();
         assert_eq!(sig.params.len(), 2);
         assert_eq!(sig.params[0].name, "a");
@@ -678,14 +705,14 @@ mod tests {
     #[test]
     fn async_fn_modifier_set() {
         let parsed = parse("async fn boot() {}");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert!(symbols[0].signature.as_ref().unwrap().modifiers.is_async);
     }
 
     #[test]
     fn deprecated_attribute_propagates_to_modifier() {
         let parsed = parse("#[deprecated = \"use bar\"] fn foo() {}");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let dep = symbols[0]
             .signature
             .as_ref()
@@ -699,7 +726,7 @@ mod tests {
     #[test]
     fn self_receiver_renders_as_self_typeref() {
         let parsed = parse("impl Foo {\n  fn a(self) {}\n  fn b(&self) {}\n  fn c(&mut self) {}\n}");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let a = &symbols.iter().find(|s| s.name == "a").unwrap().signature;
         let b = &symbols.iter().find(|s| s.name == "b").unwrap().signature;
         let c = &symbols.iter().find(|s| s.name == "c").unwrap().signature;
@@ -711,7 +738,7 @@ mod tests {
     #[test]
     fn struct_emits_type_symbol() {
         let parsed = parse("pub struct Foo { x: u32 }");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].kind, Kind::Type);
         assert_eq!(symbols[0].language_kind.as_str(), "struct");
@@ -721,7 +748,7 @@ mod tests {
     #[test]
     fn enum_emits_type_symbol() {
         let parsed = parse("enum E { A, B }");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].kind, Kind::Type);
         assert_eq!(symbols[0].language_kind.as_str(), "enum");
     }
@@ -729,7 +756,7 @@ mod tests {
     #[test]
     fn trait_emits_type_and_inner_fn_symbols() {
         let parsed = parse("pub trait T { fn foo(&self); fn bar(&self) -> u32 { 0 } }");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols.len(), 3);
         assert_eq!(symbols[0].kind, Kind::Type);
         assert_eq!(symbols[0].language_kind.as_str(), "trait");
@@ -744,7 +771,7 @@ mod tests {
     #[test]
     fn inherent_impl_emits_method_symbols() {
         let parsed = parse("struct Foo; impl Foo { pub fn a(&self) {} fn b(&self) {} }");
-        let (symbols, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, edges, _docs) = walk(&parsed, "c", "src/lib.rs", "c");
         assert!(edges.is_empty(), "no IMPLEMENTS for inherent impl");
         let foo = symbols.iter().find(|s| s.fqdn == "c::Foo").unwrap();
         assert_eq!(foo.kind, Kind::Type);
@@ -757,7 +784,7 @@ mod tests {
     #[test]
     fn trait_impl_emits_implements_edge() {
         let parsed = parse("struct Foo; impl SomeTrait for Foo { fn run(&self) {} }");
-        let (symbols, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, edges, _docs) = walk(&parsed, "c", "src/lib.rs", "c");
         let imp: Vec<_> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Implements)
@@ -777,7 +804,7 @@ mod tests {
         let parsed = parse(
             "use crate::traits::Foo; struct Bar; impl Foo for Bar { fn run(&self) {} }",
         );
-        let (_, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let imp = edges
             .iter()
             .find(|e| e.kind == EdgeKind::Implements)
@@ -793,7 +820,7 @@ mod tests {
     #[test]
     fn const_emits_value_symbol() {
         let parsed = parse("const N: u32 = 0;");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].kind, Kind::Value);
         assert_eq!(symbols[0].language_kind.as_str(), "const");
         assert_eq!(symbols[0].fqdn, "c::N");
@@ -802,7 +829,7 @@ mod tests {
     #[test]
     fn static_emits_value_symbol() {
         let parsed = parse("static GLOBAL: u32 = 0;");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].kind, Kind::Value);
         assert_eq!(symbols[0].language_kind.as_str(), "static");
     }
@@ -810,7 +837,7 @@ mod tests {
     #[test]
     fn type_alias_emits_type_symbol() {
         let parsed = parse("pub type Bytes = Vec<u8>;");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].kind, Kind::Type);
         assert_eq!(symbols[0].language_kind.as_str(), "type_alias");
     }
@@ -818,7 +845,7 @@ mod tests {
     #[test]
     fn macro_rules_with_export_is_public() {
         let parsed = parse("#[macro_export] macro_rules! say { () => {}; }");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].kind, Kind::Macro);
         assert_eq!(symbols[0].visibility, Visibility::Public);
@@ -827,14 +854,14 @@ mod tests {
     #[test]
     fn macro_rules_without_export_is_private() {
         let parsed = parse("macro_rules! say { () => {}; }");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].visibility, Visibility::Private);
     }
 
     #[test]
     fn inline_mod_pushes_fqdn_without_emitting_module_symbol() {
         let parsed = parse("mod inner { pub fn deep() {} }");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(
             symbols.len(),
             1,
@@ -847,7 +874,7 @@ mod tests {
     #[test]
     fn attributes_are_captured_with_path_name() {
         let parsed = parse("#[derive(Debug, Clone)] pub struct X;");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].attributes.len(), 1);
         assert_eq!(symbols[0].attributes[0].name, "derive");
         assert_eq!(symbols[0].attributes[0].args.len(), 1);
@@ -857,7 +884,7 @@ mod tests {
     #[test]
     fn generic_params_captured_as_strings() {
         let parsed = parse("fn id<T>(x: T) -> T { x }");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let g = &symbols[0]
             .signature
             .as_ref()
@@ -872,7 +899,7 @@ mod tests {
     fn span_locations_are_captured() {
         // proc-macro2 with span-locations feature gives 1-based lines for parsed source.
         let parsed = parse("\n\nfn foo() {}\n");
-        let (symbols, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].location.start_line, 3);
     }
 

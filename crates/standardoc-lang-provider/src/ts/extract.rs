@@ -2,13 +2,15 @@ use std::path::Path;
 
 use standardoc_core::ExtractError;
 use standardoc_ir::{
-    Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawSymbol, SourceOrigin,
-    SymbolLocation, Visibility,
+    Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol,
+    SourceOrigin, SymbolLocation, Visibility,
 };
-use swc_core::common::{FileName, sync::Lrc, SourceMap};
+use swc_core::common::comments::SingleThreadedComments;
+use swc_core::common::{FileName, sync::Lrc, SourceMap, Spanned};
 use swc_core::ecma::ast::EsVersion;
 use swc_core::ecma::parser::{EsSyntax, Parser, StringInput, Syntax, TsSyntax, lexer::Lexer};
 
+use super::extract_doc;
 use super::helpers::compute_module_path;
 use super::resolver::TsConfigPaths;
 use super::walk;
@@ -28,11 +30,12 @@ pub(crate) fn extract_file(
         Lrc::new(FileName::Custom(workspace_relative_path.into())),
         content.to_string(),
     );
+    let comments = SingleThreadedComments::default();
     let lexer = Lexer::new(
         syntax_for(workspace_relative_path),
         EsVersion::EsNext,
         StringInput::from(&*fm),
-        None,
+        Some(&comments),
     );
     let mut parser = Parser::new_from(lexer);
     let module = parser.parse_module().map_err(|e| ExtractError::Parse {
@@ -61,8 +64,18 @@ pub(crate) fn extract_file(
         attributes: vec![],
     };
 
+    let mut documents = Vec::new();
+    if let Some(first_pos) = module.body.first().map(|item| item.span().lo)
+        && let Some(description) = extract_doc::extract_at(&comments, first_pos)
+    {
+        documents.push(RawDocument {
+            symbol_fqdn: module_fqdn.clone(),
+            description,
+        });
+    }
+
     let mut symbols = vec![module_symbol];
-    let (item_symbols, edges) = walk::walk(
+    let (item_symbols, edges, item_documents) = walk::walk(
         &module,
         package_name,
         workspace_relative_path,
@@ -71,8 +84,10 @@ pub(crate) fn extract_file(
         from_file_abs_path,
         package_root,
         tsconfig,
+        &comments,
     );
     symbols.extend(item_symbols);
+    documents.extend(item_documents);
 
     Ok(ExtractedFile {
         file: workspace_relative_path.into(),
@@ -84,6 +99,7 @@ pub(crate) fn extract_file(
         symbols,
         edges,
         call_sites: vec![],
+        documents,
     })
 }
 

@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use standardoc_ir::{
-    Blake3Hash, EdgeKind, Kind, LanguageKind, Modifiers, Param, RawEdge, RawSymbol,
+    Blake3Hash, EdgeKind, Kind, LanguageKind, Modifiers, Param, RawDocument, RawEdge, RawSymbol,
     ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation, TypeRef, Visibility,
 };
+use swc_core::common::BytePos;
+use swc_core::common::comments::SingleThreadedComments;
 use swc_core::common::errors::SourceMapper;
 use swc_core::common::{Span, Spanned, SourceMap, sync::Lrc};
 use swc_core::ecma::ast::{
@@ -14,6 +16,7 @@ use swc_core::ecma::ast::{
     TsTypeAliasDecl, VarDecl, VarDeclarator,
 };
 
+use super::extract_doc;
 use super::helpers::map_access_modifier;
 use super::resolver::{TsConfigPaths, resolve_import};
 use super::visit;
@@ -25,7 +28,7 @@ use crate::walk_core::WalkContextCore;
 /// defined_fqdns) with TS-specific resolution state: the owning package
 /// name (FQDN namespace), an import alias-table, and the swc inputs we need
 /// to compute spans / body hashes / import resolution from inside the walk.
-pub(crate) struct TsWalkContext {
+pub(crate) struct TsWalkContext<'a> {
     pub(crate) core: WalkContextCore,
     pub(crate) package_name: String,
     pub(crate) import_aliases: HashMap<String, ResolvedImport>,
@@ -33,9 +36,10 @@ pub(crate) struct TsWalkContext {
     pub(crate) from_file_abs_path: PathBuf,
     pub(crate) package_root: PathBuf,
     pub(crate) tsconfig: Option<TsConfigPaths>,
+    pub(crate) comments: &'a SingleThreadedComments,
 }
 
-impl TsWalkContext {
+impl<'a> TsWalkContext<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         file_path: String,
@@ -45,6 +49,7 @@ impl TsWalkContext {
         from_file_abs_path: PathBuf,
         package_root: PathBuf,
         tsconfig: Option<TsConfigPaths>,
+        comments: &'a SingleThreadedComments,
     ) -> Self {
         Self {
             core: WalkContextCore::new(file_path, file_module_fqdn),
@@ -54,6 +59,7 @@ impl TsWalkContext {
             from_file_abs_path,
             package_root,
             tsconfig,
+            comments,
         }
     }
 
@@ -63,6 +69,26 @@ impl TsWalkContext {
 
     pub(crate) fn push_edge(&mut self, edge: RawEdge) {
         self.core.push_edge(edge);
+    }
+
+    pub(crate) fn push_document(&mut self, doc: RawDocument) {
+        self.core.push_document(doc);
+    }
+
+    /// Push the symbol and, if a JSDoc block precedes `attached_pos`, also
+    /// push a `RawDocument` keyed by the symbol's FQDN. swc attaches leading
+    /// comments to the `BytePos` of the first significant token after the
+    /// comment, so callers must pass the OUTERMOST span of the wrapping item
+    /// (e.g. `ExportDecl.span.lo`, not `FnDecl.function.span.lo`).
+    pub(crate) fn push_symbol_with_doc(&mut self, sym: RawSymbol, attached_pos: BytePos) {
+        let fqdn = sym.fqdn.clone();
+        self.push_symbol(sym);
+        if let Some(description) = extract_doc::extract_at(self.comments, attached_pos) {
+            self.push_document(RawDocument {
+                symbol_fqdn: fqdn,
+                description,
+            });
+        }
     }
 
     pub(crate) fn add_import_alias(&mut self, local_name: String, resolved: ResolvedImport) {
@@ -118,8 +144,8 @@ impl TsWalkContext {
         self.cm.span_to_snippet(span).ok()
     }
 
-    pub(crate) fn into_outputs(self) -> (Vec<RawSymbol>, Vec<RawEdge>) {
-        (self.core.symbols, self.core.edges)
+    pub(crate) fn into_outputs(self) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
+        (self.core.symbols, self.core.edges, self.core.documents)
     }
 }
 
@@ -140,7 +166,8 @@ pub(crate) fn walk(
     from_file_abs_path: &Path,
     package_root: &Path,
     tsconfig: Option<TsConfigPaths>,
-) -> (Vec<RawSymbol>, Vec<RawEdge>) {
+    comments: &SingleThreadedComments,
+) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
     let mut ctx = TsWalkContext::new(
         file_path.to_string(),
         package_name.to_string(),
@@ -149,19 +176,20 @@ pub(crate) fn walk(
         from_file_abs_path.to_path_buf(),
         package_root.to_path_buf(),
         tsconfig,
+        comments,
     );
     walk_p1(&mut ctx, &module.body, file_module_fqdn);
     walk_p2(&mut ctx, &module.body, file_module_fqdn);
     ctx.into_outputs()
 }
 
-fn walk_p1(ctx: &mut TsWalkContext, items: &[ModuleItem], current_module: &str) {
+fn walk_p1(ctx: &mut TsWalkContext<'_>, items: &[ModuleItem], current_module: &str) {
     for item in items {
         process_item_p1(ctx, item, current_module);
     }
 }
 
-fn process_item_p1(ctx: &mut TsWalkContext, item: &ModuleItem, current_module: &str) {
+fn process_item_p1(ctx: &mut TsWalkContext<'_>, item: &ModuleItem, current_module: &str) {
     match item {
         ModuleItem::ModuleDecl(ModuleDecl::Import(it)) => {
             process_import(ctx, it, current_module);
@@ -173,7 +201,7 @@ fn process_item_p1(ctx: &mut TsWalkContext, item: &ModuleItem, current_module: &
             process_export_default_decl(ctx, it, current_module);
         }
         ModuleItem::Stmt(Stmt::Decl(decl)) => {
-            process_decl(ctx, decl, current_module, false);
+            process_decl(ctx, decl, current_module, false, decl.span().lo);
         }
         // Namespace export / re-export (`export {…}`, `export * from …`,
         // `export = …`) and bare expression statements are PUNTed day-1.
@@ -181,13 +209,13 @@ fn process_item_p1(ctx: &mut TsWalkContext, item: &ModuleItem, current_module: &
     }
 }
 
-fn walk_p2(ctx: &mut TsWalkContext, items: &[ModuleItem], current_module: &str) {
+fn walk_p2(ctx: &mut TsWalkContext<'_>, items: &[ModuleItem], current_module: &str) {
     for item in items {
         process_item_p2(ctx, item, current_module);
     }
 }
 
-fn process_item_p2(ctx: &mut TsWalkContext, item: &ModuleItem, current_module: &str) {
+fn process_item_p2(ctx: &mut TsWalkContext<'_>, item: &ModuleItem, current_module: &str) {
     match item {
         ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(it)) => {
             visit_decl_bodies(ctx, &it.decl, current_module);
@@ -202,7 +230,7 @@ fn process_item_p2(ctx: &mut TsWalkContext, item: &ModuleItem, current_module: &
     }
 }
 
-fn visit_decl_bodies(ctx: &mut TsWalkContext, decl: &Decl, current_module: &str) {
+fn visit_decl_bodies(ctx: &mut TsWalkContext<'_>, decl: &Decl, current_module: &str) {
     match decl {
         Decl::Fn(it) => {
             let fn_fqdn = format!("{current_module}::{}", it.ident.sym);
@@ -219,7 +247,7 @@ fn visit_decl_bodies(ctx: &mut TsWalkContext, decl: &Decl, current_module: &str)
 }
 
 fn visit_default_decl_bodies(
-    ctx: &mut TsWalkContext,
+    ctx: &mut TsWalkContext<'_>,
     decl: &DefaultDecl,
     current_module: &str,
 ) {
@@ -244,7 +272,7 @@ fn visit_default_decl_bodies(
 }
 
 fn visit_class_methods(
-    ctx: &mut TsWalkContext,
+    ctx: &mut TsWalkContext<'_>,
     class_name: &str,
     class: &Class,
     current_module: &str,
@@ -262,7 +290,7 @@ fn visit_class_methods(
     }
 }
 
-fn visit_var_initializers(ctx: &mut TsWalkContext, var: &VarDecl, current_module: &str) {
+fn visit_var_initializers(ctx: &mut TsWalkContext<'_>, var: &VarDecl, current_module: &str) {
     for declarator in &var.decls {
         let Some(name) = declarator_name(declarator) else {
             continue;
@@ -273,42 +301,49 @@ fn visit_var_initializers(ctx: &mut TsWalkContext, var: &VarDecl, current_module
     }
 }
 
-fn process_decl(ctx: &mut TsWalkContext, decl: &Decl, current_module: &str, exported: bool) {
+fn process_decl(
+    ctx: &mut TsWalkContext<'_>,
+    decl: &Decl,
+    current_module: &str,
+    exported: bool,
+    outer_pos: BytePos,
+) {
     match decl {
         Decl::Fn(it) => {
             let sym = extract_fn_decl(ctx, it, current_module, exported);
-            ctx.push_symbol(sym);
+            ctx.push_symbol_with_doc(sym, outer_pos);
         }
         Decl::Class(it) => {
-            extract_class_decl(ctx, it, current_module, exported);
+            extract_class_decl(ctx, it, current_module, exported, outer_pos);
         }
         Decl::Var(it) => {
-            extract_var_decl(ctx, it, current_module, exported);
+            extract_var_decl(ctx, it, current_module, exported, outer_pos);
         }
         Decl::TsInterface(it) => {
-            extract_interface_decl(ctx, it, current_module, exported);
+            extract_interface_decl(ctx, it, current_module, exported, outer_pos);
         }
         Decl::TsTypeAlias(it) => {
             let sym = extract_type_alias_decl(ctx, it, current_module, exported);
-            ctx.push_symbol(sym);
+            ctx.push_symbol_with_doc(sym, outer_pos);
         }
         Decl::TsEnum(it) => {
             let sym = extract_enum_decl(ctx, it, current_module, exported);
-            ctx.push_symbol(sym);
+            ctx.push_symbol_with_doc(sym, outer_pos);
         }
         Decl::TsModule(_) | Decl::Using(_) => {}
     }
 }
 
-fn process_export_decl(ctx: &mut TsWalkContext, item: &ExportDecl, current_module: &str) {
-    process_decl(ctx, &item.decl, current_module, true);
+fn process_export_decl(ctx: &mut TsWalkContext<'_>, item: &ExportDecl, current_module: &str) {
+    process_decl(ctx, &item.decl, current_module, true, item.span.lo);
 }
 
 fn process_export_default_decl(
-    ctx: &mut TsWalkContext,
+    ctx: &mut TsWalkContext<'_>,
     item: &ExportDefaultDecl,
     current_module: &str,
 ) {
+    let outer_pos = item.span.lo;
     match &item.decl {
         DefaultDecl::Fn(fn_expr) => {
             let name = fn_expr
@@ -318,47 +353,53 @@ fn process_export_default_decl(
             let span = fn_expr.function.span;
             let signature = build_function_signature(ctx, &fn_expr.function);
             let body_hash = ctx.body_hash_of(span);
-            ctx.push_symbol(RawSymbol {
-                fqdn: format!("{current_module}::{name}"),
-                name,
-                kind: Kind::Function,
-                language_kind: LanguageKind::from("function"),
-                module: Some(current_module.to_string()),
-                visibility: Visibility::Public,
-                location: ctx.span_location(span),
-                signature: Some(signature),
-                body_hash,
-                attributes: vec![],
-            });
+            ctx.push_symbol_with_doc(
+                RawSymbol {
+                    fqdn: format!("{current_module}::{name}"),
+                    name,
+                    kind: Kind::Function,
+                    language_kind: LanguageKind::from("function"),
+                    module: Some(current_module.to_string()),
+                    visibility: Visibility::Public,
+                    location: ctx.span_location(span),
+                    signature: Some(signature),
+                    body_hash,
+                    attributes: vec![],
+                },
+                outer_pos,
+            );
         }
         DefaultDecl::Class(class_expr) => {
             let name = class_expr
                 .ident
                 .as_ref()
                 .map_or_else(|| "default".to_string(), |i| i.sym.to_string());
-            extract_class_inner(ctx, &name, &class_expr.class, current_module, true);
+            extract_class_inner(ctx, &name, &class_expr.class, current_module, true, outer_pos);
         }
         DefaultDecl::TsInterfaceDecl(interface) => {
             let exported = true;
             let span = interface.span;
             let name = interface.id.sym.to_string();
-            ctx.push_symbol(RawSymbol {
-                fqdn: format!("{current_module}::{name}"),
-                name,
-                kind: Kind::Type,
-                language_kind: LanguageKind::from("interface"),
-                module: Some(current_module.to_string()),
-                visibility: map_access_modifier(None, exported),
-                location: ctx.span_location(span),
-                signature: None,
-                body_hash: ctx.body_hash_of(span),
-                attributes: vec![],
-            });
+            ctx.push_symbol_with_doc(
+                RawSymbol {
+                    fqdn: format!("{current_module}::{name}"),
+                    name,
+                    kind: Kind::Type,
+                    language_kind: LanguageKind::from("interface"),
+                    module: Some(current_module.to_string()),
+                    visibility: map_access_modifier(None, exported),
+                    location: ctx.span_location(span),
+                    signature: None,
+                    body_hash: ctx.body_hash_of(span),
+                    attributes: vec![],
+                },
+                outer_pos,
+            );
         }
     }
 }
 
-fn process_import(ctx: &mut TsWalkContext, item: &ImportDecl, current_module: &str) {
+fn process_import(ctx: &mut TsWalkContext<'_>, item: &ImportDecl, current_module: &str) {
     let span = item.span;
     let spec = item.src.value.to_string_lossy().into_owned();
     let canonical = resolve_import(
@@ -429,7 +470,7 @@ fn process_import(ctx: &mut TsWalkContext, item: &ImportDecl, current_module: &s
 }
 
 fn extract_fn_decl(
-    ctx: &TsWalkContext,
+    ctx: &TsWalkContext<'_>,
     item: &FnDecl,
     parent_fqdn: &str,
     exported: bool,
@@ -453,36 +494,41 @@ fn extract_fn_decl(
 }
 
 fn extract_class_decl(
-    ctx: &mut TsWalkContext,
+    ctx: &mut TsWalkContext<'_>,
     item: &ClassDecl,
     parent_fqdn: &str,
     exported: bool,
+    outer_pos: BytePos,
 ) {
     let name = item.ident.sym.to_string();
-    extract_class_inner(ctx, &name, &item.class, parent_fqdn, exported);
+    extract_class_inner(ctx, &name, &item.class, parent_fqdn, exported, outer_pos);
 }
 
 fn extract_class_inner(
-    ctx: &mut TsWalkContext,
+    ctx: &mut TsWalkContext<'_>,
     name: &str,
     class: &Class,
     parent_fqdn: &str,
     exported: bool,
+    outer_pos: BytePos,
 ) {
     let class_fqdn = format!("{parent_fqdn}::{name}");
     let class_span = class.span;
-    ctx.push_symbol(RawSymbol {
-        name: name.to_string(),
-        fqdn: class_fqdn.clone(),
-        kind: Kind::Type,
-        language_kind: LanguageKind::from("class"),
-        module: Some(parent_fqdn.to_string()),
-        visibility: map_access_modifier(None, exported),
-        location: ctx.span_location(class_span),
-        signature: None,
-        body_hash: ctx.body_hash_of(class_span),
-        attributes: vec![],
-    });
+    ctx.push_symbol_with_doc(
+        RawSymbol {
+            name: name.to_string(),
+            fqdn: class_fqdn.clone(),
+            kind: Kind::Type,
+            language_kind: LanguageKind::from("class"),
+            module: Some(parent_fqdn.to_string()),
+            visibility: map_access_modifier(None, exported),
+            location: ctx.span_location(class_span),
+            signature: None,
+            body_hash: ctx.body_hash_of(class_span),
+            attributes: vec![],
+        },
+        outer_pos,
+    );
 
     if let Some(super_class) = &class.super_class {
         let span = super_class.span();
@@ -509,13 +555,14 @@ fn extract_class_inner(
         if let ClassMember::Method(method) = member
             && let Some(method_name) = method_name_string(&method.key)
         {
-            ctx.push_symbol(extract_method(ctx, method, &class_fqdn, &method_name));
+            let method_sym = extract_method(ctx, method, &class_fqdn, &method_name);
+            ctx.push_symbol_with_doc(method_sym, method.span.lo);
         }
     }
 }
 
 fn extract_method(
-    ctx: &TsWalkContext,
+    ctx: &TsWalkContext<'_>,
     method: &ClassMethod,
     class_fqdn: &str,
     method_name: &str,
@@ -543,10 +590,11 @@ fn extract_method(
 }
 
 fn extract_var_decl(
-    ctx: &mut TsWalkContext,
+    ctx: &mut TsWalkContext<'_>,
     item: &VarDecl,
     parent_fqdn: &str,
     exported: bool,
+    outer_pos: BytePos,
 ) {
     for declarator in &item.decls {
         let Some(name) = declarator_name(declarator) else {
@@ -568,42 +616,49 @@ fn extract_var_decl(
         } else {
             LanguageKind::from(language_kind)
         };
-        ctx.push_symbol(RawSymbol {
-            name,
-            fqdn,
-            kind,
-            language_kind,
-            module: Some(parent_fqdn.to_string()),
-            visibility: map_access_modifier(None, exported),
-            location: ctx.span_location(span),
-            signature,
-            body_hash: ctx.body_hash_of(span),
-            attributes: vec![],
-        });
+        ctx.push_symbol_with_doc(
+            RawSymbol {
+                name,
+                fqdn,
+                kind,
+                language_kind,
+                module: Some(parent_fqdn.to_string()),
+                visibility: map_access_modifier(None, exported),
+                location: ctx.span_location(span),
+                signature,
+                body_hash: ctx.body_hash_of(span),
+                attributes: vec![],
+            },
+            outer_pos,
+        );
     }
 }
 
 fn extract_interface_decl(
-    ctx: &mut TsWalkContext,
+    ctx: &mut TsWalkContext<'_>,
     item: &TsInterfaceDecl,
     parent_fqdn: &str,
     exported: bool,
+    outer_pos: BytePos,
 ) {
     let name = item.id.sym.to_string();
     let fqdn = format!("{parent_fqdn}::{name}");
     let span = item.span;
-    ctx.push_symbol(RawSymbol {
-        name,
-        fqdn: fqdn.clone(),
-        kind: Kind::Type,
-        language_kind: LanguageKind::from("interface"),
-        module: Some(parent_fqdn.to_string()),
-        visibility: map_access_modifier(None, exported),
-        location: ctx.span_location(span),
-        signature: None,
-        body_hash: ctx.body_hash_of(span),
-        attributes: vec![],
-    });
+    ctx.push_symbol_with_doc(
+        RawSymbol {
+            name,
+            fqdn: fqdn.clone(),
+            kind: Kind::Type,
+            language_kind: LanguageKind::from("interface"),
+            module: Some(parent_fqdn.to_string()),
+            visibility: map_access_modifier(None, exported),
+            location: ctx.span_location(span),
+            signature: None,
+            body_hash: ctx.body_hash_of(span),
+            attributes: vec![],
+        },
+        outer_pos,
+    );
     for ext in &item.extends {
         let span = ext.span;
         let to = ctx.resolve_call(&render_expr_name(&ext.expr), parent_fqdn);
@@ -617,7 +672,7 @@ fn extract_interface_decl(
 }
 
 fn extract_type_alias_decl(
-    ctx: &TsWalkContext,
+    ctx: &TsWalkContext<'_>,
     item: &TsTypeAliasDecl,
     parent_fqdn: &str,
     exported: bool,
@@ -640,7 +695,7 @@ fn extract_type_alias_decl(
 }
 
 fn extract_enum_decl(
-    ctx: &TsWalkContext,
+    ctx: &TsWalkContext<'_>,
     item: &TsEnumDecl,
     parent_fqdn: &str,
     exported: bool,
@@ -663,7 +718,7 @@ fn extract_enum_decl(
 }
 
 fn build_function_signature(
-    ctx: &TsWalkContext,
+    ctx: &TsWalkContext<'_>,
     function: &swc_core::ecma::ast::Function,
 ) -> Signature {
     let params = function
@@ -701,12 +756,12 @@ fn build_function_signature(
     }
 }
 
-fn build_param(ctx: &TsWalkContext, param: &AstParam) -> Param {
+fn build_param(ctx: &TsWalkContext<'_>, param: &AstParam) -> Param {
     let (name, ty, default) = render_pat(ctx, &param.pat);
     Param { name, ty, default }
 }
 
-fn render_pat(ctx: &TsWalkContext, pat: &Pat) -> (String, TypeRef, Option<String>) {
+fn render_pat(ctx: &TsWalkContext<'_>, pat: &Pat) -> (String, TypeRef, Option<String>) {
     match pat {
         Pat::Ident(b) => {
             let name = b.id.sym.to_string();
@@ -744,7 +799,7 @@ fn render_pat(ctx: &TsWalkContext, pat: &Pat) -> (String, TypeRef, Option<String
 }
 
 fn signature_from_declarator(
-    ctx: &TsWalkContext,
+    ctx: &TsWalkContext<'_>,
     declarator: &VarDeclarator,
 ) -> Option<Signature> {
     let init = declarator.init.as_ref()?;
@@ -859,12 +914,13 @@ mod tests {
     use swc_core::ecma::ast::EsVersion;
     use swc_core::ecma::parser::{Parser, StringInput, Syntax, TsSyntax, lexer::Lexer};
 
-    fn parse_ts(source: &str) -> (Lrc<SourceMap>, Module) {
+    fn parse_ts(source: &str) -> (Lrc<SourceMap>, Module, SingleThreadedComments) {
         let cm: Lrc<SourceMap> = Default::default();
         let fm = cm.new_source_file(
             Lrc::new(FileName::Custom("test.ts".into())),
             source.to_string(),
         );
+        let comments = SingleThreadedComments::default();
         let lexer = Lexer::new(
             Syntax::Typescript(TsSyntax {
                 tsx: false,
@@ -875,15 +931,15 @@ mod tests {
             }),
             EsVersion::EsNext,
             StringInput::from(&*fm),
-            None,
+            Some(&comments),
         );
         let mut parser = Parser::new_from(lexer);
         let module = parser.parse_module().expect("parse ok");
-        (cm, module)
+        (cm, module, comments)
     }
 
-    fn run(source: &str) -> (Vec<RawSymbol>, Vec<RawEdge>) {
-        let (cm, module) = parse_ts(source);
+    fn run(source: &str) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
+        let (cm, module, comments) = parse_ts(source);
         walk(
             &module,
             "@app",
@@ -893,12 +949,13 @@ mod tests {
             &PathBuf::from("/tmp/pkg/src/index.ts"),
             &PathBuf::from("/tmp/pkg"),
             None,
+            &comments,
         )
     }
 
     #[test]
     fn function_decl_emits_function_symbol() {
-        let (symbols, edges) = run("function foo() {}");
+        let (symbols, edges, _docs) = run("function foo() {}");
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].kind, Kind::Function);
         assert_eq!(symbols[0].fqdn, "src::foo");
@@ -908,13 +965,13 @@ mod tests {
 
     #[test]
     fn export_function_decl_is_public() {
-        let (symbols, _) = run("export function foo() {}");
+        let (symbols, _, _) = run("export function foo() {}");
         assert_eq!(symbols[0].visibility, Visibility::Public);
     }
 
     #[test]
     fn function_signature_captures_param_types_and_return() {
-        let (symbols, _) = run("export function add(a: number, b: number): number { return a + b; }");
+        let (symbols, _, _) = run("export function add(a: number, b: number): number { return a + b; }");
         let sig = symbols[0].signature.as_ref().unwrap();
         assert_eq!(sig.params.len(), 2);
         assert_eq!(sig.params[0].name, "a");
@@ -925,20 +982,20 @@ mod tests {
 
     #[test]
     fn async_function_modifier_set() {
-        let (symbols, _) = run("export async function boot() {}");
+        let (symbols, _, _) = run("export async function boot() {}");
         assert!(symbols[0].signature.as_ref().unwrap().modifiers.is_async);
     }
 
     #[test]
     fn function_default_param_captured() {
-        let (symbols, _) = run("export function f(x: number = 7) {}");
+        let (symbols, _, _) = run("export function f(x: number = 7) {}");
         let p = &symbols[0].signature.as_ref().unwrap().params[0];
         assert_eq!(p.default.as_deref(), Some("7"));
     }
 
     #[test]
     fn rest_param_prefixed_with_ellipsis() {
-        let (symbols, _) = run("export function f(...args: number[]) {}");
+        let (symbols, _, _) = run("export function f(...args: number[]) {}");
         let p = &symbols[0].signature.as_ref().unwrap().params[0];
         assert_eq!(p.name, "...args");
         assert_eq!(p.ty.display, "number[]");
@@ -946,7 +1003,7 @@ mod tests {
 
     #[test]
     fn generic_params_captured_as_strings() {
-        let (symbols, _) = run("export function id<T>(x: T): T { return x; }");
+        let (symbols, _, _) = run("export function id<T>(x: T): T { return x; }");
         let g = &symbols[0]
             .signature
             .as_ref()
@@ -959,7 +1016,7 @@ mod tests {
 
     #[test]
     fn class_emits_type_symbol_and_methods() {
-        let (symbols, _) = run("export class Foo { run(): void {} }");
+        let (symbols, _, _) = run("export class Foo { run(): void {} }");
         let foo = symbols.iter().find(|s| s.fqdn == "src::Foo").unwrap();
         assert_eq!(foo.kind, Kind::Type);
         assert_eq!(foo.language_kind.as_str(), "class");
@@ -970,7 +1027,7 @@ mod tests {
 
     #[test]
     fn class_extends_emits_extends_edge() {
-        let (_, edges) = run("class Foo extends Bar {}");
+        let (_, edges, _) = run("class Foo extends Bar {}");
         let ext: Vec<_> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Extends)
@@ -985,7 +1042,7 @@ mod tests {
 
     #[test]
     fn class_implements_emits_implements_edge() {
-        let (_, edges) = run("class Foo implements IBar {}");
+        let (_, edges, _) = run("class Foo implements IBar {}");
         let imp: Vec<_> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Implements)
@@ -1000,7 +1057,7 @@ mod tests {
 
     #[test]
     fn class_method_accessibility_maps_to_visibility() {
-        let (symbols, _) = run(
+        let (symbols, _, _) = run(
             "class Foo { public a() {} private b() {} protected c() {} d() {} }",
         );
         let a = symbols.iter().find(|s| s.fqdn == "src::Foo::a").unwrap();
@@ -1015,7 +1072,7 @@ mod tests {
 
     #[test]
     fn interface_emits_type_symbol() {
-        let (symbols, _) = run("export interface IFoo { x: number }");
+        let (symbols, _, _) = run("export interface IFoo { x: number }");
         assert_eq!(symbols[0].kind, Kind::Type);
         assert_eq!(symbols[0].language_kind.as_str(), "interface");
         assert_eq!(symbols[0].fqdn, "src::IFoo");
@@ -1023,7 +1080,7 @@ mod tests {
 
     #[test]
     fn interface_extends_emits_extends_edge() {
-        let (_, edges) = run("interface A extends B {}");
+        let (_, edges, _) = run("interface A extends B {}");
         let ext: Vec<_> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Extends)
@@ -1034,7 +1091,7 @@ mod tests {
 
     #[test]
     fn type_alias_emits_type_symbol() {
-        let (symbols, _) = run("export type Bytes = Uint8Array;");
+        let (symbols, _, _) = run("export type Bytes = Uint8Array;");
         assert_eq!(symbols[0].kind, Kind::Type);
         assert_eq!(symbols[0].language_kind.as_str(), "type_alias");
         assert_eq!(symbols[0].fqdn, "src::Bytes");
@@ -1042,14 +1099,14 @@ mod tests {
 
     #[test]
     fn enum_emits_type_symbol() {
-        let (symbols, _) = run("export enum Color { Red, Green }");
+        let (symbols, _, _) = run("export enum Color { Red, Green }");
         assert_eq!(symbols[0].kind, Kind::Type);
         assert_eq!(symbols[0].language_kind.as_str(), "enum");
     }
 
     #[test]
     fn const_var_emits_value_symbol() {
-        let (symbols, _) = run("export const N = 42;");
+        let (symbols, _, _) = run("export const N = 42;");
         assert_eq!(symbols[0].kind, Kind::Value);
         assert_eq!(symbols[0].language_kind.as_str(), "const");
         assert_eq!(symbols[0].fqdn, "src::N");
@@ -1057,7 +1114,7 @@ mod tests {
 
     #[test]
     fn arrow_const_emits_function_symbol() {
-        let (symbols, _) =
+        let (symbols, _, _) =
             run("export const add = (a: number, b: number): number => a + b;");
         assert_eq!(symbols[0].kind, Kind::Function);
         assert_eq!(symbols[0].language_kind.as_str(), "function");
@@ -1069,7 +1126,7 @@ mod tests {
 
     #[test]
     fn import_named_emits_import_edge_and_alias() {
-        let (_, edges) = run("import { foo } from './helper';");
+        let (_, edges, _) = run("import { foo } from './helper';");
         let imp: Vec<_> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Imports)
@@ -1079,19 +1136,19 @@ mod tests {
 
     #[test]
     fn import_default_emits_import_edge() {
-        let (_, edges) = run("import React from 'react';");
+        let (_, edges, _) = run("import React from 'react';");
         assert!(edges.iter().any(|e| e.kind == EdgeKind::Imports));
     }
 
     #[test]
     fn import_namespace_emits_import_edge() {
-        let (_, edges) = run("import * as utils from './utils';");
+        let (_, edges, _) = run("import * as utils from './utils';");
         assert!(edges.iter().any(|e| e.kind == EdgeKind::Imports));
     }
 
     #[test]
     fn import_side_effect_emits_one_edge_no_alias() {
-        let (_, edges) = run("import 'polyfill';");
+        let (_, edges, _) = run("import 'polyfill';");
         let imp: Vec<_> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Imports)
@@ -1101,7 +1158,7 @@ mod tests {
 
     #[test]
     fn export_default_function_named() {
-        let (symbols, _) = run("export default function foo() {}");
+        let (symbols, _, _) = run("export default function foo() {}");
         let foo = symbols.iter().find(|s| s.fqdn == "src::foo").unwrap();
         assert_eq!(foo.kind, Kind::Function);
         assert_eq!(foo.visibility, Visibility::Public);
@@ -1109,33 +1166,33 @@ mod tests {
 
     #[test]
     fn export_default_function_anonymous_uses_default_name() {
-        let (symbols, _) = run("export default function () {}");
+        let (symbols, _, _) = run("export default function () {}");
         assert_eq!(symbols[0].fqdn, "src::default");
     }
 
     #[test]
     fn export_default_class_named() {
-        let (symbols, _) = run("export default class Foo {}");
+        let (symbols, _, _) = run("export default class Foo {}");
         let foo = symbols.iter().find(|s| s.fqdn == "src::Foo").unwrap();
         assert_eq!(foo.kind, Kind::Type);
     }
 
     #[test]
     fn span_locations_are_captured() {
-        let (symbols, _) = run("\n\nexport function foo() {}\n");
+        let (symbols, _, _) = run("\n\nexport function foo() {}\n");
         assert_eq!(symbols[0].location.start_line, 3);
     }
 
     #[test]
     fn body_hash_changes_with_body_content() {
-        let (sym_a, _) = run("export function foo() { return 1; }");
-        let (sym_b, _) = run("export function foo() { return 2; }");
+        let (sym_a, _, _) = run("export function foo() { return 1; }");
+        let (sym_b, _, _) = run("export function foo() { return 2; }");
         assert_ne!(sym_a[0].body_hash, sym_b[0].body_hash);
     }
 
     #[test]
     fn resolve_call_via_alias_table() {
-        let (cm, _module) = parse_ts("");
+        let (cm, _module, comments) = parse_ts("");
         let mut ctx = TsWalkContext::new(
             "src/index.ts".into(),
             "@app".into(),
@@ -1144,6 +1201,7 @@ mod tests {
             PathBuf::new(),
             PathBuf::new(),
             None,
+            &comments,
         );
         ctx.add_import_alias(
             "Foo".into(),
@@ -1163,7 +1221,7 @@ mod tests {
 
     #[test]
     fn resolve_call_module_local_resolved_when_defined() {
-        let (cm, _module) = parse_ts("");
+        let (cm, _module, comments) = parse_ts("");
         let mut ctx = TsWalkContext::new(
             "src/index.ts".into(),
             "@app".into(),
@@ -1172,6 +1230,7 @@ mod tests {
             PathBuf::new(),
             PathBuf::new(),
             None,
+            &comments,
         );
         ctx.core.defined_fqdns.insert("src::foo".into());
         match ctx.resolve_call("foo", "src") {
@@ -1182,7 +1241,7 @@ mod tests {
 
     #[test]
     fn resolve_call_falls_back_to_unresolved_module_local() {
-        let (cm, _module) = parse_ts("");
+        let (cm, _module, comments) = parse_ts("");
         let ctx = TsWalkContext::new(
             "src/index.ts".into(),
             "@app".into(),
@@ -1191,6 +1250,7 @@ mod tests {
             PathBuf::new(),
             PathBuf::new(),
             None,
+            &comments,
         );
         match ctx.resolve_call("nope", "src") {
             ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "src::nope"),

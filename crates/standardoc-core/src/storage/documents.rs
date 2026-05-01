@@ -57,6 +57,14 @@ pub(crate) fn get_document(
         .optional()?)
 }
 
+pub(crate) fn delete_document(conn: &Connection, symbol_id: i64) -> Result<(), StorageError> {
+    conn.execute(
+        "DELETE FROM documents WHERE symbol_id = ?1",
+        [symbol_id],
+    )?;
+    Ok(())
+}
+
 fn from_row(row: &Row<'_>) -> rusqlite::Result<DocumentInput> {
     Ok(DocumentInput {
         symbol_id: row.get(0)?,

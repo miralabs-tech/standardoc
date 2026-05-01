@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::call_site::RawCallSite;
+use crate::document::RawDocument;
 use crate::edge::RawEdge;
 use crate::hash::Blake3Hash;
 use crate::kinds::{Language, SourceOrigin};
@@ -20,6 +21,8 @@ pub struct ExtractedFile {
     pub edges: Vec<RawEdge>,
     #[serde(default)]
     pub call_sites: Vec<RawCallSite>,
+    #[serde(default)]
+    pub documents: Vec<RawDocument>,
 }
 
 #[cfg(test)]
@@ -38,6 +41,7 @@ mod tests {
             symbols: vec![],
             edges: vec![],
             call_sites: vec![],
+            documents: vec![],
         };
         let json = serde_json::to_string(&f).unwrap();
         let back: ExtractedFile = serde_json::from_str(&json).unwrap();
@@ -56,6 +60,7 @@ mod tests {
             symbols: vec![],
             edges: vec![],
             call_sites: vec![],
+            documents: vec![],
         };
         let json = serde_json::to_string(&f).unwrap();
         let back: ExtractedFile = serde_json::from_str(&json).unwrap();

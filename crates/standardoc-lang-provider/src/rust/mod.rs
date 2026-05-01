@@ -9,6 +9,7 @@ mod body_hash;
 mod crate_root;
 mod extract;
 mod extract_call;
+mod extract_doc;
 mod extract_use;
 mod module_path;
 mod visibility;

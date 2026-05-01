@@ -6,6 +6,7 @@ use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
 use standardoc_ir::ExtractedFile;
 
 mod extract;
+mod extract_doc;
 mod helpers;
 mod resolver;
 mod visit;

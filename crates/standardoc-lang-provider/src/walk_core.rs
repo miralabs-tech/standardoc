@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use standardoc_ir::{RawEdge, RawSymbol};
+use standardoc_ir::{RawDocument, RawEdge, RawSymbol};
 
 #[derive(Debug)]
 pub(crate) struct WalkContextCore {
@@ -8,6 +8,7 @@ pub(crate) struct WalkContextCore {
     pub(crate) file_module_fqdn: String,
     pub(crate) symbols: Vec<RawSymbol>,
     pub(crate) edges: Vec<RawEdge>,
+    pub(crate) documents: Vec<RawDocument>,
     pub(crate) defined_fqdns: HashSet<String>,
 }
 
@@ -18,6 +19,7 @@ impl WalkContextCore {
             file_module_fqdn,
             symbols: Vec::new(),
             edges: Vec::new(),
+            documents: Vec::new(),
             defined_fqdns: HashSet::new(),
         }
     }
@@ -29,5 +31,9 @@ impl WalkContextCore {
 
     pub(crate) fn push_edge(&mut self, edge: RawEdge) {
         self.edges.push(edge);
+    }
+
+    pub(crate) fn push_document(&mut self, doc: RawDocument) {
+        self.documents.push(doc);
     }
 }

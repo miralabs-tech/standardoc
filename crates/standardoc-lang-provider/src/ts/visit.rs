@@ -11,7 +11,7 @@ use super::walk::TsWalkContext;
 /// `rust::extract_call::visit_block`. Skips dynamic dispatch (`obj.method()`
 /// always Unresolved with the method ident, day-1, no inference).
 pub(crate) fn visit_function_body(
-    ctx: &mut TsWalkContext,
+    ctx: &mut TsWalkContext<'_>,
     function: &Function,
     current_module: &str,
     enclosing_fqdn: &str,
@@ -30,7 +30,7 @@ pub(crate) fn visit_function_body(
 /// Walk an arbitrary expression (typically the initializer of a `const fn = …`
 /// arrow / function expression) for `CallExpr` / `NewExpr` nested inside.
 pub(crate) fn visit_expression_for_calls(
-    ctx: &mut TsWalkContext,
+    ctx: &mut TsWalkContext<'_>,
     expr: &Expr,
     current_module: &str,
     enclosing_fqdn: &str,
@@ -43,13 +43,13 @@ pub(crate) fn visit_expression_for_calls(
     expr.visit_with(&mut visitor);
 }
 
-struct CallVisitor<'a> {
-    ctx: &'a mut TsWalkContext,
+struct CallVisitor<'a, 'b> {
+    ctx: &'a mut TsWalkContext<'b>,
     current_module: String,
     enclosing_fqdn: String,
 }
 
-impl CallVisitor<'_> {
+impl CallVisitor<'_, '_> {
     fn emit_call(&mut self, to: ResolvedOrUnresolved, span: Span) {
         let site = self.ctx.span_site(span);
         self.ctx.push_edge(RawEdge {
@@ -84,7 +84,7 @@ impl CallVisitor<'_> {
     }
 }
 
-impl Visit for CallVisitor<'_> {
+impl Visit for CallVisitor<'_, '_> {
     fn visit_call_expr(&mut self, node: &CallExpr) {
         if let Callee::Expr(expr) = &node.callee {
             self.handle_callee_expr(expr);
@@ -124,16 +124,18 @@ fn member_prop_name(prop: &MemberProp) -> Option<String> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use swc_core::common::comments::SingleThreadedComments;
     use swc_core::common::{FileName, sync::Lrc, SourceMap};
     use swc_core::ecma::ast::{EsVersion, Module};
     use swc_core::ecma::parser::{Parser, StringInput, Syntax, TsSyntax, lexer::Lexer};
 
-    fn parse_ts(source: &str) -> (Lrc<SourceMap>, Module) {
+    fn parse_ts(source: &str) -> (Lrc<SourceMap>, Module, SingleThreadedComments) {
         let cm: Lrc<SourceMap> = Default::default();
         let fm = cm.new_source_file(
             Lrc::new(FileName::Custom("test.ts".into())),
             source.to_string(),
         );
+        let comments = SingleThreadedComments::default();
         let lexer = Lexer::new(
             Syntax::Typescript(TsSyntax {
                 tsx: false,
@@ -144,16 +146,16 @@ mod tests {
             }),
             EsVersion::EsNext,
             StringInput::from(&*fm),
-            None,
+            Some(&comments),
         );
         let mut parser = Parser::new_from(lexer);
         let module = parser.parse_module().expect("parse ok");
-        (cm, module)
+        (cm, module, comments)
     }
 
     fn run(source: &str) -> (Vec<standardoc_ir::RawSymbol>, Vec<RawEdge>) {
-        let (cm, module) = parse_ts(source);
-        super::super::walk::walk(
+        let (cm, module, comments) = parse_ts(source);
+        let (symbols, edges, _) = super::super::walk::walk(
             &module,
             "@app",
             "src/index.ts",
@@ -162,7 +164,9 @@ mod tests {
             &PathBuf::from("/tmp/pkg/src/index.ts"),
             &PathBuf::from("/tmp/pkg"),
             None,
-        )
+            &comments,
+        );
+        (symbols, edges)
     }
 
     fn calls(edges: &[RawEdge]) -> Vec<&RawEdge> {

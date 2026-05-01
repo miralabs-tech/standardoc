@@ -1060,6 +1060,7 @@ mod tests {
             }],
             edges: vec![],
             call_sites: vec![],
+            documents: vec![],
         };
         handle
             .submit_blocking(IngestCommand::UpsertFile {

@@ -103,6 +103,7 @@ mod tests {
             symbols: vec![],
             edges: vec![],
             call_sites: vec![],
+            documents: vec![],
         }
     }
 

@@ -2,9 +2,10 @@ use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension};
-use standardoc_ir::{ExtractedFile, RawEdge};
+use standardoc_ir::{ExtractedFile, RawDocument, RawEdge};
 
 use crate::pipeline::diff::{DiffPlan, diff_symbols, fetch_existing_symbols};
+use crate::storage::documents::{DocumentInput, delete_document, upsert_document};
 use crate::storage::edge_sites::{delete_edge_sites_by_file, insert_edge_sites};
 use crate::storage::edges::{delete_edges_from, insert_edge, promote_unresolved_batch};
 use crate::storage::error::StorageError;
@@ -33,6 +34,7 @@ pub(crate) fn apply_upsert_file(
     let new_or_modified_ids = apply_inserts_and_modifications(conn, &plan, ctx)?;
     apply_edges(conn, &plan, &extracted.edges)?;
     promote_unresolved_batch(conn, &new_or_modified_ids)?;
+    apply_documents(conn, &plan, &new_or_modified_ids, &extracted.documents)?;
     Ok(())
 }
 
@@ -129,6 +131,52 @@ fn apply_edges(
     Ok(())
 }
 
+/// Replay user-authored documents for the touched symbol set.
+///
+/// Scoped to `new_or_modified_ids` (= inserts ∪ modifications) — unchanged
+/// symbols keep their existing docs untouched. For each touched id we wipe
+/// any stale `documents` row, then UPSERT for each `RawDocument` whose
+/// `symbol_fqdn` lands in the touched set. A symbol whose `///`/JSDoc was
+/// removed by the user has no matching `RawDocument` → its row stays
+/// deleted (intentional). Symbol disappearance is handled by FK cascade
+/// from `delete_symbol`.
+fn apply_documents(
+    conn: &Connection,
+    plan: &DiffPlan<'_>,
+    new_or_modified_ids: &[i64],
+    documents: &[RawDocument],
+) -> Result<(), StorageError> {
+    if new_or_modified_ids.is_empty() && documents.is_empty() {
+        return Ok(());
+    }
+    for &id in new_or_modified_ids {
+        delete_document(conn, id)?;
+    }
+    if documents.is_empty() {
+        return Ok(());
+    }
+    let touched = touched_fqdns(plan);
+    let now = current_unix_ms()?;
+    for doc in documents {
+        if !touched.contains(doc.symbol_fqdn.as_str()) {
+            continue;
+        }
+        let Some(id) = lookup_symbol_id(conn, &doc.symbol_fqdn)? else {
+            continue;
+        };
+        upsert_document(
+            conn,
+            &DocumentInput {
+                symbol_id: id,
+                description: Some(doc.description.clone()),
+                last_updated: now,
+                ..DocumentInput::default()
+            },
+        )?;
+    }
+    Ok(())
+}
+
 fn touched_fqdns<'a>(plan: &'a DiffPlan<'_>) -> HashSet<&'a str> {
     let mut out: HashSet<&'a str> =
         HashSet::with_capacity(plan.inserts.len() + plan.modifications.len());
@@ -184,11 +232,12 @@ fn current_unix_ms() -> Result<i64, StorageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::documents::get_document;
     use crate::storage::files::get_file;
     use crate::storage::test_utils::fresh_conn;
     use standardoc_ir::{
-        Blake3Hash, EdgeKind, ExtractedFile, Kind, Language, LanguageKind, RawEdge, RawSymbol,
-        ResolvedOrUnresolved, Site, SourceOrigin, SymbolLocation, Visibility,
+        Blake3Hash, EdgeKind, ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawEdge,
+        RawSymbol, ResolvedOrUnresolved, Site, SourceOrigin, SymbolLocation, Visibility,
     };
 
     fn sym(name: &str, fqdn: &str, hash_byte: u8, line: u32) -> RawSymbol {
@@ -223,6 +272,7 @@ mod tests {
             symbols,
             edges,
             call_sites: vec![],
+            documents: vec![],
         }
     }
 
@@ -507,6 +557,106 @@ mod tests {
         let f = get_file(&conn, "src/new.rs").unwrap().unwrap();
         assert_eq!(f.last_scan_error.as_deref(), Some("syntax error"));
         assert_eq!(f.byte_size, 0);
+    }
+
+    fn doc_for(fqdn: &str, description: &str) -> RawDocument {
+        RawDocument {
+            symbol_fqdn: fqdn.into(),
+            description: description.into(),
+        }
+    }
+
+    fn fetch_doc_description(conn: &Connection, fqdn: &str) -> Option<String> {
+        let id: Option<i64> = conn
+            .query_row("SELECT id FROM symbols WHERE fqdn = ?1", [fqdn], |r| {
+                r.get(0)
+            })
+            .optional()
+            .unwrap();
+        let id = id?;
+        let doc = get_document(conn, id).unwrap()?;
+        doc.description
+    }
+
+    #[test]
+    fn upsert_file_persists_documents_for_inserted_symbols() {
+        let conn = fresh_conn();
+        let mut ef = extracted(
+            "src/main.rs",
+            vec![sym("foo", "crate::foo", 0x01, 1)],
+            vec![],
+        );
+        ef.documents = vec![doc_for("crate::foo", "Top-level helper.")];
+        apply_upsert_file(&conn, &ef).unwrap();
+
+        let desc = fetch_doc_description(&conn, "crate::foo");
+        assert_eq!(desc.as_deref(), Some("Top-level helper."));
+    }
+
+    #[test]
+    fn upsert_file_replaces_documents_when_body_modified() {
+        let conn = fresh_conn();
+        let mut ef1 = extracted(
+            "src/main.rs",
+            vec![sym("foo", "crate::foo", 0x01, 1)],
+            vec![],
+        );
+        ef1.documents = vec![doc_for("crate::foo", "v1 description.")];
+        apply_upsert_file(&conn, &ef1).unwrap();
+
+        let mut ef2 = extracted(
+            "src/main.rs",
+            vec![sym("foo", "crate::foo", 0xee, 1)],
+            vec![],
+        );
+        ef2.documents = vec![doc_for("crate::foo", "v2 description.")];
+        apply_upsert_file(&conn, &ef2).unwrap();
+
+        assert_eq!(
+            fetch_doc_description(&conn, "crate::foo").as_deref(),
+            Some("v2 description.")
+        );
+    }
+
+    #[test]
+    fn upsert_file_removes_document_when_user_deletes_doc_comment() {
+        let conn = fresh_conn();
+        let mut ef1 = extracted(
+            "src/main.rs",
+            vec![sym("foo", "crate::foo", 0x01, 1)],
+            vec![],
+        );
+        ef1.documents = vec![doc_for("crate::foo", "Original.")];
+        apply_upsert_file(&conn, &ef1).unwrap();
+        assert!(fetch_doc_description(&conn, "crate::foo").is_some());
+
+        // Body modified (different hash) AND no RawDocument provided → wipe the row.
+        let ef2 = extracted(
+            "src/main.rs",
+            vec![sym("foo", "crate::foo", 0xee, 1)],
+            vec![],
+        );
+        apply_upsert_file(&conn, &ef2).unwrap();
+        assert!(fetch_doc_description(&conn, "crate::foo").is_none());
+    }
+
+    #[test]
+    fn delete_file_cascades_documents_via_fk() {
+        let conn = fresh_conn();
+        let mut ef = extracted(
+            "src/main.rs",
+            vec![sym("foo", "crate::foo", 0x01, 1)],
+            vec![],
+        );
+        ef.documents = vec![doc_for("crate::foo", "Doc.")];
+        apply_upsert_file(&conn, &ef).unwrap();
+        assert!(fetch_doc_description(&conn, "crate::foo").is_some());
+
+        apply_delete_file(&conn, "src/main.rs").unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "FK ON DELETE CASCADE should wipe documents");
     }
 
     #[test]

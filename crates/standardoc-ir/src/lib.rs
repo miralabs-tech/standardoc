@@ -1,6 +1,7 @@
 mod attribute;
 mod bridge_kind;
 mod call_site;
+mod document;
 mod edge;
 mod extracted;
 mod hash;
@@ -13,6 +14,7 @@ mod symbol;
 pub use attribute::{RawAttribute, RawAttributeArg};
 pub use bridge_kind::BridgeKind;
 pub use call_site::{RawCallArg, RawCallSite};
+pub use document::RawDocument;
 pub use edge::{RawEdge, ResolvedOrUnresolved};
 pub use extracted::ExtractedFile;
 pub use hash::{Blake3Hash, ParseHashError};

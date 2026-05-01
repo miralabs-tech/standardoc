@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn expr_call_local_function_is_resolved_against_defined_fqdn() {
         let parsed = parse("fn bar() {} fn caller() { bar(); }");
-        let (_, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0].from_fqdn, "c::caller");
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn expr_call_unknown_external_is_unresolved_canonical() {
         let parsed = parse("fn caller() { std::mem::take(&mut 0); }");
-        let (_, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         match &cs[0].to {
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn expr_call_via_alias_resolves_to_canonical() {
         let parsed = parse("use foo::bar; fn caller() { bar(); }");
-        let (_, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         match &cs[0].to {
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn expr_method_call_is_always_unresolved_with_method_ident() {
         let parsed = parse("fn caller() { let v = vec![1]; v.iter().count(); }");
-        let (_, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         // Two ExprMethodCall: .iter() and .count().
         assert_eq!(cs.len(), 2);
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn nested_calls_in_arguments_are_captured() {
         let parsed = parse("fn a() {} fn b() {} fn caller() { a(); b(); }");
-        let (_, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 2);
     }
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn impl_fn_body_calls_attributed_to_method_fqdn() {
         let parsed = parse("fn helper() {} struct F; impl F { fn run(&self) { helper(); } }");
-        let (_, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0].from_fqdn, "c::F::run");
@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn trait_default_body_calls_attributed_to_trait_fn_fqdn() {
         let parsed = parse("fn helper() {} trait T { fn run(&self) { helper(); } }");
-        let (_, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0].from_fqdn, "c::T::run");
@@ -172,7 +172,7 @@ mod tests {
         let parsed = parse(
             "fn outside() {} fn caller() { let _ = async { outside(); }; }",
         );
-        let (_, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert!(cs.is_empty(), "async block body must be skipped day-1");
     }
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn macro_invocation_args_are_not_walked_for_calls() {
         let parsed = parse("fn outside() {} fn caller() { println!(\"{}\", outside()); }");
-        let (_, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert!(cs.is_empty(), "macro tokens must be opaque day-1");
     }
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn closure_body_is_walked_for_calls() {
         let parsed = parse("fn inner() {} fn caller() { let f = || inner(); f(); }");
-        let (_, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         // ExprCall captures: inner() inside closure + f() outside (f is not a Path,
         // it's an ExprPath to local var → emitted with name "f", not in defined_fqdns).
@@ -208,7 +208,7 @@ mod tests {
         // Multi-segment unaliased path stays text-as-written (Rust 2018: prelude/extern,
         // not module-local). What we validate here is the generic stripping.
         let parsed = parse("fn caller() { Vec::<u8>::new(); }");
-        let (_, edges) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         match &cs[0].to {
