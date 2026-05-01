@@ -201,6 +201,78 @@ fn purge_excluded_yes_flag_purges_matching_rows() {
         .stdout(predicate::str::contains("purged 1 path"));
 }
 
+fn write_mixed_workspace(root: &Path) {
+    fs::create_dir_all(root.join("src-tauri/src")).unwrap();
+    fs::write(
+        root.join("src-tauri/Cargo.toml"),
+        "[package]\nname = \"sample-api\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src-tauri/src/lib.rs"),
+        "pub fn alpha() {}\npub fn beta() { alpha(); }\n",
+    )
+    .unwrap();
+
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("package.json"),
+        "{\"name\":\"@app/web\",\"version\":\"0.1.0\"}",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/index.ts"),
+        "import { login } from \"./auth\";\nexport function main() { login(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/auth.ts"),
+        "export function login(): string { return \"ok\"; }\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn cli_index_then_query_on_mixed_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    write_mixed_workspace(dir.path());
+
+    standardoc().arg("index").arg(dir.path()).assert().success();
+
+    standardoc()
+        .arg("query")
+        .arg(dir.path())
+        .args(["--fqdn", "@app/web::src::main"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("@app/web::src::main"))
+        .stdout(predicate::str::contains("Function"));
+
+    standardoc()
+        .arg("query")
+        .arg(dir.path())
+        .args(["--fqdn", "sample-api::beta"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sample-api::beta"));
+}
+
+#[test]
+fn cli_query_text_finds_ts_symbol_via_fts() {
+    let dir = tempfile::tempdir().unwrap();
+    write_mixed_workspace(dir.path());
+
+    standardoc().arg("index").arg(dir.path()).assert().success();
+
+    standardoc()
+        .arg("query")
+        .arg(dir.path())
+        .args(["--text", "login"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("@app/web::src::auth::login"));
+}
+
 #[test]
 fn purge_excluded_requires_yes_in_non_interactive_shell() {
     let dir = tempfile::tempdir().unwrap();
