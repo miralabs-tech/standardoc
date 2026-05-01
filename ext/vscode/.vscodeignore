@@ -1,0 +1,16 @@
+.old/**
+src/**
+scripts/**
+node_modules/**
+.vscode/**
+.github/**
+.gitignore
+.vscodeignore
+tsconfig.json
+bunfig.toml
+bun.lock
+bun.lockb
+*.vsix
+*.tsbuildinfo
+**/*.ts
+**/*.map
