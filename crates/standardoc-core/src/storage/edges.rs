@@ -27,27 +27,42 @@ pub(crate) fn insert_edge(
     Ok(id)
 }
 
+/// Maps an edge target to its on-disk pair `(to_symbol_id, to_unresolved)`.
+///
+/// Both `Resolved { fqdn }` and `Unresolved { name }` carry a canonical FQDN
+/// the provider believes is the intended target — `Resolved` adds the
+/// guarantee that the FQDN was confirmed in the same provider scope (typically
+/// the same file's `defined_fqdns`). At the storage layer they collapse to
+/// the same operation: look the FQDN up in `symbols`, link by id when present,
+/// fall back to `to_unresolved` otherwise. This is the symmetric counterpart
+/// to [`promote_unresolved_batch`]: that handles "target arrives later",
+/// this handles "target was already in DB when caller's edge was inserted".
 fn resolve_target(
     conn: &Connection,
     target: &ResolvedOrUnresolved,
 ) -> Result<(Option<i64>, Option<String>), StorageError> {
     match target {
-        ResolvedOrUnresolved::Resolved { fqdn } => {
-            let id: Option<i64> = conn
-                .query_row("SELECT id FROM symbols WHERE fqdn = ?1", [fqdn], |row| {
-                    row.get(0)
-                })
-                .optional()?;
-            Ok(match id {
-                Some(rid) => (Some(rid), None),
-                None => (None, Some(fqdn.clone())),
-            })
-        }
-        ResolvedOrUnresolved::Unresolved { name } => Ok((None, Some(name.clone()))),
+        ResolvedOrUnresolved::Resolved { fqdn } => lookup_or_fallback(conn, fqdn),
+        ResolvedOrUnresolved::Unresolved { name } => lookup_or_fallback(conn, name),
         ResolvedOrUnresolved::UnresolvedBridge { bridge, name } => {
-            Ok((None, Some(format!("{}::{}", bridge.as_str(), name))))
+            lookup_or_fallback(conn, &format!("{}::{}", bridge.as_str(), name))
         }
     }
+}
+
+fn lookup_or_fallback(
+    conn: &Connection,
+    fqdn: &str,
+) -> Result<(Option<i64>, Option<String>), StorageError> {
+    let id: Option<i64> = conn
+        .query_row("SELECT id FROM symbols WHERE fqdn = ?1", [fqdn], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    Ok(match id {
+        Some(rid) => (Some(rid), None),
+        None => (None, Some(fqdn.to_string())),
+    })
 }
 
 /// Promotes any edge whose `to_unresolved` matches the fqdn of one of the
@@ -278,6 +293,50 @@ mod tests {
             map_constraint(err),
             StorageError::CheckConstraintViolated { .. }
         ));
+    }
+
+    #[test]
+    fn insert_edge_promotes_unresolved_when_target_already_in_db() {
+        let conn = fresh_conn();
+        seed_file(&conn, "src/main.rs");
+        let target_id = insert_symbol(
+            &conn,
+            &sample_symbol("foo", "crate::foo"),
+            symbol_ctx("src/main.rs"),
+        )
+        .unwrap();
+        let caller_id = insert_symbol(
+            &conn,
+            &sample_symbol("bar", "crate::bar"),
+            symbol_ctx("src/main.rs"),
+        )
+        .unwrap();
+
+        let edge_id = insert_edge(
+            &conn,
+            caller_id,
+            &make_edge(
+                EdgeKind::Calls,
+                ResolvedOrUnresolved::Unresolved {
+                    name: "crate::foo".into(),
+                },
+            ),
+        )
+        .unwrap();
+
+        let (to_id, to_unresolved): (Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT to_symbol_id, to_unresolved FROM edges WHERE id = ?1",
+                [edge_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            to_id,
+            Some(target_id),
+            "Unresolved-with-canonical-fqdn must promote on insert when target row exists"
+        );
+        assert!(to_unresolved.is_none());
     }
 
     #[test]
