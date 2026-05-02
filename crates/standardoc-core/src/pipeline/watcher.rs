@@ -462,10 +462,14 @@ mod tests {
         let provider: Arc<dyn LanguageProvider> = mock;
         let filters = fresh_filters(&handle);
 
-        let _watcher = spawn_watcher(handle.clone(), provider, filters).unwrap();
-
+        // Pre-create src/ before spawning the watcher so inotify (Linux) watches
+        // it from the start. Creating the directory after spawn races with
+        // inotify adding the recursive watch for the new subdirectory.
         let src_dir = handle.workspace_root().join("src");
         std::fs::create_dir_all(&src_dir).unwrap();
+
+        let _watcher = spawn_watcher(handle.clone(), provider, filters).unwrap();
+
         std::fs::write(src_dir.join("lib.rs"), b"fn foo() {}").unwrap();
 
         wait_revision_at_least(&handle, 1, Duration::from_secs(15));
@@ -491,10 +495,11 @@ mod tests {
         let provider: Arc<dyn LanguageProvider> = mock;
         let filters = fresh_filters(&handle);
 
-        let _watcher = spawn_watcher(handle.clone(), provider, filters).unwrap();
-
         let src_dir = handle.workspace_root().join("src");
         std::fs::create_dir_all(&src_dir).unwrap();
+
+        let _watcher = spawn_watcher(handle.clone(), provider, filters).unwrap();
+
         std::fs::write(src_dir.join("bad.rs"), b"fn ???").unwrap();
 
         wait_revision_at_least(&handle, 1, Duration::from_secs(15));
@@ -524,10 +529,11 @@ mod tests {
         let provider: Arc<dyn LanguageProvider> = mock;
         let filters = fresh_filters(&handle);
 
-        let _watcher = spawn_watcher(handle.clone(), provider, filters).unwrap();
-
         let src_dir = handle.workspace_root().join("src");
         std::fs::create_dir_all(&src_dir).unwrap();
+
+        let _watcher = spawn_watcher(handle.clone(), provider, filters).unwrap();
+
         let file_path = src_dir.join("lib.rs");
         std::fs::write(&file_path, b"fn foo() {}").unwrap();
 
