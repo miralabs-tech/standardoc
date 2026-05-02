@@ -16,9 +16,24 @@ pub const STDIGNORE_FILENAME: &str = ".stdignore";
 
 const STDIGNORE_SEED: &str = "\
 # standardoc indexing exclusions (gitignore syntax)
+# Edit freely. Lines added here exclude paths from the workspace index.
+# Paths removed here trigger an automatic re-index of the affected subtree.
+
+# VCS / package managers
 .git/
-target/
 node_modules/
+
+# Build outputs
+target/
+dist/
+build/
+
+# Legacy / archived code (avoids cross-folder fqdn collisions)
+.old/
+*-old/
+
+# Test fixtures / generated exports
+test-export/
 ";
 
 /// Aggregated `.stdignore` files from the workspace root down to the deepest
@@ -323,6 +338,11 @@ mod tests {
         assert!(body.contains(".git/"));
         assert!(body.contains("target/"));
         assert!(body.contains("node_modules/"));
+        assert!(body.contains("dist/"));
+        assert!(body.contains("build/"));
+        assert!(body.contains(".old/"));
+        assert!(body.contains("*-old/"));
+        assert!(body.contains("test-export/"));
         assert!(
             !body.contains(".standardoc/"),
             "seed must not include .standardoc/ (user decision lock 21 Q3)"
