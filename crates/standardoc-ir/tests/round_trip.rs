@@ -1,8 +1,8 @@
 use standardoc_ir::{
     Blake3Hash, BridgeKind, EdgeKind, ExtractedFile, Kind, Language, LanguageKind, Modifiers,
-    Param, RawAttribute, RawAttributeArg, RawCallArg, RawCallSite, RawDocument, RawEdge,
-    RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SourceOrigin,
-    SymbolLocation, TypeRef, Visibility,
+    Param, RawAttribute, RawAttributeArg, RawCallArg, RawCallSite, RawDocument, RawEdge, RawSymbol,
+    ResolvedOrUnresolved, Signature, SignatureMeta, Site, SourceOrigin, SymbolLocation, TypeRef,
+    Visibility,
 };
 
 fn fixture() -> ExtractedFile {

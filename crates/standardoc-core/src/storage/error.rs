@@ -66,7 +66,9 @@ pub(crate) fn map_constraint(err: rusqlite::Error) -> StorageError {
     if let rusqlite::Error::SqliteFailure(ref ffi_err, ref msg) = err
         && ffi_err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK
     {
-        let detail = msg.clone().unwrap_or_else(|| String::from("unknown CHECK constraint"));
+        let detail = msg
+            .clone()
+            .unwrap_or_else(|| String::from("unknown CHECK constraint"));
         return StorageError::CheckConstraintViolated { detail };
     }
     StorageError::Sqlite(err)

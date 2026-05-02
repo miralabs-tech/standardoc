@@ -160,7 +160,7 @@ impl IndexHandle {
         })
     }
 
-    /// Returns `true` when this handle was opened via [`open_readonly`] and
+    /// Returns `true` when this handle was opened via [`IndexHandle::open_readonly`] and
     /// therefore does not own the workspace's fs4 lock or a writer thread.
     /// Servers (`serve_mcp`, ...) inspect this to skip cold-start and
     /// watcher boot when running alongside a primary writer.
@@ -194,29 +194,20 @@ impl IndexHandle {
     }
 
     #[allow(clippy::result_large_err)]
-    pub fn try_submit(
-        &self,
-        cmd: IngestCommand,
-    ) -> Result<(), TrySendError<IngestCommand>> {
+    pub fn try_submit(&self, cmd: IngestCommand) -> Result<(), TrySendError<IngestCommand>> {
         self.sender.try_send(cmd)
     }
 
     #[allow(clippy::result_large_err)]
-    pub fn submit_blocking(
-        &self,
-        cmd: IngestCommand,
-    ) -> Result<(), SendError<IngestCommand>> {
+    pub fn submit_blocking(&self, cmd: IngestCommand) -> Result<(), SendError<IngestCommand>> {
         self.sender.blocking_send(cmd)
     }
 
-    /// Async counterpart to [`submit_blocking`]. Suitable for LSP / MCP
+    /// Async counterpart to [`IndexHandle::submit_blocking`]. Suitable for LSP / MCP
     /// handlers running on a tokio runtime: `await`s back-pressure from the
     /// writer queue without blocking the executor thread.
     #[allow(clippy::result_large_err)]
-    pub async fn submit(
-        &self,
-        cmd: IngestCommand,
-    ) -> Result<(), SendError<IngestCommand>> {
+    pub async fn submit(&self, cmd: IngestCommand) -> Result<(), SendError<IngestCommand>> {
         self.sender.send(cmd).await
     }
 
@@ -343,12 +334,11 @@ fn parse_cold_start_progress(value: &str) -> Result<Option<(u64, u64)>, StorageE
             .ok_or_else(|| StorageError::InvalidStoredData {
                 detail: format!("malformed cold_start_progress: {value}"),
             })?;
-    let done: u64 =
-        done_str
-            .parse()
-            .map_err(|_| StorageError::InvalidStoredData {
-                detail: format!("malformed cold_start_progress: {value}"),
-            })?;
+    let done: u64 = done_str
+        .parse()
+        .map_err(|_| StorageError::InvalidStoredData {
+            detail: format!("malformed cold_start_progress: {value}"),
+        })?;
     let total: u64 = total_str
         .parse()
         .map_err(|_| StorageError::InvalidStoredData {
@@ -530,10 +520,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2));
         let handle2 = IndexHandle::open(dir.path()).unwrap();
         let stored2 = read_meta(&handle2, "created_at");
-        assert_eq!(
-            stored1, stored2,
-            "created_at must persist across reopens"
-        );
+        assert_eq!(stored1, stored2, "created_at must persist across reopens");
     }
 
     #[test]
@@ -844,7 +831,12 @@ mod tests {
         seed_file(&handle, "src/lib.rs");
 
         let filters = ScanFilters::load(handle.workspace_root());
-        assert!(handle.list_paths_matching_ignore(&filters).unwrap().is_empty());
+        assert!(
+            handle
+                .list_paths_matching_ignore(&filters)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

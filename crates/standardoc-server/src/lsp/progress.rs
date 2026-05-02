@@ -6,8 +6,7 @@ use tower_lsp_server::{
     Client,
     ls_types::{
         ProgressParams, ProgressParamsValue, ProgressToken, WorkDoneProgress,
-        WorkDoneProgressBegin, WorkDoneProgressEnd, WorkDoneProgressReport,
-        notification::Progress,
+        WorkDoneProgressBegin, WorkDoneProgressEnd, WorkDoneProgressReport, notification::Progress,
     },
 };
 
@@ -24,8 +23,10 @@ pub(crate) async fn run_cold_start_with_progress(
     filters: Arc<RwLock<ScanFilters>>,
     client: Client,
 ) -> Result<(), ColdStartError> {
-    let token =
-        ProgressToken::String(format!("standardoc/cold-start/{:p}", handle.workspace_root()));
+    let token = ProgressToken::String(format!(
+        "standardoc/cold-start/{:p}",
+        handle.workspace_root()
+    ));
 
     let _ = client.create_work_done_progress(token.clone()).await;
     send_begin(&client, &token).await;
@@ -50,13 +51,11 @@ pub(crate) async fn run_cold_start_with_progress(
         }
     });
 
-    let result = cold_start_task
-        .await
-        .unwrap_or_else(|join_err| {
-            Err(ColdStartError::Io(std::io::Error::other(format!(
-                "spawn_blocking join failed: {join_err}"
-            ))))
-        });
+    let result = cold_start_task.await.unwrap_or_else(|join_err| {
+        Err(ColdStartError::Io(std::io::Error::other(format!(
+            "spawn_blocking join failed: {join_err}"
+        ))))
+    });
 
     poll_task.abort();
     send_end(&client, &token, &result).await;
@@ -75,7 +74,11 @@ async fn send_begin(client: &Client, token: &ProgressToken) {
 
 async fn send_report(client: &Client, token: &ProgressToken, done: u64, total: u64) {
     let percentage = if total > 0 {
-        Some(u32::try_from(done.saturating_mul(100) / total).unwrap_or(100).min(100))
+        Some(
+            u32::try_from(done.saturating_mul(100) / total)
+                .unwrap_or(100)
+                .min(100),
+        )
     } else {
         None
     };

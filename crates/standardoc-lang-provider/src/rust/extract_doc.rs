@@ -35,9 +35,15 @@ fn extract_with(attrs: &[Attribute], style_pred: impl Fn(&Attribute) -> bool) ->
 }
 
 fn doc_value(meta: &Meta) -> Option<String> {
-    let Meta::NameValue(nv) = meta else { return None };
-    let Expr::Lit(expr_lit) = &nv.value else { return None };
-    let Lit::Str(s) = &expr_lit.lit else { return None };
+    let Meta::NameValue(nv) = meta else {
+        return None;
+    };
+    let Expr::Lit(expr_lit) = &nv.value else {
+        return None;
+    };
+    let Lit::Str(s) = &expr_lit.lit else {
+        return None;
+    };
     Some(s.value())
 }
 
@@ -61,7 +67,10 @@ mod tests {
     #[test]
     fn triple_slash_extracts_description() {
         let attrs = parse_attrs("/// Creates a new user.\nfn foo() {}");
-        assert_eq!(extract_outer(&attrs).as_deref(), Some("Creates a new user."));
+        assert_eq!(
+            extract_outer(&attrs).as_deref(),
+            Some("Creates a new user.")
+        );
     }
 
     #[test]

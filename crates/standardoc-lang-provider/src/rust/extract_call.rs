@@ -80,10 +80,7 @@ mod tests {
     }
 
     fn calls(edges: &[standardoc_ir::RawEdge]) -> Vec<&standardoc_ir::RawEdge> {
-        edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Calls)
-            .collect()
+        edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect()
     }
 
     #[test]
@@ -169,9 +166,7 @@ mod tests {
 
     #[test]
     fn async_block_body_is_not_walked_for_calls() {
-        let parsed = parse(
-            "fn outside() {} fn caller() { let _ = async { outside(); }; }",
-        );
+        let parsed = parse("fn outside() {} fn caller() { let _ = async { outside(); }; }");
         let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert!(cs.is_empty(), "async block body must be skipped day-1");

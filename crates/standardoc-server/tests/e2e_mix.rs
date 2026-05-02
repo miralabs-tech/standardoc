@@ -113,10 +113,7 @@ fn cold_start_indexes_both_rust_and_ts() {
 
     let ts_index = query::symbols_by_file(&handle, "src/index.ts").unwrap();
     let ts_names: Vec<&str> = ts_index.iter().map(|s| s.name.as_str()).collect();
-    assert!(
-        ts_names.contains(&"main"),
-        "ts main missing: {ts_names:?}"
-    );
+    assert!(ts_names.contains(&"main"), "ts main missing: {ts_names:?}");
 
     let ts_auth = query::symbols_by_file(&handle, "src/auth.ts").unwrap();
     let auth_names: Vec<&str> = ts_auth.iter().map(|s| s.name.as_str()).collect();

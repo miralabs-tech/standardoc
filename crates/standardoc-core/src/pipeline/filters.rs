@@ -151,7 +151,12 @@ fn collect_layers(workspace_root: &Path) -> Vec<Layer> {
     }
 
     let descent_filter = layers.first().map(|l| clone_matcher(&l.matcher));
-    add_nested_layers(&mut layers, workspace_root, &root_file, descent_filter.as_ref());
+    add_nested_layers(
+        &mut layers,
+        workspace_root,
+        &root_file,
+        descent_filter.as_ref(),
+    );
     layers.sort_by_key(|l| l.rooted_at.components().count());
     layers
 }
@@ -369,7 +374,10 @@ mod tests {
         ensure_stdignore_seed_at(dir.path()).unwrap();
 
         let body = fs::read_to_string(dir.path().join(STDIGNORE_FILENAME)).unwrap();
-        assert!(body.is_empty(), "an existing empty .stdignore must stay empty");
+        assert!(
+            body.is_empty(),
+            "an existing empty .stdignore must stay empty"
+        );
     }
 
     #[test]

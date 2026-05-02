@@ -42,12 +42,11 @@ impl RustProvider {
         file_abs_path: &Path,
         workspace_relative: &str,
     ) -> Result<String, ExtractError> {
-        let cargo_toml = crate_root::find_cargo_toml(file_abs_path).ok_or_else(|| {
-            ExtractError::Parse {
+        let cargo_toml =
+            crate_root::find_cargo_toml(file_abs_path).ok_or_else(|| ExtractError::Parse {
                 file: workspace_relative.into(),
                 detail: "could not determine crate name (no Cargo.toml ancestor)".into(),
-            }
-        })?;
+            })?;
 
         if let Some(hit) = self
             .crate_name_cache
@@ -58,15 +57,12 @@ impl RustProvider {
             return Ok(hit);
         }
 
-        let toml_content =
-            std::fs::read_to_string(&cargo_toml).map_err(ExtractError::Io)?;
-        let crate_name = crate_root::parse_package_name(&toml_content).ok_or_else(|| {
-            ExtractError::Parse {
+        let toml_content = std::fs::read_to_string(&cargo_toml).map_err(ExtractError::Io)?;
+        let crate_name =
+            crate_root::parse_package_name(&toml_content).ok_or_else(|| ExtractError::Parse {
                 file: workspace_relative.into(),
-                detail: "could not determine crate name (Cargo.toml has no [package].name)"
-                    .into(),
-            }
-        })?;
+                detail: "could not determine crate name (Cargo.toml has no [package].name)".into(),
+            })?;
 
         if let Ok(mut guard) = self.crate_name_cache.write() {
             guard.insert(cargo_toml, crate_name.clone());
@@ -111,11 +107,17 @@ mod tests {
     fn extract_resolves_crate_name_from_cargo_toml() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        write(root, "Cargo.toml", "[package]\nname = \"mycrate\"\nversion = \"0.1.0\"\n");
+        write(
+            root,
+            "Cargo.toml",
+            "[package]\nname = \"mycrate\"\nversion = \"0.1.0\"\n",
+        );
         write(root, "src/lib.rs", "pub fn foo() {}\n");
 
         let provider = RustProvider::new();
-        let ctx = ExtractContext { workspace_root: root };
+        let ctx = ExtractContext {
+            workspace_root: root,
+        };
         let extracted = provider
             .extract("pub fn foo() {}\n", "src/lib.rs", &ctx)
             .expect("extract ok");
@@ -138,7 +140,9 @@ mod tests {
         write(root, "src/lib.rs", "fn foo() {}\n");
 
         let provider = RustProvider::new();
-        let ctx = ExtractContext { workspace_root: root };
+        let ctx = ExtractContext {
+            workspace_root: root,
+        };
         let err = provider
             .extract("fn foo() {}\n", "src/lib.rs", &ctx)
             .expect_err("must fail without Cargo.toml");
@@ -155,11 +159,17 @@ mod tests {
     fn extract_returns_parse_error_when_cargo_toml_has_no_package_name() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        write(root, "Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n");
+        write(
+            root,
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        );
         write(root, "src/lib.rs", "fn foo() {}\n");
 
         let provider = RustProvider::new();
-        let ctx = ExtractContext { workspace_root: root };
+        let ctx = ExtractContext {
+            workspace_root: root,
+        };
         let err = provider
             .extract("fn foo() {}\n", "src/lib.rs", &ctx)
             .expect_err("must fail without [package].name");
@@ -181,7 +191,9 @@ mod tests {
         write(root, "src/bar.rs", "pub fn b() {}\n");
 
         let provider = RustProvider::new();
-        let ctx = ExtractContext { workspace_root: root };
+        let ctx = ExtractContext {
+            workspace_root: root,
+        };
 
         let _ = provider
             .extract("pub fn a() {}\n", "src/lib.rs", &ctx)

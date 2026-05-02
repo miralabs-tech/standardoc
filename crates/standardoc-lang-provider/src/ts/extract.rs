@@ -2,11 +2,11 @@ use std::path::Path;
 
 use standardoc_core::ExtractError;
 use standardoc_ir::{
-    Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol,
-    SourceOrigin, SymbolLocation, Visibility,
+    Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol, SourceOrigin,
+    SymbolLocation, Visibility,
 };
 use swc_core::common::comments::SingleThreadedComments;
-use swc_core::common::{FileName, sync::Lrc, SourceMap, Spanned};
+use swc_core::common::{FileName, SourceMap, Spanned, sync::Lrc};
 use swc_core::ecma::ast::EsVersion;
 use swc_core::ecma::parser::{EsSyntax, Parser, StringInput, Syntax, TsSyntax, lexer::Lexer};
 
@@ -182,11 +182,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn extract(
-        content: &str,
-        workspace_relative: &str,
-        package_relative: &str,
-    ) -> ExtractedFile {
+    fn extract(content: &str, workspace_relative: &str, package_relative: &str) -> ExtractedFile {
         extract_file(
             content,
             workspace_relative,

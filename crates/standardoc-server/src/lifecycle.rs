@@ -37,7 +37,9 @@ pub fn open_workspace(
     let handle = IndexHandle::open(root)?;
     let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
     {
-        let guard = filters.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = filters
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cold_start::run(&handle, provider.as_ref(), &guard)?;
     }
     let watcher = spawn_watcher(handle.clone(), provider, filters)?;

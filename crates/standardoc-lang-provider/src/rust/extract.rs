@@ -1,7 +1,7 @@
 use standardoc_core::ExtractError;
 use standardoc_ir::{
-    Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol,
-    SourceOrigin, SymbolLocation, Visibility,
+    Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol, SourceOrigin,
+    SymbolLocation, Visibility,
 };
 
 use super::{extract_doc, module_path, walk};
@@ -44,8 +44,7 @@ pub(crate) fn extract_file(
     }
 
     let mut symbols = vec![module_symbol];
-    let (item_symbols, edges, item_documents) =
-        walk::walk(&parsed, &module_fqdn, path, crate_name);
+    let (item_symbols, edges, item_documents) = walk::walk(&parsed, &module_fqdn, path, crate_name);
     symbols.extend(item_symbols);
     documents.extend(item_documents);
 
@@ -168,10 +167,7 @@ mod tests {
     fn byte_size_matches_content_len() {
         let content = "fn main() {}\n";
         let r = extract_file(content, "src/main.rs", "foo").unwrap();
-        assert_eq!(
-            r.byte_size,
-            u64::try_from(content.len()).unwrap()
-        );
+        assert_eq!(r.byte_size, u64::try_from(content.len()).unwrap());
     }
 
     #[test]

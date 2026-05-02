@@ -175,10 +175,13 @@ fn handle_stdignore_change(
     let new_filters = ScanFilters::from_stack(GitignoreStack::build(workspace_root));
 
     let newly_excluded = collect_newly_excluded_db_paths(handle, filters, &new_filters)?;
-    let newly_allowed = collect_newly_allowed_workspace_paths(workspace_root, filters, &new_filters);
+    let newly_allowed =
+        collect_newly_allowed_workspace_paths(workspace_root, filters, &new_filters);
 
     {
-        let mut guard = filters.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = filters
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = new_filters;
     }
 
@@ -192,7 +195,9 @@ fn handle_stdignore_change(
     }
 
     if !newly_allowed.is_empty() {
-        let guard = filters.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = filters
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Err(e) = reindex_paths(handle, provider, &newly_allowed, &guard) {
             eprintln!("standardoc watcher: re-index failed for newly-allowed paths: {e}");
         }
@@ -207,7 +212,9 @@ fn collect_newly_excluded_db_paths(
     new_filters: &ScanFilters,
 ) -> Result<Vec<String>, WatcherError> {
     let paths = handle.list_all_file_paths()?;
-    let guard = old_filters.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = old_filters
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut out = Vec::new();
     for path in paths {
         if new_filters.is_skipped(&path) && !guard.is_skipped(&path) {
@@ -222,7 +229,9 @@ fn collect_newly_allowed_workspace_paths(
     old_filters: &Arc<RwLock<ScanFilters>>,
     new_filters: &ScanFilters,
 ) -> Vec<String> {
-    let guard = old_filters.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = old_filters
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let walker = WalkDir::new(workspace_root)
         .follow_links(false)
         .into_iter()
@@ -257,7 +266,9 @@ fn is_dir_excluded(entry: &DirEntry, workspace_root: &Path, filters: &ScanFilter
 }
 
 fn filters_skipped(filters: &Arc<RwLock<ScanFilters>>, rel: &str) -> bool {
-    let guard = filters.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = filters
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard.is_skipped(rel)
 }
 
@@ -524,11 +535,7 @@ mod tests {
         let revision_after_create = handle.revision();
 
         std::fs::remove_file(&file_path).unwrap();
-        wait_revision_at_least(
-            &handle,
-            revision_after_create + 1,
-            Duration::from_secs(5),
-        );
+        wait_revision_at_least(&handle, revision_after_create + 1, Duration::from_secs(5));
 
         let conn = handle.pool().unwrap().get().unwrap();
         let count: i64 = conn

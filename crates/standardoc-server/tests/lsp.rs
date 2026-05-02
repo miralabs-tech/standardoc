@@ -8,7 +8,12 @@ use tempfile::TempDir;
 use tower::Service;
 use tower_lsp_server::jsonrpc::{Request, Response};
 
-fn open_workspace() -> (TempDir, IndexHandle, Arc<dyn LanguageProvider>, Arc<RwLock<ScanFilters>>) {
+fn open_workspace() -> (
+    TempDir,
+    IndexHandle,
+    Arc<dyn LanguageProvider>,
+    Arc<RwLock<ScanFilters>>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let handle = IndexHandle::open(dir.path()).unwrap();
     let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));

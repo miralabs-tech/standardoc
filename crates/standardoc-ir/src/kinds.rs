@@ -55,21 +55,39 @@ mod tests {
 
     #[test]
     fn kind_lowercase() {
-        assert_eq!(serde_json::to_string(&Kind::Function).unwrap(), "\"function\"");
+        assert_eq!(
+            serde_json::to_string(&Kind::Function).unwrap(),
+            "\"function\""
+        );
         assert_eq!(serde_json::to_string(&Kind::Macro).unwrap(), "\"macro\"");
     }
 
     #[test]
     fn edge_kind_screaming() {
-        assert_eq!(serde_json::to_string(&EdgeKind::Calls).unwrap(), "\"CALLS\"");
-        assert_eq!(serde_json::to_string(&EdgeKind::UsesType).unwrap(), "\"USES_TYPE\"");
-        assert_eq!(serde_json::to_string(&EdgeKind::ExposesApi).unwrap(), "\"EXPOSES_API\"");
+        assert_eq!(
+            serde_json::to_string(&EdgeKind::Calls).unwrap(),
+            "\"CALLS\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EdgeKind::UsesType).unwrap(),
+            "\"USES_TYPE\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EdgeKind::ExposesApi).unwrap(),
+            "\"EXPOSES_API\""
+        );
     }
 
     #[test]
     fn visibility_lowercase() {
-        assert_eq!(serde_json::to_string(&Visibility::Crate).unwrap(), "\"crate\"");
-        assert_eq!(serde_json::to_string(&Visibility::Protected).unwrap(), "\"protected\"");
+        assert_eq!(
+            serde_json::to_string(&Visibility::Crate).unwrap(),
+            "\"crate\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Visibility::Protected).unwrap(),
+            "\"protected\""
+        );
     }
 
     #[test]

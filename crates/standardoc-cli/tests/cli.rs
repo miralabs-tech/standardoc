@@ -27,11 +27,7 @@ fn index_succeeds_on_sample_workspace() {
     let dir = tempfile::tempdir().unwrap();
     write_sample_workspace(dir.path());
 
-    standardoc()
-        .arg("index")
-        .arg(dir.path())
-        .assert()
-        .success();
+    standardoc().arg("index").arg(dir.path()).assert().success();
 }
 
 #[test]
@@ -106,11 +102,7 @@ fn query_without_selector_fails() {
     let dir = tempfile::tempdir().unwrap();
     write_sample_workspace(dir.path());
 
-    standardoc()
-        .arg("query")
-        .arg(dir.path())
-        .assert()
-        .failure();
+    standardoc().arg("query").arg(dir.path()).assert().failure();
 }
 
 #[test]

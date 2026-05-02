@@ -55,7 +55,10 @@ pub(crate) fn diff_symbols<'a>(
             plan.inserts.push(sym);
             continue;
         };
-        let new_hash = sym.body_hash.as_ref().map(standardoc_ir::Blake3Hash::to_hex);
+        let new_hash = sym
+            .body_hash
+            .as_ref()
+            .map(standardoc_ir::Blake3Hash::to_hex);
         if new_hash == row.body_hash {
             plan.position_updates.push((row.id, sym));
         } else {

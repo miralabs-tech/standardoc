@@ -156,7 +156,9 @@ mod tests {
         EnrichmentInput {
             symbol_id,
             description: Some("Inferred description.".into()),
-            params_json: Some("[{\"name\":\"x\",\"description\":\"x\",\"source\":\"name\"}]".into()),
+            params_json: Some(
+                "[{\"name\":\"x\",\"description\":\"x\",\"source\":\"name\"}]".into(),
+            ),
             returns_json: Some("{\"description\":\"r\",\"source\":\"return-name\"}".into()),
             modifiers_json: Some("{\"async\":true}".into()),
             confidence: ConfidenceLevel::High,
@@ -232,7 +234,8 @@ mod tests {
         let conn = fresh_conn();
         let id = insert_dummy_symbol(&conn, "crate::a");
         upsert_enrichment(&conn, &sample(id)).unwrap();
-        conn.execute("DELETE FROM symbols WHERE id = ?1", [id]).unwrap();
+        conn.execute("DELETE FROM symbols WHERE id = ?1", [id])
+            .unwrap();
         assert!(get_enrichment(&conn, id).unwrap().is_none());
     }
 
@@ -249,6 +252,9 @@ mod tests {
             )
             .unwrap_err();
         let mapped = map_constraint(err);
-        assert!(matches!(mapped, StorageError::CheckConstraintViolated { .. }));
+        assert!(matches!(
+            mapped,
+            StorageError::CheckConstraintViolated { .. }
+        ));
     }
 }

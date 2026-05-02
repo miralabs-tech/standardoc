@@ -59,10 +59,18 @@ fn rescan_recreates_index_from_scratch() {
 
     let provider = WorkspaceProvider::new();
     let handle = index_once(dir.path(), &provider).unwrap();
-    assert!(query::symbol_by_fqdn(&handle, "sample::alpha").unwrap().is_some());
+    assert!(
+        query::symbol_by_fqdn(&handle, "sample::alpha")
+            .unwrap()
+            .is_some()
+    );
 
     rescan(&handle, &provider).unwrap();
-    assert!(query::symbol_by_fqdn(&handle, "sample::alpha").unwrap().is_some());
+    assert!(
+        query::symbol_by_fqdn(&handle, "sample::alpha")
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -87,23 +95,19 @@ fn open_workspace_indexes_a_new_file_through_the_watcher() {
     let server = open_workspace(dir.path(), provider).unwrap();
     let baseline_revision = server.handle().revision();
 
-    fs::write(
-        dir.path().join("src/extra.rs"),
-        "pub fn gamma() {}\n",
-    )
-    .unwrap();
+    fs::write(dir.path().join("src/extra.rs"), "pub fn gamma() {}\n").unwrap();
 
-    wait_revision_at_least(server.handle(), baseline_revision + 1, Duration::from_secs(10));
+    wait_revision_at_least(
+        server.handle(),
+        baseline_revision + 1,
+        Duration::from_secs(10),
+    );
     let extra_symbols = query::symbols_by_file(server.handle(), "src/extra.rs").unwrap();
     let names: Vec<&str> = extra_symbols.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"gamma"), "got {names:?}");
 }
 
-fn wait_revision_at_least(
-    handle: &standardoc_core::IndexHandle,
-    target: u64,
-    timeout: Duration,
-) {
+fn wait_revision_at_least(handle: &standardoc_core::IndexHandle, target: u64, timeout: Duration) {
     let start = Instant::now();
     while handle.revision() < target {
         assert!(

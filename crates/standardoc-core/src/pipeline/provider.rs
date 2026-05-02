@@ -67,10 +67,7 @@ pub(crate) mod mock {
             path: &str,
             _ctx: &ExtractContext<'_>,
         ) -> Result<ExtractedFile, ExtractError> {
-            let guard = self
-                .responses
-                .lock()
-                .expect("mock provider lock poisoned");
+            let guard = self.responses.lock().expect("mock provider lock poisoned");
             match guard.get(path) {
                 Some(MockResponse::Ok(extracted)) => Ok(extracted.clone()),
                 Some(MockResponse::ParseError(detail)) => Err(ExtractError::Parse {

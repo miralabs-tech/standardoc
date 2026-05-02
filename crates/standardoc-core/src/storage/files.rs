@@ -78,10 +78,11 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<RawFileRow> {
 }
 
 fn build_file_input(raw: RawFileRow) -> Result<FileInput, StorageError> {
-    let content_hash =
-        Blake3Hash::from_hex(&raw.content_hash_hex).map_err(|e| StorageError::InvalidStoredData {
+    let content_hash = Blake3Hash::from_hex(&raw.content_hash_hex).map_err(|e| {
+        StorageError::InvalidStoredData {
             detail: format!("files.content_hash: {e}"),
-        })?;
+        }
+    })?;
     let language = language_from_sql_text(&raw.language_text)?;
     let byte_size =
         u64::try_from(raw.byte_size_i64).map_err(|_| StorageError::InvalidStoredData {

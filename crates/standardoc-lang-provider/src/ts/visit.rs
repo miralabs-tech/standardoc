@@ -125,7 +125,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use swc_core::common::comments::SingleThreadedComments;
-    use swc_core::common::{FileName, sync::Lrc, SourceMap};
+    use swc_core::common::{FileName, SourceMap, sync::Lrc};
     use swc_core::ecma::ast::{EsVersion, Module};
     use swc_core::ecma::parser::{Parser, StringInput, Syntax, TsSyntax, lexer::Lexer};
 
@@ -254,9 +254,7 @@ mod tests {
 
     #[test]
     fn alias_resolves_to_canonical_via_import_table() {
-        let (_, edges) = run(
-            "import { foo } from './helper'; function caller() { foo(); }",
-        );
+        let (_, edges) = run("import { foo } from './helper'; function caller() { foo(); }");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         match &cs[0].to {

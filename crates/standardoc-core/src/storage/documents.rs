@@ -58,10 +58,7 @@ pub(crate) fn get_document(
 }
 
 pub(crate) fn delete_document(conn: &Connection, symbol_id: i64) -> Result<(), StorageError> {
-    conn.execute(
-        "DELETE FROM documents WHERE symbol_id = ?1",
-        [symbol_id],
-    )?;
+    conn.execute("DELETE FROM documents WHERE symbol_id = ?1", [symbol_id])?;
     Ok(())
 }
 
@@ -165,7 +162,8 @@ mod tests {
         let conn = fresh_conn();
         let id = insert_dummy_symbol(&conn, "crate::a");
         upsert_document(&conn, &sample(id)).unwrap();
-        conn.execute("DELETE FROM symbols WHERE id = ?1", [id]).unwrap();
+        conn.execute("DELETE FROM symbols WHERE id = ?1", [id])
+            .unwrap();
         assert!(get_document(&conn, id).unwrap().is_none());
     }
 

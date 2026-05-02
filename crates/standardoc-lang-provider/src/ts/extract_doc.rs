@@ -45,16 +45,19 @@ fn strip_jsdoc(text: &str) -> String {
 fn strip_line_prefix(line: &str) -> String {
     let trimmed = line.trim_start();
     let after_star = trimmed.strip_prefix('*').unwrap_or(trimmed);
-    after_star.strip_prefix(' ').unwrap_or(after_star).to_string()
+    after_star
+        .strip_prefix(' ')
+        .unwrap_or(after_star)
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use swc_core::common::FileName;
+    use swc_core::common::SourceMap;
     use swc_core::common::comments::SingleThreadedComments;
     use swc_core::common::sync::Lrc;
-    use swc_core::common::SourceMap;
     use swc_core::ecma::ast::EsVersion;
     use swc_core::ecma::parser::{Parser, StringInput, Syntax, TsSyntax, lexer::Lexer};
 
@@ -79,8 +82,10 @@ mod tests {
         );
         let mut parser = Parser::new_from(lexer);
         let module = parser.parse_module().expect("parse ok");
-        let lo_positions: Vec<BytePos> =
-            module.body.iter().map(|item| match item {
+        let lo_positions: Vec<BytePos> = module
+            .body
+            .iter()
+            .map(|item| match item {
                 swc_core::ecma::ast::ModuleItem::ModuleDecl(decl) => match decl {
                     swc_core::ecma::ast::ModuleDecl::ExportDecl(d) => d.span.lo,
                     swc_core::ecma::ast::ModuleDecl::ExportDefaultDecl(d) => d.span.lo,
@@ -105,7 +110,8 @@ mod tests {
                     },
                     other => panic!("unsupported stmt: {other:?}"),
                 },
-            }).collect();
+            })
+            .collect();
         (comments, lo_positions)
     }
 
@@ -157,8 +163,7 @@ mod tests {
 
     #[test]
     fn closest_jsdoc_block_wins_when_two_present() {
-        let src =
-            "/**\n * First doc.\n */\n/**\n * Second doc.\n */\nexport function foo() {}\n";
+        let src = "/**\n * First doc.\n */\n/**\n * Second doc.\n */\nexport function foo() {}\n";
         let (comments, los) = parse_with_comments(src);
         let out = extract_at(&comments, los[0]).unwrap();
         assert_eq!(out, "Second doc.");

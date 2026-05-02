@@ -1,4 +1,6 @@
-use standardoc_ir::{EdgeKind, Kind, Language, ResolvedOrUnresolved, Signature, SourceOrigin, Visibility};
+use standardoc_ir::{
+    EdgeKind, Kind, Language, ResolvedOrUnresolved, Signature, SourceOrigin, Visibility,
+};
 
 use crate::storage::error::StorageError;
 
@@ -234,7 +236,13 @@ mod tests {
 
     #[test]
     fn kind_round_trip_all_variants() {
-        for k in [Kind::Function, Kind::Type, Kind::Value, Kind::Module, Kind::Macro] {
+        for k in [
+            Kind::Function,
+            Kind::Type,
+            Kind::Value,
+            Kind::Module,
+            Kind::Macro,
+        ] {
             let s = kind_to_sql_text(k);
             assert_eq!(kind_from_sql_text(s).unwrap(), k);
         }

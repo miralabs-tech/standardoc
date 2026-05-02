@@ -8,12 +8,12 @@ use standardoc_ir::{
 use swc_core::common::BytePos;
 use swc_core::common::comments::SingleThreadedComments;
 use swc_core::common::errors::SourceMapper;
-use swc_core::common::{Span, Spanned, SourceMap, sync::Lrc};
+use swc_core::common::{SourceMap, Span, Spanned, sync::Lrc};
 use swc_core::ecma::ast::{
-    Class, ClassDecl, ClassMember, ClassMethod, Decl, DefaultDecl, ExportDecl,
-    ExportDefaultDecl, FnDecl, ImportDecl, ImportSpecifier, MemberProp, Module, ModuleDecl,
-    ModuleExportName, ModuleItem, Param as AstParam, Pat, Stmt, TsEnumDecl, TsInterfaceDecl,
-    TsTypeAliasDecl, VarDecl, VarDeclarator,
+    Class, ClassDecl, ClassMember, ClassMethod, Decl, DefaultDecl, ExportDecl, ExportDefaultDecl,
+    FnDecl, ImportDecl, ImportSpecifier, MemberProp, Module, ModuleDecl, ModuleExportName,
+    ModuleItem, Param as AstParam, Pat, Stmt, TsEnumDecl, TsInterfaceDecl, TsTypeAliasDecl,
+    VarDecl, VarDeclarator,
 };
 
 use super::extract_doc;
@@ -137,7 +137,9 @@ impl<'a> TsWalkContext<'a> {
 
     pub(crate) fn body_hash_of(&self, span: Span) -> Option<Blake3Hash> {
         let snippet = self.span_snippet(span)?;
-        Some(Blake3Hash::new(*blake3::hash(snippet.as_bytes()).as_bytes()))
+        Some(Blake3Hash::new(
+            *blake3::hash(snippet.as_bytes()).as_bytes(),
+        ))
     }
 
     pub(crate) fn span_snippet(&self, span: Span) -> Option<String> {
@@ -295,7 +297,9 @@ fn visit_var_initializers(ctx: &mut TsWalkContext<'_>, var: &VarDecl, current_mo
         let Some(name) = declarator_name(declarator) else {
             continue;
         };
-        let Some(init) = &declarator.init else { continue };
+        let Some(init) = &declarator.init else {
+            continue;
+        };
         let var_fqdn = format!("{current_module}::{name}");
         visit::visit_expression_for_calls(ctx, init, current_module, &var_fqdn);
     }
@@ -374,7 +378,14 @@ fn process_export_default_decl(
                 .ident
                 .as_ref()
                 .map_or_else(|| "default".to_string(), |i| i.sym.to_string());
-            extract_class_inner(ctx, &name, &class_expr.class, current_module, true, outer_pos);
+            extract_class_inner(
+                ctx,
+                &name,
+                &class_expr.class,
+                current_module,
+                true,
+                outer_pos,
+            );
         }
         DefaultDecl::TsInterfaceDecl(interface) => {
             let exported = true;
@@ -608,9 +619,7 @@ fn extract_var_decl(
             swc_core::ecma::ast::VarDeclKind::Let => "let",
             swc_core::ecma::ast::VarDeclKind::Var => "var",
         };
-        let kind = signature
-            .as_ref()
-            .map_or(Kind::Value, |_| Kind::Function);
+        let kind = signature.as_ref().map_or(Kind::Value, |_| Kind::Function);
         let language_kind = if signature.is_some() {
             LanguageKind::from("function")
         } else {
@@ -842,7 +851,9 @@ fn signature_from_declarator(
                 meta: SignatureMeta::default(),
             })
         }
-        swc_core::ecma::ast::Expr::Fn(fn_expr) => Some(build_function_signature(ctx, &fn_expr.function)),
+        swc_core::ecma::ast::Expr::Fn(fn_expr) => {
+            Some(build_function_signature(ctx, &fn_expr.function))
+        }
         _ => None,
     }
 }
@@ -971,7 +982,8 @@ mod tests {
 
     #[test]
     fn function_signature_captures_param_types_and_return() {
-        let (symbols, _, _) = run("export function add(a: number, b: number): number { return a + b; }");
+        let (symbols, _, _) =
+            run("export function add(a: number, b: number): number { return a + b; }");
         let sig = symbols[0].signature.as_ref().unwrap();
         assert_eq!(sig.params.len(), 2);
         assert_eq!(sig.params[0].name, "a");
@@ -1057,9 +1069,8 @@ mod tests {
 
     #[test]
     fn class_method_accessibility_maps_to_visibility() {
-        let (symbols, _, _) = run(
-            "class Foo { public a() {} private b() {} protected c() {} d() {} }",
-        );
+        let (symbols, _, _) =
+            run("class Foo { public a() {} private b() {} protected c() {} d() {} }");
         let a = symbols.iter().find(|s| s.fqdn == "src::Foo::a").unwrap();
         assert_eq!(a.visibility, Visibility::Public);
         let b = symbols.iter().find(|s| s.fqdn == "src::Foo::b").unwrap();
@@ -1114,8 +1125,7 @@ mod tests {
 
     #[test]
     fn arrow_const_emits_function_symbol() {
-        let (symbols, _, _) =
-            run("export const add = (a: number, b: number): number => a + b;");
+        let (symbols, _, _) = run("export const add = (a: number, b: number): number => a + b;");
         assert_eq!(symbols[0].kind, Kind::Function);
         assert_eq!(symbols[0].language_kind.as_str(), "function");
         let sig = symbols[0].signature.as_ref().unwrap();

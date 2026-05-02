@@ -22,9 +22,7 @@ pub(crate) fn parse_package_name(toml_content: &str) -> Option<String> {
             in_package = section.trim() == "package";
             continue;
         }
-        if in_package
-            && let Some(value) = extract_name_value(trimmed)
-        {
+        if in_package && let Some(value) = extract_name_value(trimmed) {
             return Some(value);
         }
     }

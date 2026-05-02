@@ -20,8 +20,15 @@ pub(crate) fn insert_symbol(
     symbol: &RawSymbol,
     ctx: SymbolInsertContext<'_>,
 ) -> Result<i64, StorageError> {
-    let signature_json = symbol.signature.as_ref().map(signature_to_json).transpose()?;
-    let body_hash_hex = symbol.body_hash.as_ref().map(standardoc_ir::Blake3Hash::to_hex);
+    let signature_json = symbol
+        .signature
+        .as_ref()
+        .map(signature_to_json)
+        .transpose()?;
+    let body_hash_hex = symbol
+        .body_hash
+        .as_ref()
+        .map(standardoc_ir::Blake3Hash::to_hex);
 
     let id = conn
         .query_row(
@@ -129,7 +136,9 @@ mod tests {
         .unwrap();
         assert!(id > 0);
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM symbols WHERE id = ?1", [id], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM symbols WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count, 1);
     }
@@ -260,7 +269,9 @@ mod tests {
         .unwrap();
         delete_symbol(&conn, id).unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM symbols WHERE id = ?1", [id], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM symbols WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count, 0);
     }

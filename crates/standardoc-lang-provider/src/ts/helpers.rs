@@ -85,7 +85,10 @@ mod tests {
 
     #[test]
     fn map_access_modifier_public_explicit() {
-        assert_eq!(map_access_modifier(Some("public"), false), Visibility::Public);
+        assert_eq!(
+            map_access_modifier(Some("public"), false),
+            Visibility::Public
+        );
     }
 
     #[test]

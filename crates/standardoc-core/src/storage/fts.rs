@@ -18,11 +18,9 @@ pub(crate) fn fts_integrity_check(conn: &Connection) -> Result<(), StorageError>
 
 pub(crate) fn assert_fts_counts_match(conn: &Connection) -> Result<(), StorageError> {
     let symbols: i64 = conn.query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))?;
-    let fts: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM symbols_fts_docsize",
-        [],
-        |row| row.get(0),
-    )?;
+    let fts: i64 = conn.query_row("SELECT COUNT(*) FROM symbols_fts_docsize", [], |row| {
+        row.get(0)
+    })?;
     if symbols != fts {
         return Err(StorageError::FtsCountMismatch { symbols, fts });
     }
@@ -82,10 +80,7 @@ mod tests {
         let mismatch = assert_fts_counts_match(&conn).unwrap_err();
         assert!(matches!(
             mismatch,
-            StorageError::FtsCountMismatch {
-                symbols: 2,
-                fts: 0
-            }
+            StorageError::FtsCountMismatch { symbols: 2, fts: 0 }
         ));
 
         reindex_fts(&conn).unwrap();
@@ -180,6 +175,9 @@ mod tests {
         let count_after: i64 = conn
             .query_row("SELECT COUNT(*) FROM symbols_fts", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count_after, 0, "AFTER DELETE trigger must remove the FTS entry");
+        assert_eq!(
+            count_after, 0,
+            "AFTER DELETE trigger must remove the FTS entry"
+        );
     }
 }

@@ -285,7 +285,10 @@ mod tests {
         let conn = fresh_conn();
         let ef = extracted(
             "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 1), sym("bar", "crate::bar", 0x02, 10)],
+            vec![
+                sym("foo", "crate::foo", 0x01, 1),
+                sym("bar", "crate::bar", 0x02, 10),
+            ],
             vec![],
         );
         apply_upsert_file(&conn, &ef).unwrap();
@@ -374,7 +377,10 @@ mod tests {
         let conn = fresh_conn();
         let ef1 = extracted(
             "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 1), sym("bar", "crate::bar", 0x02, 10)],
+            vec![
+                sym("foo", "crate::foo", 0x01, 1),
+                sym("bar", "crate::bar", 0x02, 10),
+            ],
             vec![],
         );
         apply_upsert_file(&conn, &ef1).unwrap();
@@ -416,11 +422,9 @@ mod tests {
         apply_upsert_file(&conn, &ef).unwrap();
 
         let (to_id, to_unresolved): (Option<i64>, Option<String>) = conn
-            .query_row(
-                "SELECT to_symbol_id, to_unresolved FROM edges",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .query_row("SELECT to_symbol_id, to_unresolved FROM edges", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap();
         assert!(to_id.is_some(), "in-batch promote must resolve to an id");
         assert!(to_unresolved.is_none());

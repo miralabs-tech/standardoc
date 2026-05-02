@@ -6,7 +6,12 @@ use standardoc_lang_provider::WorkspaceProvider;
 use standardoc_server::{StandardocMcp, build_mcp_handler, kick_off_indexing};
 use tempfile::TempDir;
 
-fn open_workspace() -> (TempDir, IndexHandle, Arc<dyn LanguageProvider>, Arc<RwLock<ScanFilters>>) {
+fn open_workspace() -> (
+    TempDir,
+    IndexHandle,
+    Arc<dyn LanguageProvider>,
+    Arc<RwLock<ScanFilters>>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let handle = IndexHandle::open(dir.path()).unwrap();
     let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
@@ -95,11 +100,7 @@ async fn kick_off_indexing_readonly_flips_index_ready_synchronously_and_skips_wa
 
     let provider: Arc<dyn LanguageProvider> = Arc::new(WorkspaceProvider::new());
     let filters = Arc::new(RwLock::new(ScanFilters::load(reader.workspace_root())));
-    let mcp = build_mcp_handler(
-        reader.clone(),
-        Arc::clone(&provider),
-        Arc::clone(&filters),
-    );
+    let mcp = build_mcp_handler(reader.clone(), Arc::clone(&provider), Arc::clone(&filters));
     let index_ready = mcp.index_ready();
     let watcher_slot = mcp.watcher_slot();
 

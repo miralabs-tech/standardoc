@@ -89,12 +89,7 @@ fn emit_import(
     });
 }
 
-fn emit_glob_import(
-    ctx: &mut WalkContext,
-    prefix: &[String],
-    current_module: &str,
-    span: Span,
-) {
+fn emit_glob_import(ctx: &mut WalkContext, prefix: &[String], current_module: &str, span: Span) {
     let raw = prefix.join("::");
     let canonical = ctx
         .canonicalize(&raw, current_module)
@@ -220,10 +215,7 @@ mod tests {
             other => panic!("expected unresolved, got {other:?}"),
         }
         // The CALLS edge should resolve B::new through the alias.
-        let calls: Vec<_> = edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Calls)
-            .collect();
+        let calls: Vec<_> = edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
         assert_eq!(calls.len(), 1);
         match &calls[0].to {
             ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "foo::Bar::new"),
@@ -282,10 +274,7 @@ mod tests {
             other => panic!("expected unresolved, got {other:?}"),
         }
         // CALLS through the alias.
-        let calls: Vec<_> = edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Calls)
-            .collect();
+        let calls: Vec<_> = edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
         assert_eq!(calls.len(), 1);
         match &calls[0].to {
             ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "alloc::vec::Vec::new"),

@@ -451,9 +451,7 @@ mod tests {
                 caller_id,
                 &make_edge(
                     EdgeKind::Calls,
-                    ResolvedOrUnresolved::Unresolved {
-                        name: name.into(),
-                    },
+                    ResolvedOrUnresolved::Unresolved { name: name.into() },
                 ),
             )
             .unwrap();

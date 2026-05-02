@@ -13,9 +13,9 @@ use tower_lsp_server::{
         DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
         GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeParams,
         InitializeResult, InitializedParams, Location, MarkupContent, MarkupKind, MessageType,
-        OneOf, Position, Range, ReferenceParams, ServerCapabilities, ServerInfo,
-        SymbolInformation, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind,
-        WorkspaceSymbolParams, WorkspaceSymbolResponse,
+        OneOf, Position, Range, ReferenceParams, ServerCapabilities, ServerInfo, SymbolInformation,
+        SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, WorkspaceSymbolParams,
+        WorkspaceSymbolResponse,
     },
 };
 
@@ -111,10 +111,7 @@ impl LanguageServer for StandardocLsp {
                 }
                 Err(e) => {
                     client
-                        .log_message(
-                            MessageType::ERROR,
-                            format!("watcher boot failed: {e}"),
-                        )
+                        .log_message(MessageType::ERROR, format!("watcher boot failed: {e}"))
                         .await;
                 }
             }
@@ -154,10 +151,7 @@ impl LanguageServer for StandardocLsp {
         Ok(Some(GotoDefinitionResponse::Scalar(loc)))
     }
 
-    async fn references(
-        &self,
-        params: ReferenceParams,
-    ) -> JsonRpcResult<Option<Vec<Location>>> {
+    async fn references(&self, params: ReferenceParams) -> JsonRpcResult<Option<Vec<Location>>> {
         let pos = params.text_document_position.position;
         let uri = params.text_document_position.text_document.uri;
         let Some(rel) = uri_to_workspace_path(&uri, self.handle.workspace_root()) else {
@@ -179,9 +173,14 @@ impl LanguageServer for StandardocLsp {
         let mut locations: Vec<Location> = Vec::new();
         for edge in edges {
             for site in edge.sites {
-                if let Some(loc) =
-                    location_at(&site.file, site.line, site.col, site.line, site.col + 1, &workspace_root)
-                {
+                if let Some(loc) = location_at(
+                    &site.file,
+                    site.line,
+                    site.col,
+                    site.line,
+                    site.col + 1,
+                    &workspace_root,
+                ) {
                     locations.push(loc);
                 }
             }
@@ -533,8 +532,20 @@ mod tests {
 
     #[test]
     fn to_lsp_position_decrements_line() {
-        assert_eq!(to_lsp_position(10, 4), Position { line: 9, character: 4 });
-        assert_eq!(to_lsp_position(0, 0), Position { line: 0, character: 0 });
+        assert_eq!(
+            to_lsp_position(10, 4),
+            Position {
+                line: 9,
+                character: 4
+            }
+        );
+        assert_eq!(
+            to_lsp_position(0, 0),
+            Position {
+                line: 0,
+                character: 0
+            }
+        );
     }
 
     #[test]

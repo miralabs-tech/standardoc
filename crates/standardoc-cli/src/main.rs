@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use standardoc_core::{IndexHandle, ScanFilters, cold_start, spawn_watcher};
-use standardoc_lang_provider::WorkspaceProvider;
 use standardoc_ir::{RawEdge, RawSymbol, ResolvedOrUnresolved};
+use standardoc_lang_provider::WorkspaceProvider;
 use standardoc_server::ServerError;
 use standardoc_server::query;
 
@@ -208,7 +208,9 @@ fn cmd_watch(path: &Path) -> Result<(), ServerError> {
 
     let progress = ProgressReporter::start(handle.clone());
     let cold_start_result = {
-        let guard = filters.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = filters
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cold_start::run(&handle, provider.as_ref(), &guard)
     };
     progress.stop();
@@ -286,10 +288,7 @@ fn cmd_purge_excluded(path: &Path, yes_flag: bool) -> Result<(), ServerError> {
         println!("  {path}");
     }
     if candidates.len() > PURGE_PREVIEW_LIMIT {
-        println!(
-            "  ... and {} more",
-            candidates.len() - PURGE_PREVIEW_LIMIT
-        );
+        println!("  ... and {} more", candidates.len() - PURGE_PREVIEW_LIMIT);
     }
 
     if !confirm_purge(candidates.len(), yes_flag)? {

@@ -21,7 +21,10 @@ pub(crate) fn parse_tsconfig(jsonc_content: &str) -> Option<TsConfigPaths> {
     let stripped = strip_jsonc(jsonc_content);
     let value: serde_json::Value = serde_json::from_str(&stripped).ok()?;
     let opts = value.get("compilerOptions")?;
-    let base_url = opts.get("baseUrl").and_then(|v| v.as_str()).map(str::to_string);
+    let base_url = opts
+        .get("baseUrl")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let paths = opts
         .get("paths")
         .and_then(|v| v.as_object())
@@ -184,10 +187,16 @@ fn expand_pattern(
 
 fn resolve_via_node_modules(spec: &str, from_file: &Path) -> Option<String> {
     let pkg_dir = package_dir_of_specifier(spec);
-    let sub_path = spec.strip_prefix(&pkg_dir).unwrap_or("").trim_start_matches('/');
+    let sub_path = spec
+        .strip_prefix(&pkg_dir)
+        .unwrap_or("")
+        .trim_start_matches('/');
     let mut current = from_file.parent()?;
     loop {
-        let candidate = current.join("node_modules").join(&pkg_dir).join("package.json");
+        let candidate = current
+            .join("node_modules")
+            .join(&pkg_dir)
+            .join("package.json");
         if candidate.is_file() {
             return canonical_from_node_modules_pkg(&candidate, sub_path);
         }
@@ -365,8 +374,7 @@ mod tests {
         let from = pkg.join("src/auth/login.ts");
         fs::create_dir_all(from.parent().unwrap()).unwrap();
         fs::write(&from, b"// dummy").unwrap();
-        let canonical =
-            resolve_relative("./helper", &from, pkg, "@app").expect("relative ok");
+        let canonical = resolve_relative("./helper", &from, pkg, "@app").expect("relative ok");
         assert_eq!(canonical, "@app::src::auth::helper");
     }
 
@@ -377,8 +385,7 @@ mod tests {
         let from = pkg.join("src/auth/login.ts");
         fs::create_dir_all(from.parent().unwrap()).unwrap();
         fs::write(&from, b"// dummy").unwrap();
-        let canonical =
-            resolve_relative("../user", &from, pkg, "@app").expect("relative ok");
+        let canonical = resolve_relative("../user", &from, pkg, "@app").expect("relative ok");
         assert_eq!(canonical, "@app::src::user");
     }
 
@@ -389,8 +396,7 @@ mod tests {
         let from = pkg.join("src/auth/login.ts");
         fs::create_dir_all(from.parent().unwrap()).unwrap();
         fs::write(&from, b"// dummy").unwrap();
-        let canonical =
-            resolve_relative("./index", &from, pkg, "@app").expect("relative ok");
+        let canonical = resolve_relative("./index", &from, pkg, "@app").expect("relative ok");
         assert_eq!(canonical, "@app::src::auth");
     }
 
@@ -400,8 +406,7 @@ mod tests {
             base_url: Some("./".into()),
             paths: vec![("@app/*".into(), vec!["src/*".into()])],
         };
-        let canonical =
-            resolve_via_tsconfig("@app/auth/login", &cfg, "myorg-api").expect("hit");
+        let canonical = resolve_via_tsconfig("@app/auth/login", &cfg, "myorg-api").expect("hit");
         assert_eq!(canonical, "myorg-api::src::auth::login");
     }
 
@@ -431,8 +436,7 @@ mod tests {
         let from = pkg.join("src/auth/login.ts");
         fs::create_dir_all(from.parent().unwrap()).unwrap();
         fs::write(&from, b"// dummy").unwrap();
-        let canonical =
-            resolve_import("./helper", &from, pkg, "@app", None).expect("relative");
+        let canonical = resolve_import("./helper", &from, pkg, "@app", None).expect("relative");
         assert_eq!(canonical, "@app::src::auth::helper");
     }
 
@@ -503,8 +507,7 @@ mod tests {
             br#"{"name":"@scope/sdk","types":"dist/index.d.ts"}"#,
         )
         .unwrap();
-        let canonical =
-            resolve_import("@scope/sdk", &from, pkg, "@app", None).expect("scoped hit");
+        let canonical = resolve_import("@scope/sdk", &from, pkg, "@app", None).expect("scoped hit");
         assert_eq!(canonical, "@scope/sdk::dist");
     }
 

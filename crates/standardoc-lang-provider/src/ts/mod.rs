@@ -35,12 +35,11 @@ impl TsProvider {
         file_abs_path: &Path,
         workspace_relative: &str,
     ) -> Result<(String, PathBuf), ExtractError> {
-        let package_json = helpers::find_package_json(file_abs_path).ok_or_else(|| {
-            ExtractError::Parse {
+        let package_json =
+            helpers::find_package_json(file_abs_path).ok_or_else(|| ExtractError::Parse {
                 file: workspace_relative.into(),
                 detail: "could not determine package name (no package.json ancestor)".into(),
-            }
-        })?;
+            })?;
 
         if let Some(hit) = self
             .package_name_cache
@@ -98,10 +97,7 @@ impl LanguageProvider for TsProvider {
     }
 }
 
-fn load_nearest_tsconfig(
-    from_file: &Path,
-    package_root: &Path,
-) -> Option<resolver::TsConfigPaths> {
+fn load_nearest_tsconfig(from_file: &Path, package_root: &Path) -> Option<resolver::TsConfigPaths> {
     let mut current = from_file.parent()?;
     loop {
         let candidate = current.join("tsconfig.json");
@@ -146,8 +142,12 @@ mod tests {
         write(root, "src/index.ts", src);
 
         let provider = TsProvider::new();
-        let ctx = ExtractContext { workspace_root: root };
-        let extracted = provider.extract(src, "src/index.ts", &ctx).expect("extract ok");
+        let ctx = ExtractContext {
+            workspace_root: root,
+        };
+        let extracted = provider
+            .extract(src, "src/index.ts", &ctx)
+            .expect("extract ok");
 
         let module = &extracted.symbols[0];
         assert_eq!(module.fqdn, "@myorg/api::src");
@@ -167,7 +167,9 @@ mod tests {
         write(root, "src/index.ts", src);
 
         let provider = TsProvider::new();
-        let ctx = ExtractContext { workspace_root: root };
+        let ctx = ExtractContext {
+            workspace_root: root,
+        };
         let err = provider
             .extract(src, "src/index.ts", &ctx)
             .expect_err("must fail without package.json");
@@ -189,7 +191,9 @@ mod tests {
         write(root, "src/index.ts", src);
 
         let provider = TsProvider::new();
-        let ctx = ExtractContext { workspace_root: root };
+        let ctx = ExtractContext {
+            workspace_root: root,
+        };
         let err = provider
             .extract(src, "src/index.ts", &ctx)
             .expect_err("must fail without name");
@@ -211,7 +215,9 @@ mod tests {
         write(root, "src/b.ts", "export const b = 2;\n");
 
         let provider = TsProvider::new();
-        let ctx = ExtractContext { workspace_root: root };
+        let ctx = ExtractContext {
+            workspace_root: root,
+        };
 
         let _ = provider
             .extract("export const a = 1;\n", "src/a.ts", &ctx)
@@ -243,12 +249,13 @@ mod tests {
             "tsconfig.json",
             r#"{"compilerOptions":{"baseUrl":"./","paths":{"@lib/*":["src/lib/*"]}}}"#,
         );
-        let src =
-            "import { helper } from '@lib/utils';\nexport function caller() { helper(); }\n";
+        let src = "import { helper } from '@lib/utils';\nexport function caller() { helper(); }\n";
         write(root, "src/caller.ts", src);
 
         let provider = TsProvider::new();
-        let ctx = ExtractContext { workspace_root: root };
+        let ctx = ExtractContext {
+            workspace_root: root,
+        };
         let extracted = provider.extract(src, "src/caller.ts", &ctx).expect("ok");
 
         let imports: Vec<_> = extracted

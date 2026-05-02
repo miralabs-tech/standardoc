@@ -725,7 +725,8 @@ mod tests {
 
     #[test]
     fn self_receiver_renders_as_self_typeref() {
-        let parsed = parse("impl Foo {\n  fn a(self) {}\n  fn b(&self) {}\n  fn c(&mut self) {}\n}");
+        let parsed =
+            parse("impl Foo {\n  fn a(self) {}\n  fn b(&self) {}\n  fn c(&mut self) {}\n}");
         let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let a = &symbols.iter().find(|s| s.name == "a").unwrap().signature;
         let b = &symbols.iter().find(|s| s.name == "b").unwrap().signature;
@@ -801,9 +802,8 @@ mod tests {
 
     #[test]
     fn trait_impl_with_use_alias_resolves_implements_target() {
-        let parsed = parse(
-            "use crate::traits::Foo; struct Bar; impl Foo for Bar { fn run(&self) {} }",
-        );
+        let parsed =
+            parse("use crate::traits::Foo; struct Bar; impl Foo for Bar { fn run(&self) {} }");
         let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let imp = edges
             .iter()
@@ -919,7 +919,10 @@ mod tests {
             ctx.canonicalize("crate::foo::bar", "mycrate"),
             Some("mycrate::foo::bar".to_string())
         );
-        assert_eq!(ctx.canonicalize("crate", "mycrate"), Some("mycrate".to_string()));
+        assert_eq!(
+            ctx.canonicalize("crate", "mycrate"),
+            Some("mycrate".to_string())
+        );
     }
 
     #[test]

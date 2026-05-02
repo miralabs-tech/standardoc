@@ -604,8 +604,8 @@ fn load_edge_sites(conn: &Connection, edge_id: i64) -> Result<Vec<Site>, Storage
 mod tests {
     use super::*;
     use crate::commands::IngestCommand;
-    use crate::storage::edges::insert_edge;
     use crate::storage::edge_sites::insert_edge_sites;
+    use crate::storage::edges::insert_edge;
     use crate::storage::files::{FileInput, upsert_file};
     use crate::storage::symbols::{SymbolInsertContext, insert_symbol};
     use rusqlite::Connection;
@@ -974,8 +974,20 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol(&conn, "src/main.rs", "create_user", "crate::user::create_user", 1);
-            seed_symbol(&conn, "src/main.rs", "delete_user", "crate::user::delete_user", 5);
+            seed_symbol(
+                &conn,
+                "src/main.rs",
+                "create_user",
+                "crate::user::create_user",
+                1,
+            );
+            seed_symbol(
+                &conn,
+                "src/main.rs",
+                "delete_user",
+                "crate::user::delete_user",
+                5,
+            );
             seed_symbol(&conn, "src/main.rs", "noise", "crate::noise", 10);
         }
         let got = search_text(&handle, "create_user", 50).unwrap();
@@ -1346,7 +1358,11 @@ mod tests {
             .unwrap()
             .expect("foo exists");
         assert_eq!(ctx.context.symbol.fqdn, "crate::foo");
-        assert_eq!(ctx.callees.len(), 2, "callees include resolved + unresolved");
+        assert_eq!(
+            ctx.callees.len(),
+            2,
+            "callees include resolved + unresolved"
+        );
         assert_eq!(ctx.imports.len(), 1);
         assert_eq!(ctx.callers.len(), 1);
         assert_eq!(ctx.imported_by.len(), 1);
