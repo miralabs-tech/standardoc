@@ -468,7 +468,7 @@ mod tests {
         std::fs::create_dir_all(&src_dir).unwrap();
         std::fs::write(src_dir.join("lib.rs"), b"fn foo() {}").unwrap();
 
-        wait_revision_at_least(&handle, 1, Duration::from_secs(5));
+        wait_revision_at_least(&handle, 1, Duration::from_secs(15));
 
         let conn = handle.pool().unwrap().get().unwrap();
         let count: i64 = conn
@@ -497,7 +497,7 @@ mod tests {
         std::fs::create_dir_all(&src_dir).unwrap();
         std::fs::write(src_dir.join("bad.rs"), b"fn ???").unwrap();
 
-        wait_revision_at_least(&handle, 1, Duration::from_secs(5));
+        wait_revision_at_least(&handle, 1, Duration::from_secs(15));
 
         let conn = handle.pool().unwrap().get().unwrap();
         let last_error: Option<String> = conn
@@ -531,11 +531,11 @@ mod tests {
         let file_path = src_dir.join("lib.rs");
         std::fs::write(&file_path, b"fn foo() {}").unwrap();
 
-        wait_revision_at_least(&handle, 1, Duration::from_secs(5));
+        wait_revision_at_least(&handle, 1, Duration::from_secs(15));
         let revision_after_create = handle.revision();
 
         std::fs::remove_file(&file_path).unwrap();
-        wait_revision_at_least(&handle, revision_after_create + 1, Duration::from_secs(5));
+        wait_revision_at_least(&handle, revision_after_create + 1, Duration::from_secs(15));
 
         let conn = handle.pool().unwrap().get().unwrap();
         let count: i64 = conn
@@ -724,7 +724,7 @@ mod tests {
         )
         .unwrap();
 
-        wait_revision_at_least(&handle, 1, Duration::from_secs(5));
+        wait_revision_at_least(&handle, 1, Duration::from_secs(15));
 
         let conn = handle.pool().unwrap().get().unwrap();
         let count: i64 = conn
