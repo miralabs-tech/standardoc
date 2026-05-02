@@ -7,10 +7,11 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Standardoc CLI — single user-facing binary `standardoc`. Subcommands: index / watch / query / rescan. Future LSP/MCP added as subcommands."
+description = "Standardoc CLI — single user-facing binary `stdoc`. Subcommands: index / watch / query / rescan / lsp / mcp / purge-excluded."
+default-run = "stdoc"
 
 [[bin]]
-name = "standardoc"
+name = "stdoc"
 path = "src/main.rs"
 
 [dependencies]
