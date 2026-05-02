@@ -1,13 +1,12 @@
 name: Release
 
-# Triggered when a tag matching `v*` is pushed (e.g. `v0.1.0`).
-# Builds the OSS binaries for Linux x64/arm64, macOS x64/arm64, Windows x64
-# (all without the `embedded-frontend` Cargo feature — Pro binaries live in
-# the private `standardoc-pro` repository), packages them into archives, and
-# attaches everything to a new GitHub Release named after the tag.
+# Triggered when a tag matching `v*` is pushed (e.g. `v1.0.0-beta.1`).
+# Publishes `standardoc-cli` to crates.io and creates a GitHub Release with
+# notes pulled from CHANGELOG.md.
 #
-# Manual run via `gh release create vX.Y.Z` is also possible after the fact:
-# this workflow only auto-runs on tag push.
+# Beta.1 distribution is `cargo install standardoc-cli` (compile from source
+# on the user's machine). Pre-built cross-platform binaries are deferred
+# post-beta.1 — re-introduce here when feedback demands it.
 
 on:
   push:
@@ -18,106 +17,32 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive: tar.gz
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            archive: tar.gz
-            cross: true
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            archive: tar.gz
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            archive: tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: zip
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          target: ${{ matrix.target }}
+          toolchain: '1.91'
 
-      - name: Install cross (for aarch64-linux)
-        if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Build (cargo)
-        if: '!matrix.cross'
-        run: cargo build --release --target ${{ matrix.target }} -p standardoc -p standardoc-server
+      - name: cargo publish (dry-run)
+        run: cargo publish --dry-run -p standardoc-cli
 
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }} -p standardoc -p standardoc-server
-
-      - name: Stage artifacts
-        shell: bash
-        run: |
-          mkdir -p staging
-          cp README.md QUICKSTART.md CHANGELOG.md LICENSE staging/
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp target/${{ matrix.target }}/release/standardoc-server.exe staging/
-            cp target/${{ matrix.target }}/release/standardoc.exe staging/
-          else
-            cp target/${{ matrix.target }}/release/standardoc-server staging/
-            cp target/${{ matrix.target }}/release/standardoc staging/
-          fi
-
-      - name: Archive (tar.gz)
-        if: matrix.archive == 'tar.gz'
-        shell: bash
-        run: |
-          name="standardoc-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mv staging "$name"
-          tar czf "${name}.tar.gz" "$name"
-          shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
-
-      - name: Archive (zip)
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          $name = "standardoc-$env:GITHUB_REF_NAME-${{ matrix.target }}"
-          Move-Item staging $name
-          Compress-Archive -Path $name -DestinationPath "$name.zip"
-          $hash = (Get-FileHash -Algorithm SHA256 "$name.zip").Hash.ToLower()
-          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: standardoc-${{ matrix.target }}
-          path: |
-            standardoc-*.tar.gz
-            standardoc-*.tar.gz.sha256
-            standardoc-*.zip
-            standardoc-*.zip.sha256
-          if-no-files-found: error
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p standardoc-cli
 
   release:
-    name: Publish GitHub Release
-    needs: build
+    name: Create GitHub Release
+    needs: publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Flatten artifacts
-        run: |
-          mkdir -p release-assets
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" \) -exec cp {} release-assets/ \;
-          ls -lh release-assets
 
       - name: Extract changelog section
         id: changelog
@@ -136,5 +61,4 @@ jobs:
           body_path: release-notes.md
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
-          files: release-assets/*
           generate_release_notes: false
