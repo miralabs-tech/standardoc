@@ -50,7 +50,14 @@ enum Command {
     },
 
     /// Run the LSP daemon over stdio (workspace `<path>` is the index root).
-    Lsp { path: PathBuf },
+    Lsp {
+        path: PathBuf,
+
+        /// Accepted for vscode-languageclient compatibility; stdio is the only
+        /// transport supported and is the default — this flag is ignored.
+        #[arg(long, hide = true)]
+        stdio: bool,
+    },
 
     /// Run the MCP daemon over stdio (workspace `<path>` is the index root).
     Mcp {
@@ -120,7 +127,7 @@ fn main_inner() -> Result<(), ServerError> {
         Command::Query(args) => cmd_query(&args),
         Command::Rescan { path } => cmd_rescan(&path),
         Command::PurgeExcluded { path, yes } => cmd_purge_excluded(&path, yes),
-        Command::Lsp { path } => cmd_lsp(&path),
+        Command::Lsp { path, stdio: _ } => cmd_lsp(&path),
         Command::Mcp { path, readonly } => cmd_mcp(&path, readonly),
     }
 }
