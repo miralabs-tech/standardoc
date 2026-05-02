@@ -1,0 +1,112 @@
+name: Release VSCode extension
+
+# Manual trigger only — the maintainer publishes the extension after smoke
+# and dogfood, decoupled from the core `cargo publish` flow on tag push.
+#
+# Inputs:
+#   version      — semver to publish (must match ext/vscode/package.json
+#                   already on the checked-out branch). Used for the
+#                   release artifact name and the marketplace listing.
+#   pre_release  — toggles `vsce publish --pre-release` for the marketplace
+#                   pre-release track (default true; flip false for stable).
+#   ovsx         — also publish to Open VSX (used by VSCodium / Theia).
+#                   Requires OVSX_PAT secret. Default true.
+#
+# Required secrets:
+#   VSCE_PAT     — Visual Studio Marketplace personal access token
+#   OVSX_PAT     — Open VSX personal access token (only if `ovsx` is true)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 1.0.0-beta.1). Must match ext/vscode/package.json.'
+        required: true
+        type: string
+      pre_release:
+        description: 'Mark as VSCode marketplace pre-release.'
+        required: true
+        type: boolean
+        default: true
+      ovsx:
+        description: 'Also publish to Open VSX (VSCodium / Theia).'
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish-ext:
+    name: Publish VSCode extension
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ext/vscode
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: '1.91'
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Verify package.json version matches input
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          pkg_version=$(node -p "require('./package.json').version")
+          if [ "$pkg_version" != "$INPUT_VERSION" ]; then
+            echo "::error::package.json version ($pkg_version) does not match input ($INPUT_VERSION). Bump and commit before re-running."
+            exit 1
+          fi
+          echo "version OK: $pkg_version"
+
+      - name: Install deps
+        run: bun install --frozen-lockfile
+
+      - name: Build native binary (release) for bundling
+        working-directory: ${{ github.workspace }}
+        run: cargo build --release -p standardoc-cli
+
+      - name: Bundle binary into ext/dist/bin/
+        run: bun run dev:bundle
+
+      - name: Production build
+        run: bun run build:prod
+
+      - name: Package vsix
+        run: bunx vsce package --out "standardoc-${{ inputs.version }}.vsix"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: standardoc-vsix-${{ inputs.version }}
+          path: ext/vscode/standardoc-${{ inputs.version }}.vsix
+          if-no-files-found: error
+
+      - name: Publish to VSCode Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ "${{ inputs.pre_release }}" = "true" ]; then
+            bunx vsce publish --pre-release --packagePath "standardoc-${{ inputs.version }}.vsix"
+          else
+            bunx vsce publish --packagePath "standardoc-${{ inputs.version }}.vsix"
+          fi
+
+      - name: Publish to Open VSX
+        if: ${{ inputs.ovsx }}
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [ "${{ inputs.pre_release }}" = "true" ]; then
+            bunx ovsx publish --pre-release "standardoc-${{ inputs.version }}.vsix"
+          else
+            bunx ovsx publish "standardoc-${{ inputs.version }}.vsix"
+          fi

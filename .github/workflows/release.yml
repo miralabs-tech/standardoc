@@ -1,12 +1,14 @@
 name: Release
 
 # Triggered when a tag matching `v*` is pushed (e.g. `v1.0.0-beta.1`).
-# Publishes `standardoc-cli` to crates.io and creates a GitHub Release with
-# notes pulled from CHANGELOG.md.
+# Builds pre-compiled `stdoc` binaries for Linux x64/arm64, macOS x64/arm64,
+# Windows x64; generates a `version.json` manifest consumed by the VSCode
+# extension's future version selector; publishes `standardoc-cli` to
+# crates.io; creates a GitHub Release with archives + checksums + manifest
+# attached, body pulled from CHANGELOG.md.
 #
-# Beta.1 distribution is `cargo install standardoc-cli` (compile from source
-# on the user's machine). Pre-built cross-platform binaries are deferred
-# post-beta.1 — re-introduce here when feedback demands it.
+# VSCode extension publish is intentionally separate (`release-ext.yml`,
+# manual workflow_dispatch) — the maintainer triggers it after smoke + dogfood.
 
 on:
   push:
@@ -17,8 +19,94 @@ permissions:
   contents: write
 
 jobs:
-  publish:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: '1.91'
+          target: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross (aarch64-linux only)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+
+      - name: Build (cargo)
+        if: '!matrix.cross'
+        run: cargo build --release --target ${{ matrix.target }} -p standardoc-cli
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }} -p standardoc-cli
+
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp README.md QUICKSTART.md CHANGELOG.md TODO-LIST.md LICENSE staging/
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp target/${{ matrix.target }}/release/stdoc.exe staging/
+          else
+            cp target/${{ matrix.target }}/release/stdoc staging/
+          fi
+
+      - name: Archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          name="stdoc-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mv staging "$name"
+          tar czf "${name}.tar.gz" "$name"
+          shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
+
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $name = "stdoc-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          Move-Item staging $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "$name.zip").Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stdoc-${{ matrix.target }}
+          path: |
+            stdoc-*.tar.gz
+            stdoc-*.tar.gz.sha256
+            stdoc-*.zip
+            stdoc-*.zip.sha256
+          if-no-files-found: error
+
+  publish-crates:
     name: Publish to crates.io
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -39,19 +127,84 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: publish
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" \) -exec cp {} release-assets/ \;
+          ls -lh release-assets
+
+      - name: Read ext version
+        id: ext
+        run: echo "version=$(node -p "require('./ext/vscode/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Generate version.json
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          EXT_VERSION: ${{ steps.ext.outputs.version }}
+        run: |
+          set -e
+          core_version="${REF_NAME#v}"
+          released_at="$(date -u +%Y-%m-%d)"
+          base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${REF_NAME}"
+
+          declare -A targets=(
+            [x86_64-unknown-linux-gnu]="tar.gz"
+            [aarch64-unknown-linux-gnu]="tar.gz"
+            [x86_64-apple-darwin]="tar.gz"
+            [aarch64-apple-darwin]="tar.gz"
+            [x86_64-pc-windows-msvc]="zip"
+          )
+
+          binaries_json=""
+          checksums_json=""
+          first=1
+          for t in "${!targets[@]}"; do
+            ext="${targets[$t]}"
+            file="stdoc-${REF_NAME}-${t}.${ext}"
+            sha_file="release-assets/${file}.sha256"
+            if [ ! -f "$sha_file" ]; then
+              echo "::warning::missing checksum for $file"
+              continue
+            fi
+            sha=$(awk '{print $1}' "$sha_file")
+            sep=","; [ $first -eq 1 ] && sep=""
+            first=0
+            binaries_json="${binaries_json}${sep}\"${t}\":\"${base_url}/${file}\""
+            checksums_json="${checksums_json}${sep}\"${t}\":\"${sha}\""
+          done
+
+          cat > release-assets/version.json <<EOF
+          {
+            "core_version": "${core_version}",
+            "ext_version": "${EXT_VERSION}",
+            "protocol_version": 1,
+            "min_compat": {
+              "core": "${core_version}",
+              "ext": "${EXT_VERSION}"
+            },
+            "released_at": "${released_at}",
+            "binaries": {${binaries_json}},
+            "checksums_sha256": {${checksums_json}}
+          }
+          EOF
+          cat release-assets/version.json
 
       - name: Extract changelog section
         id: changelog
         run: |
           version="${GITHUB_REF_NAME#v}"
-          # Pull the section between `## [VERSION]` and the next `## ` header.
           awk "/^## \\[$version\\]/{flag=1; next} /^## /{flag=0} flag" CHANGELOG.md > release-notes.md
           if [ ! -s release-notes.md ]; then
-            echo "Release $GITHUB_REF_NAME — see CHANGELOG.md for details." > release-notes.md
+            echo "Release $GITHUB_REF_NAME — see CHANGELOG.md and TODO-LIST.md for details." > release-notes.md
           fi
 
       - name: Create GitHub Release
@@ -61,4 +214,5 @@ jobs:
           body_path: release-notes.md
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+          files: release-assets/*
           generate_release_notes: false
