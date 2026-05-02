@@ -2025,11 +2025,11 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "standardoc-bridge-sdk"
-version = "0.0.1"
+version = "1.0.0-beta.1"
 
 [[package]]
 name = "standardoc-cli"
-version = "0.1.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -2045,7 +2045,7 @@ dependencies = [
 
 [[package]]
 name = "standardoc-core"
-version = "0.1.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "blake3",
  "fs4",
@@ -2067,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "standardoc-ir"
-version = "0.1.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2075,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "standardoc-lang-provider"
-version = "0.1.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "blake3",
  "proc-macro2",
@@ -2090,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "standardoc-server"
-version = "0.1.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "rmcp",
  "schemars",

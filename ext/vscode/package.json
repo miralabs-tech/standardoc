@@ -2,7 +2,7 @@
   "name": "standardoc",
   "displayName": "Standardoc",
   "description": "AI-readable code documentation — Rust + TypeScript indexer surfaced over LSP and MCP.",
-  "version": "0.1.0-beta.2",
+  "version": "1.0.0-beta.1",
   "publisher": "miralabs-tech",
   "license": "LicenseRef-FSL-1.1-MIT",
   "homepage": "https://github.com/miralabs-tech/standardoc#readme",
