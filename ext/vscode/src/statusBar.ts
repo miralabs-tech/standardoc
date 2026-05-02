@@ -35,7 +35,7 @@ export class StatusBarController implements vscode.Disposable {
 
   constructor() {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-    this.item.command = 'Standardoc.daemon.restart';
+    this.item.command = 'Standardoc.statusBarMenu';
     this.item.show();
   }
 

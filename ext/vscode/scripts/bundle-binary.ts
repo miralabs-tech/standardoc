@@ -24,6 +24,12 @@ const source = present[0]!;
 
 const targetDir = path.join(extRoot, 'dist', 'bin');
 const target = path.join(targetDir, exe);
+
+if (fs.existsSync(targetDir)) {
+  for (const entry of fs.readdirSync(targetDir)) {
+    fs.rmSync(path.join(targetDir, entry), { force: true });
+  }
+}
 fs.mkdirSync(targetDir, { recursive: true });
 
 try {

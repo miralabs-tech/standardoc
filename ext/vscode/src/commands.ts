@@ -42,6 +42,7 @@ export function registerCommands(context: vscode.ExtensionContext, ctx: CommandC
     vscode.commands.registerCommand('Standardoc.daemon.stop', () => commandDaemonStop(ctx)),
     vscode.commands.registerCommand('Standardoc.daemon.start', () => commandDaemonStart(ctx)),
     vscode.commands.registerCommand('Standardoc.purgeExcluded', () => commandPurgeExcluded(ctx)),
+    vscode.commands.registerCommand('Standardoc.statusBarMenu', () => commandStatusBarMenu(ctx)),
   );
 }
 
@@ -168,6 +169,24 @@ async function commandRegenerateSkill(ctx: CommandContext): Promise<void> {
   } catch (e) {
     void vscode.window.showErrorMessage(`Regenerate AI agent skill failed: ${describeError(e)}`);
   }
+}
+
+interface StatusBarMenuItem extends vscode.QuickPickItem {
+  readonly commandId: string;
+}
+
+async function commandStatusBarMenu(_ctx: CommandContext): Promise<void> {
+  const items: StatusBarMenuItem[] = [
+    { label: '$(play) Start daemon', commandId: 'Standardoc.daemon.start' },
+    { label: '$(debug-stop) Stop daemon', commandId: 'Standardoc.daemon.stop' },
+    { label: '$(refresh) Restart daemon', commandId: 'Standardoc.daemon.restart' },
+    { label: '$(trash) Purge excluded paths', commandId: 'Standardoc.purgeExcluded' },
+  ];
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Standardoc — choose an action',
+  });
+  if (!picked) return;
+  await vscode.commands.executeCommand(picked.commandId);
 }
 
 async function commandDaemonRestart(ctx: CommandContext): Promise<void> {
