@@ -71,13 +71,20 @@
           "description": "Absolute path to a custom `standardoc` binary. When set, overrides the bundled binary in `dist/bin/`."
         }
       }
-    }
+    },
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "standardoc.mcp",
+        "label": "Standardoc"
+      }
+    ]
   },
   "scripts": {
     "build": "bun build ./src/extension.ts --format=cjs --target=node --external=vscode --outdir=./dist --sourcemap=external",
     "build:prod": "bun build ./src/extension.ts --format=cjs --target=node --external=vscode --outdir=./dist --minify --sourcemap=external",
     "watch": "bun build ./src/extension.ts --format=cjs --target=node --external=vscode --outdir=./dist --watch --sourcemap=external",
     "typecheck": "tsc --noEmit",
+    "test": "bun test",
     "package": "bun run dev:bundle && bun run build:prod && vsce package",
     "vscode:prepublish": "bun run build:prod",
     "dev:daemon": "cargo build --manifest-path ../../Cargo.toml -p standardoc-cli",

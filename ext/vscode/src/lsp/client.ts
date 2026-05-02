@@ -1,26 +1,73 @@
 import * as vscode from 'vscode';
-import type { LanguageClient } from 'vscode-languageclient/node';
+import {
+  LanguageClient,
+  type LanguageClientOptions,
+  type ServerOptions,
+  State,
+  TransportKind,
+} from 'vscode-languageclient/node';
+
+export type LspState = 'stopped' | 'starting' | 'running';
 
 export class LspClient implements vscode.Disposable {
   private client: LanguageClient | null = null;
+  private stateSub: vscode.Disposable | null = null;
+  private readonly emitter = new vscode.EventEmitter<LspState>();
+
+  readonly onStateChange: vscode.Event<LspState> = this.emitter.event;
 
   constructor(
-    private readonly context: vscode.ExtensionContext,
     private readonly workspaceRoot: string,
     private readonly output: vscode.OutputChannel,
   ) {}
 
-  async start(_binaryPath: string): Promise<void> {
-    throw new Error(
-      'TODO: Phase B — spawn `standardoc lsp <workspace>` over stdio + start LanguageClient',
-    );
+  async start(binaryPath: string): Promise<void> {
+    if (this.client) return;
+
+    const serverOptions: ServerOptions = {
+      command: binaryPath,
+      args: ['lsp', this.workspaceRoot],
+      transport: TransportKind.stdio,
+    };
+    const clientOptions: LanguageClientOptions = {
+      documentSelector: [
+        { scheme: 'file', language: 'rust' },
+        { scheme: 'file', language: 'typescript' },
+        { scheme: 'file', language: 'typescriptreact' },
+        { scheme: 'file', language: 'javascript' },
+        { scheme: 'file', language: 'javascriptreact' },
+      ],
+      outputChannel: this.output,
+    };
+
+    const client = new LanguageClient('standardoc', 'Standardoc', serverOptions, clientOptions);
+    this.stateSub = client.onDidChangeState(event => this.emitter.fire(toLspState(event.newState)));
+    this.client = client;
+    await client.start();
   }
 
   async stop(): Promise<void> {
-    throw new Error('TODO: Phase B — gracefully stop LanguageClient');
+    const client = this.client;
+    if (!client) return;
+    this.client = null;
+    this.stateSub?.dispose();
+    this.stateSub = null;
+    await client.stop();
   }
 
   dispose(): void {
-    void this.client?.dispose();
+    this.stateSub?.dispose();
+    this.stateSub = null;
+    if (this.client) {
+      void this.client.stop().catch(() => undefined);
+      this.client = null;
+    }
+    this.emitter.dispose();
   }
+}
+
+function toLspState(s: State): LspState {
+  if (s === State.Running) return 'running';
+  if (s === State.Starting) return 'starting';
+  return 'stopped';
 }

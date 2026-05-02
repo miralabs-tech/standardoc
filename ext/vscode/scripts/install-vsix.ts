@@ -26,13 +26,22 @@ stats.sort((a, b) => b.mtime - a.mtime);
 const latest = stats[0]!.name;
 const fullPath = path.join(extRoot, latest);
 
-console.log(`Installing ${latest}…`);
-const result = spawnSync('code', ['--install-extension', fullPath, '--force'], {
+const codeCmd = process.platform === 'win32' ? 'code.cmd' : 'code';
+
+console.log(`Installing ${latest} via ${codeCmd}…`);
+const result = spawnSync(codeCmd, ['--install-extension', fullPath, '--force'], {
   stdio: 'inherit',
   shell: true,
 });
 
-if (result.status !== 0) {
-  console.error('`code --install-extension` failed. Make sure the VSCode CLI is on your PATH.');
+if (result.status === 0) {
+  console.log(`Installed ${latest}.`);
+} else {
+  console.error(`\`${codeCmd} --install-extension\` failed (status ${result.status}).`);
+  if (process.platform === 'win32') {
+    console.error('On Windows, ensure `<VSCode install>\\bin` is on your PATH so');
+    console.error('that `code.cmd` resolves to the CLI launcher (not `Code.exe`, the GUI).');
+  }
+  console.error(`Fallback: VSCode → Ctrl+Shift+X → ... → Install from VSIX → ${fullPath}`);
 }
 process.exit(result.status ?? 1);

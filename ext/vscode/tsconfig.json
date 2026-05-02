@@ -16,6 +16,6 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["node", "bun-types"]
   },
-  "include": ["src/**/*", "scripts/**/*"],
+  "include": ["src/**/*", "scripts/**/*", "tests/**/*"],
   "exclude": ["node_modules", "dist", ".old"]
 }

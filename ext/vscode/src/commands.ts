@@ -1,12 +1,17 @@
 import * as vscode from 'vscode';
+import * as path from 'node:path';
 import type { DaemonSupervisor } from './daemon/supervisor';
 import type { LspClient } from './lsp/client';
 import type { McpClient } from './mcp/client';
+import type { RawSymbolJson, SymbolContextWithNeighborsJson } from './mcp/types';
+import { formatSymbolContext, parseToolResult, pickTopFqdn } from './commands-render';
 
 export interface CommandContext {
   readonly supervisor: DaemonSupervisor;
   readonly lsp: LspClient;
   readonly mcp: McpClient;
+  readonly output: vscode.OutputChannel;
+  readonly workspaceRoot: string;
 }
 
 export function registerCommands(context: vscode.ExtensionContext, ctx: CommandContext): void {
@@ -17,14 +22,127 @@ export function registerCommands(context: vscode.ExtensionContext, ctx: CommandC
   );
 }
 
-async function commandDaemonRestart(_ctx: CommandContext): Promise<void> {
-  throw new Error('TODO: Phase B — Standardoc.daemon.restart');
+async function commandDaemonRestart(ctx: CommandContext): Promise<void> {
+  try {
+    await ctx.supervisor.restart();
+    void vscode.window.showInformationMessage('Standardoc daemon restarted');
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Daemon restart failed: ${describeError(e)}`);
+  }
 }
 
-async function commandFindSymbol(_ctx: CommandContext): Promise<void> {
-  throw new Error('TODO: Phase B — prompt query, call mcp.findSymbol, render quick-pick');
+interface FindSymbolItem extends vscode.QuickPickItem {
+  readonly symbol: RawSymbolJson;
 }
 
-async function commandGetContext(_ctx: CommandContext): Promise<void> {
-  throw new Error('TODO: Phase B — derive fqdn from active editor selection, call mcp.getContext, show result');
+async function commandFindSymbol(ctx: CommandContext): Promise<void> {
+  const query = await vscode.window.showInputBox({
+    prompt: 'Search Standardoc symbols by name or FQDN',
+    placeHolder: 'e.g. parse_workspace',
+  });
+  if (!query || !query.trim()) return;
+
+  const raw = await safeFindSymbol(ctx, query, 50);
+  if (raw === null) return;
+
+  const parsed = parseToolResult<RawSymbolJson[]>(raw);
+  if (parsed.kind === 'indexing') {
+    void vscode.window.showInformationMessage(parsed.message);
+    return;
+  }
+  if (parsed.value.length === 0) {
+    void vscode.window.showInformationMessage(`No symbols match "${query}"`);
+    return;
+  }
+
+  const items: FindSymbolItem[] = parsed.value.map(s => ({
+    label: s.fqdn,
+    description: s.kind,
+    detail: `${s.location.file}:${s.location.start_line}`,
+    symbol: s,
+  }));
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: `${parsed.value.length} matches — pick a symbol to open`,
+    matchOnDescription: true,
+    matchOnDetail: true,
+  });
+  if (!picked) return;
+
+  await openSymbolLocation(ctx.workspaceRoot, picked.symbol);
+}
+
+async function commandGetContext(ctx: CommandContext): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    void vscode.window.showInformationMessage('No active editor — open a source file first');
+    return;
+  }
+  const range = editor.document.getWordRangeAtPosition(editor.selection.active);
+  if (!range) {
+    void vscode.window.showInformationMessage('Place the cursor on a symbol name');
+    return;
+  }
+  const word = editor.document.getText(range);
+
+  const findRaw = await safeFindSymbol(ctx, word, 5);
+  if (findRaw === null) return;
+
+  const found = parseToolResult<RawSymbolJson[]>(findRaw);
+  if (found.kind === 'indexing') {
+    void vscode.window.showInformationMessage(found.message);
+    return;
+  }
+  const fqdn = pickTopFqdn(found.value);
+  if (!fqdn) {
+    void vscode.window.showInformationMessage(`No symbol matches "${word}"`);
+    return;
+  }
+
+  let ctxRaw: string;
+  try {
+    ctxRaw = await ctx.mcp.getContext(fqdn, 1);
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Get context failed: ${describeError(e)}`);
+    return;
+  }
+
+  const ctxParsed = parseToolResult<SymbolContextWithNeighborsJson>(ctxRaw);
+  if (ctxParsed.kind === 'indexing') {
+    void vscode.window.showInformationMessage(ctxParsed.message);
+    return;
+  }
+
+  ctx.output.appendLine('');
+  ctx.output.appendLine(formatSymbolContext(ctxParsed.value));
+  ctx.output.show(true);
+}
+
+async function safeFindSymbol(
+  ctx: CommandContext,
+  query: string,
+  limit: number,
+): Promise<string | null> {
+  try {
+    return await ctx.mcp.findSymbol(query, limit);
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Find symbol failed: ${describeError(e)}`);
+    return null;
+  }
+}
+
+async function openSymbolLocation(workspaceRoot: string, symbol: RawSymbolJson): Promise<void> {
+  const absolute = path.resolve(workspaceRoot, symbol.location.file);
+  const uri = vscode.Uri.file(absolute);
+  const doc = await vscode.workspace.openTextDocument(uri);
+  const editor = await vscode.window.showTextDocument(doc);
+  const pos = new vscode.Position(
+    Math.max(0, symbol.location.start_line - 1),
+    symbol.location.start_col,
+  );
+  editor.selection = new vscode.Selection(pos, pos);
+  editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+}
+
+function describeError(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
