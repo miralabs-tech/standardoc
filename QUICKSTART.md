@@ -1,159 +1,153 @@
-# Quickstart — 5 minutes from zero to a documented project
+# Quickstart
 
 📖 English · [Français](QUICKSTART.fr.md)
 
-This walks you from a fresh Rust workspace to a running standardoc daemon
-that an AI agent (Claude Code, Cursor, …) can query, with live diagnostics
-in your editor.
+5 minutes from zero to a Standardoc-indexed workspace that AI agents can query.
 
-> If you already cloned standardoc and just want to use it: skip to
-> **Step 2** with the binary at `target/release/standardoc-server`.
-
-## Step 0 — Build the binaries
-
-```sh
-git clone https://github.com/miralabs-tech/standardoc
-cd standardoc
-cargo build --release -p standardoc-server -p standardoc
-```
-
-After build, the binaries you'll use are:
-- `target/release/standardoc-server` — the daemon (LSP + MCP)
-- `target/release/standardoc` — the CLI (one-shot scan / transform / validate)
-
-## Step 1 — Annotate your code
-
-In any Rust / TypeScript / Python / Lua file, add `@doc` comments above
-public symbols:
-
-```rust
-/// Adds two integers.
-/// @doc math.add add
-/// @param a i32 first operand
-/// @param b i32 second operand
-/// @returns i32 the sum
-pub fn add(a: i32, b: i32) -> i32 { a + b }
-```
-
-The minimum is `@doc <key>`. Everything else is optional but unlocks more
-DSL features (`@param`, `@returns`, `@example`, `@see`, custom tags).
-
-## Step 2 — Scan and validate
-
-```sh
-# See what was discovered
-standardoc scan /path/to/your/project
-
-# Run the validator (prints any STD001-STD012 issues)
-standardoc validate /path/to/your/project
-```
-
-Common first-time output: a few `STD006` hints ("public symbol with no
-@doc") — pick the ones worth documenting and ignore the rest. Add
-`"STD006": "off"` to `.standardoc.json` to silence permanently.
-
-## Step 3 — Write narrative pages
-
-Create `.standardoc/pages/01-getting-started.md`:
-
-```markdown
----
-title: Getting Started
 ---
 
-# Welcome
-
-We expose a single `add` function:
-
-`{{ @doc.math.add:symbol.signature }}`
-
-{{ @doc.math.add:description }}
-
-**Parameters**
-
-{{ each p in @doc.math.add:param }}
-- `{{ p.name }}` (`{{ p.type }}`): {{ p.description }}
-{{ /each }}
-```
-
-The `{{ @doc.math.add:… }}` expressions resolve at render time against the
-live index — change the source comment and the doc updates next rescan.
-
-## Step 4 — Run the daemon (LSP + MCP)
+## 1. Install the CLI
 
 ```sh
-target/release/standardoc-server --mcp --workspace /path/to/your/project
+cargo install standardoc-cli
+stdoc --version
 ```
 
-This starts both protocols on stdio simultaneously :
-- The LSP pushes diagnostics, completions on `@doc.…`, hover, goto-def,
-  references, rename, and DSL semantic-token highlighting to your editor
-- The MCP exposes 28 tools to AI agents
+You now have a single binary `stdoc` with sub-commands:
 
-For Claude Code / Cursor, drop a `.mcp.json` at your workspace root :
+```sh
+stdoc lsp <workspace>             # primary writer daemon (acquires fs lock)
+stdoc mcp <workspace> --readonly  # read-only MCP daemon
+stdoc index <workspace>           # one-shot scan + index
+stdoc rescan <workspace>          # rebuild from scratch
+stdoc purge-excluded <workspace>  # drop symbols matching .stdignore
+```
+
+You can stop here if you only want CLI / standalone MCP usage with Claude
+Desktop, Cursor or the Claude Code CLI — see [§5](#5-use-without-the-vscode-extension).
+For the integrated VSCode flow, continue.
+
+---
+
+## 2. Install the VSCode extension
+
+Search **Standardoc** in the VSCode Extensions panel, or grab the latest VSIX
+from [releases](https://github.com/miralabs-tech/standardoc/releases) and:
+
+```sh
+code --install-extension standardoc-X.Y.Z.vsix
+```
+
+The extension auto-spawns the daemon, supervises restarts, registers Standardoc
+as an MCP server for Copilot Chat / Claude Code in VSCode, and surfaces a
+status bar item.
+
+---
+
+## 3. Initialize a workspace
+
+Open any Rust or TypeScript project in VSCode. On first activation you get a
+notification:
+
+> **Standardoc: Initialize this workspace?** (DB index + register MCP for Claude Code CLI)
+>
+> [Initialize] [Skip] [Never for this workspace] [Never (any workspace)]
+
+Click **Initialize**. The extension:
+
+1. Creates `.standardoc/` (SQLite index + workspace metadata)
+2. Writes `.mcp.json` at the workspace root with absolute paths
+3. Generates `.claude/skills/standardoc/SKILL.md` for Claude Code
+4. Spawns the LSP daemon (cold start ~5-15s on first run)
+
+Cold start indexes every `.rs` / `.ts` / `.tsx` / `.js` / `.jsx` file. After
+that, a watcher keeps the index live.
+
+> Consider adding `.mcp.json` to your `.gitignore` if collaborating —
+> the file contains machine-absolute paths that aren't portable.
+
+---
+
+## 4. Use it
+
+### From AI agents (Claude Code / Copilot Chat in VSCode)
+
+The skill auto-loads. Just ask the agent normal questions about your codebase:
+
+> *"Where is `parse_workspace` defined? Who calls it?"*
+
+The agent uses `find_symbol` + `get_context` instead of grepping. ~100 tokens
+per query instead of 30k.
+
+### From the VSCode command palette
+
+- `Standardoc: Find symbol` — InputBox + QuickPick over `find_symbol`, opens
+  the chosen symbol at its source location.
+- `Standardoc: Get context for symbol at cursor` — runs `find_symbol` on the
+  word under the cursor, takes the top match, renders `get_context(fqdn,
+  depth=1)` into the Standardoc output channel.
+- `Standardoc: Daemon: Stop` / `Start` / `Restart`
+- `Standardoc: Refresh .mcp.json paths` — re-merge with current absolute paths
+  after moving the workspace or rebuilding the binary elsewhere.
+- `Standardoc: Regenerate AI agent skill` — overwrite the SKILL.md template.
+
+---
+
+## 5. Use without the VSCode extension
+
+Standardoc MCP works with any MCP-aware client. Add this to your client's MCP
+config (replace `<workspace>` and `<binary>` with absolute paths):
 
 ```json
 {
   "mcpServers": {
-    "myproj": {
+    "standardoc": {
       "type": "stdio",
-      "command": "/abs/path/to/standardoc-server",
-      "args": ["--mcp", "--workspace", "/abs/path/to/your/project"]
+      "command": "<binary>",
+      "args": ["mcp", "<workspace>", "--readonly"]
     }
   }
 }
 ```
 
-For VSCode + the standardoc LSP extension (TBD), the editor auto-spawns the
-daemon.
-
-## Step 5 — Add a custom language (no recompile)
-
-Got a language not in the built-ins? Drop a JSON in
-`.standardoc/languages/`:
-
-**Pure regex** (any language, no AST needed):
-
-```json
-{
-  "id": "myx",
-  "extensions": [".myx"],
-  "commentStyles": { "single": ["#"], "docSingle": ["##"] },
-  "backend": {
-    "kind": "regex",
-    "patterns": [
-      { "kind": "function", "regex": "^\\s*fn\\s+(?P<name>\\w+)\\((?P<params>[^)]*)\\)" }
-    ]
-  }
-}
-```
-
-Restart the daemon to pick up new `.standardoc/languages/*.json` files.
-
-For **tree-sitter forks** that extend an existing grammar (currently only
-`lua`) with extra capture patterns, see
-[`examples/dynamic-langs/`](examples/dynamic-langs/) — that README also
-documents the limits (a fork **cannot** change syntax, add operators or
-introduce new tokens; it only adds captures over an existing grammar).
-
-## Step 6 — Iterate
-
-While editing source or markdown, the watcher rescans on save:
-- New `@doc` annotations show up in MCP tools immediately
-- Broken `@doc.X` references trigger STD004 warnings in your editor
-- DSL syntax errors trigger STD007
-
-Rebuild & redeploy the daemon after a standardoc upgrade :
+You also need an active LSP daemon (the **primary writer**) to keep the index
+fresh. Run it in a terminal:
 
 ```sh
-./scripts/build.sh    # or ./scripts/build.ps1 on Windows
-# Pick [2] prod — kills running servers, rebuilds into target/release/.
-# Then: open a new Claude Code conversation. No VSCode restart needed.
+stdoc lsp /abs/path/to/workspace
 ```
+
+The LSP holds the workspace fs lock; multiple `--readonly` MCP clients can
+attach concurrently to the same SQLite index without contention.
+
+Common config locations:
+
+- **Claude Desktop** — `claude_desktop_config.json` (Settings → Developer → Edit Config)
+- **Claude Code CLI** — `~/.claude.json` or per-project `.mcp.json`
+- **Cursor** — `~/.cursor/mcp.json` or workspace `.cursor/mcp.json`
+
+---
+
+## 6. Tune the index
+
+### `.stdignore`
+
+Auto-seeded at workspace root on first init. Gitignore syntax. Default
+template excludes `.git/`, `node_modules/`, `target/`, `dist/`, `build/`,
+`.old/`, `*-old/`, `test-export/`. Edit freely — additions exclude paths,
+removals trigger an auto re-index of the affected subtree.
+
+### Pause / purge
+
+- `stdoc purge-excluded <workspace>` removes from the index any symbol whose
+  source file now matches `.stdignore` (useful after enriching the file).
+
+---
 
 ## Where to next
 
-- [`README.md`](README.md) — the full feature surface
-- [`examples/`](examples/) — runnable demos for Rust, TypeScript, mixed-language, and dynamic providers
-- MCP tool `get_dsl_reference` — exhaustive DSL reference (`each`, `if`, function calls, block iteration, …)
-- MCP resources `standardoc://*` — every MCP tool and resource discoverable directly from your IDE
+- [README.md](README.md) — full feature surface and architecture diagram
+- [ABOUT.md](ABOUT.md) — why Standardoc exists and how it differs from LSP /
+  Sourcegraph / TypeDoc / etc.
+- [FAQ.md](FAQ.md) — common questions
+- [COMPARISON.md](COMPARISON.md) — side-by-side with adjacent tools

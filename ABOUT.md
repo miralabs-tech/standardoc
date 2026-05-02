@@ -2,126 +2,159 @@
 
 📖 English · [Français](ABOUT.fr.md)
 
-> **One-line pitch** : a documentation tool that solves a single problem — **your docs never drift from your code**, no matter what you refactor. And along the way, it exposes your codebase to any AI agent via MCP, regardless of language, even if the project was never initialized with standardoc.
+> **One-line pitch** — a local semantic graph of your code, with the AST as
+> source of truth, surfaced over MCP so AI agents stop grepping and start
+> querying.
 
 ---
 
-## The problem
+## 🧠 The problem
 
-Documentation drifts. Always.
+When an AI agent answers *"what does function X take as input?"*, today it does
+`grep -r "fn X" .` then `cat src/foo.rs` then guesses. Cost: **30k-100k tokens**
+per question, on every conversation, on every project.
 
-Every doc tool today asks you to write the same information twice :
-- once in the code (signatures, types, constraints, semantics)
-- once in markdown / JSDoc / a `.rst` file / a wiki / Notion / Confluence
+For humans the problem is parallel. Modern codebases are too complex to keep a
+mental model of. Existing tooling fragments the answer:
 
-The instant the code changes, the doc is wrong. You can rename a parameter in code in one second. Updating the 47 markdown files that mention it takes hours — and nobody does it consistently. Six months later, half the doc is lying to your users.
+- **LSP** gives you precise per-language symbol resolution but no cross-language
+  graph and no AI-friendly query surface.
+- **Grep / Sourcegraph** gives you text-level navigation but no semantic
+  meaning — you find occurrences, not relationships.
+- **JSDoc / TypeDoc / Sphinx** gives you narrative prose, hand-maintained,
+  perpetually drifting from the code it claims to describe.
 
-JSDoc, TypeDoc, Sphinx, Docusaurus in manual mode, Nextra, GitBook — they all share the same flaw : the **link from code to prose is human-maintained**, and humans break that link every time they ship a feature under deadline.
+Standardoc bridges this: a **single local index** built from the AST, exposed
+to humans (LSP) and AI (MCP) through one stable contract.
 
-For AI agents, the problem multiplies. To answer "what does function X take as input?", an agent today does `grep -r "fn X" .` then `cat src/foo.rs` then guesses. Cost : 30k–100k tokens per question. With a fresh, structured doc index, the same answer costs ~100 tokens. **A 100x to 1000x reduction**, systematically.
+---
 
-## The thesis
+## 💡 The thesis
 
-Decouple **structured data** (annotations next to symbols, machine-readable) from **narrative prose** (markdown, human-written), and link the two with a small DSL the IDE understands.
+### Code is the source of truth
 
-```rust
-/// Adds two integers.
-/// @doc math.add add
-/// @param a i32 first operand
-/// @param b i32 second operand
-/// @returns i32 the sum
-pub fn add(a: i32, b: i32) -> i32 { a + b }
-```
+The AST is **structurally accurate by definition**. Standardoc parses Rust
+with `syn` and TypeScript with `swc`, normalizes both into a canonical
+intermediate representation (FQDN-keyed symbols, typed edges), and persists
+the graph in SQLite with FTS5 for fuzzy search.
 
-```markdown
-## `{{ @doc.math.add:label }}`
+No annotations required. The AST tells the truth — Standardoc just listens.
 
-{{ @doc.math.add:description }}
+### Structure is derived
 
-`{{ @doc.math.add:symbol.signature }}`
+`<package>::<module>::<name>` is a stable identifier across Rust and TypeScript.
+Edges are typed: `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`,
+`DEFINES`, `USES_TYPE`, `EXPOSES_API`. Cross-language jumps (Rust ↔ TS via
+Tauri commands, TS ↔ Rust via WASM bindings) materialize as
+`UnresolvedBridge` edges that future bridge plug-ins will resolve.
 
-{{ each p in @doc.math.add:param }}
-- **{{ p.name }}** (`{{ p.type }}`): {{ p.description }}
-{{ /each }}
-```
+### Understanding is a system
 
-Rename `add` to `sum` in the source ? The doc follows automatically. Change a parameter type ? The doc follows. Delete a parameter ? The LSP screams red in your editor with diagnostic STD008.
+A graph you can query is more useful than ten doc pages you have to read.
+The MCP server exposes two tools:
 
-The annotation lives **next to** its symbol. The prose lives in markdown **separately**. The DSL stitches them together at render time. Move either, the link survives. Drift becomes architecturally impossible.
+- `find_symbol(query, limit?)` — fuzzy FTS5 search → list of symbols.
+- `get_context(fqdn, depth: 1|2)` — symbol + neighbors (callers, callees,
+  imports, imported_by) as a graph slice.
 
-## The double moat
+Two tools. Honest contract. AI agents learn them once and reuse them on every
+project.
 
-### 1. Zero-drift between code and prose
+---
 
-This is the *functional* moat. TypeDoc / Nextra / Docusaurus in manual usage all push the dev to re-edit the prose every time the code shifts. Standardoc eliminates that step. Once you've used a tool that guarantees the doc matches the code, going back feels reckless.
+## 🤖 Why MCP-first
 
-### 2. Universal, language-agnostic MCP server
+Existing MCP servers fall into two camps:
 
-This is the *strategic* moat. Existing MCP servers are nearly all :
-- **product-specific** (Stripe MCP, Linear MCP, GitHub MCP, …) — useful for that one product, useless for your code
-- **library-specific** (one MCP per framework) — fragmentation, maintenance burden
+- **Product-specific** (Stripe MCP, Linear MCP, GitHub MCP) — useful for that
+  one product, useless for *your code*.
+- **Library-specific** (one MCP per framework) — fragmentation, maintenance
+  burden, never covers what you actually use.
 
-Standardoc is the first MCP server that :
+Standardoc is the first MCP server that:
 
-- indexes **any codebase** (Rust, TypeScript, Python natively + tree-sitter for Lua / and dynamically-loaded providers)
-- works **even on a project never initialized with standardoc** : the AST auto-discovers all exports, `@doc` annotations are just enrichment
-- exposes one stable protocol agents learn once and reuse everywhere — same set of tools whether you're indexing a 200-line script or a 200k-LOC monorepo
+- Indexes **any codebase** (Rust + TS day-1, more languages coming
+  post-beta.1).
+- Works **without any annotation** — drop in, run cold start, query.
+- Exposes **one stable contract** that agents learn once and reuse on every
+  project.
 
-For an AI agent, `{{ @doc.foo:description }}` resolved via MCP costs ~100 tokens vs 10k–100k tokens of `grep + read` over the repo. **100x to 1000x token savings**, on every question, every conversation, every project.
+For an AI agent, `get_context("myapp::server::handle_request", 1)` resolved via
+MCP costs ~100 tokens vs 10k-100k tokens of `grep + read` over the repo.
+**100x to 1000x token savings**, systematically.
 
-## Who it's for
+---
 
-Three personas, three modes of usage :
+## 🎯 Why Rust + TypeScript first
 
-### The developer (writes annotations)
+Two languages. Both popular. Both have first-class native parsers (`syn`,
+`swc`). Both common in modern stacks (Rust backend + TS frontend, Tauri
+desktop apps, web extensions).
 
-You annotate functions with `@doc key`, optionally `@param name type description`, `@returns type description`, etc. Your IDE (via the LSP) gives completion, hover, goto-definition for every reference, and rename refactoring that propagates `DocKey` changes into all `.md` files automatically.
+Reducing scope to two languages lets us **perfect the foundation** before
+expanding. Once Rust and TS are rock-solid (FQDN unification, cross-language
+bridges, edge resolution, performance on 200k LOC monorepos), adding Python /
+Go / Java / Swift via tree-sitter or native parsers becomes a copy-paste of
+the language provider trait.
 
-You spend 30 seconds per function annotating, save weeks of doc maintenance.
+The alternative — shipping 10 languages with mediocre depth — is what existing
+tools do, and it's why none of them give AI agents a useful semantic surface.
 
-### The doc reader (consumes the rendered output)
+---
 
-A user opens your published doc site and reads exactly what was in the source at the moment of build. The signatures are accurate. The parameter types match. The links work. Examples are real, executable code, not fictionalized snippets. Trust restored.
+## 🔓 Open-core posture
 
-### The AI agent (queries the index)
+**Standardoc Core** — CLI, LSP, MCP, all language providers, VSCode
+extension. Source under [FSL-1.1-MIT](LICENSE) — converts to **plain MIT on
+April 26, 2028**. Free for any non-competing use today, fully MIT after that.
 
-An agent (Claude Code, Cursor, Zed, Continue, …) connects via MCP, gets 28 tools to query the index : list docs, search by type, find usages, validate doc syntax, generate llms.txt / skill.md / OpenAPI exports. The agent never has to grep. The agent never hallucinates a signature. The agent answers questions in 100 tokens, not 100k.
+The focus stays on the open-source Core. As long as Standardoc has no
+cloud/server component that would justify recurring infrastructure, there
+is **no reason to offer a subscription** — and none is planned. If a
+companion tool ever ships (e.g. a GitBook-style local doc UI that runs
+on your machine, no hosting), it would ship under a **one-time lifetime
+license**. Either way, the Core stays OSS and the MIT conversion date
+above is locked.
 
-## Open-core
+No SaaS. No per-seat subscription. No telemetry. No upsell modal in your IDE.
 
-Standardoc is **open-core, GitLab-style**.
+---
 
-- **Standardoc Core** — CLI, LSP, MCP, all language providers, DSL, validator, plugins API, HTTP/SSE backend. Source under [FSL-1.1-MIT](LICENSE) (converts to plain MIT after 2 years). Free for any non-competing use.
-- **Standardoc Pro** — the polished web UI (GitBook-like navigation, MDX live components, search, polish). Closed-source, one-time **lifetime** purchase, no subscription. Distributed as a binary.
+## 🚀 Long-term direction
 
-The bet : the dev tooling stays free to maximize ecosystem reach (the moat is adoption). The polished UI for non-dev doc creation gets monetized as a one-time purchase to fund my work on the Core (because no infrastructure cost can be sustained without revenue).
+What's coming:
 
-**Pro doesn't ship until `v1.0.0`.** While Standardoc is in `v0.x.x`, everything I publish is OSS — the Pro tier is held back so the API surface stabilizes first and so paying users get something that won't break under their feet next week.
+- **More language providers** — Python / Go / Java / C# / Swift / Zig via
+  native parsers or tree-sitter.
+- **Cross-language bridge plug-ins** (WASM) — Tauri command resolution, WASM
+  bindings, FFI declarations resolved across the graph.
+- **Virtual annotations** — synthesized doc descriptions for undocumented
+  public symbols (verb-prefix conventions, type-signature narratives, trait
+  impl templates).
+- **MDX/React rendering layer** — npm package shipping
+  `<Doc id="user.create" />`, `<Params id="user.create" />`,
+  `<Examples id="user.create" />`, `queryDocs("api.*")`. Drop-in for
+  Next/Nextra/Astro/Docusaurus/… The doc graph (SQLite) feeds the rendering
+  layer; no template engine, no custom DSL — just MDX with structured
+  queries. Targeting beta.2.
+- **Optional GitBook-style companion UI** — if the idea materializes,
+  local-only (runs on your machine, no hosting), one-time lifetime
+  license. Decided based on adoption.
 
-No SaaS, no per-seat subscription, no telemetry, no upsell modal in your IDE. Pay once for Pro if you want the UI, otherwise use the Core forever for free.
+The full backlog and milestone breakdown live in [TODO-LIST.md](TODO-LIST.md).
 
-## Long-term direction
+---
 
-What's coming :
+## 🙋 Why this project exists
 
-- **VSCode extension** — thin wrapper that auto-spawns the daemon, surfaces status, ships independent of `standardoc-server` itself
-- **Runtime WASM grammar loading** — drop a `tree-sitter-X.wasm` to add support for any language with a public grammar
-- **More language providers** — Java / Kotlin / Go / C# / Swift / Zig / etc. via tree-sitter once WASM loading lands
-- **Cross-ref FQN resolution** — proper `use` / `import` resolution per provider, ends the short-name ambiguity for large workspaces
-- **Pro web UI features** — version snapshots, doc usage analytics, AI-assisted annotation generation, team review queues, cross-repo references
+I'm the sole maintainer, working on Standardoc on top of a day job. Years of
+watching AI agents burn thousands of tokens to figure out what a 5-line
+function does, and watching documentation drift away from the code it claims
+to describe. Every doc tool I tried solved part of the problem and pushed the
+rest back onto manual work.
 
-The full backlog and milestone breakdown live in the project's internal notes — the public roadmap is published at v0.1.1.
+There had to be a single source of truth that humans could read and AI could
+query — without me rewriting it for each consumer. That's Standardoc.
 
-## Why this project exists
-
-I've spent years writing the same markdown files three times — once for the team, once for the website, once for the AI tools that didn't read the website. Each rewrite wrong by the time it's done. Each AI agent burning thousands of tokens to figure out what a 5-line function does.
-
-Before LLMs, doc was 100% manual. When you're the only one maintaining an open-source project on top of a day job, writing **and keeping current** the docs becomes the bottleneck that makes you give up. I've got a stack of side projects I either abandoned or kept private because of this — not because I dislike doc, but because keeping it in sync with a moving codebase took longer than writing the code itself. Standardoc is exactly the tooling I wish I'd had for those projects.
-
-There had to be a single source of truth that humans could read narratively and agents could query structurally — without me rewriting it for each consumer. That's standardoc.
-
-If it saves you time, [support the project](README.md#support-the-project).
-
-If you find a bug or want a feature, [open an issue](https://github.com/miralabs-tech/standardoc/issues).
-
-Once `v1.0.0` lands and [Standardoc Pro](/) ships, you'll be able to grab a one-time lifetime license for the polished web UI. Until then, everything is OSS and free.
+If it saves you time, [support the project](SUPPORT.md).
+If you find a bug, [open an issue](https://github.com/miralabs-tech/standardoc/issues).

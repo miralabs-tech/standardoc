@@ -2,36 +2,41 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: '1.91'
 
 jobs:
   fmt:
-    name: Format
+    name: Rust format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
 
   clippy:
-    name: Lint
+    name: Rust lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
-    name: Test (${{ matrix.os }})
+    name: Rust test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -40,14 +45,36 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: cargo test --workspace
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace -- --test-threads=1
 
   docs:
-    name: Docs
+    name: Rust docs
     runs-on: ubuntu-latest
     env:
       RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps
+
+  ext:
+    name: VSCode extension (TS)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ext/vscode
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+      - run: bun test
+      - run: bun run build

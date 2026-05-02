@@ -1,33 +1,30 @@
 [package]
 name = "standardoc-server"
-description = "LSP + MCP + SSE daemon for Standardoc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-
-[[bin]]
-name = "standardoc-server"
-path = "src/main.rs"
+description = "Standardoc daemon orchestration — open_workspace, watcher lifecycle, query re-exports. Bin (LSP/MCP) lands in later sessions; today this is the lib consumed by standardoc-cli."
 
 [dependencies]
-standardoc-core = { workspace = true }
-standardoc-lang-rust = { version = "0.1.0", path = "../standardoc-lang-rust" }
-standardoc-lang-ts = { version = "0.1.0", path = "../standardoc-lang-ts" }
-standardoc-lang-python = { version = "0.1.0", path = "../standardoc-lang-python" }
-standardoc-lang-tree-sitter = { version = "0.1.0", path = "../standardoc-lang-tree-sitter" }
-standardoc-web = { version = "0.1.0", path = "../standardoc-web" }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tower-lsp = "0.20.0"
-tokio = { version = "1.52.1", features = ["rt-multi-thread", "io-std", "io-util", "macros", "sync", "net", "signal"] }
-axum = "0.8.4"
-pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }
+standardoc-core  = { workspace = true }
+standardoc-ir    = { workspace = true }
+thiserror        = { workspace = true }
+tokio            = { workspace = true }
+tower-lsp-server = { workspace = true }
+rmcp             = { workspace = true, features = ["server", "transport-io", "macros"] }
+schemars         = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.27.0"
+standardoc-lang-provider = { workspace = true }
+tempfile                 = { workspace = true }
+serde_json               = { workspace = true }
+tower                    = "0.5"
 
 [lints]
 workspace = true

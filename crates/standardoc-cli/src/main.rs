@@ -1,517 +1,467 @@
-//! Standardoc CLI entry point.
-//!
-//! Commands implemented:
-//! - `scan <path>` — print canonical `DocBlock`s as JSON
-//! - `transform <path> <template.md>` — render a markdown template against a scan
-//! - `emit <format> <path>` — emit `llms`/`llms-full`/`skill` documentation
-//! - `validate <path>` — run validator rules, exit 1 on errors
-//! - `materialize <path>` — write virtual annotations into source as `///` comments
+#![allow(clippy::result_large_err)]
 
-use standardoc_core::config::Config;
-use standardoc_core::dsl::render_string;
-use standardoc_core::emit::{emit_llms_full, emit_llms_txt, emit_skill_md, EmitOptions};
-use standardoc_core::materialize::{apply_to_disk, plan, ConfidenceFilter, MaterializePlan};
-use standardoc_core::model::{DocBlock, Severity};
-use standardoc_core::pipeline::{scan_and_extract, PipelineReport};
-use standardoc_core::scanner::Registry;
-use standardoc_core::validator::validate;
-use standardoc_lang_python::PythonProvider;
-use standardoc_lang_rust::RustProvider;
-use standardoc_lang_tree_sitter::TreeSitterProvider;
-use standardoc_lang_ts::TsProvider;
-use std::path::Path;
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use clap::{ArgGroup, Args, Parser, Subcommand};
+use standardoc_core::{IndexHandle, ScanFilters, cold_start, spawn_watcher};
+use standardoc_lang_provider::WorkspaceProvider;
+use standardoc_ir::{RawEdge, RawSymbol, ResolvedOrUnresolved};
+use standardoc_server::ServerError;
+use standardoc_server::query;
+
+#[derive(Parser)]
+#[command(
+    name = "standardoc",
+    version,
+    about = "Standardoc — workspace-wide symbol graph"
+)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run cold start once on the workspace, then exit.
+    Index { path: PathBuf },
+
+    /// Run cold start, then watch the workspace live until Ctrl+C.
+    Watch { path: PathBuf },
+
+    /// Look up a symbol or run a search query (read-only, no watcher).
+    Query(QueryArgs),
+
+    /// Drop the existing index and re-build from scratch.
+    Rescan { path: PathBuf },
+
+    /// Remove indexed paths that now match the workspace's `.stdignore`.
+    PurgeExcluded {
+        path: PathBuf,
+
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Run the LSP daemon over stdio (workspace `<path>` is the index root).
+    Lsp {
+        path: PathBuf,
+
+        /// Accepted for vscode-languageclient compatibility; stdio is the only
+        /// transport supported and is the default — this flag is ignored.
+        #[arg(long, hide = true)]
+        stdio: bool,
+    },
+
+    /// Run the MCP daemon over stdio (workspace `<path>` is the index root).
+    Mcp {
+        path: PathBuf,
+
+        /// Open the index in read-only mode: do not acquire the workspace
+        /// lock, do not run cold start, do not spawn the watcher. Polls for
+        /// `.standardoc/index.db` for up to 60 s while a primary writer
+        /// (LSP daemon, `standardoc watch`, ...) initializes the workspace.
+        #[arg(long)]
+        readonly: bool,
+    },
+}
+
+#[derive(Args)]
+#[command(group(
+    ArgGroup::new("selector").required(true).multiple(false).args(["fqdn", "name", "file", "text"])
+))]
+struct QueryArgs {
+    /// Workspace root.
+    path: PathBuf,
+
+    /// Fully-qualified name lookup. Combine with --edges-from / --edges-to to
+    /// switch from symbol details to edge listings.
+    #[arg(long)]
+    fqdn: Option<String>,
+
+    /// Match symbols whose `name` equals the given identifier.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// List symbols defined in a workspace-relative file path.
+    #[arg(long)]
+    file: Option<String>,
+
+    /// Full-text search across symbol names + fqdns (FTS5).
+    #[arg(long)]
+    text: Option<String>,
+
+    /// List outbound edges (callees, imports, ...) from --fqdn.
+    #[arg(long, requires = "fqdn")]
+    edges_from: bool,
+
+    /// List inbound edges (callers, references, ...) into --fqdn.
+    #[arg(long, requires = "fqdn", conflicts_with = "edges_from")]
+    edges_to: bool,
+
+    /// Cap the number of results for --name / --text.
+    #[arg(short = 'l', long, default_value_t = 50)]
+    limit: usize,
+}
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("scan") => run_scan(&args[1..]),
-        Some("transform") => run_transform(&args[1..]),
-        Some("emit") => run_emit(&args[1..]),
-        Some("validate") => run_validate(&args[1..]),
-        Some("materialize") => run_materialize(&args[1..]),
-        Some("--help" | "-h") | None => {
-            print_help();
-            ExitCode::SUCCESS
-        }
-        Some(other) => {
-            eprintln!("unknown command: {other}");
-            print_help();
-            ExitCode::from(2)
+    match main_inner() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
         }
     }
 }
 
-/// @doc cli.commands.help --help
-/// @category meta
-/// @since 0.1
-/// @usage standardoc --help
-/// @description
-/// Print the command list with brief usage. Always exits `0`.
-fn print_help() {
+fn main_inner() -> Result<(), ServerError> {
+    match Cli::parse().cmd {
+        Command::Index { path } => cmd_index(&path),
+        Command::Watch { path } => cmd_watch(&path),
+        Command::Query(args) => cmd_query(&args),
+        Command::Rescan { path } => cmd_rescan(&path),
+        Command::PurgeExcluded { path, yes } => cmd_purge_excluded(&path, yes),
+        Command::Lsp { path, stdio: _ } => cmd_lsp(&path),
+        Command::Mcp { path, readonly } => cmd_mcp(&path, readonly),
+    }
+}
+
+fn cmd_lsp(path: &Path) -> Result<(), ServerError> {
+    let provider: Arc<dyn standardoc_core::LanguageProvider> = Arc::new(WorkspaceProvider::new());
+    let handle = IndexHandle::open(path)?;
+    let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(ServerError::Io)?;
+    runtime.block_on(standardoc_server::serve_lsp(handle, provider, filters))
+}
+
+fn cmd_mcp(path: &Path, readonly: bool) -> Result<(), ServerError> {
+    let provider: Arc<dyn standardoc_core::LanguageProvider> = Arc::new(WorkspaceProvider::new());
+    let handle = if readonly {
+        wait_for_db_then_open_readonly(path, READONLY_DB_WAIT)?
+    } else {
+        IndexHandle::open(path)?
+    };
+    let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(ServerError::Io)?;
+    runtime.block_on(standardoc_server::serve_mcp(handle, provider, filters))
+}
+
+const READONLY_DB_WAIT: Duration = Duration::from_secs(60);
+const READONLY_DB_POLL: Duration = Duration::from_millis(250);
+
+/// Poll for `.standardoc/index.db` until it exists, then open the index in
+/// read-only mode. Designed for an MCP daemon spawned in parallel with a
+/// primary writer (LSP daemon) on a workspace that may not have been
+/// indexed yet — the writer creates the DB during its own boot, and this
+/// helper unblocks once the file appears on disk.
+fn wait_for_db_then_open_readonly(
+    path: &Path,
+    timeout: Duration,
+) -> Result<IndexHandle, ServerError> {
+    let db_path = path.join(".standardoc").join("index.db");
+    let deadline = Instant::now() + timeout;
+    loop {
+        if db_path.exists() {
+            return IndexHandle::open_readonly(path).map_err(ServerError::from);
+        }
+        if Instant::now() >= deadline {
+            return Err(ServerError::Io(io::Error::other(format!(
+                "readonly: timed out after {:?} waiting for {} — \
+                 start a primary writer (LSP daemon, `standardoc watch`, ...) on this workspace first",
+                timeout,
+                db_path.display()
+            ))));
+        }
+        std::thread::sleep(READONLY_DB_POLL);
+    }
+}
+
+fn cmd_index(path: &Path) -> Result<(), ServerError> {
+    let provider = WorkspaceProvider::new();
+    let handle = IndexHandle::open(path)?;
+    let filters = ScanFilters::load(handle.workspace_root());
+    let progress = ProgressReporter::start(handle.clone());
+    let result = cold_start::run(&handle, &provider, &filters);
+    progress.stop();
+    result?;
+    Ok(())
+}
+
+fn cmd_watch(path: &Path) -> Result<(), ServerError> {
+    let provider: Arc<dyn standardoc_core::LanguageProvider> = Arc::new(WorkspaceProvider::new());
+    let handle = IndexHandle::open(path)?;
+    let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
+
+    let progress = ProgressReporter::start(handle.clone());
+    let cold_start_result = {
+        let guard = filters.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        cold_start::run(&handle, provider.as_ref(), &guard)
+    };
+    progress.stop();
+    cold_start_result?;
+
+    let _watcher = spawn_watcher(handle, provider, filters)?;
+    eprintln!(
+        "watching {} — press Ctrl+C to exit",
+        handle_root_display(path)
+    );
+    wait_ctrl_c();
+    eprintln!("shutting down");
+    Ok(())
+}
+
+fn cmd_query(args: &QueryArgs) -> Result<(), ServerError> {
+    let handle = IndexHandle::open(&args.path)?;
+    if let Some(fqdn) = args.fqdn.as_deref() {
+        return run_fqdn_query(&handle, fqdn, args);
+    }
+    if let Some(name) = args.name.as_deref() {
+        let results = query::symbols_by_name(&handle, name, args.limit)?;
+        print_symbol_list(&results);
+        return Ok(());
+    }
+    if let Some(file) = args.file.as_deref() {
+        let results = query::symbols_by_file(&handle, file)?;
+        print_symbol_list(&results);
+        return Ok(());
+    }
+    if let Some(text) = args.text.as_deref() {
+        let results = query::search_text(&handle, text, args.limit)?;
+        print_symbol_list(&results);
+        return Ok(());
+    }
+    // clap's ArgGroup guarantees one selector is set.
+    unreachable!("clap ArgGroup `selector` is `required(true)`")
+}
+
+fn run_fqdn_query(handle: &IndexHandle, fqdn: &str, args: &QueryArgs) -> Result<(), ServerError> {
+    if args.edges_from {
+        let edges = query::edges_from(handle, fqdn)?;
+        print_edge_list(&edges);
+        return Ok(());
+    }
+    if args.edges_to {
+        let edges = query::edges_to(handle, fqdn)?;
+        print_edge_list(&edges);
+        return Ok(());
+    }
+    match query::symbol_by_fqdn(handle, fqdn)? {
+        Some(symbol) => print_symbol_detail(&symbol),
+        None => println!("no symbol found for fqdn `{fqdn}`"),
+    }
+    Ok(())
+}
+
+const PURGE_PREVIEW_LIMIT: usize = 20;
+
+fn cmd_purge_excluded(path: &Path, yes_flag: bool) -> Result<(), ServerError> {
+    let handle = IndexHandle::open(path)?;
+    let filters = ScanFilters::load(handle.workspace_root());
+    let candidates = handle.list_paths_matching_ignore(&filters)?;
+
+    if candidates.is_empty() {
+        println!("(nothing to purge)");
+        return Ok(());
+    }
+
     println!(
-        "standardoc — scaffold\n\n\
-         USAGE:\n  \
-         standardoc scan <path>\n      \
-             Scan a directory and print canonical DocBlocks as JSON.\n  \
-         standardoc transform <path> <template.md>\n      \
-             Scan <path>, then render <template.md> with the DSL.\n  \
-         standardoc emit <format> <path> [--name <project>] [--tagline <line>] [--link-base <url>]\n      \
-             Scan <path>, then emit one of: llms, llms-full, skill.\n      \
-             Outputs to stdout. Redirect to a file with `>`.\n  \
-         standardoc validate <path>\n      \
-             Run validator rules. Exit 1 if any error-level diagnostic.\n  \
-         standardoc materialize <path> [--apply] [--confidence low|medium|high]\n      \
-             Write virtual annotations into source as `///` doc-comments.\n      \
-             Defaults to a dry-run; pass --apply to actually edit files.\n      \
-             Default --confidence is `medium` (skip low-tier suggestions).\n  \
-         standardoc --help\n      \
-             Show this help."
+        "found {} indexed path(s) matching `.stdignore`:",
+        candidates.len()
     );
-}
-
-fn build_registry(workspace: &Path) -> Registry {
-    use standardoc_core::lang_def::{load_workspace_languages, LanguageBackend};
-    use standardoc_core::lang_regex::RegexProvider;
-    let mut builder = Registry::builder()
-        .with(RustProvider)
-        .with(TsProvider)
-        .with(PythonProvider)
-        .with(TreeSitterProvider::lua());
-    for def in load_workspace_languages(workspace) {
-        builder = match &def.backend {
-            LanguageBackend::TreeSitterFork { .. } => match TreeSitterProvider::from_lang_def(&def)
-            {
-                Ok(p) => {
-                    eprintln!("standardoc: loaded tree-sitter fork '{}'", def.id);
-                    builder.with(p)
-                }
-                Err(err) => {
-                    eprintln!("standardoc: skipping '{}': {err}", def.id);
-                    builder
-                }
-            },
-            LanguageBackend::Regex { .. } => match RegexProvider::from_lang_def(&def) {
-                Ok(p) => {
-                    eprintln!("standardoc: loaded regex provider '{}'", def.id);
-                    builder.with(p)
-                }
-                Err(err) => {
-                    eprintln!("standardoc: skipping '{}': {err}", def.id);
-                    builder
-                }
-            },
-        };
+    for path in candidates.iter().take(PURGE_PREVIEW_LIMIT) {
+        println!("  {path}");
     }
-    builder.build()
-}
-
-/// @doc cli.commands.scan scan
-/// @category index
-/// @since 0.1
-/// @usage `standardoc scan <path>`
-/// @description
-/// Walk `<path>` and emit canonical [`DocBlock`](../crates/standardoc-core/src/model/)
-/// entries as JSON, one block per record.
-///
-/// Useful for : piping into `jq`, building external tooling, debugging discovery,
-/// snapshot diffs in CI.
-///
-/// **Exit codes** :
-/// - `0` — success
-/// - `1` — pipeline error (unreadable path, parse failure)
-/// - `2` — missing required argument
-///
-/// **Example** :
-/// ```sh
-/// standardoc scan ./my-project | jq '.[] | {key, kind: .symbol.kind}'
-/// ```
-fn run_scan(args: &[String]) -> ExitCode {
-    let Some(root) = args.first() else {
-        eprintln!("usage: standardoc scan <path>");
-        return ExitCode::from(2);
-    };
-    let report = match run_pipeline(Path::new(root)) {
-        Ok(r) => r,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
-
-    let ordered: Vec<DocBlock> = report.blocks.into_values().collect();
-    match serde_json::to_string_pretty(&ordered) {
-        Ok(json) => println!("{json}"),
-        Err(err) => {
-            eprintln!("failed to serialize blocks: {err}");
-            return ExitCode::from(1);
-        }
-    }
-    eprintln!(
-        "scanned {} block(s), {} error(s), {} key collision(s)",
-        ordered.len(),
-        report.errors.len(),
-        report.collisions.len()
-    );
-    for err in &report.errors {
-        eprintln!("error: {err}");
-    }
-    for collision in &report.collisions {
-        eprintln!(
-            "collision: key '{}' kept {}:{} — dropped {}",
-            collision.key,
-            collision.kept.path.display(),
-            collision.kept.line,
-            collision
-                .dropped
-                .iter()
-                .map(|p| format!("{}:{}", p.path.display(), p.line))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    if report.errors.is_empty() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    }
-}
-
-/// @doc cli.commands.transform transform
-/// @category render
-/// @since 0.1
-/// @usage `standardoc transform <path> <template.md>`
-/// @description
-/// Scan `<path>`, then render `<template.md>` against the resulting index. The
-/// template uses the standardoc DSL (`{{ @doc.KEY:tag }}`,
-/// `{{ each x in @docs.module(...) }}`, `{{ if ... }}`, …). Result printed to stdout.
-///
-/// **Exit codes** :
-/// - `0` — render OK
-/// - `1` — pipeline or render error
-/// - `2` — missing argument
-///
-/// **Example** :
-/// ```sh
-/// standardoc transform ./my-project ./docs-src/api.md > ./public/api.md
-/// ```
-fn run_transform(args: &[String]) -> ExitCode {
-    let (Some(root), Some(template_path)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: standardoc transform <path> <template.md>");
-        return ExitCode::from(2);
-    };
-    let template_src = match std::fs::read_to_string(template_path) {
-        Ok(s) => s,
-        Err(err) => {
-            eprintln!("cannot read template '{template_path}': {err}");
-            return ExitCode::from(1);
-        }
-    };
-    let (report, config) = match run_pipeline_with_config(Path::new(root)) {
-        Ok(r) => r,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
-    match render_string(&template_src, &report.blocks, &config.tags) {
-        Ok(rendered) => {
-            print!("{rendered}");
-            ExitCode::SUCCESS
-        }
-        Err(err) => {
-            eprintln!("render error: {err}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-/// @doc cli.commands.emit emit
-/// @category emit
-/// @since 0.1
-/// @usage `standardoc emit <format> <path> [--name <project>] [--tagline <line>] [--link-base <url>]`
-/// @description
-/// Generate one of three agent-oriented documentation standards from a workspace scan.
-///
-/// **Formats** :
-/// - `llms` (alias `llms.txt`) — [Jeremy Howard's `llms.txt`](https://llmstxt.org/) summary index
-/// - `llms-full` (alias `llms-full.txt`) — `llms-full.txt` long-form variant
-/// - `skill` (alias `skill.md`) — Claude Code [`SKILL.md`](https://docs.anthropic.com/en/docs/claude-code/skills) format
-///
-/// **Options** :
-/// - `--name <project>` — overrides the auto-detected project name (default : the workspace root directory name)
-/// - `--tagline <line>` — short description embedded in the output header
-/// - `--link-base <url>` — base URL prefix for source links (e.g. `https://github.com/owner/repo/blob/main`)
-///
-/// Output goes to stdout. Redirect with `>` to write a file.
-///
-/// **Example** :
-/// ```sh
-/// standardoc emit llms ./my-project \
-///   --name "My Project" \
-///   --tagline "REST API for X" \
-///   --link-base "https://github.com/owner/repo/blob/main" \
-///   > llms.txt
-/// ```
-fn run_emit(args: &[String]) -> ExitCode {
-    let (Some(format), Some(root)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: standardoc emit <llms|llms-full|skill> <path> [--name N] [--tagline T] [--link-base U]");
-        return ExitCode::from(2);
-    };
-
-    let mut opts = EmitOptions::default();
-    let mut iter = args[2..].iter();
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--name" => opts.project_name = iter.next().cloned(),
-            "--tagline" => opts.tagline = iter.next().cloned(),
-            "--link-base" => opts.link_base = iter.next().cloned(),
-            other => {
-                eprintln!("unknown emit flag: {other}");
-                return ExitCode::from(2);
-            }
-        }
-    }
-
-    let report = match run_pipeline(Path::new(root)) {
-        Ok(r) => r,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
-
-    // If no explicit project name is provided, derive it from root directory
-    // name — convenient for dogfooding (`standardoc/` -> "standardoc").
-    if opts.project_name.is_none() {
-        opts.project_name = report
-            .workspace_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(ToOwned::to_owned);
-    }
-
-    let output = match format.as_str() {
-        "llms" | "llms.txt" => emit_llms_txt(&report.blocks, &opts),
-        "llms-full" | "llms-full.txt" => emit_llms_full(&report.blocks, &opts),
-        "skill" | "skill.md" => emit_skill_md(&report.blocks, &opts),
-        other => {
-            eprintln!("unknown format '{other}' (expected: llms, llms-full, skill)");
-            return ExitCode::from(2);
-        }
-    };
-    print!("{output}");
-    ExitCode::SUCCESS
-}
-
-/// @doc cli.commands.validate validate
-/// @category validate
-/// @since 0.1
-/// @usage `standardoc validate <path>`
-/// @description
-/// Run the full validator suite over a workspace, print one diagnostic per line in the
-/// format `<severity> [STD###] <path>:<line>: <message>`. A summary count is printed
-/// to stderr.
-///
-/// **Severities** : `error`, `warning`, `info`, `hint` — see the
-/// [validator rules table in README.md](../README.md#validator) for the full list.
-///
-/// **Exit codes** :
-/// - `0` — no error-severity diagnostic found (warnings/info/hints don't fail)
-/// - `1` — at least one `error` diagnostic
-/// - `2` — missing argument
-///
-/// **Example** :
-/// ```sh
-/// standardoc validate ./my-project
-/// # error [STD001] src/lib.rs:42: duplicate DocKey "foo.bar"
-/// # warning [STD006] src/lib.rs:10: public symbol with no @doc annotation
-/// # 1 error(s), 1 warning(s), 0 info, 0 hint(s)
-/// ```
-///
-/// CI integration : run `standardoc validate .` as a step; non-zero exit blocks the merge.
-fn run_validate(args: &[String]) -> ExitCode {
-    let Some(root) = args.first() else {
-        eprintln!("usage: standardoc validate <path>");
-        return ExitCode::from(2);
-    };
-    let (report, config) = match run_pipeline_with_config(Path::new(root)) {
-        Ok(r) => r,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
-    let diagnostics = validate(&report.blocks, &report.collisions, &report.pages, &config);
-
-    let mut error_count = 0_usize;
-    let mut warning_count = 0_usize;
-    let mut info_count = 0_usize;
-    let mut hint_count = 0_usize;
-    for d in &diagnostics {
-        match d.severity {
-            Severity::Error => error_count += 1,
-            Severity::Warning => warning_count += 1,
-            Severity::Info => info_count += 1,
-            Severity::Hint => hint_count += 1,
-        }
-        let prefix = match d.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-            Severity::Info => "info",
-            Severity::Hint => "hint",
-        };
+    if candidates.len() > PURGE_PREVIEW_LIMIT {
         println!(
-            "{prefix} [{code}] {path}:{line}: {message}",
-            code = d.code.as_str(),
-            path = d.path.display(),
-            line = d.range.line_start,
-            message = d.message,
+            "  ... and {} more",
+            candidates.len() - PURGE_PREVIEW_LIMIT
         );
     }
 
-    eprintln!(
-        "\n{error_count} error(s), {warning_count} warning(s), {info_count} info, {hint_count} hint(s)"
-    );
-    if error_count > 0 {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
+    if !confirm_purge(candidates.len(), yes_flag)? {
+        println!("aborted");
+        return Ok(());
     }
+
+    handle.delete_paths(&candidates)?;
+    println!("purged {} path(s)", candidates.len());
+    Ok(())
 }
 
-/// @doc cli.commands.materialize materialize
-/// @category migrate
-/// @since 0.1
-/// @usage `standardoc materialize <path> [--apply] [--confidence low|medium|high]`
-/// @description
-/// Promote virtual annotations (synthesized by the virtual-annotation pass on
-/// `Inferred` blocks) into real source-level `///` doc-comments. Defaults to a dry-run
-/// that prints exactly what would be inserted, file-by-file ; pass `--apply` to actually
-/// edit the source.
-///
-/// **Options** :
-/// - `--apply` — perform the edits. Without this flag, only a dry-run report is printed.
-/// - `--confidence <tier>` — minimum confidence required for a virtual annotation to be
-///   eligible. `low` (everything), `medium` (default), `high` (only the most confident
-///   templates : constructors, trait impls, predicates, etc.).
-///
-/// The output respects the language's preferred doc-comment syntax (`///` for Rust,
-/// `---` for Lua, `/** … */` for TS/JS) and preserves the indentation of the symbol it
-/// documents. Python is intentionally unsupported in this MVP — docstrings live inside
-/// the function body, which needs different placement logic.
-///
-/// **Exit codes** :
-/// - `0` — dry-run printed, or `--apply` succeeded
-/// - `1` — pipeline error or write failure
-/// - `2` — bad argument
-///
-/// **Example** :
-/// ```sh
-/// # Preview what would be added on the public API
-/// standardoc materialize ./my-project --confidence high
-///
-/// # Actually write
-/// standardoc materialize ./my-project --confidence high --apply
-/// ```
-fn run_materialize(args: &[String]) -> ExitCode {
-    let Some(root) = args.first() else {
-        eprintln!("usage: standardoc materialize <path> [--apply] [--confidence low|medium|high]");
-        return ExitCode::from(2);
-    };
-    let mut apply = false;
-    let mut filter = ConfidenceFilter::AtLeastMedium;
-    let mut iter = args[1..].iter();
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--apply" => apply = true,
-            "--confidence" => match iter.next().map(String::as_str) {
-                Some("low") => filter = ConfidenceFilter::AtLeastLow,
-                Some("medium") => filter = ConfidenceFilter::AtLeastMedium,
-                Some("high") => filter = ConfidenceFilter::AtLeastHigh,
-                other => {
-                    eprintln!(
-                        "--confidence requires low|medium|high (got {})",
-                        other.unwrap_or("nothing")
-                    );
-                    return ExitCode::from(2);
-                }
-            },
-            other => {
-                eprintln!("unknown materialize flag: {other}");
-                return ExitCode::from(2);
-            }
-        }
+fn confirm_purge(count: usize, yes_flag: bool) -> Result<bool, ServerError> {
+    if yes_flag {
+        return Ok(true);
     }
+    if !io::stdin().is_terminal() {
+        return Err(io::Error::other(format!(
+            "non-interactive shell: pass --yes to purge {count} path(s) without prompting"
+        ))
+        .into());
+    }
+    eprint!("purge {count} path(s) from index? [y/N] ");
+    let _ = io::stderr().flush();
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES"))
+}
 
-    let report = match run_pipeline(Path::new(root)) {
-        Ok(r) => r,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
+fn cmd_rescan(path: &Path) -> Result<(), ServerError> {
+    let provider = WorkspaceProvider::new();
+    let handle = IndexHandle::open(path)?;
+    handle.rescan_from_scratch()?;
+    let filters = ScanFilters::load(handle.workspace_root());
+    let progress = ProgressReporter::start(handle.clone());
+    let result = cold_start::run(&handle, &provider, &filters);
+    progress.stop();
+    result?;
+    Ok(())
+}
 
-    let mp: MaterializePlan = plan(&report.blocks, filter);
-    if mp.edits.is_empty() {
-        eprintln!(
-            "standardoc materialize: no virtual annotations to write at this confidence tier."
+fn handle_root_display(path: &Path) -> String {
+    path.canonicalize()
+        .map_or_else(|_| path.display().to_string(), |p| p.display().to_string())
+}
+
+fn print_symbol_list(symbols: &[RawSymbol]) {
+    if symbols.is_empty() {
+        println!("(no matches)");
+        return;
+    }
+    for s in symbols {
+        println!(
+            "{}  ({:?}, {:?})  {}:{}",
+            s.fqdn, s.kind, s.visibility, s.location.file, s.location.start_line,
         );
-        return ExitCode::SUCCESS;
+    }
+}
+
+fn print_symbol_detail(s: &RawSymbol) {
+    println!("{}", s.fqdn);
+    println!("  kind:       {:?}", s.kind);
+    println!("  visibility: {:?}", s.visibility);
+    println!(
+        "  location:   {}:{}..{} (cols {}..{})",
+        s.location.file,
+        s.location.start_line,
+        s.location.end_line,
+        s.location.start_col,
+        s.location.end_col,
+    );
+    if let Some(module) = &s.module {
+        println!("  module:     {module}");
+    }
+    println!("  language_kind: {}", s.language_kind);
+    if let Some(hash) = &s.body_hash {
+        println!("  body_hash:  {hash}");
+    }
+    if let Some(sig) = &s.signature {
+        println!("  signature:  {sig:?}");
+    }
+}
+
+fn print_edge_list(edges: &[RawEdge]) {
+    if edges.is_empty() {
+        println!("(no edges)");
+        return;
+    }
+    for e in edges {
+        let target = match &e.to {
+            ResolvedOrUnresolved::Resolved { fqdn } => fqdn.clone(),
+            ResolvedOrUnresolved::Unresolved { name } => format!("[unresolved] {name}"),
+            ResolvedOrUnresolved::UnresolvedBridge { bridge, name } => {
+                format!("[bridge {}] {name}", bridge.as_str())
+            }
+        };
+        println!("{} --{:?}--> {}", e.from_fqdn, e.kind, target);
+        for site in &e.sites {
+            println!("  {}:{}:{}", site.file, site.line, site.col);
+        }
+    }
+}
+
+fn wait_ctrl_c() {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let install_result = ctrlc::set_handler(move || {
+        let _ = tx.send(());
+    });
+    if let Err(e) = install_result {
+        eprintln!("warning: failed to install Ctrl+C handler: {e}");
+        return;
+    }
+    let _ = rx.recv();
+}
+
+struct ProgressReporter {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl ProgressReporter {
+    fn start(index_handle: IndexHandle) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let is_tty = io::stderr().is_terminal();
+        let handle = std::thread::Builder::new()
+            .name("standardoc-progress".into())
+            .spawn(move || progress_loop(&index_handle, &stop_clone, is_tty))
+            .expect("spawn progress thread");
+        Self {
+            stop,
+            handle: Some(handle),
+        }
     }
 
-    let total_edits: usize = mp.edits.values().map(Vec::len).sum();
-    let mode = if apply { "applying" } else { "dry-run" };
-    eprintln!(
-        "standardoc materialize ({mode}): {total_edits} block(s) across {} file(s)",
-        mp.edits.len()
-    );
+    fn stop(mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
 
-    for (path, edits) in &mp.edits {
-        eprintln!("\n  {}", path.display());
-        // Print in ascending line order for readability (the plan stores
-        // descending so writes don't shift later targets).
-        let mut display = edits.clone();
-        display.sort_by_key(|e| e.line_start);
-        for edit in display {
-            eprintln!(
-                "    L{} ({} — confidence={:?})",
-                edit.line_start, edit.key, edit.confidence
-            );
-            for line in &edit.comment_lines {
-                eprintln!("        {line}");
+impl Drop for ProgressReporter {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+fn progress_loop(handle: &IndexHandle, stop: &AtomicBool, is_tty: bool) {
+    let mut last_print = Instant::now()
+        .checked_sub(Duration::from_secs(2))
+        .unwrap_or_else(Instant::now);
+    let mut printed_anything = false;
+    while !stop.load(Ordering::Acquire) {
+        if let Ok(Some((done, total))) = handle.cold_start_progress() {
+            if is_tty {
+                let _ = write!(io::stderr(), "\r[{done}/{total} files indexed]    ");
+                let _ = io::stderr().flush();
+                printed_anything = true;
+            } else if last_print.elapsed() >= Duration::from_secs(1) {
+                let _ = writeln!(io::stderr(), "[{done}/{total} files indexed]");
+                last_print = Instant::now();
+                printed_anything = true;
             }
         }
+        std::thread::sleep(Duration::from_millis(100));
     }
-
-    if !apply {
-        eprintln!("\nDry-run only. Re-run with --apply to write the changes.");
-        return ExitCode::SUCCESS;
+    if is_tty && printed_anything {
+        let _ = writeln!(io::stderr());
     }
-
-    match apply_to_disk(&mp, &report.workspace_root) {
-        Ok((files, edits)) => {
-            eprintln!("\nMaterialized {edits} annotation(s) into {files} file(s).");
-            ExitCode::SUCCESS
-        }
-        Err(err) => {
-            eprintln!("\nmaterialize failed: {err}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-fn run_pipeline(root: &Path) -> Result<PipelineReport, String> {
-    let (report, _config) = run_pipeline_with_config(root)?;
-    Ok(report)
-}
-
-/// Variant exposing resolved config — useful when caller needs it later
-/// (DSL schemas, validator rules) to stay consistent with scan settings.
-fn run_pipeline_with_config(root: &Path) -> Result<(PipelineReport, Config), String> {
-    let registry = build_registry(root);
-    let config = Config::load_from_workspace_or_default(root);
-    let report = scan_and_extract(root, &registry, &config)
-        .map_err(|err| format!("cannot resolve path '{}': {err}", root.display()))?;
-    Ok((report, config))
 }
