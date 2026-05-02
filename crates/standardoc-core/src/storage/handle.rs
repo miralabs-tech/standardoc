@@ -21,6 +21,7 @@ PRAGMA foreign_keys = ON;
 PRAGMA synchronous = NORMAL;
 PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 268435456;
+PRAGMA busy_timeout = 5000;
 ";
 
 const POOL_MAX_SIZE: u32 = 8;
@@ -358,6 +359,7 @@ const PRAGMA_READONLY_BOOT_SQL: &str = "
 PRAGMA foreign_keys = ON;
 PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 268435456;
+PRAGMA busy_timeout = 5000;
 ";
 
 fn build_readonly_pool(db_path: &Path) -> Result<Pool<SqliteConnectionManager>, StorageError> {
