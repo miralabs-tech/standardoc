@@ -5,17 +5,17 @@ over LSP (writer daemon) and MCP (read-only daemon) via stdio.
 
 ## Architecture
 
-The extension spawns the bundled `standardoc` binary as two parallel daemons:
+The extension spawns the bundled `stdoc` binary as two parallel daemons:
 
-- `standardoc lsp <workspace>` — primary writer (acquires the workspace fs lock,
+- `stdoc lsp <workspace>` — primary writer (acquires the workspace fs lock,
   runs the indexer, serves LSP requests).
-- `standardoc mcp <workspace> --readonly` — read-only client over a separate
+- `stdoc mcp <workspace> --readonly` — read-only client over a separate
   SQLite connection, exposes MCP tools (`get_context`, `find_symbol`).
 
 ## Settings
 
 - `standardoc.binaryPath` — absolute path override. When unset the extension
-  falls back to the binary bundled under `dist/bin/`, then to a `standardoc`
+  falls back to the binary bundled under `dist/bin/`, then to a `stdoc`
   found on `PATH`.
 
 ## Commands
@@ -37,19 +37,23 @@ and `get_context` tools automatically — no extra config inside the editor.
 To use Standardoc MCP from chat clients **outside** VSCode (Claude Desktop,
 Cursor, the standalone Claude Code CLI, …) add the following entry to the
 client's MCP config file. Replace `<workspace>` with the absolute path to your
-project root and `<binary>` with the absolute path to your `standardoc` build
-(or `standardoc` if it is on your `PATH`):
+project root and `<binary>` with the absolute path to your `stdoc` build
+(or `stdoc` if it is on your `PATH`):
 
 ```json
 {
   "mcpServers": {
     "standardoc": {
+      "type": "stdio",
       "command": "<binary>",
       "args": ["mcp", "<workspace>", "--readonly"]
     }
   }
 }
 ```
+
+> If you collaborate via git, consider adding `.mcp.json` to your `.gitignore` —
+> the file contains machine-absolute paths that are not portable across teammates.
 
 Common file locations:
 
@@ -65,7 +69,7 @@ with the LSP daemon owned by the VSCode extension.
 ```sh
 bun install
 # Point standardoc.binaryPath in VSCode settings to
-# <repo>/standardoc/target/debug/standardoc(.exe), then:
+# <repo>/standardoc/target/debug/stdoc(.exe), then:
 bun run package
 bun run dev:install
 # Reload the VSCode window and exercise the extension live.

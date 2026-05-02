@@ -68,7 +68,7 @@
           "type": "string",
           "default": "",
           "scope": "machine-overridable",
-          "description": "Absolute path to a custom `standardoc` binary. When set, overrides the bundled binary in `dist/bin/`."
+          "description": "Absolute path to a custom `stdoc` binary. When set, overrides the bundled binary in `dist/bin/`."
         }
       }
     },

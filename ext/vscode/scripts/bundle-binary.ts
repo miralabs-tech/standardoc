@@ -5,7 +5,7 @@ import * as fs from 'node:fs';
 const extRoot = path.resolve(import.meta.dir, '..');
 const workspaceRoot = path.resolve(extRoot, '..', '..');
 
-const exe = process.platform === 'win32' ? 'standardoc.exe' : 'standardoc';
+const exe = process.platform === 'win32' ? 'stdoc.exe' : 'stdoc';
 
 const candidates = [
   path.join(workspaceRoot, 'target', 'release', exe),
@@ -14,7 +14,7 @@ const candidates = [
 
 const present = candidates.filter(p => fs.existsSync(p));
 if (present.length === 0) {
-  console.error('No standardoc binary found. Tried:');
+  console.error('No stdoc binary found. Tried:');
   for (const c of candidates) console.error(`  ${c}`);
   console.error('Run `bun run dev:daemon` or `bun run dev:daemon:release` first.');
   process.exit(1);

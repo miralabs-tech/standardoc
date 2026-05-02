@@ -8,10 +8,10 @@ import {
 
 const baseDeps = (overrides: Partial<ResolveDeps> = {}): ResolveDeps => ({
   settingsPath: undefined,
-  bundledPath: '/ext/dist/bin/standardoc',
+  bundledPath: '/ext/dist/bin/stdoc',
   pathEnv: undefined,
   pathSeparator: ':',
-  exeName: 'standardoc',
+  exeName: 'stdoc',
   existsSync: () => false,
   ...overrides,
 });
@@ -20,18 +20,18 @@ describe('resolveBinaryWith', () => {
   test('returns settings path when set and existing', () => {
     const r = resolveBinaryWith(
       baseDeps({
-        settingsPath: '/custom/standardoc',
-        existsSync: p => p === '/custom/standardoc',
+        settingsPath: '/custom/stdoc',
+        existsSync: p => p === '/custom/stdoc',
       }),
     );
-    expect(r).toEqual({ path: '/custom/standardoc', source: 'settings' });
+    expect(r).toEqual({ path: '/custom/stdoc', source: 'settings' });
   });
 
   test('throws when settings path is set but does not exist', () => {
     expect(() =>
       resolveBinaryWith(
         baseDeps({
-          settingsPath: '/missing/standardoc',
+          settingsPath: '/missing/stdoc',
         }),
       ),
     ).toThrow(BinaryNotFoundError);
@@ -41,20 +41,20 @@ describe('resolveBinaryWith', () => {
     const r = resolveBinaryWith(
       baseDeps({
         settingsPath: '',
-        bundledPath: '/ext/dist/bin/standardoc',
-        existsSync: p => p === '/ext/dist/bin/standardoc',
+        bundledPath: '/ext/dist/bin/stdoc',
+        existsSync: p => p === '/ext/dist/bin/stdoc',
       }),
     );
-    expect(r).toEqual({ path: '/ext/dist/bin/standardoc', source: 'bundled' });
+    expect(r).toEqual({ path: '/ext/dist/bin/stdoc', source: 'bundled' });
   });
 
   test('falls back to PATH lookup when settings empty and bundled missing', () => {
-    const expected = path.join('/usr/bin', 'standardoc');
+    const expected = path.join('/usr/bin', 'stdoc');
     const r = resolveBinaryWith(
       baseDeps({
         pathEnv: ['/usr/local/bin', '/usr/bin'].join(':'),
         pathSeparator: ':',
-        exeName: 'standardoc',
+        exeName: 'stdoc',
         existsSync: p => p === expected,
       }),
     );
