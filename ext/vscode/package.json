@@ -59,6 +59,41 @@
         "command": "Standardoc.getContext",
         "title": "Get context for symbol at cursor",
         "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.initWorkspace",
+        "title": "Initialize for this workspace",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.refreshMcpConfig",
+        "title": "Refresh .mcp.json paths",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.resetGlobalInitPrompt",
+        "title": "Reset global init prompt",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.regenerateSkill",
+        "title": "Regenerate AI agent skill",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.daemon.stop",
+        "title": "Daemon: Stop",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.daemon.start",
+        "title": "Daemon: Start",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.purgeExcluded",
+        "title": "Purge excluded paths",
+        "category": "Standardoc"
       }
     ],
     "configuration": {

@@ -20,12 +20,42 @@ The extension spawns the bundled `stdoc` binary as two parallel daemons:
 
 ## Commands
 
-- `Standardoc: Daemon: Restart`
+- `Standardoc: Daemon: Restart` / `Daemon: Stop` / `Daemon: Start`
 - `Standardoc: Find symbol` — InputBox + QuickPick over `find_symbol`, opens the
   selected symbol at its source location.
 - `Standardoc: Get context for symbol at cursor` — runs `find_symbol` on the
   word under the cursor, takes the top match, and renders
   `get_context(fqdn, depth=1)` into the Standardoc output channel.
+- `Standardoc: Initialize for this workspace` — manual override of the init
+  prompt. Writes `.mcp.json` and `.claude/skills/standardoc/SKILL.md`, opts
+  this workspace in, and starts the daemons.
+- `Standardoc: Refresh .mcp.json paths` — re-merge `.mcp.json` with current
+  absolute paths (use after moving the workspace or rebuilding the binary
+  elsewhere).
+- `Standardoc: Regenerate AI agent skill` — overwrite
+  `.claude/skills/standardoc/SKILL.md` with the latest template.
+- `Standardoc: Reset global init prompt` — clear the "Never (any workspace)"
+  global opt-out so the init prompt re-appears on workspaces with code.
+- `Standardoc: Purge excluded paths` — stop the daemon, run
+  `stdoc purge-excluded`, restart.
+
+## AI agent skill (Claude Code)
+
+When you opt in to initialization on a workspace, the extension generates a
+skill file at `.claude/skills/standardoc/SKILL.md`. Claude Code (CLI and IDE
+integrations) auto-loads skills from `.claude/skills/` and uses the
+`description` / `when_to_use` frontmatter to decide when to invoke them.
+
+The generated skill instructs the AI to use Standardoc as the **first** tool
+for any code-understanding task on this workspace, falling back to LSP /
+Go-to-Definition and then to raw `Read`/`Grep`/`Glob` only when Standardoc
+cannot answer. It also pre-approves the two MCP tools
+(`mcp__standardoc__find_symbol`, `mcp__standardoc__get_context`) so they run
+without per-call permission prompts.
+
+If you edit the file by hand, re-running `Standardoc: Regenerate AI agent
+skill` will overwrite your changes. The init flow leaves an existing skill
+file untouched (only writes when absent or already matching the template).
 
 ## Use Standardoc MCP from external chat clients
 

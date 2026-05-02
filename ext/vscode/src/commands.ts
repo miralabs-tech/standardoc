@@ -1,17 +1,27 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
+import { spawn } from 'node:child_process';
 import type { DaemonSupervisor } from './daemon/supervisor';
 import type { LspClient } from './lsp/client';
 import type { McpClient } from './mcp/client';
 import type { RawSymbolJson, SymbolContextWithNeighborsJson } from './mcp/types';
 import { formatSymbolContext, parseToolResult, pickTopFqdn } from './commands-render';
+import {
+  clearGlobalInitState,
+  initializeWorkspace,
+  regenerateSkill,
+  writeMcpConfig,
+} from './init/prompt';
+import { resolveBinary } from './daemon/binary';
 
 export interface CommandContext {
+  readonly context: vscode.ExtensionContext;
   readonly supervisor: DaemonSupervisor;
   readonly lsp: LspClient;
   readonly mcp: McpClient;
   readonly output: vscode.OutputChannel;
   readonly workspaceRoot: string;
+  readonly spawnSupervisor: () => void;
 }
 
 export function registerCommands(context: vscode.ExtensionContext, ctx: CommandContext): void {
@@ -19,7 +29,145 @@ export function registerCommands(context: vscode.ExtensionContext, ctx: CommandC
     vscode.commands.registerCommand('Standardoc.daemon.restart', () => commandDaemonRestart(ctx)),
     vscode.commands.registerCommand('Standardoc.findSymbol', () => commandFindSymbol(ctx)),
     vscode.commands.registerCommand('Standardoc.getContext', () => commandGetContext(ctx)),
+    vscode.commands.registerCommand('Standardoc.initWorkspace', () => commandInitWorkspace(ctx)),
+    vscode.commands.registerCommand('Standardoc.refreshMcpConfig', () =>
+      commandRefreshMcpConfig(ctx),
+    ),
+    vscode.commands.registerCommand('Standardoc.resetGlobalInitPrompt', () =>
+      commandResetGlobalInitPrompt(ctx),
+    ),
+    vscode.commands.registerCommand('Standardoc.regenerateSkill', () =>
+      commandRegenerateSkill(ctx),
+    ),
+    vscode.commands.registerCommand('Standardoc.daemon.stop', () => commandDaemonStop(ctx)),
+    vscode.commands.registerCommand('Standardoc.daemon.start', () => commandDaemonStart(ctx)),
+    vscode.commands.registerCommand('Standardoc.purgeExcluded', () => commandPurgeExcluded(ctx)),
   );
+}
+
+async function commandDaemonStop(ctx: CommandContext): Promise<void> {
+  try {
+    await ctx.supervisor.stop();
+    void vscode.window.showInformationMessage('Standardoc daemon stopped');
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Daemon stop failed: ${describeError(e)}`);
+  }
+}
+
+async function commandDaemonStart(ctx: CommandContext): Promise<void> {
+  const current = ctx.supervisor.current().kind;
+  if (current === 'ready' || current === 'starting') {
+    void vscode.window.showInformationMessage(`Standardoc daemon already ${current}`);
+    return;
+  }
+  try {
+    await ctx.supervisor.spawn();
+    void vscode.window.showInformationMessage('Standardoc daemon started');
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Daemon start failed: ${describeError(e)}`);
+  }
+}
+
+async function commandPurgeExcluded(ctx: CommandContext): Promise<void> {
+  const confirm = await vscode.window.showWarningMessage(
+    'Purge symbols matching .stdignore from the index?\n\n' +
+      'This will stop the Standardoc daemon, run `stdoc purge-excluded`, then restart.',
+    { modal: true },
+    'Purge',
+  );
+  if (confirm !== 'Purge') return;
+
+  let binaryPath: string;
+  try {
+    const resolved = await resolveBinary(ctx.context);
+    binaryPath = resolved.path;
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Cannot resolve standardoc binary: ${describeError(e)}`);
+    return;
+  }
+
+  ctx.output.show(true);
+  ctx.output.appendLine('[purge] stopping daemon to release workspace lock…');
+  await ctx.supervisor.stop();
+
+  const exitCode = await runChildToOutput(binaryPath, ['purge-excluded', ctx.workspaceRoot, '--yes'], ctx.output);
+
+  if (exitCode === 0) {
+    ctx.output.appendLine('[purge] complete, restarting daemon…');
+    void vscode.window.showInformationMessage('Standardoc: purge complete, daemon restarting');
+  } else {
+    ctx.output.appendLine(`[purge] failed with exit code ${exitCode}, restarting daemon anyway…`);
+    void vscode.window.showErrorMessage(`Purge failed (exit ${exitCode}). See Standardoc output for details.`);
+  }
+
+  ctx.spawnSupervisor();
+}
+
+function runChildToOutput(
+  binaryPath: string,
+  args: ReadonlyArray<string>,
+  output: vscode.OutputChannel,
+): Promise<number> {
+  return new Promise(resolve => {
+    const child = spawn(binaryPath, [...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout?.on('data', chunk => output.append(stripTrailingNewline(chunk.toString())));
+    child.stderr?.on('data', chunk => output.append(stripTrailingNewline(chunk.toString())));
+    child.on('error', err => {
+      output.appendLine(`[purge] child spawn error: ${err.message}`);
+      resolve(-1);
+    });
+    child.on('close', code => resolve(code ?? -1));
+  });
+}
+
+function stripTrailingNewline(s: string): string {
+  return s.endsWith('\n') ? s.slice(0, -1) + '\n' : s + '\n';
+}
+
+async function commandInitWorkspace(ctx: CommandContext): Promise<void> {
+  try {
+    await initializeWorkspace({
+      context: ctx.context,
+      workspaceRoot: ctx.workspaceRoot,
+      output: ctx.output,
+      onOptedIn: ctx.spawnSupervisor,
+    });
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Initialize failed: ${describeError(e)}`);
+  }
+}
+
+async function commandRefreshMcpConfig(ctx: CommandContext): Promise<void> {
+  try {
+    await writeMcpConfig({
+      context: ctx.context,
+      workspaceRoot: ctx.workspaceRoot,
+      output: ctx.output,
+      onOptedIn: ctx.spawnSupervisor,
+    });
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Refresh .mcp.json failed: ${describeError(e)}`);
+  }
+}
+
+async function commandResetGlobalInitPrompt(ctx: CommandContext): Promise<void> {
+  await clearGlobalInitState(ctx.context);
+  void vscode.window.showInformationMessage(
+    'Standardoc: global init prompt reset. The init prompt will appear again on workspaces with code.',
+  );
+}
+
+async function commandRegenerateSkill(ctx: CommandContext): Promise<void> {
+  try {
+    await regenerateSkill({
+      context: ctx.context,
+      workspaceRoot: ctx.workspaceRoot,
+      output: ctx.output,
+      onOptedIn: ctx.spawnSupervisor,
+    });
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Regenerate AI agent skill failed: ${describeError(e)}`);
+  }
 }
 
 async function commandDaemonRestart(ctx: CommandContext): Promise<void> {

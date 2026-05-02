@@ -5,6 +5,7 @@ import { McpClient } from './mcp/client';
 import { StandardocMcpServerProvider } from './mcp/serverDefinitionProvider';
 import { StatusBarController } from './statusBar';
 import { registerCommands } from './commands';
+import { maybePromptForInit } from './init/prompt';
 
 const MCP_PROVIDER_ID = 'standardoc.mcp';
 
@@ -29,14 +30,31 @@ export function activate(context: vscode.ExtensionContext): void {
   statusBar.update(supervisor.current());
   context.subscriptions.push(supervisor.onDidChangeState(state => statusBar.update(state)));
 
-  registerCommands(context, { supervisor, lsp, mcp, output, workspaceRoot });
+  const spawnSupervisor = (): void => {
+    void supervisor.spawn().catch(e => {
+      output.appendLine(`activate: spawn failed: ${e instanceof Error ? e.message : String(e)}`);
+    });
+  };
+
+  registerCommands(context, {
+    context,
+    supervisor,
+    lsp,
+    mcp,
+    output,
+    workspaceRoot,
+    spawnSupervisor,
+  });
 
   registerMcpServerProvider(context, workspaceRoot, output);
 
   output.appendLine('Standardoc extension activated.');
 
-  void supervisor.spawn().catch(e => {
-    output.appendLine(`activate: spawn failed: ${e instanceof Error ? e.message : String(e)}`);
+  void maybePromptForInit({
+    context,
+    workspaceRoot,
+    output,
+    onOptedIn: spawnSupervisor,
   });
 }
 
