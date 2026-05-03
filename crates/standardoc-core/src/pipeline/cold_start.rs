@@ -4,6 +4,7 @@ use rayon::prelude::*;
 use rusqlite::TransactionBehavior;
 use walkdir::{DirEntry, WalkDir};
 
+use crate::pipeline::batch::apply_delete_file;
 use crate::pipeline::filters::ScanFilters;
 use crate::pipeline::paths::{has_supported_extension, to_workspace_relative};
 use crate::pipeline::provider::LanguageProvider;
@@ -139,12 +140,29 @@ fn cleanup_unseen(handle: &IndexHandle, seen: &[String]) -> Result<(), ColdStart
             stmt.execute([path]).map_err(StorageError::from)?;
         }
     }
-    let removed = tx
-        .execute(
-            "DELETE FROM files WHERE path NOT IN (SELECT path FROM seen_paths)",
-            [],
-        )
-        .map_err(StorageError::from)?;
+    // Route every missing path through `apply_delete_file` so the per-symbol
+    // reverse-promote step (`delete_symbol`) runs BEFORE the cascade FK
+    // would set `edges.to_symbol_id = NULL`. A raw `DELETE FROM files`
+    // here would let the cascade fire `ON DELETE SET NULL` on
+    // `edges.to_symbol_id` while leaving `to_unresolved` untouched —
+    // immediately violating the XOR CHECK constraint.
+    let missing: Vec<String> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT path FROM files WHERE path NOT IN (SELECT path FROM seen_paths)",
+            )
+            .map_err(StorageError::from)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(StorageError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(StorageError::from)?;
+        rows
+    };
+    for path in &missing {
+        apply_delete_file(&tx, path)?;
+    }
+    let removed = missing.len();
     tx.commit().map_err(StorageError::from)?;
     conn.execute("DROP TABLE seen_paths", [])
         .map_err(StorageError::from)?;
@@ -369,6 +387,112 @@ mod tests {
         run(&handle, &mock, &filters_for(&handle)).unwrap();
 
         assert_eq!(count_files(&handle), 0, "orphan file row must be deleted");
+    }
+
+    #[test]
+    fn run_cleanup_reverse_promotes_inbound_resolved_edges_before_cascade_delete() {
+        // Reproduces the bug where a raw `DELETE FROM files` cascade-set
+        // `edges.to_symbol_id = NULL` while `to_unresolved` stayed NULL —
+        // immediately violating the XOR CHECK constraint. The cleanup
+        // must route through `apply_delete_file` so `delete_symbol`'s
+        // reverse-promote step runs in the SAME transaction.
+        use crate::pipeline::batch::apply_upsert_file;
+        use standardoc_ir::{EdgeKind, RawEdge, ResolvedOrUnresolved};
+
+        let dir = tempdir().unwrap();
+        let handle = IndexHandle::open(dir.path()).unwrap();
+
+        // Disk: only caller.rs survives — target.rs disappeared between
+        // sessions. We compute the body's hash so cold_start matches
+        // it against `files.content_hash` and emits `Outcome::Skip`,
+        // landing caller.rs in `seen` without invoking the provider.
+        let caller_body: &[u8] = b"fn caller(){}";
+        let caller_hash = Blake3Hash::new(*blake3::hash(caller_body).as_bytes());
+        write_file(handle.workspace_root(), "src/caller.rs", caller_body);
+
+        // Seed both files in DB. caller.rs gets the disk-matching hash so
+        // the cold_start hash check skips it; target.rs lives only in DB.
+        let mut caller_extracted = ExtractedFile {
+            file: "src/caller.rs".into(),
+            language: Language::Rust,
+            source_origin: SourceOrigin::Workspace,
+            is_external: false,
+            content_hash: caller_hash,
+            byte_size: caller_body.len() as u64,
+            symbols: vec![RawSymbol {
+                name: "caller".into(),
+                fqdn: "crate::caller".into(),
+                kind: Kind::Function,
+                language_kind: LanguageKind::from("fn_item"),
+                module: None,
+                visibility: Visibility::Public,
+                location: SymbolLocation {
+                    file: "src/caller.rs".into(),
+                    start_line: 1,
+                    end_line: 3,
+                    start_col: 0,
+                    end_col: 1,
+                },
+                signature: None,
+                body_hash: Some(Blake3Hash::new([0x01; 32])),
+                attributes: vec![],
+            }],
+            edges: vec![RawEdge {
+                from_fqdn: "crate::caller".into(),
+                kind: EdgeKind::Calls,
+                to: ResolvedOrUnresolved::Resolved {
+                    fqdn: "crate::target".into(),
+                },
+                sites: vec![],
+                attributes: vec![],
+            }],
+            call_sites: vec![],
+            documents: vec![],
+        };
+        let target = sample_extracted("src/target.rs", "crate::target");
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            apply_upsert_file(&conn, &target).unwrap();
+            apply_upsert_file(&conn, &caller_extracted).unwrap();
+            // After insert, the resolved-on-insert promotion should have
+            // linked the edge to target's symbol id — sanity-check before
+            // the cleanup so we know the cascade has something to chew.
+            let to_id: Option<i64> = conn
+                .query_row("SELECT to_symbol_id FROM edges", [], |r| r.get(0))
+                .unwrap();
+            assert!(
+                to_id.is_some(),
+                "test setup: caller→target edge must be Resolved before cleanup"
+            );
+        }
+        // Silence unused-mut warning for the now-immutable extracted form.
+        caller_extracted.symbols.clear();
+
+        let mock = MockProvider::new();
+        run(&handle, &mock, &filters_for(&handle)).unwrap();
+
+        // target.rs row gone, caller.rs row preserved.
+        let conn = handle.pool().unwrap().get().unwrap();
+        let remaining_files: Vec<String> = conn
+            .prepare("SELECT path FROM files ORDER BY path")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(remaining_files, vec!["src/caller.rs"]);
+
+        // Caller's outbound edge survived as Unresolved with the deleted
+        // target's fqdn — the XOR invariant held throughout the cascade.
+        let (to_id, to_unresolved): (Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT to_symbol_id, to_unresolved FROM edges",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(to_id, None);
+        assert_eq!(to_unresolved.as_deref(), Some("crate::target"));
     }
 
     #[test]
