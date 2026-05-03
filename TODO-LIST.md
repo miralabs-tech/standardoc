@@ -149,22 +149,29 @@ once user feedback validates the foundation.
 
 ### Documentation rendering layer
 
-- [ ] npm package shipping React/MDX components fed by the doc graph
-  - [ ] `<Doc id="…" />` — single doc block render
-  - [ ] `<Params id="…" />` — parameter table
-  - [ ] `<Examples id="…" />` — example snippets
-  - [ ] `<Signature id="…" />` — code-fence signature
-  - [ ] `queryDocs("api.*")` — glob query helper
-- [ ] Drop-in adapters for Next, Nextra, Astro, Docusaurus
-- [ ] MDX live-resolution against the SQLite doc graph
-- [ ] Doc-graph schema additions (description, examples, tags) without re-introducing a custom DSL
-- [ ] Annotation parser (`@doc`, `@param`, `@returns`, `@example`) with language-provider hooks
+The doc graph (SQLite) is the universal source of truth. Renderers are consumers — MDX is one option, not the base. The same graph must be consumable by any framework without a MDX dependency.
 
 Pipeline target:
 
 ```
-source code → @doc parser → doc graph (SQLite) → MDX/React layer → framework
+source code → @doc parser → doc graph (SQLite) → framework-agnostic query API → renderer
 ```
+
+**Doc graph & query layer** (framework-agnostic, ships as `@standardoc/core`):
+- [ ] Doc-graph schema additions (`description`, `examples`, `tags`) without re-introducing a custom DSL
+- [ ] Annotation parser (`@doc`, `@param`, `@returns`, `@example`) with language-provider hooks
+- [ ] `queryDocs("api.*")` — glob query helper exposed as a plain JS/TS API (no framework required)
+
+**React renderer** (ships as `@standardoc/react`, first renderer):
+- [ ] `<Doc id="…" />` — single doc block render
+- [ ] `<Params id="…" />` — parameter table
+- [ ] `<Examples id="…" />` — example snippets
+- [ ] `<Signature id="…" />` — code-fence signature
+- [ ] Drop-in adapters for Next.js, Nextra, Astro, Docusaurus
+
+**Future renderers** (post-beta.2, same graph, different packages):
+- [ ] `@standardoc/vue` — same components for Vue / VitePress / Nuxt
+- [ ] `@standardoc/svelte` — for SvelteKit, plain Svelte
 
 ### Language providers
 
