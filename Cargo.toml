@@ -41,6 +41,7 @@ syn         = { version = "2", features = ["full", "extra-traits", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote       = "1"
 swc_core    = { version = "65", features = ["ecma_parser", "ecma_ast", "ecma_visit", "common", "common_concurrent"] }
+full_moon   = { version = "2.2", features = ["luau", "luajit", "cfxlua"] }
 clap        = { version = "4", features = ["derive"] }
 ctrlc       = "3"
 ignore      = "0.4"

@@ -17,6 +17,7 @@ proc-macro2     = { workspace = true }
 quote           = { workspace = true }
 blake3          = { workspace = true }
 swc_core        = { workspace = true }
+full_moon       = { workspace = true }
 serde_json      = { workspace = true }
 
 [dev-dependencies]

@@ -3,6 +3,7 @@ use std::path::Path;
 use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
 use standardoc_ir::ExtractedFile;
 
+use crate::lua::LuaProvider;
 use crate::rust::RustProvider;
 use crate::ts::TsProvider;
 
@@ -10,6 +11,7 @@ use crate::ts::TsProvider;
 pub struct WorkspaceProvider {
     rust: RustProvider,
     ts: TsProvider,
+    lua: LuaProvider,
 }
 
 impl WorkspaceProvider {
@@ -29,6 +31,7 @@ impl LanguageProvider for WorkspaceProvider {
         match dispatch(path) {
             Some(Dispatch::Rust) => self.rust.extract(content, path, ctx),
             Some(Dispatch::TypeScript) => self.ts.extract(content, path, ctx),
+            Some(Dispatch::Lua) => self.lua.extract(content, path, ctx),
             None => Err(ExtractError::UnsupportedLanguage { file: path.into() }),
         }
     }
@@ -38,6 +41,7 @@ impl LanguageProvider for WorkspaceProvider {
 enum Dispatch {
     Rust,
     TypeScript,
+    Lua,
 }
 
 fn dispatch(path: &str) -> Option<Dispatch> {
@@ -45,6 +49,7 @@ fn dispatch(path: &str) -> Option<Dispatch> {
     match ext {
         "rs" => Some(Dispatch::Rust),
         "ts" | "tsx" | "js" | "jsx" => Some(Dispatch::TypeScript),
+        "lua" => Some(Dispatch::Lua),
         _ => None,
     }
 }
@@ -68,10 +73,25 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_lua_extension() {
+        assert_eq!(dispatch("src/utils/strings.lua"), Some(Dispatch::Lua));
+        assert_eq!(dispatch("init.lua"), Some(Dispatch::Lua));
+        assert_eq!(dispatch("client/script.lua"), Some(Dispatch::Lua));
+    }
+
+    #[test]
+    fn dispatch_lua_uppercase_extension_returns_none() {
+        // Extension matching is case-sensitive — `.LUA` is not standard
+        // and we don't want to silently accept it.
+        assert_eq!(dispatch("script.LUA"), None);
+    }
+
+    #[test]
     fn dispatch_unsupported_returns_none() {
         assert_eq!(dispatch("README.md"), None);
         assert_eq!(dispatch("Cargo.toml"), None);
         assert_eq!(dispatch("package.json"), None);
+        assert_eq!(dispatch("script.py"), None);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use standardoc_ir::Language;
 
-pub(crate) const SUPPORTED_EXTENSIONS: &[&str] = &["rs", "ts", "tsx", "js", "jsx"];
+pub(crate) const SUPPORTED_EXTENSIONS: &[&str] = &["rs", "ts", "tsx", "js", "jsx", "lua"];
 
 pub(crate) fn has_supported_extension(path: &Path) -> bool {
     path.extension()
@@ -23,6 +23,7 @@ pub(crate) fn guess_language(rel_path: &str) -> Option<Language> {
         "rs" => Some(Language::Rust),
         "ts" | "tsx" => Some(Language::TypeScript),
         "js" | "jsx" => Some(Language::JavaScript),
+        "lua" => Some(Language::Lua),
         _ => None,
     }
 }
@@ -40,6 +41,7 @@ mod tests {
         assert!(has_supported_extension(Path::new("a.tsx")));
         assert!(has_supported_extension(Path::new("a.js")));
         assert!(has_supported_extension(Path::new("a.jsx")));
+        assert!(has_supported_extension(Path::new("a.lua")));
         assert!(!has_supported_extension(Path::new("a.py")));
         assert!(!has_supported_extension(Path::new("Makefile")));
     }
@@ -74,6 +76,7 @@ mod tests {
         assert_eq!(guess_language("a.tsx"), Some(Language::TypeScript));
         assert_eq!(guess_language("a.js"), Some(Language::JavaScript));
         assert_eq!(guess_language("a.jsx"), Some(Language::JavaScript));
+        assert_eq!(guess_language("a.lua"), Some(Language::Lua));
         assert_eq!(guess_language("a.py"), None);
         assert_eq!(guess_language("README"), None);
     }

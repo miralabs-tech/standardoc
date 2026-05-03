@@ -400,3 +400,67 @@ fn cold_start_persists_user_documents_for_both_languages() {
         "TS /** */ did not persist on login"
     );
 }
+
+const LUA_LIB_LUA: &str = "\
+local M = {}
+
+--- public trim helper
+function M.trim(s)
+    return s
+end
+
+local function private_helper(x) return x end
+
+return M
+";
+
+#[test]
+fn cold_start_indexes_lua_alongside_rust_and_ts() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_mix_workspace(root);
+    write(root, "scripts.rockspec", "package = \"scripts\"\n");
+    write(root, "scripts/lib.lua", LUA_LIB_LUA);
+
+    let provider = WorkspaceProvider::new();
+    let handle = index_once(root, &provider).unwrap();
+
+    let lua_syms = query::symbols_by_file(&handle, "scripts/lib.lua").unwrap();
+    let names: Vec<&str> = lua_syms.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"trim"), "lua trim missing: {names:?}");
+    assert!(
+        names.contains(&"private_helper"),
+        "lua private_helper missing: {names:?}"
+    );
+
+    // The module-pattern post-process must promote `M.trim` to Public
+    // (table M is returned at file end) while `private_helper` stays Private.
+    let trim = lua_syms.iter().find(|s| s.name == "trim").unwrap();
+    assert_eq!(trim.visibility, standardoc_ir::Visibility::Public);
+    assert_eq!(trim.fqdn, "scripts::scripts::lib::M::trim");
+
+    let private = lua_syms
+        .iter()
+        .find(|s| s.name == "private_helper")
+        .unwrap();
+    assert_eq!(private.visibility, standardoc_ir::Visibility::Private);
+
+    // The Rust + TS sides of the same workspace must still index correctly
+    // — Lua doesn't disturb the existing dispatchers.
+    let rust_lib = query::symbols_by_file(&handle, "src-tauri/src/lib.rs").unwrap();
+    assert!(rust_lib.iter().any(|s| s.name == "alpha"));
+    let ts_index = query::symbols_by_file(&handle, "src/index.ts").unwrap();
+    assert!(ts_index.iter().any(|s| s.name == "main"));
+
+    // Lua doc must persist through the pipeline (Rust /// + TS /** */
+    // already covered above; Lua --- gets the same treatment via
+    // apply_documents).
+    let trim_ctx = query::context_for_symbol(&handle, "scripts::scripts::lib::M::trim")
+        .unwrap()
+        .expect("trim context");
+    assert_eq!(
+        trim_ctx.document_description.as_deref(),
+        Some("public trim helper"),
+        "Lua --- did not persist on M.trim"
+    );
+}
