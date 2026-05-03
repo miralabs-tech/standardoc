@@ -13,9 +13,10 @@ deferred to a later milestone.
 
 Standardoc has two release deliverables that evolve at different cadences:
 
-- **Core** — published to crates.io as `standardoc-cli` (single binary `stdoc`).
+- **Core** — distributed as pre-built binaries (single binary `stdoc`).
   Tag-driven: pushing `vX.Y.Z` triggers `release.yml` (cross-platform pre-built
-  binaries + `version.json` manifest + crates.io publish + GitHub Release).
+  binaries + `version.json` manifest + GitHub Release). Source builds via
+  `cargo install --git https://github.com/miralabs-tech/standardoc`.
 - **Extension** — published to the VSCode Marketplace + Open VSX. Manual
   trigger via `release-ext.yml` (workflow_dispatch with `version` +
   `pre_release` inputs). Decoupled from tag push.
@@ -114,32 +115,17 @@ Rust + TypeScript only. Two MCP tools. Local-only.
 - [x] CI: fmt + clippy + test cross-OS + docs + ext (bun test/tsc/build)
 - [x] Labels sync workflow
 
-### Remaining before tag
+### Released ✓
 
-- [x] `Cargo.toml` workspace `publish` flags audit (all crates default to `publish = true`, no opt-out needed)
-- [x] Path-only deps verified to have `version` field (5 internal deps in `[workspace.dependencies]` aligned to `1.0.0-beta.1`)
-- [x] `bridge-sdk` aligned to `version.workspace = true` (was hardcoded `0.0.1`)
-- [x] `cargo publish --dry-run -p standardoc-ir` (leaf, validated)
-- [x] `cargo publish --dry-run -p standardoc-bridge-sdk` (leaf, validated)
-- [x] `cargo package --list` for downstream crates (packaging shape OK for `core`, `lang-provider`, `server`, `cli`)
-- [ ] **First publish chain (manual, in dependency order)**:
-  ```sh
-  cargo publish -p standardoc-ir            && sleep 30
-  cargo publish -p standardoc-bridge-sdk    && sleep 30
-  cargo publish -p standardoc-core          && sleep 30
-  cargo publish -p standardoc-lang-provider && sleep 30
-  cargo publish -p standardoc-server        && sleep 30
-  cargo publish -p standardoc-cli
-  ```
-  Each `sleep 30` lets crates.io index propagate before the next dependent crate validates against it. After the first chain is on crates.io, push the `v1.0.0-beta.1` tag → `release.yml` handles subsequent releases via `cargo publish -p standardoc-cli` (leaf only).
-- [ ] Push `v1.0.0-beta.1` tag (drives `release.yml`: cross-platform binaries + version.json + crates.io publish + GitHub Release)
-- [ ] Trigger `release-ext.yml` workflow_dispatch with `version=1.0.0-beta.1` + `pre_release=true`
+- [x] `Cargo.toml` workspace `publish` flags audit
+- [x] Path-only deps verified to have `version` field (aligned to `1.0.0-beta.1`)
+- [x] `bridge-sdk` aligned to `version.workspace = true`
+- [x] `cargo publish --dry-run` validated on leaf crates
+- [x] ~~First publish chain to crates.io~~ — dropped; distribution = GitHub Release pre-built binaries + `cargo install --git` (crates.io publish deferred, no firm commitment)
+- [x] Push `v1.0.0-beta.1` tag → `release.yml` (cross-platform binaries + `version.json` + GitHub Release)
+- [x] Trigger `release-ext.yml` workflow_dispatch (`version=1.0.0`, `pre_release=true`)
 - [ ] Smoke F5 full E2E re-test post init opt-in flow + skill gen
 - [ ] Public roadmap announcement (link this file from README + GitHub Discussions)
-
-### Future workflow enhancement (post-beta.1)
-
-- [ ] Enhance `release.yml` to publish the full chain in dependency order on tag push (currently only publishes the `standardoc-cli` leaf, assumes upstream chain already on crates.io). Either iterate the 6 crates with sleeps, or use `cargo workspaces publish` / `release-plz`.
 
 ---
 
@@ -157,9 +143,11 @@ once user feedback validates the foundation.
 
 ---
 
-## v1.0.0-beta.2 — Documentation rendering layer
+## v1.0.0-beta.2 — Documentation rendering layer + CLI self-management
 
-**Theme**: ship the doc-rendering replacement for the killed v0 DSL.
+**Theme**: ship the doc-rendering replacement for the killed v0 DSL, and make `stdoc` self-sufficient for users outside VSCode.
+
+### Documentation rendering layer
 
 - [ ] npm package shipping React/MDX components fed by the doc graph
   - [ ] `<Doc id="…" />` — single doc block render
@@ -178,6 +166,21 @@ Pipeline target:
 source code → @doc parser → doc graph (SQLite) → MDX/React layer → framework
 ```
 
+### Language providers
+
+- [ ] **Lua native provider** (`full_moon` crate — pure-Rust Lua 5.x parser): functions, local functions, module tables (`M = {}`), `require` imports, call edges. Covers `.lua` files. Distinct from the UST+Lua post-1.0 plugin system — this is a first-class core provider like `RustProvider` / `TsProvider`.
+- [ ] **Vue single-file components** (`.vue`): extract `<script>` / `<script setup lang="ts">` block → feed to existing `TsProvider`. No new provider crate; pre-processing step in the TS walk.
+- [ ] **Svelte components** (`.svelte`): same approach — extract `<script>` block → `TsProvider`. Handle both `lang="ts"` and plain JS.
+
+### CLI self-management (`stdoc` without VSCode)
+
+- [ ] `stdoc self-update` sub-command: reads `version.json` from GitHub Releases (manifest already generated by `release.yml`), detects platform, downloads + SHA256-verifies the matching binary, replaces the current executable (crate: `self_update`, Windows-aware rename-on-replace)
+- [ ] Initial install PATH injection: places binary under `~/.stdoc/bin/` (Unix) or `%USERPROFILE%\.stdoc\bin\` (Windows) and registers the path in:
+  - bash/zsh: appends `export PATH="$HOME/.stdoc/bin:$PATH"` to `.bashrc` / `.zshrc`
+  - PowerShell: appends to `$PROFILE`
+  - CMD / Windows permanent: writes to `HKCU\Environment\Path` via `winreg` crate
+- [ ] One-liner bootstrap scripts: `curl -sSf https://… | sh` (Unix) + `irm https://… | iex` (PowerShell)
+
 ---
 
 ## v1.0.0 — Stabilization
@@ -195,11 +198,28 @@ the surface.
 
 ## Post-1.0 ideas (no commitment)
 
-- [ ] Additional language providers (Go, Java, Swift, C#, Kotlin, Zig)
+- [ ] Additional language providers (Go, Java, Swift, C#, Kotlin, Zig) — Lua, Vue, Svelte ship in beta.2
 - [ ] Custom LSP methods for Standardoc-specific queries
 - [ ] Webview Preact rendering for richer in-VSCode display
 - [ ] Optional GitBook-style local doc UI (if demand emerges; lifetime license, see [SUPPORT.md](SUPPORT.md))
 - [ ] LSP bridge to rust-analyzer / tsserver for richer per-language depth
+
+### Universal language provider: UST + Lua scripting layer
+
+**Vision**: Standardoc stops understanding languages directly — it understands a universal normalized representation (UST), and Lua defines how each language maps into it. Adding a new language becomes writing a Lua plugin, not a Rust backend.
+
+```
+source code
+  → parser (tree-sitter / any tool) → UST (language-agnostic normalized AST)
+  → Lua plugin (defines symbols, relations, edges)
+  → Rust validates + stores into the IR graph
+```
+
+- [ ] **UST spec**: define a minimal language-agnostic node schema (kind, name, span, children, attributes) that all parsers output
+- [ ] **Lua runtime** (embedded `mlua`): sandbox that receives a UST tree and returns `Vec<IrSymbol>` + `Vec<IrEdge>`
+- [ ] **tree-sitter integration**: universal parser front-end; community grammars cover 100+ languages without new Rust deps
+- [ ] **Plugin discovery**: `.standardoc/plugins/<lang>.lua` auto-loaded per workspace
+- [ ] Replaces / complements the WASM bridge approach for community language providers (Lua = lower barrier than WASM; WASM kept for full native performance plugins)
 
 ### VSCode extension version selector (consumes `version.json`)
 
@@ -217,7 +237,7 @@ the surface.
 - [x] ~~v0 DSL templating (`{{ @doc.X }}` markdown expressions)~~ — killed in favour of MDX/React layer (see beta.2)
 - [x] ~~`materialize` command~~ (write virtual annotations back to source) — punted; may return as opt-in once virtual annotations land
 - [x] ~~`standardoc-server` separate binary~~ — consolidated into `stdoc` sub-commands
-- [x] ~~Lua / Python / tree-sitter providers in core~~ — Lua/Python out of beta.1 scope; tree-sitter providers via plug-in architecture only
+- [x] ~~Lua / Python / tree-sitter providers in beta.1~~ — Lua native provider ships beta.2 (`full_moon`); Python + tree-sitter deferred post-1.0
 - [x] ~~`.standardoc.json` config file~~ — replaced by `.stdignore` + `schema_meta` SQLite table
 - [x] ~~`.stdocignore`~~ — renamed to `.stdignore`
-- [x] ~~Pre-built cross-platform binaries on GitHub Releases~~ — beta.1 ships `cargo install standardoc-cli` only; pre-builts may return post-beta.1 if demand emerges
+- [x] ~~`cargo install standardoc-cli` as sole distribution channel~~ — beta.1 ships pre-built cross-platform binaries via GitHub Releases (`release.yml`); `cargo install --git` available for source builds
