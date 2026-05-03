@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
-use standardoc_core::{IndexHandle, ScanFilters, cold_start, spawn_watcher};
+use standardoc_core::{IndexHandle, ScanFilters, StorageError, cold_start, spawn_watcher};
 use standardoc_ir::{RawEdge, RawSymbol, ResolvedOrUnresolved};
 use standardoc_lang_provider::WorkspaceProvider;
 use standardoc_server::ServerError;
@@ -114,9 +114,46 @@ fn main() -> ExitCode {
     match main_inner() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
+            if let Some(marker) = fatal_marker_for(&e) {
+                eprintln!("{marker}");
+            }
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Returns a machine-readable marker line for fatal-config errors that
+/// the VSCode extension supervisor (and other daemon supervisors) need
+/// to recognise WITHOUT regex-parsing the human-readable error message.
+///
+/// The shape is stable and parsed by [`standardoc::src::daemon::supervisor`]:
+///
+/// ```text
+/// STDOC_FATAL: <code> <key>=<value> ...
+/// ```
+///
+/// Currently emitted codes:
+///
+/// - `schema_too_new db=<n> supported=<n>` — the on-disk schema is newer
+///   than this binary supports. Fix path: rebuild and re-install the
+///   binary (`cargo install --path crates/standardoc-cli --force` for a
+///   local source build, or rebuild the bundled VSCode extension). This
+///   is the H1 footgun documented in the daemon UX track — a binary
+///   pinned to schema vN cannot read a DB migrated to vN+1 by a newer
+///   process (cargo test, cargo build of an updated workspace, ...).
+///
+/// Returns `None` when the error has no structured marker — main() then
+/// falls back to the friendly `error: …` line only.
+///
+/// Adding a new code requires a matching parser update on the supervisor
+/// side. Keep the supervisor's `parseFatalMarker` in sync.
+fn fatal_marker_for(err: &ServerError) -> Option<String> {
+    match err {
+        ServerError::Storage(StorageError::SchemaVersionTooNew { db, supported }) => Some(
+            format!("STDOC_FATAL: schema_too_new db={db} supported={supported}"),
+        ),
+        _ => None,
     }
 }
 
@@ -242,7 +279,7 @@ fn cmd_query(args: &QueryArgs) -> Result<(), ServerError> {
         return Ok(());
     }
     if let Some(text) = args.text.as_deref() {
-        let results = query::search_text(&handle, text, args.limit)?;
+        let results = query::search_text(&handle, text, args.limit, &query::SymbolFilter::default())?;
         print_symbol_list(&results);
         return Ok(());
     }
@@ -462,5 +499,50 @@ fn progress_loop(handle: &IndexHandle, stop: &AtomicBool, is_tty: bool) {
     }
     if is_tty && printed_anything {
         let _ = writeln!(io::stderr());
+    }
+}
+
+#[cfg(test)]
+mod fatal_marker_tests {
+    use super::*;
+
+    #[test]
+    fn schema_too_new_emits_machine_readable_marker() {
+        let err = ServerError::Storage(StorageError::SchemaVersionTooNew {
+            db: 99,
+            supported: 2,
+        });
+        assert_eq!(
+            fatal_marker_for(&err).as_deref(),
+            Some("STDOC_FATAL: schema_too_new db=99 supported=2"),
+        );
+    }
+
+    #[test]
+    fn unrelated_storage_error_returns_no_marker() {
+        let err = ServerError::Storage(StorageError::ReadOnlyMissingDatabase {
+            path: PathBuf::from("/tmp/nope"),
+        });
+        assert!(fatal_marker_for(&err).is_none());
+    }
+
+    #[test]
+    fn io_error_returns_no_marker() {
+        let err = ServerError::Io(io::Error::other("disk full"));
+        assert!(fatal_marker_for(&err).is_none());
+    }
+
+    #[test]
+    fn marker_format_starts_with_stable_prefix() {
+        // The supervisor parses the line by splitting on the literal
+        // `STDOC_FATAL: ` prefix — keep this contract symmetric.
+        let err = ServerError::Storage(StorageError::SchemaVersionTooNew {
+            db: 42,
+            supported: 1,
+        });
+        let marker = fatal_marker_for(&err).unwrap();
+        assert!(marker.starts_with("STDOC_FATAL: "));
+        assert!(marker.contains("db=42"));
+        assert!(marker.contains("supported=1"));
     }
 }

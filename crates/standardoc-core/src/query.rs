@@ -8,16 +8,18 @@
 //! `Unresolved { name }` because the stored `to_unresolved` text discards the
 //! `BridgeKind` distinction (cf. storage::conv::unresolved_to_storage).
 
+mod similarity;
+
 use rusqlite::{Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use standardoc_ir::{
-    Blake3Hash, EdgeKind, Language, LanguageKind, RawEdge, RawSymbol, ResolvedOrUnresolved, Site,
-    SymbolLocation,
+    Blake3Hash, EdgeKind, Kind, Language, LanguageKind, RawEdge, RawSymbol, ResolvedOrUnresolved,
+    Site, SymbolLocation, Visibility,
 };
 
 use crate::storage::conv::{
-    edge_kind_from_sql_text, json_to_signature, kind_from_sql_text, language_from_sql_text,
-    visibility_from_sql_text,
+    edge_kind_from_sql_text, json_to_signature, kind_from_sql_text, kind_to_sql_text,
+    language_from_sql_text, visibility_from_sql_text, visibility_to_sql_text,
 };
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
@@ -185,12 +187,28 @@ pub fn edges_to(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Storag
     })
 }
 
+/// Symbol-shape filters reused by `search_text`, `list_symbols` and
+/// `find_by_pattern`. Every field is optional; `None` means "no
+/// constraint on that column". `module` is matched exactly against
+/// `symbols.module` — pattern-style module matching belongs to
+/// `find_by_pattern` via wildcards in the pattern argument itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SymbolFilter {
+    pub kind: Option<Kind>,
+    pub visibility: Option<Visibility>,
+    pub module: Option<String>,
+}
+
 pub fn search_text(
     handle: &IndexHandle,
     query: &str,
     limit: usize,
+    filter: &SymbolFilter,
 ) -> Result<Vec<RawSymbol>, StorageError> {
     let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+    let kind_text = filter.kind.map(kind_to_sql_text);
+    let vis_text = filter.visibility.map(visibility_to_sql_text);
+    let module = filter.module.as_deref();
     with_conn(handle, |conn| {
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
@@ -199,13 +217,162 @@ pub fn search_text(
              FROM symbols_fts f \
              JOIN symbols s ON s.id = f.rowid \
              WHERE symbols_fts MATCH ?1 \
+               AND (?2 IS NULL OR s.kind       = ?2) \
+               AND (?3 IS NULL OR s.visibility = ?3) \
+               AND (?4 IS NULL OR s.module     = ?4) \
              ORDER BY rank \
-             LIMIT ?2",
+             LIMIT ?5",
         )?;
         let rows = stmt
-            .query_map(rusqlite::params![query, limit_i64], read_symbol_row)?
+            .query_map(
+                rusqlite::params![query, kind_text, vis_text, module, limit_i64],
+                read_symbol_row,
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter().map(build_symbol).collect()
+    })
+}
+
+/// Returns symbols matching `filter` ordered by canonical fqdn. No
+/// query string, no pattern — pure server-side filter listing useful
+/// for audits like "list every private function in module X".
+pub fn list_symbols(
+    handle: &IndexHandle,
+    filter: &SymbolFilter,
+    limit: usize,
+) -> Result<Vec<RawSymbol>, StorageError> {
+    let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+    let kind_text = filter.kind.map(kind_to_sql_text);
+    let vis_text = filter.visibility.map(visibility_to_sql_text);
+    let module = filter.module.as_deref();
+    with_conn(handle, |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
+                    s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
+                    s.signature_json, s.body_hash \
+             FROM symbols s \
+             WHERE (?1 IS NULL OR s.kind       = ?1) \
+               AND (?2 IS NULL OR s.visibility = ?2) \
+               AND (?3 IS NULL OR s.module     = ?3) \
+             ORDER BY s.fqdn \
+             LIMIT ?4",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![kind_text, vis_text, module, limit_i64],
+                read_symbol_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(build_symbol).collect()
+    })
+}
+
+/// Glob-pattern search over `symbols.name` and `symbols.fqdn`. Uses
+/// SQLite's `GLOB` operator (`*`, `?`, `[abc]` wildcards — case-sensitive,
+/// distinct semantics from `LIKE`). A symbol matches when EITHER its
+/// name OR its fqdn satisfies the pattern. Results ordered by fqdn for
+/// stability.
+///
+/// Typical usage: detect cross-module duplications (`strip_*_extension`
+/// → catches `strip_rs_extension`, `strip_ts_extension`, ...).
+pub fn find_by_pattern(
+    handle: &IndexHandle,
+    pattern: &str,
+    filter: &SymbolFilter,
+    limit: usize,
+) -> Result<Vec<RawSymbol>, StorageError> {
+    let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+    let kind_text = filter.kind.map(kind_to_sql_text);
+    let vis_text = filter.visibility.map(visibility_to_sql_text);
+    let module = filter.module.as_deref();
+    with_conn(handle, |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
+                    s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
+                    s.signature_json, s.body_hash \
+             FROM symbols s \
+             WHERE (s.name GLOB ?1 OR s.fqdn GLOB ?1) \
+               AND (?2 IS NULL OR s.kind       = ?2) \
+               AND (?3 IS NULL OR s.visibility = ?3) \
+               AND (?4 IS NULL OR s.module     = ?4) \
+             ORDER BY s.fqdn \
+             LIMIT ?5",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![pattern, kind_text, vis_text, module, limit_i64],
+                read_symbol_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(build_symbol).collect()
+    })
+}
+
+/// Returns symbols whose `name` is similar to `reference`, ranked by score
+/// descending. The score is a hybrid `max(jaro_winkler, jaccard_tokens)` over
+/// lowercased names — see `query::similarity` for the algorithm.
+///
+/// `reference` is treated as raw text: no symbol lookup, no canonicalisation.
+/// Pass either a known name (`strip_rs_extension`) or a hypothetical one
+/// (`strip_extension`) to anchor the search. Symbols whose name matches
+/// `reference` case-insensitively are skipped (self-skip semantics — anchor
+/// is not its own neighbor; collisions across modules are skipped uniformly).
+///
+/// `threshold` is hard-clamped to `[0.0, 1.0]` by the caller; rows with
+/// `score < threshold` are dropped. `filter` narrows the candidate pool
+/// BEFORE scoring (idiomatic with the other query helpers — keeps the
+/// scorer's input bounded). `limit` truncates the final ranked list.
+///
+/// Comparison is on `name` only, not `fqdn`: the module-path string would
+/// dominate identifier characters and drown out the templated-name signal
+/// (`a::b::strip_rs_extension` vs `c::d::e::strip_ts_extension` look
+/// different even though they're the cluster we want to detect).
+pub fn find_similar(
+    handle: &IndexHandle,
+    reference: &str,
+    threshold: f32,
+    filter: &SymbolFilter,
+    limit: usize,
+) -> Result<Vec<(RawSymbol, f32)>, StorageError> {
+    let reference_lc = reference.to_lowercase();
+    let kind_text = filter.kind.map(kind_to_sql_text);
+    let vis_text = filter.visibility.map(visibility_to_sql_text);
+    let module = filter.module.as_deref();
+    with_conn(handle, |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
+                    s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
+                    s.signature_json, s.body_hash \
+             FROM symbols s \
+             WHERE (?1 IS NULL OR s.kind       = ?1) \
+               AND (?2 IS NULL OR s.visibility = ?2) \
+               AND (?3 IS NULL OR s.module     = ?3)",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![kind_text, vis_text, module],
+                read_symbol_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let symbols = rows
+            .into_iter()
+            .map(build_symbol)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut scored: Vec<(RawSymbol, f32)> = symbols
+            .into_iter()
+            .filter(|s| s.name.to_lowercase() != reference_lc)
+            .filter_map(|s| {
+                let score = similarity::score(reference, &s.name);
+                (score >= threshold).then_some((s, score))
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.fqdn.cmp(&b.0.fqdn))
+        });
+        scored.truncate(limit);
+        Ok(scored)
     })
 }
 
@@ -1005,7 +1172,7 @@ mod tests {
             );
             seed_symbol(&conn, "src/main.rs", "noise", "crate::noise", 10);
         }
-        let got = search_text(&handle, "create_user", 50).unwrap();
+        let got = search_text(&handle, "create_user", 50, &SymbolFilter::default()).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].name, "create_user");
     }
@@ -1019,8 +1186,457 @@ mod tests {
             seed_symbol(&conn, "src/main.rs", "tick_one", "crate::tick_one", 1);
             seed_symbol(&conn, "src/main.rs", "tick_two", "crate::tick_two", 2);
         }
-        let got = search_text(&handle, "tick_one OR tick_two", 1).unwrap();
+        let got = search_text(&handle, "tick_one OR tick_two", 1, &SymbolFilter::default()).unwrap();
         assert_eq!(got.len(), 1);
+    }
+
+    fn seed_symbol_full(
+        conn: &Connection,
+        file: &str,
+        name: &str,
+        fqdn: &str,
+        kind: Kind,
+        visibility: Visibility,
+        module: Option<&str>,
+    ) -> i64 {
+        let sym = RawSymbol {
+            name: name.into(),
+            fqdn: fqdn.into(),
+            kind,
+            language_kind: LanguageKind::from("fn_item"),
+            module: module.map(str::to_string),
+            visibility,
+            location: SymbolLocation {
+                file: file.into(),
+                start_line: 1,
+                end_line: 5,
+                start_col: 0,
+                end_col: 1,
+            },
+            signature: None,
+            body_hash: Some(Blake3Hash::new([0xab; 32])),
+            attributes: vec![],
+        };
+        insert_symbol(
+            conn,
+            &sym,
+            SymbolInsertContext {
+                file_path: file,
+                language: Language::Rust,
+                is_external: false,
+                source_origin: SourceOrigin::Workspace,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn search_text_filter_by_kind_excludes_other_kinds() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(
+                &conn, "src/main.rs", "marker", "crate::marker_fn",
+                Kind::Function, Visibility::Public, None,
+            );
+            seed_symbol_full(
+                &conn, "src/main.rs", "marker", "crate::marker_ty",
+                Kind::Type, Visibility::Public, None,
+            );
+        }
+        let only_types = SymbolFilter {
+            kind: Some(Kind::Type),
+            ..Default::default()
+        };
+        let got = search_text(&handle, "marker", 50, &only_types).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].fqdn, "crate::marker_ty");
+    }
+
+    #[test]
+    fn search_text_filter_by_visibility_excludes_other_vis() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(
+                &conn, "src/main.rs", "thing", "crate::thing_pub",
+                Kind::Function, Visibility::Public, None,
+            );
+            seed_symbol_full(
+                &conn, "src/main.rs", "thing", "crate::thing_priv",
+                Kind::Function, Visibility::Private, None,
+            );
+        }
+        let only_private = SymbolFilter {
+            visibility: Some(Visibility::Private),
+            ..Default::default()
+        };
+        let got = search_text(&handle, "thing", 50, &only_private).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].fqdn, "crate::thing_priv");
+    }
+
+    #[test]
+    fn list_symbols_returns_all_when_filter_empty() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(&conn, "src/main.rs", "a", "crate::a",
+                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(&conn, "src/main.rs", "b", "crate::b",
+                Kind::Type, Visibility::Private, None);
+        }
+        let got = list_symbols(&handle, &SymbolFilter::default(), 50).unwrap();
+        assert_eq!(got.len(), 2);
+        // Ordered by fqdn for stability.
+        assert_eq!(got[0].fqdn, "crate::a");
+        assert_eq!(got[1].fqdn, "crate::b");
+    }
+
+    #[test]
+    fn list_symbols_filter_by_visibility_private() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(&conn, "src/main.rs", "pub_one", "crate::pub_one",
+                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(&conn, "src/main.rs", "priv_one", "crate::priv_one",
+                Kind::Function, Visibility::Private, None);
+            seed_symbol_full(&conn, "src/main.rs", "priv_two", "crate::priv_two",
+                Kind::Function, Visibility::Private, None);
+        }
+        let filter = SymbolFilter {
+            visibility: Some(Visibility::Private),
+            ..Default::default()
+        };
+        let got = list_symbols(&handle, &filter, 50).unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|s| s.visibility == Visibility::Private));
+    }
+
+    #[test]
+    fn list_symbols_filter_by_module_exact_match() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(&conn, "src/main.rs", "f1", "crate::a::f1",
+                Kind::Function, Visibility::Public, Some("crate::a"));
+            seed_symbol_full(&conn, "src/main.rs", "f2", "crate::b::f2",
+                Kind::Function, Visibility::Public, Some("crate::b"));
+        }
+        let filter = SymbolFilter {
+            module: Some("crate::a".into()),
+            ..Default::default()
+        };
+        let got = list_symbols(&handle, &filter, 50).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].fqdn, "crate::a::f1");
+    }
+
+    #[test]
+    fn list_symbols_respects_limit() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            for i in 0..5 {
+                seed_symbol_full(&conn, "src/main.rs",
+                    &format!("f{i}"), &format!("crate::f{i}"),
+                    Kind::Function, Visibility::Public, None);
+            }
+        }
+        let got = list_symbols(&handle, &SymbolFilter::default(), 3).unwrap();
+        assert_eq!(got.len(), 3);
+    }
+
+    #[test]
+    fn find_by_pattern_glob_matches_name_wildcard() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(&conn, "src/main.rs", "strip_rs_extension", "crate::a::strip_rs_extension",
+                Kind::Function, Visibility::Private, None);
+            seed_symbol_full(&conn, "src/main.rs", "strip_ts_extension", "crate::b::strip_ts_extension",
+                Kind::Function, Visibility::Private, None);
+            seed_symbol_full(&conn, "src/main.rs", "compute_path", "crate::c::compute_path",
+                Kind::Function, Visibility::Public, None);
+        }
+        let got = find_by_pattern(
+            &handle,
+            "strip_*_extension",
+            &SymbolFilter::default(),
+            50,
+        )
+        .unwrap();
+        let names: Vec<&str> = got.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["strip_rs_extension", "strip_ts_extension"]);
+    }
+
+    #[test]
+    fn find_by_pattern_glob_matches_fqdn_path() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(&conn, "src/main.rs", "do_a", "myapp::utils::do_a",
+                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(&conn, "src/main.rs", "do_b", "myapp::utils::do_b",
+                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(&conn, "src/main.rs", "do_c", "other::do_c",
+                Kind::Function, Visibility::Public, None);
+        }
+        let got = find_by_pattern(
+            &handle,
+            "myapp::utils::*",
+            &SymbolFilter::default(),
+            50,
+        )
+        .unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|s| s.fqdn.starts_with("myapp::utils::")));
+    }
+
+    #[test]
+    fn find_by_pattern_combines_pattern_and_visibility_filter() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(&conn, "src/main.rs", "helper_one", "crate::helper_one",
+                Kind::Function, Visibility::Private, None);
+            seed_symbol_full(&conn, "src/main.rs", "helper_two", "crate::helper_two",
+                Kind::Function, Visibility::Public, None);
+        }
+        let filter = SymbolFilter {
+            visibility: Some(Visibility::Private),
+            ..Default::default()
+        };
+        let got = find_by_pattern(&handle, "helper_*", &filter, 50).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "helper_one");
+    }
+
+    #[test]
+    fn find_by_pattern_no_match_returns_empty() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(&conn, "src/main.rs", "foo", "crate::foo",
+                Kind::Function, Visibility::Public, None);
+        }
+        let got = find_by_pattern(&handle, "nope_*", &SymbolFilter::default(), 50).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn find_similar_ranks_template_family_above_unrelated() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(&conn, "src/main.rs",
+                "strip_rs_extension", "crate::a::strip_rs_extension",
+                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(&conn, "src/main.rs",
+                "strip_ts_extension", "crate::b::strip_ts_extension",
+                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(&conn, "src/main.rs",
+                "strip_lua_extension", "crate::c::strip_lua_extension",
+                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(&conn, "src/main.rs",
+                "render_widget", "crate::d::render_widget",
+                Kind::Function, Visibility::Public, None);
+        }
+        let got = find_similar(
+            &handle,
+            "strip_rs_extension",
+            0.8,
+            &SymbolFilter::default(),
+            50,
+        )
+        .unwrap();
+        let names: Vec<&str> = got.iter().map(|(s, _)| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"strip_ts_extension")
+                && names.contains(&"strip_lua_extension"),
+            "expected templated family in result, got {names:?}"
+        );
+        assert!(
+            !names.contains(&"render_widget"),
+            "unrelated name must be filtered by threshold, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn find_similar_self_skips_anchor_by_name() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(&conn, "src/main.rs",
+                "strip_rs_extension", "crate::a::strip_rs_extension",
+                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(&conn, "src/main.rs",
+                "strip_rs_extension", "crate::b::strip_rs_extension",
+                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(&conn, "src/main.rs",
+                "strip_ts_extension", "crate::c::strip_ts_extension",
+                Kind::Function, Visibility::Public, None);
+        }
+        let got = find_similar(
+            &handle,
+            "strip_rs_extension",
+            0.5,
+            &SymbolFilter::default(),
+            50,
+        )
+        .unwrap();
+        // Both `strip_rs_extension` collisions are skipped (case-insensitive
+        // self-skip); only the templated cousin remains.
+        let names: Vec<&str> = got.iter().map(|(s, _)| s.name.as_str()).collect();
+        assert_eq!(names, vec!["strip_ts_extension"]);
+    }
+
+    #[test]
+    fn find_similar_orders_by_score_descending_then_fqdn() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            // Closest cousin: 1-char-diff
+            seed_symbol_full(&conn, "src/main.rs",
+                "strip_ts_extension", "crate::a::strip_ts_extension",
+                Kind::Function, Visibility::Public, None);
+            // Slightly weaker cousin: 3-chars-diff
+            seed_symbol_full(&conn, "src/main.rs",
+                "strip_lua_extension", "crate::b::strip_lua_extension",
+                Kind::Function, Visibility::Public, None);
+        }
+        let got = find_similar(
+            &handle,
+            "strip_rs_extension",
+            0.5,
+            &SymbolFilter::default(),
+            50,
+        )
+        .unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(
+            got[0].1 >= got[1].1,
+            "results must be sorted by score desc"
+        );
+        assert_eq!(got[0].0.name, "strip_ts_extension");
+        assert_eq!(got[1].0.name, "strip_lua_extension");
+    }
+
+    #[test]
+    fn find_similar_threshold_filters_low_scores() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(&conn, "src/main.rs",
+                "buy_apple", "crate::a::buy_apple",
+                Kind::Function, Visibility::Public, None);
+        }
+        let got = find_similar(
+            &handle,
+            "render_widget",
+            0.95,
+            &SymbolFilter::default(),
+            50,
+        )
+        .unwrap();
+        assert!(got.is_empty(), "high threshold must drop unrelated names");
+    }
+
+    #[test]
+    fn find_similar_filter_applied_before_scoring() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(&conn, "src/main.rs",
+                "strip_ts_extension", "crate::a::strip_ts_extension",
+                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(&conn, "src/main.rs",
+                "strip_lua_extension", "crate::b::strip_lua_extension",
+                Kind::Function, Visibility::Private, None);
+        }
+        let filter = SymbolFilter {
+            visibility: Some(Visibility::Public),
+            ..Default::default()
+        };
+        let got = find_similar(&handle, "strip_rs_extension", 0.5, &filter, 50).unwrap();
+        let names: Vec<&str> = got.iter().map(|(s, _)| s.name.as_str()).collect();
+        assert_eq!(names, vec!["strip_ts_extension"]);
+    }
+
+    #[test]
+    fn find_similar_respects_limit_after_sort() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            for label in ["ts", "lua", "py", "go", "js"] {
+                let name = format!("strip_{label}_extension");
+                let fqdn = format!("crate::{label}::strip_{label}_extension");
+                seed_symbol_full(&conn, "src/main.rs", &name, &fqdn,
+                    Kind::Function, Visibility::Public, None);
+            }
+        }
+        let got = find_similar(
+            &handle,
+            "strip_rs_extension",
+            0.0,
+            &SymbolFilter::default(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn find_similar_empty_index_returns_empty() {
+        let (_dir, handle) = open_handle();
+        let got = find_similar(
+            &handle,
+            "anything",
+            0.5,
+            &SymbolFilter::default(),
+            50,
+        )
+        .unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn find_similar_module_filter_scopes_search() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol_full(&conn, "src/main.rs",
+                "strip_ts_extension", "crate::a::strip_ts_extension",
+                Kind::Function, Visibility::Public, Some("crate::a"));
+            seed_symbol_full(&conn, "src/main.rs",
+                "strip_lua_extension", "crate::b::strip_lua_extension",
+                Kind::Function, Visibility::Public, Some("crate::b"));
+        }
+        let filter = SymbolFilter {
+            module: Some("crate::a".into()),
+            ..Default::default()
+        };
+        let got = find_similar(&handle, "strip_rs_extension", 0.5, &filter, 50).unwrap();
+        let names: Vec<&str> = got.iter().map(|(s, _)| s.name.as_str()).collect();
+        assert_eq!(names, vec!["strip_ts_extension"]);
     }
 
     #[test]
