@@ -126,18 +126,30 @@ fn dispatch(path: &str) -> Option<Dispatch> {
 /// 1:1 with the original SFC source. Returns the payload + the swc
 /// syntax derived from the first script's `lang` attribute (or the
 /// framework default).
+///
+/// Lock 41 §1 Q2: `<script setup>` always lands AFTER plain `<script>`
+/// in the merged payload — Vue 3 semantics require `defineProps` etc.
+/// to see imports declared at module scope. We stable-sort scripts by
+/// the `is_script_setup` flag so plain blocks come first regardless of
+/// source order. Byte alignment is preserved when source order matches
+/// the prescribed order (the overwhelmingly common case); when the
+/// user writes `<script setup>` before `<script>` in source, the
+/// reordered second block's swc spans drift by the inter-block byte
+/// gap — accepted edge case (cohérent feedback_scope_graph_not_lsp).
 fn build_script_payload(
     content: &str,
     doc: &SfcDocument,
     framework: Framework,
 ) -> (String, Syntax) {
+    let mut scripts: Vec<&sfc::SfcBlock> = doc.scripts.iter().collect();
+    scripts.sort_by_key(|s| s.is_script_setup());
+
     let mut payload = String::new();
-    for script in &doc.scripts {
+    for script in &scripts {
         pad_until_byte_offset(&mut payload, script.content_start, content);
         payload.push_str(&content[script.content_start..script.content_end]);
     }
-    let lang = doc
-        .scripts
+    let lang = scripts
         .iter()
         .find_map(|s| s.lang.as_deref())
         .unwrap_or_else(|| framework.default_lang());
@@ -412,5 +424,59 @@ mod tests {
         let doc = sfc::extract_blocks(src);
         let regions = svelte_template_regions(src, &doc);
         assert_eq!(regions, vec![(0, src.len())]);
+    }
+
+    #[test]
+    fn build_script_payload_keeps_source_order_when_already_prescribed() {
+        // Plain <script> first, <script setup> second — already in the
+        // lock 41 §1 Q2 order. Payload must concat plain-then-setup.
+        let src = "<script>const a=1;</script>\n<script setup>const b=2;</script>";
+        let doc = sfc::extract_blocks(src);
+        let (payload, _) = build_script_payload(src, &doc, Framework::Vue);
+        let plain_pos = payload.find("const a=1;").unwrap();
+        let setup_pos = payload.find("const b=2;").unwrap();
+        assert!(plain_pos < setup_pos, "plain must appear before setup");
+    }
+
+    #[test]
+    fn build_script_payload_reorders_when_setup_appears_first_in_source() {
+        // Reverse source order: <script setup> first, plain <script>
+        // second. Lock 41 §1 Q2 enforces plain-before-setup → output
+        // payload must put `const a=1;` (plain) before `const b=2;`
+        // (setup) regardless of source order.
+        let src = "<script setup>const b=2;</script>\n<script>const a=1;</script>";
+        let doc = sfc::extract_blocks(src);
+        let (payload, _) = build_script_payload(src, &doc, Framework::Vue);
+        let plain_pos = payload.find("const a=1;").unwrap();
+        let setup_pos = payload.find("const b=2;").unwrap();
+        assert!(
+            plain_pos < setup_pos,
+            "plain must be reordered before setup even when source order says otherwise"
+        );
+    }
+
+    #[test]
+    fn build_script_payload_single_setup_only_works() {
+        // Most idiomatic Vue 3 SFC: a lone `<script setup>` block.
+        let src = "<script setup>const x=1;</script>";
+        let doc = sfc::extract_blocks(src);
+        let (payload, _) = build_script_payload(src, &doc, Framework::Vue);
+        assert!(payload.contains("const x=1;"));
+    }
+
+    #[test]
+    fn build_script_payload_preserves_byte_alignment_for_in_order_scripts() {
+        // When source order matches prescribed order, the payload's byte
+        // offset of the script content must match the source's byte
+        // offset (so swc spans align with the SFC file's coords).
+        let src = "<script>const a=1;</script>\n<script setup>const b=2;</script>";
+        let doc = sfc::extract_blocks(src);
+        let (payload, _) = build_script_payload(src, &doc, Framework::Vue);
+        let src_a_pos = src.find("const a=1;").unwrap();
+        let src_b_pos = src.find("const b=2;").unwrap();
+        let pay_a_pos = payload.find("const a=1;").unwrap();
+        let pay_b_pos = payload.find("const b=2;").unwrap();
+        assert_eq!(pay_a_pos, src_a_pos);
+        assert_eq!(pay_b_pos, src_b_pos);
     }
 }
