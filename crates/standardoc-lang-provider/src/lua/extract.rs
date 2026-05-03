@@ -199,6 +199,7 @@ pub(crate) fn extract_local_assignment(
                 kind: EdgeKind::Imports,
                 to: resolve_require(&require_arg),
                 sites: vec![site_for(&ctx.core.file_path, pos)],
+                attributes: vec![],
             });
         }
 
@@ -311,6 +312,7 @@ fn record_calls_in_block(
                             kind: EdgeKind::Imports,
                             to: resolve_require(&req),
                             sites: vec![site_for(&ctx.core.file_path, pos)],
+                            attributes: vec![],
                         });
                     }
                 }
@@ -323,6 +325,7 @@ fn record_calls_in_block(
                             kind: EdgeKind::Imports,
                             to: resolve_require(&req),
                             sites: vec![],
+                            attributes: vec![],
                         });
                     }
                 }
@@ -354,6 +357,7 @@ fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &Functi
             kind: EdgeKind::Imports,
             to: resolve_require(&req),
             sites: vec![site_for(&ctx.core.file_path, call_start(fc))],
+            attributes: vec![],
         });
         return;
     }
@@ -365,6 +369,7 @@ fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &Functi
         kind: EdgeKind::Calls,
         to: ResolvedOrUnresolved::Unresolved { name: call_name },
         sites: vec![site_for(&ctx.core.file_path, call_start(fc))],
+        attributes: vec![],
     });
 }
 

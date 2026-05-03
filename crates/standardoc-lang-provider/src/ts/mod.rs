@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
-use standardoc_ir::ExtractedFile;
+use standardoc_ir::{ExtractedFile, Language};
+use swc_core::ecma::parser::Syntax;
 
 mod extract;
 mod extract_doc;
@@ -78,6 +79,25 @@ impl LanguageProvider for TsProvider {
         path: &str,
         ctx: &ExtractContext<'_>,
     ) -> Result<ExtractedFile, ExtractError> {
+        self.extract_with_overrides(content, path, ctx, None, None)
+    }
+}
+
+impl TsProvider {
+    /// SFC-orchestrator entry point (lock 41 §2.5). Routes through the
+    /// same package/tsconfig discovery as [`Self::extract`] but lets the
+    /// caller force the swc syntax (e.g. `Syntax::Typescript{tsx:false,..}`
+    /// for a `.vue` `<script lang="ts">` payload) and stamp a different
+    /// IR language tag on the resulting `ExtractedFile`
+    /// (e.g. `Language::Vue` even though the body was parsed as TS).
+    pub(crate) fn extract_with_overrides(
+        &self,
+        content: &str,
+        path: &str,
+        ctx: &ExtractContext<'_>,
+        syntax_override: Option<Syntax>,
+        language_override: Option<Language>,
+    ) -> Result<ExtractedFile, ExtractError> {
         let file_abs_path = ctx.workspace_root.join(path);
         let (package_name, package_root) = self.resolve_package_name(&file_abs_path, path)?;
         let package_relative = file_abs_path.strip_prefix(&package_root).map_or_else(
@@ -85,7 +105,7 @@ impl LanguageProvider for TsProvider {
             |p| p.to_string_lossy().replace('\\', "/"),
         );
         let tsconfig = load_nearest_tsconfig(&file_abs_path, &package_root);
-        extract::extract_file(
+        extract::extract_file_with_syntax(
             content,
             path,
             &package_name,
@@ -93,6 +113,8 @@ impl LanguageProvider for TsProvider {
             &file_abs_path,
             &package_root,
             tsconfig,
+            syntax_override,
+            language_override,
         )
     }
 }

@@ -1,5 +1,7 @@
 mod lua;
 mod rust;
+mod sfc;
+mod template;
 mod ts;
 mod walk_core;
 mod workspace;

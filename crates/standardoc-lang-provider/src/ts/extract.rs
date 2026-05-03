@@ -15,6 +15,46 @@ use super::helpers::compute_module_path;
 use super::resolver::TsConfigPaths;
 use super::walk;
 
+/// Lock 41 §2.5 wrapper. Lets the SFC orchestrator (Vue / Svelte) drive
+/// the syntax + IR language explicitly while still routing through the
+/// shared TS extractor.
+///
+/// `syntax_override` forces the swc lexer's syntax (used by the SFC
+/// orchestrator to parse a `.vue`/`.svelte` `<script lang="ts">` body
+/// as TS rather than guessing from the `.vue` extension).
+///
+/// `language_override` substitutes the IR `Language` tag stamped on the
+/// resulting `ExtractedFile` (so a `.vue` file lands as `Language::Vue`
+/// in the DB even though its symbols came out of the TS extractor).
+///
+/// The original `workspace_relative_path` is preserved verbatim — symbols
+/// and edge sites still report the user-facing `.vue` / `.svelte` path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn extract_file_with_syntax(
+    content: &str,
+    workspace_relative_path: &str,
+    package_name: &str,
+    package_relative: &str,
+    from_file_abs_path: &Path,
+    package_root: &Path,
+    tsconfig: Option<TsConfigPaths>,
+    syntax_override: Option<Syntax>,
+    language_override: Option<Language>,
+) -> Result<ExtractedFile, ExtractError> {
+    extract_file_inner(
+        content,
+        workspace_relative_path,
+        package_name,
+        package_relative,
+        from_file_abs_path,
+        package_root,
+        tsconfig,
+        syntax_override,
+        language_override,
+    )
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_file(
     content: &str,
@@ -25,14 +65,40 @@ pub(crate) fn extract_file(
     package_root: &Path,
     tsconfig: Option<TsConfigPaths>,
 ) -> Result<ExtractedFile, ExtractError> {
+    extract_file_inner(
+        content,
+        workspace_relative_path,
+        package_name,
+        package_relative,
+        from_file_abs_path,
+        package_root,
+        tsconfig,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn extract_file_inner(
+    content: &str,
+    workspace_relative_path: &str,
+    package_name: &str,
+    package_relative: &str,
+    from_file_abs_path: &Path,
+    package_root: &Path,
+    tsconfig: Option<TsConfigPaths>,
+    syntax_override: Option<Syntax>,
+    language_override: Option<Language>,
+) -> Result<ExtractedFile, ExtractError> {
     let cm: Lrc<SourceMap> = Default::default();
     let fm = cm.new_source_file(
         Lrc::new(FileName::Custom(workspace_relative_path.into())),
         content.to_string(),
     );
     let comments = SingleThreadedComments::default();
+    let syntax = syntax_override.unwrap_or_else(|| syntax_for(workspace_relative_path));
     let lexer = Lexer::new(
-        syntax_for(workspace_relative_path),
+        syntax,
         EsVersion::EsNext,
         StringInput::from(&*fm),
         Some(&comments),
@@ -91,7 +157,7 @@ pub(crate) fn extract_file(
 
     Ok(ExtractedFile {
         file: workspace_relative_path.into(),
-        language: language_for(workspace_relative_path),
+        language: language_override.unwrap_or_else(|| language_for(workspace_relative_path)),
         source_origin: SourceOrigin::Workspace,
         is_external: false,
         content_hash,

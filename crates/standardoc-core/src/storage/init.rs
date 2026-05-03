@@ -52,7 +52,10 @@ mod tests {
     }
 
     #[test]
-    fn init_seeds_schema_version() {
+    fn init_seeds_schema_version_at_v1_baseline() {
+        // run_init_schema seeds the historical v1 baseline. Fresh DBs go
+        // through `ensure_schema` which then loops the upgraders to the
+        // current SUPPORTED_SCHEMA_VERSION — see `migrate::ensure_schema`.
         let conn = fresh_conn();
         run_init_schema(&conn).unwrap();
         let v: String = conn

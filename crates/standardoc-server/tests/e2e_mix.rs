@@ -464,3 +464,100 @@ fn cold_start_indexes_lua_alongside_rust_and_ts() {
         "Lua --- did not persist on M.trim"
     );
 }
+
+const VUE_APP_VUE: &str = "\
+<template>
+  <div>
+    <h1>{{ title }}</h1>
+    <button @click=\"increment\">+</button>
+  </div>
+</template>
+<script lang=\"ts\">
+const title = 'hello';
+function increment() {}
+</script>
+";
+
+const SVELTE_COUNTER_SVELTE: &str = "\
+<script>
+let count = 0;
+function reset() { count = 0; }
+</script>
+<button on:click={reset}>Reset {count}</button>
+";
+
+#[test]
+fn cold_start_indexes_vue_and_svelte_alongside_rust_ts_lua() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_mix_workspace(root);
+    write(root, "scripts.rockspec", "package = \"scripts\"\n");
+    write(root, "scripts/lib.lua", LUA_LIB_LUA);
+    write(root, "src/App.vue", VUE_APP_VUE);
+    write(root, "src/Counter.svelte", SVELTE_COUNTER_SVELTE);
+
+    let provider = WorkspaceProvider::new();
+    let handle = index_once(root, &provider).unwrap();
+
+    // Vue side: module + symbols + a template-event edge.
+    let vue_syms = query::symbols_by_file(&handle, "src/App.vue").unwrap();
+    let vue_names: Vec<&str> = vue_syms.iter().map(|s| s.name.as_str()).collect();
+    assert!(vue_names.contains(&"title"), "vue title missing: {vue_names:?}");
+    assert!(
+        vue_names.contains(&"increment"),
+        "vue increment missing: {vue_names:?}"
+    );
+
+    let vue_edges = query::edges_from(&handle, "@app/web::src::App").unwrap();
+    let template_event_attrs: Vec<bool> = vue_edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::References)
+        .map(|e| e.attributes.iter().any(|a| a == "template-event"))
+        .collect();
+    assert!(
+        template_event_attrs.iter().any(|t| *t),
+        "expected at least one template-event REFERENCES edge from @app/web::src::App"
+    );
+
+    // Svelte side: module + symbol + a template-event edge.
+    let sv_syms = query::symbols_by_file(&handle, "src/Counter.svelte").unwrap();
+    let sv_names: Vec<&str> = sv_syms.iter().map(|s| s.name.as_str()).collect();
+    assert!(sv_names.contains(&"count"), "svelte count missing: {sv_names:?}");
+    assert!(
+        sv_names.contains(&"reset"),
+        "svelte reset missing: {sv_names:?}"
+    );
+
+    let sv_edges = query::edges_from(&handle, "@app/web::src::Counter").unwrap();
+    let svelte_events: Vec<&ResolvedOrUnresolved> = sv_edges
+        .iter()
+        .filter(|e| {
+            e.kind == EdgeKind::References
+                && e.attributes.iter().any(|a| a == "template-event")
+        })
+        .map(|e| &e.to)
+        .collect();
+    assert!(
+        !svelte_events.is_empty(),
+        "expected a template-event edge for Svelte's on:click={{reset}}"
+    );
+
+    // Rust + TS + Lua sides still index correctly — no dispatcher regression.
+    let rust_lib = query::symbols_by_file(&handle, "src-tauri/src/lib.rs").unwrap();
+    assert!(rust_lib.iter().any(|s| s.name == "alpha"));
+    let ts_index = query::symbols_by_file(&handle, "src/index.ts").unwrap();
+    assert!(ts_index.iter().any(|s| s.name == "main"));
+    let lua_lib = query::symbols_by_file(&handle, "scripts/lib.lua").unwrap();
+    assert!(lua_lib.iter().any(|s| s.name == "trim"));
+
+    // ExtractedFile.language for SFCs must round-trip as Vue / Svelte
+    // (not TypeScript). Verified via the file_info query.
+    let vue_info = query::file_info(&handle, "src/App.vue")
+        .unwrap()
+        .expect("App.vue not indexed");
+    assert_eq!(vue_info.language, standardoc_ir::Language::Vue);
+    let sv_info = query::file_info(&handle, "src/Counter.svelte")
+        .unwrap()
+        .expect("Counter.svelte not indexed");
+    assert_eq!(sv_info.language, standardoc_ir::Language::Svelte);
+}

@@ -42,10 +42,12 @@ pub(crate) fn compute_module_path(package_relative: &str) -> String {
 }
 
 fn strip_ts_extension(p: &str) -> &str {
-    // Order matters: `.d.ts` must be tried before `.ts`, etc.
+    // Order matters: `.d.ts` must be tried before `.ts`, etc. Lock 41 §1
+    // Q9 added `.vue` and `.svelte` so SFC files compute the same module
+    // path their script content would have under a plain TS file.
     for ext in [
         ".d.ts", ".d.tsx", ".d.mts", ".d.cts", ".tsx", ".ts", ".jsx", ".js", ".mts", ".cts",
-        ".mjs", ".cjs",
+        ".mjs", ".cjs", ".vue", ".svelte",
     ] {
         if let Some(stem) = p.strip_suffix(ext) {
             return stem;

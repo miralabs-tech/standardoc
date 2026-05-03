@@ -82,6 +82,7 @@ fn fixture() -> ExtractedFile {
             line: 18,
             col: 8,
         }],
+        attributes: vec![],
     };
 
     let unresolved_edge = RawEdge {
@@ -91,6 +92,7 @@ fn fixture() -> ExtractedFile {
             name: "User".into(),
         },
         sites: vec![],
+        attributes: vec![],
     };
 
     let bridge_edge = RawEdge {
@@ -101,6 +103,7 @@ fn fixture() -> ExtractedFile {
             name: "create_user".into(),
         },
         sites: vec![],
+        attributes: vec![],
     };
 
     let call_site = RawCallSite {

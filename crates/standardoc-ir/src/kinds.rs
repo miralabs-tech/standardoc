@@ -48,6 +48,8 @@ pub enum Language {
     TypeScript,
     JavaScript,
     Lua,
+    Vue,
+    Svelte,
 }
 
 #[cfg(test)]
@@ -119,6 +121,11 @@ mod tests {
             "\"javascript\""
         );
         assert_eq!(serde_json::to_string(&Language::Lua).unwrap(), "\"lua\"");
+        assert_eq!(serde_json::to_string(&Language::Vue).unwrap(), "\"vue\"");
+        assert_eq!(
+            serde_json::to_string(&Language::Svelte).unwrap(),
+            "\"svelte\""
+        );
     }
 
     #[test]
@@ -128,6 +135,8 @@ mod tests {
             Language::TypeScript,
             Language::JavaScript,
             Language::Lua,
+            Language::Vue,
+            Language::Svelte,
         ] {
             let s = serde_json::to_string(&lang).unwrap();
             let back: Language = serde_json::from_str(&s).unwrap();

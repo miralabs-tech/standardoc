@@ -147,7 +147,7 @@ pub fn edges_from(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Stor
         };
         let rows = collect_edge_rows(
             conn,
-            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved \
+            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved, attributes \
              FROM edges WHERE from_symbol_id = ?1 ORDER BY id ASC",
             rusqlite::params![id],
         )?;
@@ -162,7 +162,7 @@ pub fn edges_to(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Storag
         let target_id = lookup_id_by_fqdn(conn, fqdn)?;
         let rows = collect_edge_rows(
             conn,
-            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved \
+            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved, attributes \
              FROM edges \
              WHERE (?1 IS NOT NULL AND to_symbol_id = ?1) \
                 OR to_unresolved = ?2 \
@@ -500,6 +500,7 @@ struct EdgeRowRaw {
     kind_text: String,
     to_symbol_id: Option<i64>,
     to_unresolved: Option<String>,
+    attributes_json: String,
 }
 
 fn read_edge_row(row: &Row<'_>) -> rusqlite::Result<EdgeRowRaw> {
@@ -509,6 +510,7 @@ fn read_edge_row(row: &Row<'_>) -> rusqlite::Result<EdgeRowRaw> {
         kind_text: row.get(2)?,
         to_symbol_id: row.get(3)?,
         to_unresolved: row.get(4)?,
+        attributes_json: row.get(5)?,
     })
 }
 
@@ -549,11 +551,19 @@ fn build_edge(
         }
     };
     let sites = load_edge_sites(conn, raw.id)?;
+    let attributes: Vec<String> =
+        serde_json::from_str(&raw.attributes_json).map_err(|e| StorageError::InvalidStoredData {
+            detail: format!(
+                "edges.id={} has malformed attributes JSON: {e}",
+                raw.id
+            ),
+        })?;
     Ok(RawEdge {
         from_fqdn,
         kind,
         to,
         sites,
+        attributes,
     })
 }
 
@@ -828,6 +838,7 @@ mod tests {
                         fqdn: "crate::callee".into(),
                     },
                     sites: vec![],
+                    attributes: vec![],
                 },
             )
             .unwrap();
@@ -841,6 +852,7 @@ mod tests {
                         name: "external::thing".into(),
                     },
                     sites: vec![],
+                    attributes: vec![],
                 },
             )
             .unwrap();
@@ -882,6 +894,7 @@ mod tests {
                         name: "thing".into(),
                     },
                     sites: vec![],
+                    attributes: vec![],
                 },
             )
             .unwrap();
@@ -929,6 +942,7 @@ mod tests {
                         fqdn: "crate::callee".into(),
                     },
                     sites: vec![],
+                    attributes: vec![],
                 },
             )
             .unwrap();
@@ -959,6 +973,7 @@ mod tests {
                         name: "external::thing".into(),
                     },
                     sites: vec![],
+                    attributes: vec![],
                 },
             )
             .unwrap();
@@ -1271,6 +1286,7 @@ mod tests {
                 kind: EdgeKind::Calls,
                 to,
                 sites: vec![],
+                attributes: vec![],
             },
         )
         .unwrap();
@@ -1290,6 +1306,7 @@ mod tests {
                 kind: EdgeKind::Imports,
                 to,
                 sites: vec![],
+                attributes: vec![],
             },
         )
         .unwrap();
@@ -1492,6 +1509,7 @@ mod tests {
                         fqdn: "crate::T".into(),
                     },
                     sites: vec![],
+                    attributes: vec![],
                 },
             )
             .unwrap();
