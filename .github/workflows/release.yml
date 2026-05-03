@@ -3,9 +3,11 @@ name: Release
 # Triggered when a tag matching `v*` is pushed (e.g. `v1.0.0-beta.1`).
 # Builds pre-compiled `stdoc` binaries for Linux x64/arm64, macOS x64/arm64,
 # Windows x64; generates a `version.json` manifest consumed by the VSCode
-# extension's future version selector; publishes `standardoc-cli` to
-# crates.io; creates a GitHub Release with archives + checksums + manifest
-# attached, body pulled from CHANGELOG.md.
+# extension's future version selector; creates a GitHub Release with
+# archives + checksums + manifest attached, body pulled from CHANGELOG.md.
+#
+# Distribution = pre-built binaries (this workflow) + `cargo install --git`
+# for source builds. crates.io publishing is intentionally not wired up.
 #
 # VSCode extension publish is intentionally separate (`release-ext.yml`,
 # manual workflow_dispatch) — the maintainer triggers it after smoke + dogfood.
@@ -103,27 +105,6 @@ jobs:
             stdoc-*.zip
             stdoc-*.zip.sha256
           if-no-files-found: error
-
-  publish-crates:
-    name: Publish to crates.io
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: '1.91'
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: cargo publish (dry-run)
-        run: cargo publish --dry-run -p standardoc-cli
-
-      - name: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p standardoc-cli
 
   release:
     name: Create GitHub Release
