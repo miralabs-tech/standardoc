@@ -17,6 +17,7 @@ use super::extract_doc;
 use super::helpers::{compute_module_path, ident_text, string_literal_text};
 use super::resolver::resolve_require;
 use super::walk::{LuaWalkContext, walk};
+use crate::utils::{file_span, hash_bytes, last_segment, parent_module};
 
 /// Parse a Lua source file with `full_moon`, walk it, and return an
 /// `ExtractedFile` ready for the pipeline.
@@ -626,41 +627,9 @@ fn site_for(file: &str, pos: Position) -> Site {
 }
 
 // --- module symbol helpers ------------------------------------------------
-
-fn hash_bytes(bytes: &[u8]) -> Blake3Hash {
-    Blake3Hash::new(*blake3::hash(bytes).as_bytes())
-}
-
-fn last_segment(fqdn: &str) -> &str {
-    fqdn.rsplit("::").next().unwrap_or(fqdn)
-}
-
-fn parent_module(fqdn: &str) -> Option<String> {
-    fqdn.rsplit_once("::").map(|(parent, _)| parent.to_string())
-}
-
-fn file_span(path: &str, content: &str) -> SymbolLocation {
-    let (end_line, end_col) = content_extent(content);
-    SymbolLocation {
-        file: path.into(),
-        start_line: 1,
-        end_line,
-        start_col: 0,
-        end_col,
-    }
-}
-
-fn content_extent(content: &str) -> (u32, u32) {
-    if content.is_empty() {
-        return (1, 0);
-    }
-    let line_count = u32::try_from(content.lines().count()).unwrap_or(u32::MAX);
-    let last_col = content
-        .lines()
-        .last()
-        .map_or(0, |l| u32::try_from(l.len()).unwrap_or(u32::MAX));
-    (line_count, last_col)
-}
+// `hash_bytes` / `last_segment` / `parent_module` / `file_span` /
+// `content_extent` were duplicates across rust/ts/lua → moved to
+// `crate::utils` (lock C-utils-44).
 
 fn first_stmt_first_token(stmt: &Stmt) -> Option<&TokenReference> {
     match stmt {

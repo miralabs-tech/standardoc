@@ -2,6 +2,16 @@ use std::path::{Path, PathBuf};
 
 use standardoc_ir::Visibility;
 
+use crate::utils::strip_extension;
+
+/// Order matters: `.d.ts` must be tried before `.ts`, etc. Lock 41 §1
+/// Q9 added `.vue` and `.svelte` so SFC files compute the same module
+/// path their script content would have under a plain TS file.
+const TS_EXTENSIONS: &[&str] = &[
+    ".d.ts", ".d.tsx", ".d.mts", ".d.cts", ".tsx", ".ts", ".jsx", ".js", ".mts", ".cts", ".mjs",
+    ".cjs", ".vue", ".svelte",
+];
+
 /// Map a TS/JS access modifier to canonical IR visibility.
 ///
 /// `public` / absent (top-level export) → `Public`.
@@ -27,7 +37,7 @@ pub(crate) fn map_access_modifier(raw: Option<&str>, exported: bool) -> Visibili
 /// * `"src/index.ts"`        → `"src"`
 /// * `"index.ts"`            → `""`  (file lives at package root)
 pub(crate) fn compute_module_path(package_relative: &str) -> String {
-    let stem = strip_ts_extension(package_relative);
+    let stem = strip_extension(package_relative, TS_EXTENSIONS);
     let segments: Vec<&str> = stem.split('/').filter(|s| !s.is_empty()).collect();
     if segments.is_empty() {
         return String::new();
@@ -39,21 +49,6 @@ pub(crate) fn compute_module_path(package_relative: &str) -> String {
         &segments[..]
     };
     useful.join("/")
-}
-
-fn strip_ts_extension(p: &str) -> &str {
-    // Order matters: `.d.ts` must be tried before `.ts`, etc. Lock 41 §1
-    // Q9 added `.vue` and `.svelte` so SFC files compute the same module
-    // path their script content would have under a plain TS file.
-    for ext in [
-        ".d.ts", ".d.tsx", ".d.mts", ".d.cts", ".tsx", ".ts", ".jsx", ".js", ".mts", ".cts",
-        ".mjs", ".cjs", ".vue", ".svelte",
-    ] {
-        if let Some(stem) = p.strip_suffix(ext) {
-            return stem;
-        }
-    }
-    p
 }
 
 /// Walk filesystem ancestors from `file_abs_path` until a `package.json` is

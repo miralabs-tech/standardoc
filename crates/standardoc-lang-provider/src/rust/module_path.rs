@@ -1,6 +1,8 @@
+use crate::utils::strip_extension;
+
 pub(crate) fn compute(crate_name: &str, file_rel: &str) -> String {
     let after_src = strip_src_prefix(file_rel);
-    let stem_path = strip_rs_extension(after_src);
+    let stem_path = strip_extension(after_src, &[".rs"]);
     let segments: Vec<&str> = stem_path.split('/').filter(|s| !s.is_empty()).collect();
     let drop_root = segments
         .last()
@@ -33,10 +35,6 @@ fn strip_src_prefix(file_rel: &str) -> &str {
         return rest;
     }
     file_rel
-}
-
-fn strip_rs_extension(p: &str) -> &str {
-    p.strip_suffix(".rs").unwrap_or(p)
 }
 
 #[cfg(test)]

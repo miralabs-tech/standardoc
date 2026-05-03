@@ -18,6 +18,7 @@
 
 use super::{TemplateAttribute, TemplateRef, TemplateRefSink, extract_identifiers_from_expression};
 use crate::sfc::{find_after, read_tag_name, skip_comment, starts_with};
+use crate::utils::find_top_level_keyword;
 
 /// Walks a Svelte template source slice and pushes one [`TemplateRef`]
 /// per identifier reference encountered.
@@ -463,50 +464,6 @@ fn strip_trailing_paren(s: &str) -> (&str, Option<&str>) {
         }
     }
     (s, None)
-}
-
-fn find_top_level_keyword(s: &str, kw: &str) -> Option<(usize, usize)> {
-    let bytes = s.as_bytes();
-    let kw_bytes = kw.as_bytes();
-    let mut depth_paren = 0i32;
-    let mut depth_bracket = 0i32;
-    let mut depth_brace = 0i32;
-    let mut in_quote: Option<u8> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if let Some(q) = in_quote {
-            if b == q {
-                in_quote = None;
-            }
-            i += 1;
-            continue;
-        }
-        match b {
-            b'\'' | b'"' | b'`' => {
-                in_quote = Some(b);
-                i += 1;
-                continue;
-            }
-            b'(' => depth_paren += 1,
-            b')' => depth_paren -= 1,
-            b'[' => depth_bracket += 1,
-            b']' => depth_bracket -= 1,
-            b'{' => depth_brace += 1,
-            b'}' => depth_brace -= 1,
-            _ => {}
-        }
-        if depth_paren == 0
-            && depth_bracket == 0
-            && depth_brace == 0
-            && i + kw_bytes.len() <= bytes.len()
-            && &bytes[i..i + kw_bytes.len()] == kw_bytes
-        {
-            return Some((i, kw_bytes.len()));
-        }
-        i += 1;
-    }
-    None
 }
 
 fn strip_then_or_catch(s: &str) -> &str {

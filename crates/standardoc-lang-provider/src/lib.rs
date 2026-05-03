@@ -3,6 +3,7 @@ mod rust;
 mod sfc;
 mod template;
 mod ts;
+mod utils;
 mod walk_core;
 mod workspace;
 

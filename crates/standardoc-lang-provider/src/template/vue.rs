@@ -12,6 +12,7 @@
 
 use super::{TemplateAttribute, TemplateRef, TemplateRefSink, extract_identifiers_from_expression};
 use crate::sfc::{find_after, read_tag_name, skip_comment, starts_with};
+use crate::utils::find_top_level_keyword;
 
 /// Walks a Vue `<template>` source slice and pushes one [`TemplateRef`]
 /// per identifier reference encountered.
@@ -90,7 +91,8 @@ pub(crate) fn parse(
 pub(crate) fn split_v_for(value: &str) -> (String, Vec<String>) {
     // Match either ` in ` or ` of ` (Vue 3 supports both).
     let trimmed = value.trim();
-    let split_at = find_keyword(trimmed, " in ").or_else(|| find_keyword(trimmed, " of "));
+    let split_at = find_top_level_keyword(trimmed, " in ")
+        .or_else(|| find_top_level_keyword(trimmed, " of "));
     let Some((kw_pos, kw_len)) = split_at else {
         return (trimmed.to_string(), Vec::new());
     };
@@ -254,53 +256,6 @@ fn emit_attribute_refs(
         return;
     }
     extract_identifiers_from_expression(value, base_offset + value_start, attribute, sink);
-}
-
-/// Linear search for a keyword (`" in "` / `" of "`) at top-level of
-/// `s` — i.e. not inside any quoted substring or parenthesised group.
-/// Returns `(byte_pos, kw_len)` of the matched occurrence.
-fn find_keyword(s: &str, kw: &str) -> Option<(usize, usize)> {
-    let bytes = s.as_bytes();
-    let kw_bytes = kw.as_bytes();
-    let mut depth_paren = 0i32;
-    let mut depth_bracket = 0i32;
-    let mut depth_brace = 0i32;
-    let mut in_quote: Option<u8> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if let Some(q) = in_quote {
-            if b == q {
-                in_quote = None;
-            }
-            i += 1;
-            continue;
-        }
-        match b {
-            b'\'' | b'"' | b'`' => {
-                in_quote = Some(b);
-                i += 1;
-                continue;
-            }
-            b'(' => depth_paren += 1,
-            b')' => depth_paren -= 1,
-            b'[' => depth_bracket += 1,
-            b']' => depth_bracket -= 1,
-            b'{' => depth_brace += 1,
-            b'}' => depth_brace -= 1,
-            _ => {}
-        }
-        if depth_paren == 0
-            && depth_bracket == 0
-            && depth_brace == 0
-            && i + kw_bytes.len() <= bytes.len()
-            && &bytes[i..i + kw_bytes.len()] == kw_bytes
-        {
-            return Some((i, kw_bytes.len()));
-        }
-        i += 1;
-    }
-    None
 }
 
 fn parse_loop_locals(lhs: &str) -> Vec<String> {

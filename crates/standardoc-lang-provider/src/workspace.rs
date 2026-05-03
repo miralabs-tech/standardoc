@@ -11,6 +11,7 @@ use crate::rust::RustProvider;
 use crate::sfc::{self, SfcDocument, pad_until_byte_offset};
 use crate::template::{self, TemplateAttribute, TemplateRef};
 use crate::ts::TsProvider;
+use crate::utils::byte_offset_to_line_col;
 
 #[derive(Debug, Default)]
 pub struct WorkspaceProvider {
@@ -293,21 +294,6 @@ const fn template_attr_to_slug(attr: TemplateAttribute) -> &'static str {
     attr.as_str()
 }
 
-fn byte_offset_to_line_col(content: &str, offset: usize) -> (u32, u32) {
-    let bytes = content.as_bytes();
-    let end = offset.min(bytes.len());
-    let mut line = 1u32;
-    let mut col = 0u32;
-    for &b in &bytes[..end] {
-        if b == b'\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
-}
 
 #[cfg(test)]
 mod tests {
@@ -396,17 +382,8 @@ mod tests {
         assert!(matches!(lang_to_syntax("haskell"), Syntax::Es(_)));
     }
 
-    #[test]
-    fn byte_offset_to_line_col_first_line() {
-        assert_eq!(byte_offset_to_line_col("hello\nworld", 0), (1, 0));
-        assert_eq!(byte_offset_to_line_col("hello\nworld", 3), (1, 3));
-    }
-
-    #[test]
-    fn byte_offset_to_line_col_after_newline() {
-        assert_eq!(byte_offset_to_line_col("hello\nworld", 6), (2, 0));
-        assert_eq!(byte_offset_to_line_col("hello\nworld", 8), (2, 2));
-    }
+    // `byte_offset_to_line_col` moved to `crate::utils::location` and is
+    // covered by its own unit tests there.
 
     #[test]
     fn svelte_template_regions_carves_out_script_block() {
@@ -472,11 +449,11 @@ mod tests {
         let src = "<script>const a=1;</script>\n<script setup>const b=2;</script>";
         let doc = sfc::extract_blocks(src);
         let (payload, _) = build_script_payload(src, &doc, Framework::Vue);
-        let src_a_pos = src.find("const a=1;").unwrap();
-        let src_b_pos = src.find("const b=2;").unwrap();
-        let pay_a_pos = payload.find("const a=1;").unwrap();
-        let pay_b_pos = payload.find("const b=2;").unwrap();
-        assert_eq!(pay_a_pos, src_a_pos);
-        assert_eq!(pay_b_pos, src_b_pos);
+        let source_first = src.find("const a=1;").unwrap();
+        let source_second = src.find("const b=2;").unwrap();
+        let payload_first = payload.find("const a=1;").unwrap();
+        let payload_second = payload.find("const b=2;").unwrap();
+        assert_eq!(payload_first, source_first);
+        assert_eq!(payload_second, source_second);
     }
 }

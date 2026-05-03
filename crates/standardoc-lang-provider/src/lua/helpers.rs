@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use full_moon::ast::{Expression, Stmt, Var};
 use full_moon::tokenizer::{TokenReference, TokenType};
 
+use crate::utils::strip_extension;
+
 /// Compute the dotted module portion of an FQDN from a workspace-relative
 /// path (relative to the package root). Strips the `.lua` extension and
 /// collapses trailing `/init` to the parent directory (Lua module
@@ -15,18 +17,13 @@ use full_moon::tokenizer::{TokenReference, TokenType};
 /// * `"init.lua"`              → `""`     (file lives at package root)
 /// * `"main.lua"`              → `"main"`
 pub(crate) fn compute_module_path(package_relative: &str) -> String {
-    let stem = strip_lua_extension(package_relative);
-    let stem = stem.strip_suffix("/init").unwrap_or(&stem);
+    let stem = strip_extension(package_relative, &[".lua"]);
+    let stem = stem.strip_suffix("/init").unwrap_or(stem);
     if stem == "init" {
         String::new()
     } else {
         stem.replace('/', ".")
     }
-}
-
-fn strip_lua_extension(path: &str) -> String {
-    path.strip_suffix(".lua")
-        .map_or_else(|| path.to_string(), str::to_string)
 }
 
 /// Walk up from a file's parent directory looking for a `*.rockspec` file.

@@ -152,12 +152,10 @@ fn cleanup_unseen(handle: &IndexHandle, seen: &[String]) -> Result<(), ColdStart
                 "SELECT path FROM files WHERE path NOT IN (SELECT path FROM seen_paths)",
             )
             .map_err(StorageError::from)?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
+        stmt.query_map([], |row| row.get::<_, String>(0))
             .map_err(StorageError::from)?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(StorageError::from)?;
-        rows
+            .map_err(StorageError::from)?
     };
     for path in &missing {
         apply_delete_file(&tx, path)?;
