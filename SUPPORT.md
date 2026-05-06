@@ -9,7 +9,7 @@ saves you time, here's how to give back.
 
 ## 🤝 Free ways to support
 
-- ⭐ **Star the repository** on [GitHub](https://github.com/miralabs-tech/standardoc) — visibility helps a lot.
+- ⭐ **Star the repository** on [GitHub](https://github.com/miralabs-tech/standarx) — visibility helps a lot.
 - 💬 **Share feedback & ideas** via [GitHub Issues](https://github.com/miralabs-tech/standardoc/issues).
 - 🐛 **Report bugs** with reproducible cases — those are gold.
 - 🧠 **Talk about it** — blog posts, conference talks, mentions in your repo's README.
