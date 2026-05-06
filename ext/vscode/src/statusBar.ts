@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { matcher } from 'matchigo';
+import { describeFatalConfig } from './daemon/fatal-marker';
 import type { DaemonState } from './daemon/supervisor';
 
 interface StatusRender {
@@ -27,6 +28,10 @@ const renderStatus = matcher<DaemonState, StatusRender>()
   .with({ kind: 'failed' }, ({ reason }) => ({
     text: '$(error) Standardoc',
     tooltip: `Standardoc daemon failed: ${reason}`,
+  }))
+  .with({ kind: 'fatal_config' }, ({ config }) => ({
+    text: '$(warning) Standardoc',
+    tooltip: `Standardoc daemon halted — ${describeFatalConfig(config)}`,
   }))
   .exhaustive();
 

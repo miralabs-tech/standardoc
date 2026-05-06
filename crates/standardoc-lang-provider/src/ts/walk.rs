@@ -461,6 +461,7 @@ fn process_import(ctx: &mut TsWalkContext<'_>, item: &ImportDecl, current_module
             kind: EdgeKind::Imports,
             to: target,
             sites: vec![ctx.span_site(span)],
+            attributes: vec![],
         });
     }
     if item.specifiers.is_empty() {
@@ -476,6 +477,7 @@ fn process_import(ctx: &mut TsWalkContext<'_>, item: &ImportDecl, current_module
             kind: EdgeKind::Imports,
             to: target,
             sites: vec![ctx.span_site(span)],
+            attributes: vec![],
         });
     }
 }
@@ -549,6 +551,7 @@ fn extract_class_inner(
             kind: EdgeKind::Extends,
             to,
             sites: vec![ctx.span_site(span)],
+            attributes: vec![],
         });
     }
     for impl_target in &class.implements {
@@ -559,6 +562,7 @@ fn extract_class_inner(
             kind: EdgeKind::Implements,
             to,
             sites: vec![ctx.span_site(span)],
+            attributes: vec![],
         });
     }
 
@@ -676,6 +680,7 @@ fn extract_interface_decl(
             kind: EdgeKind::Extends,
             to,
             sites: vec![ctx.span_site(span)],
+            attributes: vec![],
         });
     }
 }

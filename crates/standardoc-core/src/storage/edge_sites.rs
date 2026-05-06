@@ -55,6 +55,7 @@ mod tests {
                     name: "do_it".into(),
                 },
                 sites: vec![],
+                attributes: vec![],
             },
         )
         .unwrap()

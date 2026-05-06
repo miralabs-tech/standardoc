@@ -3,7 +3,7 @@
   "displayName": "standardoc",
   "description": "AI-readable code documentation — Rust + TypeScript indexer surfaced over LSP and MCP.",
   "version": "1.0.0",
-  "publisher": "SUP2Ak",
+  "publisher": "miralabs-tech",
   "license": "LicenseRef-FSL-1.1-MIT",
   "homepage": "https://github.com/miralabs-tech/standardoc#readme",
   "repository": {

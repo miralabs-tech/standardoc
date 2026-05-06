@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { resolveBinary } from './binary';
+import { describeFatalConfig, type FatalConfig } from './fatal-marker';
 import {
   BACKOFF_MS,
   CRASH_WINDOW_MS,
@@ -25,6 +26,7 @@ export class DaemonSupervisor implements vscode.Disposable {
   private resetTimer: ReturnType<typeof setTimeout> | null = null;
   private expectedStopping = false;
   private lspStateSub: vscode.Disposable | null = null;
+  private mcpFatalSub: vscode.Disposable | null = null;
 
   readonly onDidChangeState: vscode.Event<DaemonState> = this.emitter.event;
 
@@ -34,6 +36,7 @@ export class DaemonSupervisor implements vscode.Disposable {
     private readonly deps: SupervisorDeps,
   ) {
     this.lspStateSub = deps.lsp.onStateChange(state => this.onLspStateChange(state));
+    this.mcpFatalSub = deps.mcp.onFatalConfig(config => this.onFatalConfig(config));
   }
 
   current(): DaemonState {
@@ -99,6 +102,24 @@ export class DaemonSupervisor implements vscode.Disposable {
     }
   }
 
+  /**
+   * Drives the state machine into `fatal_config` and stops the
+   * backoff/retry loop. Reaching `fatal_config` requires the user to
+   * fix the host-side condition (typically: rebuild + re-install the
+   * binary) — retrying without intervention would just re-fail.
+   */
+  private onFatalConfig(config: FatalConfig): void {
+    this.log(`fatal config marker: ${describeFatalConfig(config)}`);
+    this.cancelBackoff();
+    this.cancelResetCounter();
+    this.crashTimestamps = [];
+    this.expectedStopping = true;
+    this.setState({ kind: 'fatal_config', config });
+    void this.safeStopAll().finally(() => {
+      this.expectedStopping = false;
+    });
+  }
+
   private async safeStopAll(): Promise<void> {
     await Promise.allSettled([this.safeStopLsp(), this.safeStopMcp()]);
   }
@@ -120,6 +141,14 @@ export class DaemonSupervisor implements vscode.Disposable {
   }
 
   private handleCrash(reason: string): void {
+    // If we already learned the failure is a fatal-config one (via
+    // STDOC_FATAL on stderr), keep that state — `failed` / `restarting`
+    // would mask the actionable hint and re-arm the retry machinery.
+    if (this.state.kind === 'fatal_config') {
+      this.log(`ignoring crash signal (${reason}) — already in fatal_config`);
+      return;
+    }
+
     const now = Date.now();
     this.crashTimestamps = this.crashTimestamps.filter(t => now - t < CRASH_WINDOW_MS);
     this.crashTimestamps.push(now);
@@ -178,6 +207,8 @@ export class DaemonSupervisor implements vscode.Disposable {
     this.cancelResetCounter();
     this.lspStateSub?.dispose();
     this.lspStateSub = null;
+    this.mcpFatalSub?.dispose();
+    this.mcpFatalSub = null;
     this.emitter.dispose();
   }
 }

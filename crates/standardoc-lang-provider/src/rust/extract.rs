@@ -1,10 +1,10 @@
 use standardoc_core::ExtractError;
 use standardoc_ir::{
-    Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol, SourceOrigin,
-    SymbolLocation, Visibility,
+    ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol, SourceOrigin, Visibility,
 };
 
 use super::{extract_doc, module_path, walk};
+use crate::utils::{file_span, hash_bytes, last_segment, parent_module};
 
 pub(crate) fn extract_file(
     content: &str,
@@ -62,41 +62,6 @@ pub(crate) fn extract_file(
     })
 }
 
-fn hash_bytes(bytes: &[u8]) -> Blake3Hash {
-    let digest = blake3::hash(bytes);
-    Blake3Hash::new(*digest.as_bytes())
-}
-
-fn last_segment(fqdn: &str) -> &str {
-    fqdn.rsplit("::").next().unwrap_or(fqdn)
-}
-
-fn parent_module(fqdn: &str) -> Option<String> {
-    fqdn.rsplit_once("::").map(|(parent, _)| parent.to_string())
-}
-
-fn file_span(path: &str, content: &str) -> SymbolLocation {
-    let (end_line, end_col) = content_extent(content);
-    SymbolLocation {
-        file: path.into(),
-        start_line: 1,
-        end_line,
-        start_col: 0,
-        end_col,
-    }
-}
-
-fn content_extent(content: &str) -> (u32, u32) {
-    if content.is_empty() {
-        return (1, 0);
-    }
-    let line_count = u32::try_from(content.lines().count()).unwrap_or(u32::MAX);
-    let last_col = content
-        .lines()
-        .last()
-        .map_or(0, |l| u32::try_from(l.len()).unwrap_or(u32::MAX));
-    (line_count, last_col)
-}
 
 #[cfg(test)]
 mod tests {
@@ -151,6 +116,7 @@ mod tests {
 
     #[test]
     fn content_hash_equals_blake3_of_bytes() {
+        use standardoc_ir::Blake3Hash;
         let content = "fn main() {}\n";
         let r = extract_file(content, "src/main.rs", "foo").unwrap();
         let expected = Blake3Hash::new(*blake3::hash(content.as_bytes()).as_bytes());
@@ -187,20 +153,10 @@ mod tests {
         assert_eq!(loc.end_col, 9);
     }
 
-    #[test]
-    fn empty_content_extent_is_one_line_zero_col() {
-        assert_eq!(content_extent(""), (1, 0));
-    }
-
-    #[test]
-    fn single_line_no_newline_extent() {
-        assert_eq!(content_extent("hello"), (1, 5));
-    }
-
-    #[test]
-    fn trailing_newline_keeps_count_consistent() {
-        assert_eq!(content_extent("a\nb\n"), (2, 1));
-    }
+    // `content_extent` itself moved to `crate::utils::location` and is
+    // covered by its own unit tests there. The integration test
+    // `module_location_covers_whole_file` above already validates that
+    // `extract_file` consumes it correctly.
 
     #[test]
     fn module_language_is_rust() {

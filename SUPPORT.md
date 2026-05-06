@@ -23,7 +23,7 @@ saves you time, here's how to give back.
 Recurring or one-time donations support core development, language providers,
 performance work, and infrastructure costs.
 
-👉 https://opencollective.com/standardoc
+👉 https://opencollective.com/standarx
 
 ### Optional paid companion (maybe, eventually)
 

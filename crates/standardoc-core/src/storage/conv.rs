@@ -31,6 +31,9 @@ pub(crate) const fn language_to_sql_text(lang: Language) -> &'static str {
         Language::Rust => "rust",
         Language::TypeScript => "typescript",
         Language::JavaScript => "javascript",
+        Language::Lua => "lua",
+        Language::Vue => "vue",
+        Language::Svelte => "svelte",
     }
 }
 
@@ -39,6 +42,9 @@ pub(crate) fn language_from_sql_text(s: &str) -> Result<Language, StorageError> 
         "rust" => Ok(Language::Rust),
         "typescript" => Ok(Language::TypeScript),
         "javascript" => Ok(Language::JavaScript),
+        "lua" => Ok(Language::Lua),
+        "vue" => Ok(Language::Vue),
+        "svelte" => Ok(Language::Svelte),
         other => Err(StorageError::InvalidStoredData {
             detail: format!("unknown language: {other:?}"),
         }),
@@ -208,7 +214,14 @@ mod tests {
 
     #[test]
     fn language_round_trip_all_variants() {
-        for lang in [Language::Rust, Language::TypeScript, Language::JavaScript] {
+        for lang in [
+            Language::Rust,
+            Language::TypeScript,
+            Language::JavaScript,
+            Language::Lua,
+            Language::Vue,
+            Language::Svelte,
+        ] {
             let s = language_to_sql_text(lang);
             let back = language_from_sql_text(s).unwrap();
             assert_eq!(lang, back);
@@ -220,6 +233,9 @@ mod tests {
         assert_eq!(language_to_sql_text(Language::Rust), "rust");
         assert_eq!(language_to_sql_text(Language::TypeScript), "typescript");
         assert_eq!(language_to_sql_text(Language::JavaScript), "javascript");
+        assert_eq!(language_to_sql_text(Language::Lua), "lua");
+        assert_eq!(language_to_sql_text(Language::Vue), "vue");
+        assert_eq!(language_to_sql_text(Language::Svelte), "svelte");
     }
 
     #[test]

@@ -86,6 +86,7 @@ fn emit_import(
             line: line_from_span(span),
             col: col_from_span(span),
         }],
+        attributes: vec![],
     });
 }
 
@@ -106,6 +107,7 @@ fn emit_glob_import(ctx: &mut WalkContext, prefix: &[String], current_module: &s
             line: line_from_span(span),
             col: col_from_span(span),
         }],
+        attributes: vec![],
     });
 }
 
@@ -140,6 +142,7 @@ pub(crate) fn process_extern_crate(ctx: &mut WalkContext, item: &syn::ItemExtern
             line: line_from_span(span),
             col: col_from_span(span),
         }],
+        attributes: vec![],
     });
 }
 

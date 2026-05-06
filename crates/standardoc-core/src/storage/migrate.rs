@@ -1,23 +1,38 @@
-use std::cmp::Ordering;
-
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::storage::error::StorageError;
 use crate::storage::init::run_init_schema;
 
-pub(crate) const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+pub(crate) const SUPPORTED_SCHEMA_VERSION: u32 = 2;
+
+const V1_TO_V2_SQL: &str = include_str!("../../migrations/v1_to_v2.sql");
 
 pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), StorageError> {
     if !table_exists(conn, "schema_meta")? {
-        return run_init_schema(conn);
+        run_init_schema(conn)?;
     }
 
-    let version = read_schema_version(conn)?;
-    match version.cmp(&SUPPORTED_SCHEMA_VERSION) {
-        Ordering::Equal | Ordering::Less => Ok(()),
-        Ordering::Greater => Err(StorageError::SchemaVersionTooNew {
-            db: version,
-            supported: SUPPORTED_SCHEMA_VERSION,
+    loop {
+        let version = read_schema_version(conn)?;
+        if version == SUPPORTED_SCHEMA_VERSION {
+            return Ok(());
+        }
+        if version > SUPPORTED_SCHEMA_VERSION {
+            return Err(StorageError::SchemaVersionTooNew {
+                db: version,
+                supported: SUPPORTED_SCHEMA_VERSION,
+            });
+        }
+        apply_upgrade(conn, version)?;
+    }
+}
+
+fn apply_upgrade(conn: &Connection, from: u32) -> Result<(), StorageError> {
+    match from {
+        1 => conn.execute_batch(V1_TO_V2_SQL).map_err(StorageError::from),
+        other => Err(StorageError::InvalidSchemaMetadata {
+            key: "schema_version".into(),
+            value: format!("no upgrade path from version {other}"),
         }),
     }
 }
@@ -86,9 +101,42 @@ mod tests {
             err,
             StorageError::SchemaVersionTooNew {
                 db: 99,
-                supported: 1,
+                supported: 2,
             }
         ));
+    }
+
+    #[test]
+    fn upgrade_adds_attributes_column_to_legacy_v1_db() {
+        let conn = fresh_conn();
+        // Bootstrap the historical v1 schema directly (no `attributes` column).
+        run_init_schema(&conn).unwrap();
+        let pre: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('edges')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            !pre.iter().any(|c| c == "attributes"),
+            "v1 init must NOT seed the attributes column"
+        );
+
+        ensure_schema(&conn).unwrap();
+
+        let post: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('edges')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            post.iter().any(|c| c == "attributes"),
+            "v1→v2 upgrade must add the attributes column"
+        );
+        assert_eq!(read_schema_version(&conn).unwrap(), 2);
     }
 
     #[test]

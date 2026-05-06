@@ -47,6 +47,9 @@ pub enum Language {
     Rust,
     TypeScript,
     JavaScript,
+    Lua,
+    Vue,
+    Svelte,
 }
 
 #[cfg(test)]
@@ -117,6 +120,28 @@ mod tests {
             serde_json::to_string(&Language::JavaScript).unwrap(),
             "\"javascript\""
         );
+        assert_eq!(serde_json::to_string(&Language::Lua).unwrap(), "\"lua\"");
+        assert_eq!(serde_json::to_string(&Language::Vue).unwrap(), "\"vue\"");
+        assert_eq!(
+            serde_json::to_string(&Language::Svelte).unwrap(),
+            "\"svelte\""
+        );
+    }
+
+    #[test]
+    fn language_round_trip_all_variants() {
+        for lang in [
+            Language::Rust,
+            Language::TypeScript,
+            Language::JavaScript,
+            Language::Lua,
+            Language::Vue,
+            Language::Svelte,
+        ] {
+            let s = serde_json::to_string(&lang).unwrap();
+            let back: Language = serde_json::from_str(&s).unwrap();
+            assert_eq!(lang, back);
+        }
     }
 
     #[test]

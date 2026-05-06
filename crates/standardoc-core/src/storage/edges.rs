@@ -10,16 +10,18 @@ pub(crate) fn insert_edge(
     edge: &RawEdge,
 ) -> Result<i64, StorageError> {
     let (to_symbol_id, to_unresolved) = resolve_target(conn, &edge.to)?;
+    let attributes_json = serde_json::to_string(&edge.attributes)?;
     let id = conn
         .query_row(
-            "INSERT INTO edges (from_symbol_id, kind, to_symbol_id, to_unresolved) \
-             VALUES (?1, ?2, ?3, ?4) \
+            "INSERT INTO edges (from_symbol_id, kind, to_symbol_id, to_unresolved, attributes) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
              RETURNING id",
             rusqlite::params![
                 from_symbol_id,
                 edge_kind_to_sql_text(edge.kind),
                 to_symbol_id,
                 to_unresolved,
+                attributes_json,
             ],
             |row| row.get::<_, i64>(0),
         )
@@ -115,6 +117,7 @@ mod tests {
             kind,
             to,
             sites: vec![],
+            attributes: vec![],
         }
     }
 

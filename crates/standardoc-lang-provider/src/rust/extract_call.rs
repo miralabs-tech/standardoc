@@ -39,6 +39,7 @@ impl CallVisitor<'_> {
                 line: line_from_span(span),
                 col: col_from_span(span),
             }],
+            attributes: vec![],
         });
     }
 }

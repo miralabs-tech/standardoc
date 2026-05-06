@@ -4,14 +4,14 @@ use standardoc_ir::{
 };
 
 use crate::storage::files::{FileInput, upsert_file};
-use crate::storage::init::run_init_schema;
+use crate::storage::migrate::ensure_schema;
 use crate::storage::symbols::SymbolInsertContext;
 
 pub(crate) fn fresh_conn() -> Connection {
     let conn = Connection::open_in_memory().expect("open in-memory sqlite");
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .expect("enable FK pragma");
-    run_init_schema(&conn).expect("run init schema");
+    ensure_schema(&conn).expect("ensure schema (init + upgrades)");
     conn
 }
 

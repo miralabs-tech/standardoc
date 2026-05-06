@@ -43,21 +43,51 @@ describe('buildSkillContent', () => {
     expect(c).toContain('BEFORE Read/Grep/Glob');
   });
 
-  test('declares allowed-tools pre-approving the two MCP tools', () => {
+  test('declares allowed-tools pre-approving every shipped MCP tool', () => {
     const c = buildSkillContent();
-    expect(c).toContain('allowed-tools: mcp__standardoc__find_symbol mcp__standardoc__get_context');
+    expect(c).toContain('allowed-tools:');
+    for (const tool of [
+      'mcp__standardoc__find_symbol',
+      'mcp__standardoc__get_context',
+      'mcp__standardoc__list_symbols',
+      'mcp__standardoc__find_symbols_by_pattern',
+      'mcp__standardoc__find_similar_symbols',
+    ]) {
+      expect(c).toContain(tool);
+    }
   });
 
-  test('documents both tools (find_symbol and get_context)', () => {
+  test('documents every shipped tool with a section header', () => {
     const c = buildSkillContent();
     expect(c).toContain('### find_symbol(query, limit?)');
     expect(c).toContain('### get_context(fqdn, depth: 1|2)');
+    expect(c).toContain('### list_symbols(');
+    expect(c).toContain('### find_symbols_by_pattern(');
+    expect(c).toContain('### find_similar_symbols(');
   });
 
   test('explains depth=1 cheap vs depth=2 rich semantics', () => {
     const c = buildSkillContent();
     expect(c).toContain('depth=1 (cheap)');
     expect(c).toContain('depth=2 (rich)');
+  });
+
+  test('documents similarity tool default threshold and hybrid scoring', () => {
+    const c = buildSkillContent();
+    expect(c).toContain('threshold');
+    expect(c).toContain('0.8');
+    expect(c).toContain('Jaro-Winkler');
+    expect(c).toContain('Jaccard');
+  });
+
+  test('contrasts pattern (deterministic glob) vs similarity (scored anchor)', () => {
+    const c = buildSkillContent();
+    // Pattern tool prose mentions glob shape.
+    expect(c).toContain('SQLite');
+    expect(c).toContain('GLOB');
+    // Similarity tool prose mentions anchor + score.
+    expect(c).toContain('anchor');
+    expect(c).toContain('score');
   });
 
   test('lists the 3-tier tool fallback hierarchy in body', () => {
@@ -68,12 +98,13 @@ describe('buildSkillContent', () => {
     expect(c).toContain('Raw Read / Grep / Glob');
   });
 
-  test('lists the four recommended workflows', () => {
+  test('lists every recommended workflow including duplicate-detection', () => {
     const c = buildSkillContent();
     expect(c).toContain('What does X do / where is X used');
     expect(c).toContain('I need to modify behavior Y');
     expect(c).toContain('Is symbol X used anywhere');
     expect(c).toContain("I'm starting a feature involving area Z");
+    expect(c).toContain('Detect templated/duplicate names across modules');
   });
 
   test('documents key concepts (FQDN, edge kinds, Resolved/Unresolved)', () => {

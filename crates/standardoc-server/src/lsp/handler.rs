@@ -220,7 +220,12 @@ impl LanguageServer for StandardocLsp {
             if query_str.trim().is_empty() {
                 Ok(Vec::new())
             } else {
-                query::search_text(&handle, &query_str, WORKSPACE_SEARCH_LIMIT)
+                query::search_text(
+                    &handle,
+                    &query_str,
+                    WORKSPACE_SEARCH_LIMIT,
+                    &query::SymbolFilter::default(),
+                )
             }
         })
         .await

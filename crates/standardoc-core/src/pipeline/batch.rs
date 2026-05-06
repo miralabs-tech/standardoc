@@ -341,6 +341,7 @@ mod tests {
                 line: 2,
                 col: 4,
             }],
+            attributes: vec![],
         };
         let ef1 = extracted(
             "src/main.rs",
@@ -357,6 +358,7 @@ mod tests {
                 name: "new_target".into(),
             },
             sites: vec![],
+            attributes: vec![],
         };
         let ef2 = extracted(
             "src/main.rs",
@@ -410,6 +412,7 @@ mod tests {
                 fqdn: "crate::callee".into(),
             },
             sites: vec![],
+            attributes: vec![],
         };
         let ef = extracted(
             "src/main.rs",
@@ -440,6 +443,7 @@ mod tests {
                 name: "target".into(),
             },
             sites: vec![],
+            attributes: vec![],
         };
         let ef1 = extracted(
             "src/main.rs",
@@ -475,6 +479,7 @@ mod tests {
                     fqdn: "crate::target".into(),
                 },
                 sites: vec![],
+                attributes: vec![],
             }],
         );
         let ef_target = extracted(
@@ -516,6 +521,7 @@ mod tests {
                     line: 7,
                     col: 4,
                 }],
+                attributes: vec![],
             }],
         );
         apply_upsert_file(&conn, &ef_target).unwrap();

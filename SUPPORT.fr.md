@@ -24,7 +24,7 @@ l'ascenseur.
 Les donations récurrentes ou ponctuelles soutiennent le développement core,
 les language providers, le travail de performance, et les coûts d'infra.
 
-👉 https://opencollective.com/standardoc
+👉 https://opencollective.com/standarx
 
 ### Outil compagnon payant optionnel (peut-être, un jour)
 

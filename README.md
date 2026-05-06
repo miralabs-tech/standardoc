@@ -125,7 +125,7 @@ above is locked.
 
 If Standardoc helps you rethink how software is understood :
 
-👉 [Star the repo](https://github.com/miralabs-tech/standardoc) · [OpenCollective](https://opencollective.com/standardoc) · [Other ways](SUPPORT.md)
+👉 [Star the repo](https://github.com/miralabs-tech/standardoc) · [OpenCollective](https://opencollective.com/standarx) · [Other ways](SUPPORT.md)
 
 ---
 

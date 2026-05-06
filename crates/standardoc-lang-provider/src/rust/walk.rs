@@ -423,6 +423,7 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
                 line: line_from_span(span),
                 col: col_from_span(span),
             }],
+            attributes: vec![],
         });
     }
 

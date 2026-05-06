@@ -2,8 +2,7 @@ use std::path::Path;
 
 use standardoc_core::ExtractError;
 use standardoc_ir::{
-    Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol, SourceOrigin,
-    SymbolLocation, Visibility,
+    ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol, SourceOrigin, Visibility,
 };
 use swc_core::common::comments::SingleThreadedComments;
 use swc_core::common::{FileName, SourceMap, Spanned, sync::Lrc};
@@ -14,7 +13,48 @@ use super::extract_doc;
 use super::helpers::compute_module_path;
 use super::resolver::TsConfigPaths;
 use super::walk;
+use crate::utils::{file_span, hash_bytes, last_segment, parent_module};
 
+/// Lock 41 §2.5 wrapper. Lets the SFC orchestrator (Vue / Svelte) drive
+/// the syntax + IR language explicitly while still routing through the
+/// shared TS extractor.
+///
+/// `syntax_override` forces the swc lexer's syntax (used by the SFC
+/// orchestrator to parse a `.vue`/`.svelte` `<script lang="ts">` body
+/// as TS rather than guessing from the `.vue` extension).
+///
+/// `language_override` substitutes the IR `Language` tag stamped on the
+/// resulting `ExtractedFile` (so a `.vue` file lands as `Language::Vue`
+/// in the DB even though its symbols came out of the TS extractor).
+///
+/// The original `workspace_relative_path` is preserved verbatim — symbols
+/// and edge sites still report the user-facing `.vue` / `.svelte` path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn extract_file_with_syntax(
+    content: &str,
+    workspace_relative_path: &str,
+    package_name: &str,
+    package_relative: &str,
+    from_file_abs_path: &Path,
+    package_root: &Path,
+    tsconfig: Option<TsConfigPaths>,
+    syntax_override: Option<Syntax>,
+    language_override: Option<Language>,
+) -> Result<ExtractedFile, ExtractError> {
+    extract_file_inner(
+        content,
+        workspace_relative_path,
+        package_name,
+        package_relative,
+        from_file_abs_path,
+        package_root,
+        tsconfig,
+        syntax_override,
+        language_override,
+    )
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_file(
     content: &str,
@@ -25,14 +65,40 @@ pub(crate) fn extract_file(
     package_root: &Path,
     tsconfig: Option<TsConfigPaths>,
 ) -> Result<ExtractedFile, ExtractError> {
+    extract_file_inner(
+        content,
+        workspace_relative_path,
+        package_name,
+        package_relative,
+        from_file_abs_path,
+        package_root,
+        tsconfig,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn extract_file_inner(
+    content: &str,
+    workspace_relative_path: &str,
+    package_name: &str,
+    package_relative: &str,
+    from_file_abs_path: &Path,
+    package_root: &Path,
+    tsconfig: Option<TsConfigPaths>,
+    syntax_override: Option<Syntax>,
+    language_override: Option<Language>,
+) -> Result<ExtractedFile, ExtractError> {
     let cm: Lrc<SourceMap> = Default::default();
     let fm = cm.new_source_file(
         Lrc::new(FileName::Custom(workspace_relative_path.into())),
         content.to_string(),
     );
     let comments = SingleThreadedComments::default();
+    let syntax = syntax_override.unwrap_or_else(|| syntax_for(workspace_relative_path));
     let lexer = Lexer::new(
-        syntax_for(workspace_relative_path),
+        syntax,
         EsVersion::EsNext,
         StringInput::from(&*fm),
         Some(&comments),
@@ -91,7 +157,7 @@ pub(crate) fn extract_file(
 
     Ok(ExtractedFile {
         file: workspace_relative_path.into(),
-        language: language_for(workspace_relative_path),
+        language: language_override.unwrap_or_else(|| language_for(workspace_relative_path)),
         source_origin: SourceOrigin::Workspace,
         is_external: false,
         content_hash,
@@ -142,40 +208,6 @@ fn language_for(path: &str) -> Language {
     }
 }
 
-fn hash_bytes(bytes: &[u8]) -> Blake3Hash {
-    Blake3Hash::new(*blake3::hash(bytes).as_bytes())
-}
-
-fn last_segment(fqdn: &str) -> &str {
-    fqdn.rsplit("::").next().unwrap_or(fqdn)
-}
-
-fn parent_module(fqdn: &str) -> Option<String> {
-    fqdn.rsplit_once("::").map(|(parent, _)| parent.to_string())
-}
-
-fn file_span(path: &str, content: &str) -> SymbolLocation {
-    let (end_line, end_col) = content_extent(content);
-    SymbolLocation {
-        file: path.into(),
-        start_line: 1,
-        end_line,
-        start_col: 0,
-        end_col,
-    }
-}
-
-fn content_extent(content: &str) -> (u32, u32) {
-    if content.is_empty() {
-        return (1, 0);
-    }
-    let line_count = u32::try_from(content.lines().count()).unwrap_or(u32::MAX);
-    let last_col = content
-        .lines()
-        .last()
-        .map_or(0, |l| u32::try_from(l.len()).unwrap_or(u32::MAX));
-    (line_count, last_col)
-}
 
 #[cfg(test)]
 mod tests {
@@ -238,6 +270,7 @@ mod tests {
 
     #[test]
     fn content_hash_equals_blake3_of_bytes() {
+        use standardoc_ir::Blake3Hash;
         let content = "export function foo() {}\n";
         let r = extract(content, "src/foo.ts", "src/foo.ts");
         let expected = Blake3Hash::new(*blake3::hash(content.as_bytes()).as_bytes());
@@ -306,10 +339,8 @@ mod tests {
         assert_eq!(loc.end_col, 9);
     }
 
-    #[test]
-    fn empty_content_extent_is_one_line_zero_col() {
-        assert_eq!(content_extent(""), (1, 0));
-    }
+    // `content_extent` moved to `crate::utils::location` and is covered
+    // by its own unit tests there.
 
     #[test]
     fn realistic_file_extracts_module_plus_items() {
