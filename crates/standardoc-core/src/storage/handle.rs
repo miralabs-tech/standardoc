@@ -14,6 +14,7 @@ use crate::pipeline::{ScanFilters, WriterContext, ensure_stdignore_seed_at, writ
 use crate::storage::error::StorageError;
 use crate::storage::lock::WorkspaceLock;
 use crate::storage::migrate::ensure_schema;
+use crate::storage::retry::retry_with_backoff;
 
 const PRAGMA_BOOT_SQL: &str = "
 PRAGMA journal_mode = WAL;
@@ -82,17 +83,25 @@ impl IndexHandle {
         std::fs::create_dir_all(&standardoc_dir)?;
 
         let lock_path = standardoc_dir.join("db.lock");
-        let lock = WorkspaceLock::acquire(&lock_path)?;
-
-        ensure_stdignore_seed_at(&workspace_root)?;
-
         let db_path = standardoc_dir.join("index.db");
-        let pool = build_pool(&db_path)?;
-        {
+
+        // The fs4 lock, the SQLite pool open and the first connection are
+        // all retried as a unit: on a fast restart any of them can hit a
+        // transient race against the prior process still releasing its
+        // handles. `retry_with_backoff` only loops on transient kinds
+        // (`LockHeld`, `locking protocol`, busy, …) — permanent errors
+        // (schema too new, IO, …) propagate immediately.
+        let (lock, pool) = retry_with_backoff(|| {
+            let lock = WorkspaceLock::acquire(&lock_path)?;
+            let pool = build_pool(&db_path)?;
             let conn = pool.get()?;
             ensure_schema(&conn)?;
             seed_runtime_metadata(&conn, &workspace_root)?;
-        }
+            drop(conn);
+            Ok::<_, StorageError>((lock, pool))
+        })?;
+
+        ensure_stdignore_seed_at(&workspace_root)?;
 
         Self::wire_handle(pool, workspace_root, Some(lock), "standardoc-writer")
     }
@@ -121,7 +130,17 @@ impl IndexHandle {
             return Err(StorageError::ReadOnlyMissingDatabase { path: db_path });
         }
 
-        let pool = build_pool(&db_path)?;
+        // Secondary daemons race the primary's WAL handle release on fast
+        // restarts (LSP exits → MCP --readonly spawns instantly). Retry
+        // the pool build + first connection probe on transient errors.
+        let pool = retry_with_backoff(|| {
+            let pool = build_pool(&db_path)?;
+            // Force the lazy first connection so any `locking protocol`
+            // surfaces here and routes through the retry loop instead of
+            // bubbling up to the daemon's first real query.
+            let _probe = pool.get()?;
+            Ok::<_, StorageError>(pool)
+        })?;
         Self::wire_handle(
             pool,
             workspace_root,
