@@ -1,50 +1,57 @@
 import * as vscode from 'vscode';
-import { resolveBinary } from '../daemon/binary';
 
+/**
+ * Provides Standardoc as an MCP HTTP server to VSCode's chat ecosystem
+ * (Copilot Chat, Claude Code in VSCode, …). The actual daemon is
+ * supervised by the extension as a single long-lived child — this
+ * provider just hands out its endpoint URL so every chat session
+ * connects to the shared daemon instead of spawning its own stdio
+ * child per chat (the source of the historical
+ * "one standardoc.exe per chat" RAM bloat).
+ *
+ * VSCode's `vscode.lm.registerMcpServerDefinitionProvider` API supports
+ * both stdio and HTTP definitions in recent VSCode versions; this
+ * provider exclusively emits `McpHttpServerDefinition`.
+ */
 export class StandardocMcpServerProvider
-  implements vscode.McpServerDefinitionProvider<vscode.McpStdioServerDefinition>, vscode.Disposable
+  implements vscode.McpServerDefinitionProvider<vscode.McpHttpServerDefinition>, vscode.Disposable
 {
   private readonly emitter = new vscode.EventEmitter<void>();
-  private readonly configSub: vscode.Disposable;
 
   readonly onDidChangeMcpServerDefinitions: vscode.Event<void> = this.emitter.event;
 
   constructor(
-    private readonly context: vscode.ExtensionContext,
-    private readonly workspaceRoot: string,
+    private readonly endpointResolver: () => string | null,
     private readonly output: vscode.OutputChannel,
-  ) {
-    this.configSub = vscode.workspace.onDidChangeConfiguration(e => {
-      if (e.affectsConfiguration('standardoc.binaryPath')) {
-        this.emitter.fire();
-      }
-    });
+  ) {}
+
+  /** Re-emits the definition list — call when the supervisor restarts
+   *  and the endpoint URL might have changed. */
+  refresh(): void {
+    this.emitter.fire();
   }
 
   async provideMcpServerDefinitions(
     _token: vscode.CancellationToken,
-  ): Promise<vscode.McpStdioServerDefinition[]> {
+  ): Promise<vscode.McpHttpServerDefinition[]> {
+    const endpoint = this.endpointResolver();
+    if (endpoint === null) {
+      this.output.appendLine(
+        '[mcp-provider] no endpoint resolved yet — returning empty definition list',
+      );
+      return [];
+    }
     try {
-      const binary = await resolveBinary(this.context);
-      return [
-        new vscode.McpStdioServerDefinition(
-          'Standardoc',
-          binary.path,
-          ['mcp', this.workspaceRoot, '--readonly'],
-          {},
-          this.context.extension.packageJSON.version,
-        ),
-      ];
+      return [new vscode.McpHttpServerDefinition('Standardoc', vscode.Uri.parse(endpoint))];
     } catch (e) {
       this.output.appendLine(
-        `[mcp-provider] could not resolve binary: ${e instanceof Error ? e.message : String(e)}`,
+        `[mcp-provider] failed to build definition for ${endpoint}: ${e instanceof Error ? e.message : String(e)}`,
       );
       return [];
     }
   }
 
   dispose(): void {
-    this.configSub.dispose();
     this.emitter.dispose();
   }
 }

@@ -1,6 +1,6 @@
 /**
  * Parses the structured fatal-error markers emitted on stderr by the
- * `stdoc` binary. The Rust-side contract lives in
+ * `standardoc` binary. The Rust-side contract lives in
  * `crates/standardoc-cli/src/main.rs::fatal_marker_for` — keep both
  * sides in sync when extending the protocol.
  *
@@ -65,7 +65,7 @@ export function findFatalMarker(chunk: string): FatalConfig | null {
 export function describeFatalConfig(f: FatalConfig): string {
   switch (f.kind) {
     case 'schema_too_new':
-      return `Index schema v${f.db} is newer than this stdoc binary supports (v${f.supported}). Rebuild and re-install the binary.`;
+      return `Index schema v${f.db} is newer than this standardoc binary supports (v${f.supported}). Rebuild and re-install the binary.`;
     case 'unknown':
       return `Daemon reported a fatal config error: ${f.code} (${f.raw}).`;
   }

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { resolveBinary } from './binary';
 import { describeFatalConfig, type FatalConfig } from './fatal-marker';
+import { defaultExec, preflightSchemaVersion, type ExecFn } from './preflight';
 import {
   BACKOFF_MS,
   CRASH_WINDOW_MS,
@@ -16,6 +17,11 @@ export { describeState, type DaemonState } from './supervisor-state';
 export interface SupervisorDeps {
   readonly lsp: LspClient;
   readonly mcp: McpClient;
+  /**
+   * Override the schema-version pre-flight invocation. Useful for tests; if
+   * omitted, the supervisor shells out to `<binary> schema-version <root>`.
+   */
+  readonly preflightExec?: ExecFn;
 }
 
 export class DaemonSupervisor implements vscode.Disposable {
@@ -34,6 +40,7 @@ export class DaemonSupervisor implements vscode.Disposable {
     private readonly context: vscode.ExtensionContext,
     private readonly output: vscode.OutputChannel,
     private readonly deps: SupervisorDeps,
+    private readonly workspaceRoot: string,
   ) {
     this.lspStateSub = deps.lsp.onStateChange(state => this.onLspStateChange(state));
     this.mcpFatalSub = deps.mcp.onFatalConfig(config => this.onFatalConfig(config));
@@ -54,6 +61,23 @@ export class DaemonSupervisor implements vscode.Disposable {
     try {
       const binary = await resolveBinary(this.context);
       this.log(`resolved binary (source=${binary.source}, path=${binary.path})`);
+      const exec = this.deps.preflightExec ?? defaultExec;
+      const preflight = await preflightSchemaVersion(binary.path, this.workspaceRoot, exec);
+      if (!preflight.ok) {
+        this.log(`pre-flight schema check failed: ${preflight.reason}`);
+        // Mirror the in-process STDOC_FATAL signal: if the binary itself would
+        // refuse the DB, surface it through the same `fatal_config` channel
+        // so the existing toast/status-bar pipeline picks it up.
+        const config: FatalConfig =
+          typeof preflight.db === 'number' && typeof preflight.supported === 'number'
+            ? { kind: 'schema_too_new', db: preflight.db, supported: preflight.supported }
+            : { kind: 'unknown', code: 'preflight_failed', raw: preflight.reason };
+        this.setState({ kind: 'fatal_config', config });
+        return;
+      }
+      this.log(
+        `pre-flight ok (db=${preflight.db ?? 'none'}, supported=${preflight.supported})`,
+      );
       await this.startClientsParallel(binary.path);
       this.setState({ kind: 'ready', pid: 0 });
       this.scheduleResetCounter();

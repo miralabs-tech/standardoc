@@ -1,16 +1,32 @@
 import * as vscode from 'vscode';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { findFatalMarker, type FatalConfig } from '../daemon/fatal-marker';
 
 export type ContextDepth = 1 | 2;
 
 const FIND_SYMBOL_DEFAULT_LIMIT = 20;
+const ENDPOINT_WAIT_MS = 15_000;
+const ENDPOINT_POLL_MS = 100;
 
+/**
+ * MCP client that supervises a SINGLE long-lived `standardoc mcp --http`
+ * child per workspace and connects to it over HTTP/SSE
+ * (rmcp `streamable-http` transport). Every other MCP consumer in the
+ * editor (Copilot Chat sessions, Claude Code in VSCode chats, the MCP
+ * provider for external clients) connects to the same daemon over the
+ * same URL — eliminating the per-chat stdio child-spawn cost of the
+ * previous transport.
+ */
 export class McpClient implements vscode.Disposable {
   private client: Client | null = null;
+  private child: ChildProcess | null = null;
+  private endpointUrl: string | null = null;
   private readonly fatalEmitter = new vscode.EventEmitter<FatalConfig>();
-  private stderrSub: { dispose(): void } | null = null;
+  private fatalFired = false;
 
   /**
    * Fires once per MCP child-process lifecycle when its stderr emits a
@@ -23,53 +39,80 @@ export class McpClient implements vscode.Disposable {
   constructor(
     private readonly workspaceRoot: string,
     private readonly output: vscode.OutputChannel,
+    private readonly port: number,
   ) {}
+
+  /** Returns the discovered HTTP URL or `null` if the daemon is not started yet. */
+  url(): string | null {
+    return this.endpointUrl;
+  }
 
   async start(binaryPath: string): Promise<void> {
     if (this.client) return;
 
-    const transport = new StdioClientTransport({
-      command: binaryPath,
-      args: ['mcp', this.workspaceRoot, '--readonly'],
-      stderr: 'pipe',
-    });
+    this.fatalFired = false;
+    const child = spawn(
+      binaryPath,
+      ['mcp', this.workspaceRoot, '--readonly', '--http', String(this.port)],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    this.child = child;
+    this.attachStderrScanner(child);
+
+    const endpoint = await this.waitForEndpoint();
+    this.endpointUrl = endpoint;
+    this.output.appendLine(`[mcp] daemon endpoint: ${endpoint}`);
+
+    const transport = new StreamableHTTPClientTransport(new URL(endpoint));
     const client = new Client(
       { name: 'standardoc-vscode', version: '0.1.0-beta.2' },
       { capabilities: {} },
     );
-
-    this.attachStderrScanner(transport);
-
     await client.connect(transport);
     this.client = client;
     this.output.appendLine('[mcp] connected');
   }
 
   /**
-   * Tees the MCP child's stderr into the output channel AND scans each
-   * chunk for a structured `STDOC_FATAL: ...` marker. The first marker
-   * encountered fires `onFatalConfig` exactly once per lifecycle.
+   * Wait for the daemon to write `.standardoc/mcp.endpoint`. Aborts
+   * early if the child process exits before the file appears (typical
+   * cause: port already bound by another workspace's daemon).
    */
-  private attachStderrScanner(transport: StdioClientTransport): void {
-    const stderr = transport.stderr;
+  private async waitForEndpoint(): Promise<string> {
+    const endpointFile = path.join(this.workspaceRoot, '.standardoc', 'mcp.endpoint');
+    const deadline = Date.now() + ENDPOINT_WAIT_MS;
+    while (Date.now() < deadline) {
+      if (this.child === null || this.child.exitCode !== null) {
+        throw new Error(
+          `mcp daemon exited (code=${this.child?.exitCode ?? 'unknown'}) before writing ${endpointFile}`,
+        );
+      }
+      try {
+        const raw = await fs.promises.readFile(endpointFile, 'utf8');
+        const trimmed = raw.trim();
+        if (trimmed.length > 0) return trimmed;
+      } catch (e: unknown) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT') throw e;
+      }
+      await new Promise(r => setTimeout(r, ENDPOINT_POLL_MS));
+    }
+    throw new Error(`timed out waiting for ${endpointFile} after ${ENDPOINT_WAIT_MS}ms`);
+  }
+
+  private attachStderrScanner(child: ChildProcess): void {
+    const stderr = child.stderr;
     if (!stderr) return;
-    let fatalFired = false;
-    const onData = (chunk: Buffer | string): void => {
+    stderr.on('data', (chunk: Buffer | string) => {
       const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
       this.output.append(text);
-      if (fatalFired) return;
+      if (this.fatalFired) return;
       const marker = findFatalMarker(text);
       if (marker !== null) {
-        fatalFired = true;
+        this.fatalFired = true;
         this.fatalEmitter.fire(marker);
       }
-    };
-    stderr.on('data', onData);
-    this.stderrSub = {
-      dispose: (): void => {
-        stderr.off('data', onData);
-      },
-    };
+    });
   }
 
   async findSymbol(query: string, limit: number = FIND_SYMBOL_DEFAULT_LIMIT): Promise<string> {
@@ -82,21 +125,37 @@ export class McpClient implements vscode.Disposable {
 
   async stop(): Promise<void> {
     const client = this.client;
-    if (!client) return;
     this.client = null;
-    this.stderrSub?.dispose();
-    this.stderrSub = null;
-    await client.close();
+    if (client) {
+      try {
+        await client.close();
+      } catch (e) {
+        this.output.appendLine(`[mcp] client close error: ${describe(e)}`);
+      }
+    }
+    const child = this.child;
+    this.child = null;
+    this.endpointUrl = null;
+    if (child && child.exitCode === null) {
+      child.kill();
+      await new Promise<void>(resolve => {
+        child.once('exit', () => resolve());
+        // Force fallback: SIGKILL after 2s if the daemon ignores the polite kill.
+        setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // process already gone, ignore
+          }
+          resolve();
+        }, 2000);
+      });
+    }
     this.output.appendLine('[mcp] disconnected');
   }
 
   dispose(): void {
-    this.stderrSub?.dispose();
-    this.stderrSub = null;
-    if (this.client) {
-      void this.client.close().catch(() => undefined);
-      this.client = null;
-    }
+    void this.stop();
     this.fatalEmitter.dispose();
   }
 
@@ -114,4 +173,8 @@ function extractFirstText(result: unknown): string {
   const first = r.content[0];
   if (!first || typeof first.text !== 'string') return '';
   return first.text;
+}
+
+function describe(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }

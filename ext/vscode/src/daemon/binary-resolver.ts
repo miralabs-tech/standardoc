@@ -6,7 +6,7 @@ export interface ResolvedBinary {
 }
 
 const DEFAULT_NOT_FOUND_MESSAGE =
-  'Standardoc binary not found. Set `standardoc.binaryPath`, bundle a binary into `dist/bin/`, or place `stdoc` on PATH.';
+  'Standardoc binary not found. Set `standardoc.binaryPath`, bundle a binary into `dist/bin/`, or place `standardoc` on PATH.';
 
 export class BinaryNotFoundError extends Error {
   constructor(message?: string) {
@@ -15,7 +15,7 @@ export class BinaryNotFoundError extends Error {
   }
 }
 
-export const STDOC_EXE = process.platform === 'win32' ? 'stdoc.exe' : 'stdoc';
+export const STANDARDOC_EXE = process.platform === 'win32' ? 'standardoc.exe' : 'standardoc';
 
 export interface ResolveDeps {
   readonly settingsPath: string | undefined;

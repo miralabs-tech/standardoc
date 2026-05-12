@@ -15,7 +15,7 @@ when_to_use: ALWAYS use Standardoc FIRST when exploring or modifying code
   → (3) raw file Read/Grep/Glob. Skip Standardoc only for pure text
   matching (strings, comments, config files unrelated to code symbols)
   or for files at a known path that you just need to read verbatim.
-allowed-tools: mcp__standardoc__find_symbol mcp__standardoc__get_context mcp__standardoc__list_symbols mcp__standardoc__find_symbols_by_pattern mcp__standardoc__find_similar_symbols
+allowed-tools: mcp__standardoc__find_symbol mcp__standardoc__get_context mcp__standardoc__list_symbols mcp__standardoc__find_symbols_by_pattern mcp__standardoc__find_similar_symbols mcp__standardoc__get_body mcp__standardoc__resolve_external mcp__standardoc__current_revision mcp__standardoc__check_stale mcp__standardoc__session_save mcp__standardoc__session_list mcp__standardoc__session_get mcp__standardoc__session_dump_md
 ---
 
 # Standardoc — Primary Code Navigation
@@ -37,26 +37,17 @@ workspace:
 3. **Raw Read / Grep / Glob** — last resort, or for plain-text needs
    (comments, strings, build files, markdown).
 
-## Tools available
+## Discovery tools
 
 ### find_symbol(query, limit?)
 
 Fuzzy FTS5 search over symbol names → array of \`RawSymbol\` with FQDN,
-kind, file:line. Optional filters: \`kind\`, \`visibility\`, \`module\`.
+kind, file:line. Optional filters: \`kind\`, \`visibility\`, \`module\`,
+\`include_external\` (default true).
 
 \`\`\`
 find_symbol("createUser", 5)
 \`\`\`
-
-### get_context(fqdn, depth: 1|2)
-
-Returns the symbol + its neighbors (callers, callees, imports,
-imported_by) as a graph slice.
-
-- **depth=1 (cheap)** — neighbors as FQDN + edge_kind only. For
-  exploration, building a mental map.
-- **depth=2 (rich)** — same + full \`resolved_symbol\` payload for
-  Resolved targets. For reasoning about actual code.
 
 ### list_symbols(kind?, visibility?, module?, limit?)
 
@@ -100,6 +91,115 @@ find_similar_symbols("strip_rs_extension", 0.7)
 // → strip_ts_extension, strip_lua_extension, strip_extension, ...
 \`\`\`
 
+## Reasoning tools
+
+### get_context(fqdn, depth: 1|2)
+
+Returns the symbol + its neighbors (callers, callees, imports,
+imported_by, dependents, tests) as a graph slice.
+
+- **depth=1 (cheap)** — neighbors as FQDN + edge_kind only. For
+  exploration, building a mental map.
+- **depth=2 (rich)** — same + full \`resolved_symbol\` payload for
+  Resolved targets. For reasoning about actual code.
+
+### get_body(fqdn, max_lines?)
+
+Returns the raw source text of a symbol identified by FQDN, sliced
+from the file at its declared \`start_line..end_line\`. Pair with
+\`get_context\` (graph relations) when you need to actually read the
+function body — the graph tells you WHERE, this tells you WHAT.
+
+- \`max_lines\` clamps long bodies; the response carries
+  \`truncated\` + \`total_body_lines\` so you can re-fetch without the
+  cap when needed.
+- Returns \`null\` when no symbol matches the FQDN — call
+  \`find_symbol\` first if you only have a name fragment.
+
+\`\`\`
+get_body("crate::module::function_name", 80)
+\`\`\`
+
+### resolve_external(fqdn)
+
+Lazy on-demand resolution of an external FQDN — a symbol that lives
+outside the workspace (Cargo crate, npm package, luarocks rock).
+Routes the FQDN through registered resolvers and submits the produced
+source to the index with \`is_external = 1\`. Use when
+\`get_context(fqdn)\` returned a neighbor as
+\`Unresolved { name }\` whose name looks like a known dependency.
+
+Returns \`{status, fqdn, source_origin?, symbol?, missing_binary?, detail?}\`:
+
+- \`status = "resolved"\` — \`symbol\` is the newly-indexed \`RawSymbol\`.
+- \`status = "not_found"\` — no resolver claimed this FQDN (likely
+  not a workspace dependency).
+- \`status = "missing_binary"\` — the matching resolver is gated behind
+  a CLI that is not installed; \`missing_binary\` names which one,
+  \`detail\` names the env var to override the lookup.
+- \`status = "lockfile_not_found"\` — workspace lacks the lockfile
+  needed (\`Cargo.lock\` / \`package-lock.json\` / …).
+- \`status = "error"\` — resolver-level failure; \`detail\` carries the
+  message.
+
+\`\`\`
+resolve_external("serde::Deserialize")
+\`\`\`
+
+## Freshness tracking
+
+### current_revision()
+
+Returns the current workspace revision — a monotonic counter that bumps
+on every successful index write (cold-start ingest, watcher upsert,
+external resolution). Cheap call; no parameters. Pair with \`check_stale\`
+to detect when symbols you previously cited have been modified since
+your last fetch.
+
+### check_stale(fetched: [{fqdn, fetched_at_revision}, ...])
+
+Compares a set of \`(fqdn, fetched_at_revision)\` pairs against the
+current \`last_modified_revision\` of each row. Returns
+\`[{fqdn, fetched_at_revision, last_modified_revision, status}]\` where
+\`status\` is:
+
+- \`"stale"\` — the symbol was modified since you fetched it; re-query.
+- \`"fresh"\` — no change since fetch.
+- \`"missing"\` — the FQDN is no longer indexed (renamed / removed).
+
+Stateless server-side — track the \`(fqdn → revision)\` map yourself
+across turns. Call BEFORE re-reasoning on cached context.
+
+## Session handoffs
+
+A separate SQLite DB at \`.standardoc-sessions/sessions.db\` (path
+independent of \`.standardoc/\` so a workspace reset doesn't wipe your
+handoff memos).
+
+### session_save(slug, body_md, supersedes?)
+
+UPSERT by \`slug\`. Use AT END of any session that locks decisions or
+ships meaningful work so the next chat can pick up via \`session_get\`.
+Optional \`supersedes\` marks a prior slug as \`superseded\` (chain
+semantics — useful when a refactor invalidates an older lock).
+
+### session_list(active_only?)
+
+List session memos newest-first. \`active_only\` defaults to true and
+filters out superseded entries. Returns the full \`body_md\` per row.
+
+### session_get(slug?)
+
+Fetch one memo. Pass \`slug\` to target a specific entry; omit it to
+get the most recent active session — the natural reentry point for a
+new chat. Returns \`null\` when nothing matches.
+
+### session_dump_md(target_path)
+
+Export every session memo (active + superseded) to a single markdown
+file at \`target_path\`. Durable backup against schema migrations or
+accidental DB loss.
+
 ## Recommended workflows
 
 **"What does X do / where is X used"**
@@ -112,13 +212,15 @@ find_similar_symbols("strip_rs_extension", 0.7)
 
 1. \`find_symbol("Y")\` → entry points
 2. \`get_context(fqdn, 2)\` on each candidate → understand the call chain
-3. Now you know what to read/edit
+3. \`get_body(fqdn)\` on the symbol you intend to edit → read the actual code
+4. Now you know what to read/edit
 
 **"Is symbol X used anywhere"**
 
 1. \`find_symbol("X")\` → get FQDN
-2. \`get_context(fqdn, 1)\` → check \`callers\` (CALLS) and \`imported_by\`
-   (IMPORTS)
+2. \`get_context(fqdn, 1)\` → check \`callers\` (CALLS), \`imported_by\`
+   (IMPORTS), and \`dependents\` (everything else that breaks if X
+   changes shape)
 
 **"I'm starting a feature involving area Z"**
 
@@ -134,6 +236,33 @@ find_similar_symbols("strip_rs_extension", 0.7)
 2. If you already know the pattern shape, prefer
    \`find_symbols_by_pattern\` for a deterministic glob match.
 
+**"A neighbor is Unresolved and looks like an external dependency"**
+
+1. \`get_context(fqdn, 1)\` reveals \`Unresolved { name }\` whose name
+   matches a Cargo crate / npm package / luarocks rock you depend on.
+2. \`resolve_external(name)\` indexes it on demand (one-shot;
+   subsequent \`get_context\`/\`find_symbol\` calls on the same crate
+   reuse the cache).
+3. If \`status = "missing_binary"\` or \`"lockfile_not_found"\`,
+   surface the diagnostic to the user — they need to install the CLI
+   or commit a lockfile.
+
+**"Detect what changed since last fetch"**
+
+1. When you fetch context, record \`(fqdn, current_revision())\`.
+2. Across turns, call
+   \`check_stale({fetched: [{fqdn, fetched_at_revision}, ...]})\` to
+   diff against \`last_modified_revision\`.
+3. Re-query the \`"stale"\` fqdns; drop the \`"missing"\` ones.
+
+**"Resume / save a session handoff"**
+
+1. \`session_get()\` (no slug) → latest active handoff, the natural
+   entry point for a new chat.
+2. Or \`session_list({active_only: true})\` to scan recent memos.
+3. At end of a session that locks decisions or ships work,
+   \`session_save(slug, body_md)\` so the next chat can pick up.
+
 ## Key concepts
 
 - **FQDN** — \`<package>::<module>::<name>\` (Rust + TS unified). Stable
@@ -143,11 +272,12 @@ find_similar_symbols("strip_rs_extension", 0.7)
 - **Resolved vs Unresolved targets** — an edge target may be:
   - \`Resolved { fqdn }\` — known, points to an indexed symbol.
   - \`Unresolved { name }\` — name only, external or unindexed.
+    Candidate for \`resolve_external\` if it looks like a dependency.
   - \`UnresolvedBridge { bridge, name }\` — cross-language jump (e.g.
     Rust ↔ TS via Tauri command).
 
   Don't blindly follow Unresolved targets — they leave the indexed
-  graph.
+  graph unless you \`resolve_external\` them.
 
 ## Indexing state
 

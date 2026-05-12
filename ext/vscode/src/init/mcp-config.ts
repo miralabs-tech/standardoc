@@ -1,7 +1,10 @@
 export interface McpServerEntry {
-  type?: 'stdio';
-  command: string;
-  args: string[];
+  type?: 'http' | 'stdio';
+  /** Set for `type=http` (or omitted-type-defaults-to-http) entries. */
+  url?: string;
+  /** Set for legacy `type=stdio` entries (kept for back-compat readers). */
+  command?: string;
+  args?: string[];
   env?: Record<string, string>;
   [key: string]: unknown;
 }
@@ -12,17 +15,21 @@ export interface McpConfigShape {
 }
 
 export interface BuildEntryArgs {
-  readonly binaryPath: string;
-  readonly workspaceRoot: string;
+  readonly endpointUrl: string;
 }
 
 export const STANDARDOC_SERVER_KEY = 'standardoc';
 
+/**
+ * Builds the canonical `.mcp.json` entry for Standardoc. Modern MCP
+ * clients (Claude Code 4.6+, Claude Desktop, Cursor, Copilot Chat in
+ * VSCode 1.105+) connect over HTTP/SSE to the daemon supervised by the
+ * VSCode extension. Per-client stdio children are no longer needed.
+ */
 export function buildStandardocEntry(args: BuildEntryArgs): McpServerEntry {
   return {
-    type: 'stdio',
-    command: args.binaryPath,
-    args: ['mcp', args.workspaceRoot, '--readonly'],
+    type: 'http',
+    url: args.endpointUrl,
   };
 }
 
@@ -65,12 +72,16 @@ export function mergeMcpConfig(parsed: ParseResult, expected: McpServerEntry): M
   }
 
   if (current) {
+    // Preserve user-customised siblings (e.g. `env`) while pinning the
+    // canonical fields (`type`, `url`, dropping any legacy stdio
+    // `command`/`args`).
     const merged: McpServerEntry = {
       ...current,
       type: expected.type,
-      command: expected.command,
-      args: [...expected.args],
+      url: expected.url,
     };
+    delete merged.command;
+    delete merged.args;
     return {
       kind: 'overwrite-stale',
       result: { ...existing, mcpServers: { ...servers, [STANDARDOC_SERVER_KEY]: merged } },
@@ -90,8 +101,10 @@ export function mergeMcpConfig(parsed: ParseResult, expected: McpServerEntry): M
 }
 
 function entryMatches(actual: McpServerEntry, expected: McpServerEntry): boolean {
-  if (actual.command !== expected.command) return false;
-  if (!arrayEqualsString(actual.args, expected.args)) return false;
+  if ((actual.type ?? 'stdio') !== (expected.type ?? 'stdio')) return false;
+  if (expected.url !== undefined && actual.url !== expected.url) return false;
+  if (expected.command !== undefined && actual.command !== expected.command) return false;
+  if (expected.args !== undefined && !arrayEqualsString(actual.args, expected.args)) return false;
   return true;
 }
 

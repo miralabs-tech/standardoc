@@ -49,8 +49,8 @@ describe('parseFatalMarker', () => {
 describe('findFatalMarker', () => {
   test('locates a marker buried inside a multi-line stderr blob', () => {
     const chunk = [
-      '[stdoc] starting',
-      '[stdoc] opening db at /tmp/.standardoc/index.db',
+      '[standardoc] starting',
+      '[standardoc] opening db at /tmp/.standardoc/index.db',
       'STDOC_FATAL: schema_too_new db=2 supported=1',
       'error: database schema version v2 is newer than supported v1',
     ].join('\n');

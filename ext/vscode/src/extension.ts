@@ -9,6 +9,7 @@ import { registerCommands } from './commands';
 import { maybePromptForInit } from './init/prompt';
 
 const MCP_PROVIDER_ID = 'standardoc.mcp';
+const DEFAULT_MCP_HTTP_PORT = 7700;
 
 export function activate(context: vscode.ExtensionContext): void {
   const folder = vscode.workspace.workspaceFolders?.[0];
@@ -20,9 +21,14 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('Standardoc');
   context.subscriptions.push(output);
 
+  const port = vscode.workspace
+    .getConfiguration('standardoc')
+    .get<number>('mcpHttpPort', DEFAULT_MCP_HTTP_PORT);
+  output.appendLine(`[mcp] http port from setting: ${port}`);
+
   const lsp = new LspClient(workspaceRoot, output);
-  const mcp = new McpClient(workspaceRoot, output);
-  const supervisor = new DaemonSupervisor(context, output, { lsp, mcp });
+  const mcp = new McpClient(workspaceRoot, output, port);
+  const supervisor = new DaemonSupervisor(context, output, { lsp, mcp }, workspaceRoot);
 
   context.subscriptions.push(lsp, mcp, supervisor);
 
@@ -63,7 +69,7 @@ export function activate(context: vscode.ExtensionContext): void {
     spawnSupervisor,
   });
 
-  registerMcpServerProvider(context, workspaceRoot, output);
+  registerMcpServerProvider(context, () => mcp.url(), output, supervisor);
 
   output.appendLine('Standardoc extension activated.');
 
@@ -77,8 +83,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
 function registerMcpServerProvider(
   context: vscode.ExtensionContext,
-  workspaceRoot: string,
+  endpointResolver: () => string | null,
   output: vscode.OutputChannel,
+  supervisor: DaemonSupervisor,
 ): void {
   const lm = vscode.lm as Partial<typeof vscode.lm>;
   if (typeof lm.registerMcpServerDefinitionProvider !== 'function') {
@@ -87,10 +94,21 @@ function registerMcpServerProvider(
     );
     return;
   }
-  const provider = new StandardocMcpServerProvider(context, workspaceRoot, output);
+  const provider = new StandardocMcpServerProvider(endpointResolver, output);
   context.subscriptions.push(provider);
   context.subscriptions.push(
     vscode.lm.registerMcpServerDefinitionProvider(MCP_PROVIDER_ID, provider),
+  );
+  // Re-emit the definition list whenever the supervisor moves to `ready`:
+  // that is when the MCP daemon has bound its port and the endpoint URL
+  // is finally resolvable. Without this refresh consumers would see an
+  // empty definition list at activation and never re-poll.
+  context.subscriptions.push(
+    supervisor.onDidChangeState(state => {
+      if (state.kind === 'ready') {
+        provider.refresh();
+      }
+    }),
   );
   output.appendLine(`[mcp-provider] registered (${MCP_PROVIDER_ID})`);
 }

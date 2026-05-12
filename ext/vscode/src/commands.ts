@@ -72,7 +72,7 @@ async function commandDaemonStart(ctx: CommandContext): Promise<void> {
 async function commandPurgeExcluded(ctx: CommandContext): Promise<void> {
   const confirm = await vscode.window.showWarningMessage(
     'Purge symbols matching .stdignore from the index?\n\n' +
-      'This will stop the Standardoc daemon, run `stdoc purge-excluded`, then restart.',
+      'This will stop the Standardoc daemon, run `standardoc purge-excluded`, then restart.',
     { modal: true },
     'Purge',
   );

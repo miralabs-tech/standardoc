@@ -9,8 +9,7 @@ import {
 } from '../../src/init/mcp-config';
 
 const EXPECTED = buildStandardocEntry({
-  binaryPath: '/abs/path/stdoc',
-  workspaceRoot: '/abs/workspace',
+  endpointUrl: 'http://127.0.0.1:7700/mcp',
 });
 
 describe('parseMcpConfig', () => {
@@ -83,7 +82,19 @@ describe('mergeMcpConfig', () => {
     expect(r.kind).toBe('no-op');
   });
 
-  test('overwrite-stale when command differs', () => {
+  test('overwrite-stale when url differs', () => {
+    const stale: McpServerEntry = {
+      type: 'http',
+      url: 'http://127.0.0.1:9999/mcp',
+    };
+    const existing: McpConfigShape = { mcpServers: { standardoc: stale } };
+    const r = mergeMcpConfig({ kind: 'parsed', value: existing }, EXPECTED);
+    expect(r.kind).toBe('overwrite-stale');
+    if (r.kind !== 'overwrite-stale') return;
+    expect(r.result.mcpServers?.standardoc?.url).toBe('http://127.0.0.1:7700/mcp');
+  });
+
+  test('overwrite-stale migrates legacy stdio entry to http (drops command/args)', () => {
     const stale: McpServerEntry = {
       type: 'stdio',
       command: '/old/path/standardoc.exe',
@@ -93,31 +104,16 @@ describe('mergeMcpConfig', () => {
     const r = mergeMcpConfig({ kind: 'parsed', value: existing }, EXPECTED);
     expect(r.kind).toBe('overwrite-stale');
     if (r.kind !== 'overwrite-stale') return;
-    expect(r.result.mcpServers?.standardoc?.command).toBe('/abs/path/stdoc');
-  });
-
-  test('overwrite-stale when args differ (legacy --mcp --workspace shape)', () => {
-    const stale: McpServerEntry = {
-      type: 'stdio',
-      command: '/abs/path/stdoc',
-      args: ['--mcp', '--workspace', '/abs/workspace'],
-    };
-    const existing: McpConfigShape = { mcpServers: { standardoc: stale } };
-    const r = mergeMcpConfig({ kind: 'parsed', value: existing }, EXPECTED);
-    expect(r.kind).toBe('overwrite-stale');
-    if (r.kind !== 'overwrite-stale') return;
-    expect(r.result.mcpServers?.standardoc?.args).toEqual([
-      'mcp',
-      '/abs/workspace',
-      '--readonly',
-    ]);
+    expect(r.result.mcpServers?.standardoc?.type).toBe('http');
+    expect(r.result.mcpServers?.standardoc?.url).toBe('http://127.0.0.1:7700/mcp');
+    expect(r.result.mcpServers?.standardoc?.command).toBeUndefined();
+    expect(r.result.mcpServers?.standardoc?.args).toBeUndefined();
   });
 
   test('overwrite-stale preserves user-customised env field', () => {
     const stale: McpServerEntry = {
-      type: 'stdio',
-      command: '/wrong/path',
-      args: ['mcp', '/abs/workspace', '--readonly'],
+      type: 'http',
+      url: 'http://127.0.0.1:9999/mcp',
       env: { RUST_LOG: 'debug' },
     };
     const existing: McpConfigShape = { mcpServers: { standardoc: stale } };
@@ -125,7 +121,7 @@ describe('mergeMcpConfig', () => {
     expect(r.kind).toBe('overwrite-stale');
     if (r.kind !== 'overwrite-stale') return;
     expect(r.result.mcpServers?.standardoc?.env).toEqual({ RUST_LOG: 'debug' });
-    expect(r.result.mcpServers?.standardoc?.command).toBe('/abs/path/stdoc');
+    expect(r.result.mcpServers?.standardoc?.url).toBe('http://127.0.0.1:7700/mcp');
   });
 
   test('preserves sibling top-level keys outside mcpServers', () => {
@@ -160,10 +156,11 @@ describe('serializeMcpConfig', () => {
 });
 
 describe('buildStandardocEntry', () => {
-  test('generates type=stdio with mcp <ws> --readonly args', () => {
-    const e = buildStandardocEntry({ binaryPath: 'X', workspaceRoot: 'Y' });
-    expect(e.type).toBe('stdio');
-    expect(e.command).toBe('X');
-    expect(e.args).toEqual(['mcp', 'Y', '--readonly']);
+  test('generates type=http with url pointing at the shared daemon', () => {
+    const e = buildStandardocEntry({ endpointUrl: 'http://127.0.0.1:7700/mcp' });
+    expect(e.type).toBe('http');
+    expect(e.url).toBe('http://127.0.0.1:7700/mcp');
+    expect(e.command).toBeUndefined();
+    expect(e.args).toBeUndefined();
   });
 });

@@ -104,7 +104,15 @@
           "type": "string",
           "default": "",
           "scope": "machine-overridable",
-          "description": "Absolute path to a custom `stdoc` binary. When set, overrides the bundled binary in `dist/bin/`."
+          "description": "Absolute path to a custom `standardoc` binary. When set, overrides the bundled binary in `dist/bin/`."
+        },
+        "standardoc.mcpHttpPort": {
+          "type": "integer",
+          "default": 7700,
+          "minimum": 0,
+          "maximum": 65535,
+          "scope": "resource",
+          "description": "TCP port on `127.0.0.1` where the Standardoc MCP daemon listens for streamable HTTP / SSE connections. Set to `0` to let the kernel pick a random ephemeral port (the resolved port is then written to `.standardoc/mcp.endpoint` for client discovery). When multiple Standardoc workspaces run in parallel, give each a distinct port here."
         }
       }
     },
