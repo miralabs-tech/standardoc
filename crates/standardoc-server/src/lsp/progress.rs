@@ -73,15 +73,10 @@ async fn send_begin(client: &Client, token: &ProgressToken) {
 }
 
 async fn send_report(client: &Client, token: &ProgressToken, done: u64, total: u64) {
-    let percentage = if total > 0 {
-        Some(
-            u32::try_from(done.saturating_mul(100) / total)
-                .unwrap_or(100)
-                .min(100),
-        )
-    } else {
-        None
-    };
+    let percentage = done
+        .saturating_mul(100)
+        .checked_div(total)
+        .map(|n| u32::try_from(n).unwrap_or(100).min(100));
     let value = WorkDoneProgress::Report(WorkDoneProgressReport {
         cancellable: Some(false),
         message: Some(format!("{done}/{total} files")),

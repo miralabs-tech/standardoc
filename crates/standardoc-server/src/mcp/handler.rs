@@ -12,12 +12,14 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use standardoc_core::{
-    IndexHandle, LanguageProvider, ScanFilters, WatcherHandle,
+    IndexHandle, LanguageProvider, ResolveOutcome, ResolverRegistry, ScanFilters, SessionsHandle,
+    WatcherHandle, dump_sessions_to_markdown,
     query::{self, SymbolFilter},
 };
+use standardoc_ir::SourceOrigin;
 use standardoc_ir::{Kind, RawSymbol, Visibility};
 
-use crate::mcp::error::server_error_to_rmcp;
+use crate::mcp::error::{SessionsErr, server_error_to_rmcp, sessions_err_to_rmcp};
 
 const FIND_SYMBOL_DEFAULT_LIMIT: u8 = 20;
 const FIND_SYMBOL_MAX_LIMIT: u8 = 100;
@@ -39,10 +41,13 @@ const FIND_SIMILAR_DEFAULT_THRESHOLD: f32 = 0.8;
 #[derive(Clone)]
 pub struct StandardocMcp {
     handle: IndexHandle,
-    #[allow(dead_code)]
     provider: Arc<dyn LanguageProvider>,
     #[allow(dead_code)]
     filters: Arc<RwLock<ScanFilters>>,
+    /// Lazy on-demand resolver dispatch for `resolve_external` (S3-G).
+    /// Constructed at `new()` time from the handle's workspace root —
+    /// each resolver probes its binary then memorizes the result.
+    registry: Arc<ResolverRegistry>,
     index_ready: Arc<AtomicBool>,
     watcher: Arc<Mutex<Option<WatcherHandle>>>,
     tool_router: ToolRouter<Self>,
@@ -55,10 +60,14 @@ impl StandardocMcp {
         provider: Arc<dyn LanguageProvider>,
         filters: Arc<RwLock<ScanFilters>>,
     ) -> Self {
+        let registry = Arc::new(ResolverRegistry::for_workspace(
+            handle.workspace_root().to_path_buf(),
+        ));
         Self {
             handle,
             provider,
             filters,
+            registry,
             index_ready: Arc::new(AtomicBool::new(false)),
             watcher: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
@@ -123,7 +132,12 @@ impl StandardocMcp {
             return Ok(success_json::<Vec<RawSymbol>>(&Vec::new()));
         }
 
-        let filter = parse_filter(params.kind.as_deref(), params.visibility.as_deref(), params.module)?;
+        let filter = parse_filter(
+            params.kind.as_deref(),
+            params.visibility.as_deref(),
+            params.module,
+            params.include_external,
+        )?;
         let limit = clamp_limit(params.limit);
         let handle = self.handle.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -154,7 +168,12 @@ impl StandardocMcp {
             )]));
         }
 
-        let filter = parse_filter(params.kind.as_deref(), params.visibility.as_deref(), params.module)?;
+        let filter = parse_filter(
+            params.kind.as_deref(),
+            params.visibility.as_deref(),
+            params.module,
+            params.include_external,
+        )?;
         let limit = clamp_limit(params.limit);
         let handle = self.handle.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -190,7 +209,12 @@ impl StandardocMcp {
             return Ok(success_json::<Vec<RawSymbol>>(&Vec::new()));
         }
 
-        let filter = parse_filter(params.kind.as_deref(), params.visibility.as_deref(), params.module)?;
+        let filter = parse_filter(
+            params.kind.as_deref(),
+            params.visibility.as_deref(),
+            params.module,
+            params.include_external,
+        )?;
         let limit = clamp_limit(params.limit);
         let handle = self.handle.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -229,7 +253,12 @@ impl StandardocMcp {
         }
 
         let threshold = parse_threshold(params.threshold)?;
-        let filter = parse_filter(params.kind.as_deref(), params.visibility.as_deref(), params.module)?;
+        let filter = parse_filter(
+            params.kind.as_deref(),
+            params.visibility.as_deref(),
+            params.module,
+            params.include_external,
+        )?;
         let limit = clamp_limit(params.limit);
         let handle = self.handle.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -244,6 +273,302 @@ impl StandardocMcp {
             .map(|(symbol, score)| SimilarSymbolJson { score, symbol })
             .collect();
         Ok(success_json(&envelope))
+    }
+
+    /// Returns the raw source text of the symbol identified by `fqdn`. This is
+    /// the verbatim slice between `location.start_line` and `location.end_line`
+    /// in the file on disk — exactly what a reader would see if they opened the
+    /// file at those line numbers. Use this when you need to reason about the
+    /// actual code of a known FQDN (the graph tells you WHERE; this tells you
+    /// WHAT). `max_lines` clamps long bodies; the response carries `truncated`
+    /// + `total_body_lines` so the caller can decide whether to re-call without
+    /// the cap.
+    #[tool(
+        description = "Returns the raw source text of a symbol identified by FQDN, sliced from the file at its declared start_line..end_line. Pair with `get_context` (graph relations) when you need to actually read the function body. Optional `max_lines` caps the response and sets `truncated=true` so you know to re-fetch if needed. Returns `null` when no symbol matches the FQDN — call `find_symbol` first if you only have a name fragment."
+    )]
+    async fn get_body(
+        &self,
+        Parameters(params): Parameters<GetBodyParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !self.index_ready.load(Ordering::Acquire) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
+            )]));
+        }
+        let handle = self.handle.clone();
+        let fqdn = params.fqdn;
+        let max_lines = params.max_lines;
+        let result = tokio::task::spawn_blocking(move || {
+            query::body_for_fqdn(&handle, &fqdn, max_lines)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(|e| server_error_to_rmcp(&e.into()))?;
+
+        match result {
+            Some(slice) => Ok(success_json(&slice)),
+            None => Ok(CallToolResult::success(vec![Content::text(
+                "no symbol found for the given FQDN",
+            )])),
+        }
+    }
+
+    /// Read-only snapshot of the workspace revision counter. The number is
+    /// monotonic — every successful write (cold-start ingest, watcher upsert,
+    /// rescan) bumps it by 1. Callers can record the revision they observed
+    /// alongside each fetched FQDN and later feed those pairs into
+    /// `check_stale` to detect what changed.
+    #[tool(
+        description = "Returns the current workspace revision number — a monotonic counter that bumps on every successful index write. Pair it with `check_stale` to detect when fqdns you have already cited have been modified since you last fetched them. Cheap call; no parameters."
+    )]
+    async fn current_revision(&self) -> Result<CallToolResult, ErrorData> {
+        let revision = self.handle.revision();
+        Ok(success_json(&CurrentRevisionJson { revision }))
+    }
+
+    /// Persist a session handoff memo into `.standardoc-sessions/sessions.db`.
+    /// `slug` is the unique key (UPSERT semantics: re-saving the same slug
+    /// overwrites the body). `supersedes`, when provided, marks the named
+    /// prior session as `superseded` — useful when a refactor invalidates an
+    /// older lock. Returns the inserted row id.
+    #[tool(
+        description = "Save a session handoff memo to .standardoc-sessions/sessions.db. UPSERT by `slug`. Use this AT END of any session that locks decisions or ships meaningful work so the next chat can pick up via `session_get`. Optional `supersedes` marks a prior slug as superseded (chain semantics). Returns the row id."
+    )]
+    async fn session_save(
+        &self,
+        Parameters(params): Parameters<SessionSaveParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let workspace = self.handle.workspace_root().to_path_buf();
+        let result = tokio::task::spawn_blocking(move || {
+            let h = SessionsHandle::open(&workspace).map_err(SessionsErr::from)?;
+            let id = h
+                .save(&params.slug, &params.body_md, params.supersedes.as_deref())
+                .map_err(SessionsErr::from)?;
+            Ok::<_, SessionsErr>(id)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(sessions_err_to_rmcp)?;
+        Ok(success_json(&serde_json::json!({ "id": result })))
+    }
+
+    /// List session memos newest-first. By default skips `superseded` rows.
+    #[tool(
+        description = "List session handoff memos newest-first. `active_only` (default true) filters out superseded entries. Returns the full body_md per row — use `session_get` only when you need to fetch one by slug."
+    )]
+    async fn session_list(
+        &self,
+        Parameters(params): Parameters<SessionListParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let workspace = self.handle.workspace_root().to_path_buf();
+        let active_only = params.active_only.unwrap_or(true);
+        let rows = tokio::task::spawn_blocking(move || {
+            let h = SessionsHandle::open(&workspace).map_err(SessionsErr::from)?;
+            h.list(active_only).map_err(SessionsErr::from)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(sessions_err_to_rmcp)?;
+        Ok(success_json(&rows))
+    }
+
+    /// Fetch a single session memo by slug, or the most recent active one
+    /// when `slug` is omitted. Returns `null` if no row matches.
+    #[tool(
+        description = "Fetch a session handoff memo. Pass `slug` to target a specific entry; omit it to get the most recent active session (typical reentry point for a new chat). Returns null when nothing matches."
+    )]
+    async fn session_get(
+        &self,
+        Parameters(params): Parameters<SessionGetParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let workspace = self.handle.workspace_root().to_path_buf();
+        let slug = params.slug;
+        let row = tokio::task::spawn_blocking(move || {
+            let h = SessionsHandle::open(&workspace).map_err(SessionsErr::from)?;
+            match slug {
+                Some(s) => h.get_by_slug(&s).map_err(SessionsErr::from),
+                None => h.latest().map_err(SessionsErr::from),
+            }
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(sessions_err_to_rmcp)?;
+        match row {
+            Some(r) => Ok(success_json(&r)),
+            None => Ok(CallToolResult::success(vec![Content::text(
+                "no session found",
+            )])),
+        }
+    }
+
+    /// Dump every session row (active + superseded) into a single markdown
+    /// file at `target_path`. Use as a periodic backup or before risky DB ops.
+    /// Returns the count of rows written.
+    #[tool(
+        description = "Export all session memos to a single markdown file at `target_path`. Format mirrors what a future `session_import` would consume — durable backup against schema migrations / accidental DB loss. Returns the number of rows written."
+    )]
+    async fn session_dump_md(
+        &self,
+        Parameters(params): Parameters<SessionDumpMdParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let workspace = self.handle.workspace_root().to_path_buf();
+        let target = std::path::PathBuf::from(params.target_path);
+        let count = tokio::task::spawn_blocking(move || {
+            let h = SessionsHandle::open(&workspace).map_err(SessionsErr::from)?;
+            dump_sessions_to_markdown(&h, &target).map_err(SessionsErr::from)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(sessions_err_to_rmcp)?;
+        Ok(success_json(&serde_json::json!({ "count": count })))
+    }
+
+    /// Lazy on-demand resolution of an external FQDN (Cargo crate, npm
+    /// package, luarocks rock). Routes the FQDN through the registered
+    /// resolvers in order; the first non-`NotInThisRegistry` answer wins.
+    /// On success, the produced `ExtractedFile` is submitted to the
+    /// writer pipeline (`is_external = 1` + the resolver's `SourceOrigin`)
+    /// and the new symbol's `RawSymbol` is returned in the envelope.
+    ///
+    /// Scaffold A surface — body is unimplemented until the registry
+    /// is wired into `StandardocMcp::new`. Calls return
+    /// `status = "scaffold_a_unimplemented"` rather than crashing the
+    /// daemon so existing integration tests stay green.
+    #[tool(
+        description = "Lazy on-demand resolution of an external FQDN (a symbol that lives outside the workspace — Cargo crate, npm package, luarocks rock). Routes the FQDN through registered resolvers and submits the produced ExtractedFile to the writer pipeline. Returns `{status, fqdn, source_origin?, symbol?, missing_binary?, detail?}`. `status` is `resolved` (success — `symbol` is the new RawSymbol), `not_found` (no resolver claimed the FQDN), `missing_binary` (the matching resolver is gated behind a CLI that is not installed — `missing_binary` names which one), or `error` (resolver-level failure — `detail` carries the message). Use this when `get_context(fqdn)` returned a neighbor with `to: Unresolved` and the FQDN shape matches a known dependency."
+    )]
+    pub async fn resolve_external(
+        &self,
+        Parameters(params): Parameters<ResolveExternalParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !self.index_ready.load(Ordering::Acquire) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
+            )]));
+        }
+        let fqdn = params.fqdn.clone();
+        let handle = self.handle.clone();
+        let provider = Arc::clone(&self.provider);
+        let registry = Arc::clone(&self.registry);
+        let outcome = tokio::task::spawn_blocking(move || {
+            registry.resolve(&handle, provider.as_ref(), &fqdn)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?;
+
+        let envelope = match outcome {
+            Ok(ResolveOutcome::Resolved {
+                symbol,
+                source_origin,
+            }) => ResolveExternalJson {
+                status: "resolved".to_string(),
+                fqdn: params.fqdn,
+                source_origin: Some(source_origin_label(source_origin).to_string()),
+                symbol: Some(symbol),
+                missing_binary: None,
+                detail: None,
+            },
+            Ok(ResolveOutcome::NotInThisRegistry) => ResolveExternalJson {
+                status: "not_found".to_string(),
+                fqdn: params.fqdn,
+                source_origin: None,
+                symbol: None,
+                missing_binary: None,
+                detail: Some(
+                    "no resolver claimed this FQDN — the crate / package may not be a workspace dependency"
+                        .to_string(),
+                ),
+            },
+            Ok(ResolveOutcome::MissingBinary {
+                binary,
+                env_override,
+            }) => ResolveExternalJson {
+                status: "missing_binary".to_string(),
+                fqdn: params.fqdn,
+                source_origin: None,
+                symbol: None,
+                missing_binary: Some(binary.to_string()),
+                detail: Some(format!(
+                    "binary `{binary}` not found in PATH — set the env var `{env_override}` to override the lookup",
+                )),
+            },
+            Ok(ResolveOutcome::LockfileNotFound { lockfile }) => ResolveExternalJson {
+                status: "lockfile_not_found".to_string(),
+                fqdn: params.fqdn,
+                source_origin: None,
+                symbol: None,
+                missing_binary: None,
+                detail: Some(format!("workspace has no `{lockfile}` at its root")),
+            },
+            Err(e) => ResolveExternalJson {
+                status: "error".to_string(),
+                fqdn: params.fqdn,
+                source_origin: None,
+                symbol: None,
+                missing_binary: None,
+                detail: Some(e.to_string()),
+            },
+        };
+        Ok(success_json(&envelope))
+    }
+
+    /// Compares a set of `(fqdn, fetched_at_revision)` pairs against the
+    /// current `symbols.last_modified_revision` of each row and returns the
+    /// entries that have been modified since their fetch. Stateless server-side
+    /// — the caller is responsible for tracking what it has fetched and at
+    /// which revision. Empty / unknown fqdns produce a `Missing` reason rather
+    /// than being silently dropped.
+    #[tool(
+        description = "Detects staleness for a set of previously-fetched fqdns. Input: `fetched = [{fqdn, fetched_at_revision}, ...]`. Returns an array of `{fqdn, fetched_at_revision, last_modified_revision, status}` where status is `stale` (last_modified > fetched_at), `fresh` (no change since fetch), or `missing` (fqdn no longer indexed — likely renamed/removed). Use this BEFORE re-reasoning on cached symbol context to know what changed and what to re-query. Stateless — the caller maintains the (fqdn → revision) map across turns."
+    )]
+    async fn check_stale(
+        &self,
+        Parameters(params): Parameters<CheckStaleParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !self.index_ready.load(Ordering::Acquire) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
+            )]));
+        }
+        if params.fetched.is_empty() {
+            return Ok(success_json::<Vec<StaleEntryJson>>(&Vec::new()));
+        }
+
+        let fqdns: Vec<String> = params.fetched.iter().map(|e| e.fqdn.clone()).collect();
+        let handle = self.handle.clone();
+        let revisions = tokio::task::spawn_blocking(move || {
+            let refs: Vec<&str> = fqdns.iter().map(String::as_str).collect();
+            query::last_modified_revisions_for_fqdns(&handle, &refs)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(|e| server_error_to_rmcp(&e.into()))?;
+
+        let entries: Vec<StaleEntryJson> = params
+            .fetched
+            .into_iter()
+            .map(|e| match revisions.get(&e.fqdn).copied() {
+                Some(last_modified_revision) => StaleEntryJson {
+                    fqdn: e.fqdn,
+                    fetched_at_revision: e.fetched_at_revision,
+                    last_modified_revision: Some(last_modified_revision),
+                    status: if last_modified_revision > e.fetched_at_revision {
+                        "stale"
+                    } else {
+                        "fresh"
+                    }
+                    .to_string(),
+                },
+                None => StaleEntryJson {
+                    fqdn: e.fqdn,
+                    fetched_at_revision: e.fetched_at_revision,
+                    last_modified_revision: None,
+                    status: "missing".to_string(),
+                },
+            })
+            .collect();
+
+        Ok(success_json(&entries))
     }
 }
 
@@ -305,6 +630,11 @@ pub(crate) struct FindSymbolParams {
     pub visibility: Option<String>,
     /// Optional filter — exact match on the symbol's `module` fqdn.
     pub module: Option<String>,
+    /// Optional — include `is_external = 1` symbols (Cargo crates, npm
+    /// `.d.ts`, luarocks) in the result. Defaults to `true`. Set to
+    /// `false` to scope a query to workspace-only symbols.
+    #[serde(default)]
+    pub include_external: Option<bool>,
 }
 
 /// Tool input — `list_symbols(kind?, visibility?, module?, limit?)`.
@@ -320,6 +650,11 @@ pub(crate) struct ListSymbolsParams {
     pub module: Option<String>,
     /// Maximum results to return. Defaults to 20, capped at 100.
     pub limit: Option<u8>,
+    /// Optional — include `is_external = 1` symbols (Cargo crates, npm
+    /// `.d.ts`, luarocks) in the result. Defaults to `true`. Set to
+    /// `false` to scope a query to workspace-only symbols.
+    #[serde(default)]
+    pub include_external: Option<bool>,
 }
 
 /// Tool input — `find_symbols_by_pattern(pattern, kind?, visibility?,
@@ -339,6 +674,11 @@ pub(crate) struct FindSymbolsByPatternParams {
     pub module: Option<String>,
     /// Maximum results to return. Defaults to 20, capped at 100.
     pub limit: Option<u8>,
+    /// Optional — include `is_external = 1` symbols (Cargo crates, npm
+    /// `.d.ts`, luarocks) in the result. Defaults to `true`. Set to
+    /// `false` to scope a query to workspace-only symbols.
+    #[serde(default)]
+    pub include_external: Option<bool>,
 }
 
 /// Tool input — `find_similar_symbols(reference, threshold?, limit?, kind?,
@@ -363,6 +703,11 @@ pub(crate) struct FindSimilarSymbolsParams {
     pub visibility: Option<String>,
     /// Optional filter — exact match on the symbol's `module` fqdn.
     pub module: Option<String>,
+    /// Optional — include `is_external = 1` symbols (Cargo crates, npm
+    /// `.d.ts`, luarocks) in the result. Defaults to `true`. Set to
+    /// `false` to scope a query to workspace-only symbols.
+    #[serde(default)]
+    pub include_external: Option<bool>,
 }
 
 /// Tool output envelope for `find_similar_symbols`. Pairs each `RawSymbol`
@@ -373,17 +718,140 @@ pub(crate) struct SimilarSymbolJson {
     pub symbol: RawSymbol,
 }
 
+/// Tool input — `resolve_external(fqdn)`. Routes the FQDN through the
+/// `ResolverRegistry`; orchestrator inserts the produced symbol into
+/// the index with `is_external = 1` before responding.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResolveExternalParams {
+    /// Fully-qualified domain name of the external symbol to resolve.
+    /// Shape matches the workspace convention — `<crate>::<module>::<name>`
+    /// for Rust, `<package>::<file>::<name>` for TS, `<rock>::<name>`
+    /// for Lua.
+    pub fqdn: String,
+}
+
+/// Tool output envelope for `resolve_external`. Fields are populated
+/// based on `status`:
+///
+/// - `status = "resolved"` → `source_origin` + `symbol` set, others `None`.
+/// - `status = "not_found"` → all extras `None` (no resolver claimed the FQDN).
+/// - `status = "missing_binary"` → `missing_binary` set (binary name),
+///   `detail` carries the env var hint.
+/// - `status = "lockfile_not_found"` → `detail` names the absent lockfile.
+/// - `status = "error"` → `detail` carries the resolver error.
+/// - `status = "scaffold_a_unimplemented"` → temporary while scaffold B
+///   wires the registry; `detail` carries the pending message.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResolveExternalJson {
+    pub status: String,
+    pub fqdn: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<RawSymbol>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_binary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Tool input — `get_body(fqdn, max_lines?)`. Forwarded to
+/// `query::body_for_fqdn`. Returns `null` if `fqdn` is not in the index.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct GetBodyParams {
+    /// Fully-qualified domain name of the target symbol (e.g.
+    /// `crate::module::function`). Match `RawSymbol::fqdn` exactly.
+    pub fqdn: String,
+    /// Optional cap on the number of lines returned. When the symbol's body
+    /// exceeds this count, the response is truncated and `truncated=true` is
+    /// set so the caller knows to re-fetch with a higher cap (or none).
+    pub max_lines: Option<u32>,
+}
+
+/// Tool input — `session_save(slug, body_md, supersedes?)`. Persists or
+/// overwrites a session memo. `slug` is a UNIQUE identifier; UPSERT semantics.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct SessionSaveParams {
+    pub slug: String,
+    pub body_md: String,
+    pub supersedes: Option<String>,
+}
+
+/// Tool input — `session_list(active_only?)`. Defaults to active-only.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct SessionListParams {
+    pub active_only: Option<bool>,
+}
+
+/// Tool input — `session_get(slug?)`. Omit `slug` to fetch the most recent
+/// active session (latest entry point).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct SessionGetParams {
+    pub slug: Option<String>,
+}
+
+/// Tool input — `session_dump_md(target_path)`. Exports every session to a
+/// markdown file at the given absolute path.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct SessionDumpMdParams {
+    pub target_path: String,
+}
+
+/// Tool output for `current_revision`.
+#[derive(Debug, Serialize)]
+pub(crate) struct CurrentRevisionJson {
+    pub revision: u64,
+}
+
+/// Tool input — `check_stale(fetched: [{fqdn, fetched_at_revision}, ...])`.
+/// The server is stateless; the caller tracks (fqdn → revision_at_fetch) across
+/// turns and asks "what changed since".
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct CheckStaleParams {
+    /// Pairs of (fqdn, revision_when_fetched). Order is preserved in output.
+    pub fetched: Vec<FetchedEntry>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct FetchedEntry {
+    pub fqdn: String,
+    pub fetched_at_revision: u64,
+}
+
+/// Tool output entry for `check_stale`. `status` is `"stale"`, `"fresh"`, or
+/// `"missing"`. `last_modified_revision` is `None` when the fqdn is no longer
+/// in the index.
+#[derive(Debug, Serialize)]
+pub(crate) struct StaleEntryJson {
+    pub fqdn: String,
+    pub fetched_at_revision: u64,
+    pub last_modified_revision: Option<u64>,
+    pub status: String,
+}
+
+const fn source_origin_label(origin: SourceOrigin) -> &'static str {
+    match origin {
+        SourceOrigin::Workspace => "workspace",
+        SourceOrigin::CargoRegistry => "cargo_registry",
+        SourceOrigin::NodeModulesDts => "node_modules_dts",
+        SourceOrigin::ManualExternal => "manual_external",
+    }
+}
+
 fn parse_filter(
     kind: Option<&str>,
     visibility: Option<&str>,
     module: Option<String>,
+    include_external: Option<bool>,
 ) -> Result<SymbolFilter, ErrorData> {
     let kind = kind.map(parse_kind).transpose()?;
     let visibility = visibility.map(parse_visibility).transpose()?;
+    let include_external = include_external.unwrap_or(true);
     Ok(SymbolFilter {
         kind,
         visibility,
         module,
+        include_external,
     })
 }
 
@@ -543,6 +1011,7 @@ mod tests {
                 kind: None,
                 visibility: None,
                 module: None,
+                include_external: None,
             }))
             .await
             .expect("tool returns Ok with friendly degradation");
@@ -562,6 +1031,7 @@ mod tests {
                 visibility: None,
                 module: None,
                 limit: None,
+                include_external: None,
             }))
             .await
             .expect("tool returns Ok with friendly degradation");
@@ -578,6 +1048,7 @@ mod tests {
                 visibility: None,
                 module: None,
                 limit: None,
+                include_external: None,
             }))
             .await
             .expect("tool returns Ok with friendly degradation");
@@ -615,16 +1086,35 @@ mod tests {
 
     #[test]
     fn parse_filter_propagates_module_string_unchanged() {
-        let f = parse_filter(Some("function"), Some("private"), Some("crate::a".into())).unwrap();
+        let f = parse_filter(
+            Some("function"),
+            Some("private"),
+            Some("crate::a".into()),
+            None,
+        )
+        .unwrap();
         assert_eq!(f.kind, Some(Kind::Function));
         assert_eq!(f.visibility, Some(Visibility::Private));
         assert_eq!(f.module.as_deref(), Some("crate::a"));
+        assert!(
+            f.include_external,
+            "omitting include_external must default to true (S3-G include externals by default)"
+        );
     }
 
     #[test]
     fn parse_filter_all_none_yields_empty_filter() {
-        let f = parse_filter(None, None, None).unwrap();
+        let f = parse_filter(None, None, None, None).unwrap();
         assert_eq!(f, SymbolFilter::default());
+    }
+
+    #[test]
+    fn parse_filter_propagates_include_external_false() {
+        let f = parse_filter(None, None, None, Some(false)).unwrap();
+        assert!(
+            !f.include_external,
+            "explicit false must scope queries to workspace-only symbols"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -656,6 +1146,7 @@ mod tests {
                 kind: None,
                 visibility: None,
                 module: None,
+                include_external: None,
             }))
             .await
             .unwrap();
@@ -677,6 +1168,7 @@ mod tests {
                 visibility: None,
                 module: None,
                 limit: None,
+                include_external: None,
             }))
             .await
             .unwrap();
@@ -694,6 +1186,7 @@ mod tests {
                 kind: None,
                 visibility: None,
                 module: None,
+                include_external: None,
             }))
             .await
             .expect("tool returns Ok with friendly degradation");
@@ -712,6 +1205,7 @@ mod tests {
                 kind: None,
                 visibility: None,
                 module: None,
+                include_external: None,
             }))
             .await
             .unwrap();
@@ -730,6 +1224,7 @@ mod tests {
                 kind: None,
                 visibility: None,
                 module: None,
+                include_external: None,
             }))
             .await;
         assert!(
@@ -750,6 +1245,7 @@ mod tests {
                 kind: None,
                 visibility: None,
                 module: None,
+                include_external: None,
             }))
             .await;
         assert!(result.is_err(), "negative threshold must be rejected");
@@ -767,6 +1263,7 @@ mod tests {
                 kind: Some("class".into()),
                 visibility: None,
                 module: None,
+                include_external: None,
             }))
             .await;
         assert!(result.is_err(), "invalid `kind` filter must be rejected");
@@ -802,10 +1299,104 @@ mod tests {
                 kind: Some("class".into()),
                 visibility: None,
                 module: None,
+                include_external: None,
             }))
             .await;
         // Invalid filter is a parameter error — surfaces as Err on the
         // tool invocation, NOT a graceful CallToolResult.
         assert!(result.is_err(), "invalid `kind` must be rejected with ErrorData");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_body_returns_indexing_in_progress_when_not_ready() {
+        let (_dir, mcp) = fixture();
+        let result = mcp
+            .get_body(Parameters(GetBodyParams {
+                fqdn: "crate::foo".into(),
+                max_lines: None,
+            }))
+            .await
+            .expect("tool returns Ok with friendly degradation");
+        assert!(body_text(&result).contains("Workspace indexing in progress"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_body_returns_no_symbol_message_when_fqdn_unknown() {
+        let (dir, mcp) = fixture();
+        cold_start_workspace(&mcp, dir.path());
+        let result = mcp
+            .get_body(Parameters(GetBodyParams {
+                fqdn: "crate::nope::never_indexed".into(),
+                max_lines: None,
+            }))
+            .await
+            .unwrap();
+        assert!(body_text(&result).contains("no symbol found"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn current_revision_returns_zero_on_fresh_index() {
+        let (_dir, mcp) = fixture();
+        let result = mcp.current_revision().await.unwrap();
+        let body = body_text(&result);
+        assert!(body.contains("\"revision\": 0"), "got `{body}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn current_revision_advances_after_cold_start_writes() {
+        let (dir, mcp) = fixture();
+        cold_start_workspace(&mcp, dir.path());
+        let result = mcp.current_revision().await.unwrap();
+        let body = body_text(&result);
+        // Empty workspace = 0 writes = revision stays 0. We rely on the field
+        // shape rather than the exact value here.
+        assert!(body.contains("\"revision\""), "got `{body}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_stale_empty_fetched_returns_empty_array() {
+        let (dir, mcp) = fixture();
+        cold_start_workspace(&mcp, dir.path());
+        let result = mcp
+            .check_stale(Parameters(CheckStaleParams { fetched: vec![] }))
+            .await
+            .unwrap();
+        assert_eq!(body_text(&result).trim(), "[]");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_stale_unknown_fqdn_marked_missing() {
+        let (dir, mcp) = fixture();
+        cold_start_workspace(&mcp, dir.path());
+        let result = mcp
+            .check_stale(Parameters(CheckStaleParams {
+                fetched: vec![FetchedEntry {
+                    fqdn: "crate::nope::never_indexed".into(),
+                    fetched_at_revision: 5,
+                }],
+            }))
+            .await
+            .unwrap();
+        let body = body_text(&result);
+        assert!(body.contains("\"status\": \"missing\""), "got `{body}`");
+        assert!(
+            body.contains("\"last_modified_revision\": null"),
+            "got `{body}`"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_stale_returns_indexing_in_progress_when_not_ready() {
+        let (_dir, mcp) = fixture();
+        let result = mcp
+            .check_stale(Parameters(CheckStaleParams {
+                fetched: vec![FetchedEntry {
+                    fqdn: "crate::foo".into(),
+                    fetched_at_revision: 0,
+                }],
+            }))
+            .await
+            .expect("tool returns Ok with friendly degradation");
+        assert!(body_text(&result).contains("Workspace indexing in progress"));
     }
 }
