@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import type { DaemonSupervisor } from './daemon/supervisor';
@@ -13,6 +14,12 @@ import {
   writeMcpConfig,
 } from './init/prompt';
 import { resolveBinary } from './daemon/binary';
+import {
+  readRagSettings,
+  writeRagEmbedder,
+  writeRagEnabled,
+  type RagEmbedder,
+} from './daemon/rag-settings';
 
 export interface CommandContext {
   readonly context: vscode.ExtensionContext;
@@ -43,7 +50,93 @@ export function registerCommands(context: vscode.ExtensionContext, ctx: CommandC
     vscode.commands.registerCommand('Standardoc.daemon.start', () => commandDaemonStart(ctx)),
     vscode.commands.registerCommand('Standardoc.purgeExcluded', () => commandPurgeExcluded(ctx)),
     vscode.commands.registerCommand('Standardoc.statusBarMenu', () => commandStatusBarMenu(ctx)),
+    vscode.commands.registerCommand('Standardoc.rag.toggle', () => commandRagToggle()),
+    vscode.commands.registerCommand('Standardoc.rag.switchEmbedder', () => commandRagSwitchEmbedder()),
+    vscode.commands.registerCommand('Standardoc.rag.rebuild', () => commandRagRebuild(ctx)),
   );
+}
+
+async function commandRagToggle(): Promise<void> {
+  const current = readRagSettings();
+  await writeRagEnabled(!current.enabled);
+  void vscode.window.showInformationMessage(
+    current.enabled
+      ? 'Standardoc RAG disabled — daemon will restart without prose retrieval'
+      : `Standardoc RAG enabled (${current.embedder}) — daemon will restart with prose retrieval`,
+  );
+}
+
+interface RagEmbedderItem extends vscode.QuickPickItem {
+  readonly value: RagEmbedder;
+}
+
+async function commandRagSwitchEmbedder(): Promise<void> {
+  const current = readRagSettings();
+  const items: RagEmbedderItem[] = [
+    {
+      label: 'Mock',
+      description: 'Deterministic, zero network — for development',
+      value: 'mock',
+      picked: current.embedder === 'mock',
+    },
+    {
+      label: 'Candle (BGE-small)',
+      description: 'Local 384-dim BERT — first run downloads ~130 MB',
+      detail: 'Cached at ~/.cache/standardoc/models/ (override via STANDARDOC_MODELS_DIR)',
+      value: 'candle',
+      picked: current.embedder === 'candle',
+    },
+  ];
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: `Embedder backend — currently: ${current.embedder}`,
+  });
+  if (!picked || picked.value === current.embedder) return;
+  await writeRagEmbedder(picked.value);
+  if (!current.enabled) {
+    void vscode.window.showInformationMessage(
+      `Embedder set to ${picked.value}. Enable RAG via "Standardoc: Toggle RAG" to activate.`,
+    );
+  }
+}
+
+async function commandRagRebuild(ctx: CommandContext): Promise<void> {
+  const confirm = await vscode.window.showWarningMessage(
+    'Rebuild RAG index?\n\n' +
+      'This will stop the Standardoc daemon, delete `.standardoc/rag.db`, then restart.\n' +
+      'All chunks are re-embedded on the next cold start.',
+    { modal: true },
+    'Rebuild',
+  );
+  if (confirm !== 'Rebuild') return;
+
+  ctx.output.show(true);
+  ctx.output.appendLine('[rag-rebuild] stopping daemon to release rag.db handle…');
+  await ctx.supervisor.stop();
+
+  const ragDb = path.join(ctx.workspaceRoot, '.standardoc', 'rag.db');
+  const ragWal = `${ragDb}-wal`;
+  const ragShm = `${ragDb}-shm`;
+  let deleted = 0;
+  for (const target of [ragDb, ragWal, ragShm]) {
+    try {
+      await fs.promises.unlink(target);
+      deleted += 1;
+      ctx.output.appendLine(`[rag-rebuild] deleted ${target}`);
+    } catch (e: unknown) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        ctx.output.appendLine(`[rag-rebuild] could not delete ${target}: ${describeError(e)}`);
+      }
+    }
+  }
+  ctx.output.appendLine(`[rag-rebuild] removed ${deleted} file(s), restarting daemon…`);
+  // Note: the daemon's `IndexHandle::open` now retries with exponential
+  // backoff (~1.5 s) on `locking protocol` / `LockHeld`, so no extra
+  // wait is required here even on Windows.
+  void vscode.window.showInformationMessage(
+    `Standardoc: RAG index cleared (${deleted} file(s) removed). Daemon restarting — cold start will rebuild.`,
+  );
+  ctx.spawnSupervisor();
 }
 
 async function commandDaemonStop(ctx: CommandContext): Promise<void> {
@@ -176,11 +269,21 @@ interface StatusBarMenuItem extends vscode.QuickPickItem {
 }
 
 async function commandStatusBarMenu(_ctx: CommandContext): Promise<void> {
+  const rag = readRagSettings();
+  const toggleLabel = rag.enabled
+    ? '$(circle-slash) Disable RAG'
+    : '$(symbol-event) Enable RAG';
   const items: StatusBarMenuItem[] = [
     { label: '$(play) Start daemon', commandId: 'Standardoc.daemon.start' },
     { label: '$(debug-stop) Stop daemon', commandId: 'Standardoc.daemon.stop' },
     { label: '$(refresh) Restart daemon', commandId: 'Standardoc.daemon.restart' },
     { label: '$(trash) Purge excluded paths', commandId: 'Standardoc.purgeExcluded' },
+    { label: toggleLabel, commandId: 'Standardoc.rag.toggle' },
+    {
+      label: '$(symbol-misc) Switch RAG embedder…',
+      commandId: 'Standardoc.rag.switchEmbedder',
+    },
+    { label: '$(history) Rebuild RAG index', commandId: 'Standardoc.rag.rebuild' },
   ];
   const picked = await vscode.window.showQuickPick(items, {
     placeHolder: 'Standardoc — choose an action',

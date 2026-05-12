@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { matcher } from 'matchigo';
 import { describeFatalConfig } from './daemon/fatal-marker';
+import type { RagSettings } from './daemon/rag-flags';
 import type { DaemonState } from './daemon/supervisor';
 
 interface StatusRender {
@@ -44,10 +45,13 @@ export class StatusBarController implements vscode.Disposable {
     this.item.show();
   }
 
-  update(state: DaemonState): void {
+  update(state: DaemonState, rag?: RagSettings): void {
     const r = renderStatus(state);
-    this.item.text = r.text;
-    this.item.tooltip = r.tooltip;
+    const ragSuffix = rag?.enabled ? ` · RAG (${rag.embedder})` : '';
+    this.item.text = `${r.text}${ragSuffix}`;
+    this.item.tooltip = rag?.enabled
+      ? `${r.tooltip}\nRAG enabled (embedder: ${rag.embedder})`
+      : r.tooltip;
   }
 
   dispose(): void {

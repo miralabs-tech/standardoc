@@ -95,6 +95,21 @@
         "command": "Standardoc.purgeExcluded",
         "title": "Purge excluded paths",
         "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.rag.toggle",
+        "title": "Toggle RAG (prose retrieval)",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.rag.switchEmbedder",
+        "title": "Switch RAG embedder…",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.rag.rebuild",
+        "title": "Rebuild RAG index",
+        "category": "Standardoc"
       }
     ],
     "configuration": {
@@ -113,6 +128,23 @@
           "maximum": 65535,
           "scope": "resource",
           "description": "TCP port on `127.0.0.1` where the Standardoc MCP daemon listens for streamable HTTP / SSE connections. Set to `0` to let the kernel pick a random ephemeral port (the resolved port is then written to `.standardoc/mcp.endpoint` for client discovery). When multiple Standardoc workspaces run in parallel, give each a distinct port here."
+        },
+        "standardoc.ragEnabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Enable the RAG (prose retrieval) layer. Adds `chunk_refs` to `get_context` responses and exposes the `fetch_chunks` MCP tool. The daemon restarts automatically when this changes."
+        },
+        "standardoc.ragEmbedder": {
+          "type": "string",
+          "enum": ["mock", "candle"],
+          "default": "mock",
+          "scope": "resource",
+          "enumDescriptions": [
+            "Deterministic zero-network BLAKE3-derived stub. Use for development and to exercise the tool surface without a model download.",
+            "Local BGE-small-en-v1.5 (~130 MB). Downloaded on first use and cached at `~/.cache/standardoc/models/` (or platform equivalent). Override via STANDARDOC_MODELS_DIR."
+          ],
+          "description": "Embedder backend used when `standardoc.ragEnabled` is true. The daemon restarts automatically when this changes."
         }
       }
     },
