@@ -1,5 +1,7 @@
 #![allow(clippy::result_large_err)]
 
+mod warn;
+
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -59,17 +61,39 @@ enum Command {
         stdio: bool,
     },
 
-    /// Run the MCP daemon over stdio (workspace `<path>` is the index root).
+    /// Run the MCP daemon. Default transport: stdio. Use `--http` to serve
+    /// over HTTP/SSE (singleton shared by multiple chat clients).
     Mcp {
         path: PathBuf,
 
-        /// Open the index in read-only mode: do not acquire the workspace
-        /// lock, do not run cold start, do not spawn the watcher. Polls for
-        /// `.standardoc/index.db` for up to 60 s while a primary writer
-        /// (LSP daemon, `standardoc watch`, ...) initializes the workspace.
+        /// Open the index in secondary mode: do not acquire the workspace
+        /// fs4 lock, do not run cold start, do not spawn the watcher.
+        /// Polls for `.standardoc/index.db` for up to 60 s while a primary
+        /// writer (LSP daemon, `standardoc watch`, ...) initialises the
+        /// workspace. The handle is still R/W under SQLite WAL (v6+),
+        /// so `resolve_external` etc. can write external symbols.
         #[arg(long)]
         readonly: bool,
+
+        /// Serve MCP over HTTP/SSE at `127.0.0.1:<port>` instead of stdio.
+        /// Pass `0` to let the kernel pick a random ephemeral port. The
+        /// resolved endpoint URL is written to
+        /// `<path>/.standardoc/mcp.endpoint` for client discovery.
+        ///
+        /// HTTP mode is the recommended transport for the VSCode
+        /// extension and any other long-running client: one daemon per
+        /// workspace serves every chat session, eliminating the
+        /// per-chat stdio child-spawn cost of the default transport.
+        #[arg(long)]
+        http: Option<u16>,
     },
+
+    /// Print the on-disk schema version of the workspace index, the schema
+    /// version this binary supports, and a compatibility flag. Output is JSON
+    /// on stdout; exit code is always 0 when the command itself runs. The ext
+    /// VSCode uses this as a pre-flight check before spawning the LSP/MCP
+    /// daemons.
+    SchemaVersion { path: PathBuf },
 }
 
 #[derive(Args)]
@@ -165,13 +189,39 @@ fn main_inner() -> Result<(), ServerError> {
         Command::Rescan { path } => cmd_rescan(&path),
         Command::PurgeExcluded { path, yes } => cmd_purge_excluded(&path, yes),
         Command::Lsp { path, stdio: _ } => cmd_lsp(&path),
-        Command::Mcp { path, readonly } => cmd_mcp(&path, readonly),
+        Command::Mcp {
+            path,
+            readonly,
+            http,
+        } => cmd_mcp(&path, readonly, http),
+        Command::SchemaVersion { path } => cmd_schema_version(&path),
     }
+}
+
+fn cmd_schema_version(path: &Path) -> Result<(), ServerError> {
+    let supported = standardoc_core::SUPPORTED_SCHEMA_VERSION;
+    let db_path = path.join(".standardoc").join("index.db");
+    let db_version: Option<u32> = if db_path.exists() {
+        let handle = IndexHandle::open_readonly(path)?;
+        Some(query::schema_version(&handle)?)
+    } else {
+        None
+    };
+    let compatible = db_version.is_none_or(|db| db <= supported);
+    let payload = serde_json::json!({
+        "db": db_version,
+        "supported": supported,
+        "compatible": compatible,
+    });
+    println!("{payload}");
+    Ok(())
 }
 
 fn cmd_lsp(path: &Path) -> Result<(), ServerError> {
     let provider: Arc<dyn standardoc_core::LanguageProvider> = Arc::new(WorkspaceProvider::new());
     let handle = IndexHandle::open(path)?;
+    let _ = warn::boot_binary_sweep(handle.workspace_root());
+    let _ = warn::boot_lockfile_invalidation_sweep(&handle, handle.workspace_root());
     let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -181,23 +231,36 @@ fn cmd_lsp(path: &Path) -> Result<(), ServerError> {
     runtime.block_on(standardoc_server::serve_lsp(handle, provider, filters))
 }
 
-fn cmd_mcp(path: &Path, readonly: bool) -> Result<(), ServerError> {
+fn cmd_mcp(path: &Path, readonly: bool, http: Option<u16>) -> Result<(), ServerError> {
     let provider: Arc<dyn standardoc_core::LanguageProvider> = Arc::new(WorkspaceProvider::new());
     let handle = if readonly {
         wait_for_db_then_open_readonly(path, READONLY_DB_WAIT)?
     } else {
         IndexHandle::open(path)?
     };
+    if !readonly {
+        let _ = warn::boot_binary_sweep(handle.workspace_root());
+        let _ = warn::boot_lockfile_invalidation_sweep(&handle, handle.workspace_root());
+    }
     let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(ServerError::Io)?;
-    runtime.block_on(standardoc_server::serve_mcp(handle, provider, filters))
+
+    match http {
+        Some(port) => {
+            let bind_addr = format!("127.0.0.1:{port}");
+            runtime.block_on(standardoc_server::serve_mcp_http(
+                handle, provider, filters, &bind_addr,
+            ))
+        }
+        None => runtime.block_on(standardoc_server::serve_mcp(handle, provider, filters)),
+    }
 }
 
-const READONLY_DB_WAIT: Duration = Duration::from_secs(60);
+const READONLY_DB_WAIT: Duration = Duration::from_mins(1);
 const READONLY_DB_POLL: Duration = Duration::from_millis(250);
 
 /// Poll for `.standardoc/index.db` until it exists, then open the index in
@@ -230,6 +293,8 @@ fn wait_for_db_then_open_readonly(
 fn cmd_index(path: &Path) -> Result<(), ServerError> {
     let provider = WorkspaceProvider::new();
     let handle = IndexHandle::open(path)?;
+    let _ = warn::boot_binary_sweep(handle.workspace_root());
+    let _ = warn::boot_lockfile_invalidation_sweep(&handle, handle.workspace_root());
     let filters = ScanFilters::load(handle.workspace_root());
     let progress = ProgressReporter::start(handle.clone());
     let result = cold_start::run(&handle, &provider, &filters);
@@ -241,6 +306,8 @@ fn cmd_index(path: &Path) -> Result<(), ServerError> {
 fn cmd_watch(path: &Path) -> Result<(), ServerError> {
     let provider: Arc<dyn standardoc_core::LanguageProvider> = Arc::new(WorkspaceProvider::new());
     let handle = IndexHandle::open(path)?;
+    let _ = warn::boot_binary_sweep(handle.workspace_root());
+    let _ = warn::boot_lockfile_invalidation_sweep(&handle, handle.workspace_root());
     let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
 
     let progress = ProgressReporter::start(handle.clone());

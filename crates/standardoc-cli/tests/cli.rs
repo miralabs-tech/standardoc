@@ -19,7 +19,7 @@ fn write_sample_workspace(root: &Path) {
 }
 
 fn standardoc() -> Command {
-    Command::cargo_bin("stdoc").expect("stdoc binary must build")
+    Command::cargo_bin("standardoc").expect("standardoc binary must build")
 }
 
 #[test]
