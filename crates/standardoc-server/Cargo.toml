@@ -12,6 +12,7 @@ description = "Standardoc daemon orchestration — open_workspace, watcher lifec
 [dependencies]
 standardoc-core  = { workspace = true }
 standardoc-ir    = { workspace = true }
+standardoc-rag   = { workspace = true }
 thiserror        = { workspace = true }
 tokio            = { workspace = true }
 tokio-util       = { workspace = true }

@@ -15,4 +15,6 @@ mod progress;
 mod serve;
 
 pub use handler::{ResolveExternalJson, ResolveExternalParams, StandardocMcp};
-pub use serve::{build_mcp_handler, kick_off_indexing, serve_mcp, serve_mcp_http};
+pub use serve::{
+    build_mcp_handler, build_mcp_handler_with_rag, kick_off_indexing, serve_mcp, serve_mcp_http,
+};

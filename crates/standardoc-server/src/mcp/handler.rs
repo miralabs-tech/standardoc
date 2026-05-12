@@ -12,12 +12,15 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use standardoc_core::{
-    IndexHandle, LanguageProvider, ResolveOutcome, ResolverRegistry, ScanFilters, SessionsHandle,
-    WatcherHandle, dump_sessions_to_markdown,
+    IndexHandle, LanguageProvider, RagWatcherHandle, ResolveOutcome, ResolverRegistry,
+    ScanFilters, SessionsHandle, WatcherHandle, dump_sessions_to_markdown,
     query::{self, SymbolFilter},
 };
 use standardoc_ir::SourceOrigin;
 use standardoc_ir::{Kind, RawSymbol, Visibility};
+use standardoc_rag::embedder::Embedder;
+use standardoc_rag::store::RagStore;
+use standardoc_rag::types::{Chunk, ChunkRef};
 
 use crate::mcp::error::{SessionsErr, server_error_to_rmcp, sessions_err_to_rmcp};
 
@@ -25,6 +28,8 @@ const FIND_SYMBOL_DEFAULT_LIMIT: u8 = 20;
 const FIND_SYMBOL_MAX_LIMIT: u8 = 100;
 const GET_CONTEXT_DEFAULT_DEPTH: u8 = 1;
 const FIND_SIMILAR_DEFAULT_THRESHOLD: f32 = 0.8;
+const CHUNK_REFS_DEFAULT_LIMIT: u32 = 10;
+const FETCH_CHUNKS_MAX_INPUT: usize = 64;
 
 /// Dispatch target for the rmcp `ServiceExt::serve` boot. Holds:
 /// - `handle`: query / submit gateway into the index
@@ -48,8 +53,19 @@ pub struct StandardocMcp {
     /// Constructed at `new()` time from the handle's workspace root —
     /// each resolver probes its binary then memorizes the result.
     registry: Arc<ResolverRegistry>,
+    /// Optional handle to the RAG sidecar store. When `Some`,
+    /// `get_context` includes `chunk_refs` for the queried symbol and
+    /// the `fetch_chunks` tool is functional. When `None`, both
+    /// gracefully degrade (empty refs / RAG-disabled error).
+    rag_store: Option<Arc<RagStore>>,
+    /// Optional embedder used by `get_context(fqdn, query?)` for
+    /// query-time re-rank of `chunk_refs`. When `None`, the query
+    /// argument is silently ignored (pre-computed `link × def_site_boost`
+    /// confidence drives the order). Wire via `with_embedder()`.
+    rag_embedder: Option<Arc<dyn Embedder>>,
     index_ready: Arc<AtomicBool>,
     watcher: Arc<Mutex<Option<WatcherHandle>>>,
+    rag_watcher: Arc<Mutex<Option<RagWatcherHandle>>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -68,8 +84,11 @@ impl StandardocMcp {
             provider,
             filters,
             registry,
+            rag_store: None,
+            rag_embedder: None,
             index_ready: Arc::new(AtomicBool::new(false)),
             watcher: Arc::new(Mutex::new(None)),
+            rag_watcher: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
         }
     }
@@ -77,8 +96,11 @@ impl StandardocMcp {
     /// Aggregate context for a symbol: signature + descriptions + four
     /// pre-grouped neighbor lists (callers / callees / imports / imported_by).
     /// `depth` selects the shape's richness — see [`SymbolContextWithNeighbors`].
+    /// When the daemon was booted with a RAG store, the response also carries
+    /// `chunk_refs` (lightweight URI envelopes). Fetch chunk text via the
+    /// `fetch_chunks` tool.
     #[tool(
-        description = "Aggregate context for a symbol identified by its fully-qualified name (FQDN). Returns the symbol's signature, descriptions and four pre-grouped neighbor lists (callers, callees, imports, imported_by). `depth=1` returns neighbor FQDNs only — cheap, suited to graph exploration. `depth=2` enriches each resolved neighbor with its full RawSymbol — suited to reasoning. Day-1 hard-clamped to 1..=2."
+        description = "Aggregate context for a symbol identified by its fully-qualified name (FQDN). Returns the symbol's signature, descriptions, four pre-grouped neighbor lists (callers, callees, imports, imported_by) AND lightweight `chunk_refs` envelopes pointing at related prose chunks (markdown docs, ADRs, design notes). `depth=1` returns neighbor FQDNs only — cheap, suited to graph exploration. `depth=2` enriches each resolved neighbor with its full RawSymbol — suited to reasoning. Hard-clamped to 1..=2. The `chunk_refs` field is empty when no prose is linked or the RAG layer is not enabled — fetch their text via the `fetch_chunks` tool with the URIs (`rag://<id>`)."
     )]
     async fn get_context(
         &self,
@@ -92,7 +114,7 @@ impl StandardocMcp {
 
         let depth = params.depth.unwrap_or(GET_CONTEXT_DEFAULT_DEPTH);
         let handle = self.handle.clone();
-        let fqdn = params.fqdn;
+        let fqdn = params.fqdn.clone();
         let result = tokio::task::spawn_blocking(move || {
             query::context_for_symbol_with_neighbors(&handle, &fqdn, depth)
         })
@@ -101,11 +123,43 @@ impl StandardocMcp {
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
         match result {
-            Some(ctx) => Ok(success_json(&ctx)),
+            Some(ctx) => {
+                let chunk_refs = self
+                    .chunk_refs_for(&params.fqdn, params.query.as_deref())
+                    .await?;
+                Ok(success_json(&GetContextResponse { ctx, chunk_refs }))
+            }
             None => Ok(CallToolResult::success(vec![Content::text(
                 "no symbol found for the given FQDN",
             )])),
         }
+    }
+
+    /// Resolves a list of `rag://<id>` URIs to the underlying prose
+    /// chunks. The companion to `get_context` — call it with the URIs
+    /// surfaced in `chunk_refs` to materialise the actual chunk text.
+    /// Unknown / malformed URIs are silently skipped.
+    #[tool(
+        description = "Resolves a list of `rag://<id>` URIs to the underlying prose chunks (markdown documentation, ADRs, design notes). Pair with `get_context` — call this with URIs from the response's `chunk_refs`. Each returned chunk carries `text`, `source_path`, `section_header` (nearest H2/H3) and byte offsets. Unknown or malformed URIs are silently dropped (diff inputs vs outputs to detect them)."
+    )]
+    async fn fetch_chunks(
+        &self,
+        Parameters(params): Parameters<FetchChunksParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(store) = self.rag_store.clone() else {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "RAG layer not enabled on this daemon — fetch_chunks returns nothing. Boot the daemon with a RAG store to enable prose retrieval.",
+            )]));
+        };
+        let mut uris = params.uris;
+        uris.truncate(FETCH_CHUNKS_MAX_INPUT);
+        let chunks = tokio::task::spawn_blocking(move || store.fetch_by_uris(&uris))
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+            .map_err(|e| {
+                ErrorData::internal_error(format!("rag fetch_by_uris: {e}"), None)
+            })?;
+        Ok(success_json::<Vec<Chunk>>(&chunks))
     }
 
     /// FTS5 search across symbol `name` and `fqdn` columns. Returns ranked
@@ -598,11 +652,107 @@ impl StandardocMcp {
     pub fn watcher_slot(&self) -> Arc<Mutex<Option<WatcherHandle>>> {
         Arc::clone(&self.watcher)
     }
+
+    pub fn rag_watcher_slot(&self) -> Arc<Mutex<Option<RagWatcherHandle>>> {
+        Arc::clone(&self.rag_watcher)
+    }
+
+    /// Enables the RAG layer for this handler. Builder-style so existing
+    /// constructors stay backward-compatible — daemons that wire a RAG
+    /// store call this immediately after `new()` ; daemons that don't
+    /// keep `rag_store = None` and `fetch_chunks` returns the "not
+    /// enabled" message while `get_context` emits an empty `chunk_refs`.
+    #[must_use]
+    pub fn with_rag(mut self, rag_store: Arc<RagStore>) -> Self {
+        self.rag_store = Some(rag_store);
+        self
+    }
+
+    /// Wires an embedder for query-time `chunk_refs` re-ranking. Only
+    /// useful in combination with `with_rag` — the embedder is invoked
+    /// from `get_context(fqdn, query?)` when the caller passes a query
+    /// string, to recompute cosine similarity between the query and
+    /// each linked chunk's stored vector.
+    #[must_use]
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.rag_embedder = Some(embedder);
+        self
+    }
+
+    pub const fn rag_store(&self) -> Option<&Arc<RagStore>> {
+        self.rag_store.as_ref()
+    }
+
+    /// Looks up chunk references for `fqdn` if the RAG layer is enabled.
+    /// When `query` is provided AND an embedder is wired, the refs are
+    /// re-ranked by cosine similarity between the query embedding and
+    /// each chunk's stored vector. Returns an empty vec when RAG is
+    /// disabled or any step fails — degradation is silent so
+    /// `get_context` always succeeds for the graph data.
+    async fn chunk_refs_for(
+        &self,
+        fqdn: &str,
+        query: Option<&str>,
+    ) -> Result<Vec<ChunkRef>, ErrorData> {
+        let Some(store) = self.rag_store.clone() else {
+            return Ok(Vec::new());
+        };
+        let fqdn_owned = fqdn.to_string();
+
+        if let (Some(q), Some(embedder)) = (query, self.rag_embedder.clone()) {
+            let q_owned = q.to_string();
+            let refs = tokio::task::spawn_blocking(move || -> Result<Vec<ChunkRef>, ErrorData> {
+                let vector = embedder.embed(&q_owned).map_err(|e| {
+                    ErrorData::internal_error(format!("rag embed query: {e}"), None)
+                })?;
+                store
+                    .refs_for_symbol_with_query(&fqdn_owned, &vector, CHUNK_REFS_DEFAULT_LIMIT)
+                    .map_err(|e| ErrorData::internal_error(format!("rag re-rank: {e}"), None))
+            })
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?;
+            return refs;
+        }
+
+        let refs = tokio::task::spawn_blocking(move || {
+            store.refs_for_symbol(&fqdn_owned, CHUNK_REFS_DEFAULT_LIMIT)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .unwrap_or_default();
+        Ok(refs)
+    }
 }
 
-/// Tool input — `get_context(fqdn, depth?)`. Forwarded to
-/// `query::context_for_symbol_with_neighbors`. `depth` defaults to `1` and
-/// is hard-clamped to `1..=2` server-side.
+/// Tool output for `get_context` : the canonical neighbor-flat shape
+/// from `query::context_for_symbol_with_neighbors`, plus `chunk_refs`
+/// added via `#[serde(flatten)]` so the JSON layout stays a single flat
+/// object (consumers that don't know about RAG see an extra optional
+/// `chunk_refs` field and can ignore it).
+#[derive(Debug, Serialize)]
+pub(crate) struct GetContextResponse {
+    #[serde(flatten)]
+    pub ctx: query::SymbolContextWithNeighbors,
+    pub chunk_refs: Vec<ChunkRef>,
+}
+
+/// Tool input — `fetch_chunks(uris)`. Resolves `rag://<id>` URIs to the
+/// underlying `Chunk` rows. Unknown / malformed entries are silently
+/// dropped. The list is hard-capped at `FETCH_CHUNKS_MAX_INPUT` to keep
+/// the response small.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct FetchChunksParams {
+    /// URIs of the form `rag://<id>`, typically copied from the
+    /// `chunk_refs` field of a previous `get_context` call.
+    pub uris: Vec<String>,
+}
+
+/// Tool input — `get_context(fqdn, depth?, query?)`. Forwarded to
+/// `query::context_for_symbol_with_neighbors`. `depth` defaults to `1`
+/// and is hard-clamped to `1..=2` server-side. When `query` is
+/// supplied AND the daemon is booted with both a RAG store and an
+/// embedder, `chunk_refs` are re-ranked by cosine similarity between
+/// the query embedding and each chunk's stored vector.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct GetContextParams {
     /// The fully-qualified domain name of the symbol to look up
@@ -612,6 +762,11 @@ pub(crate) struct GetContextParams {
     /// `2` = full RawSymbol per resolved neighbor (rich, reasoning).
     /// Defaults to `1`. Hard-clamped to `1..=2`.
     pub depth: Option<u8>,
+    /// Optional natural-language query used to re-rank `chunk_refs` by
+    /// semantic relevance. Ignored when the daemon has no RAG store or
+    /// no embedder wired.
+    #[serde(default)]
+    pub query: Option<String>,
 }
 
 /// Tool input — `find_symbol(query, limit?, kind?, visibility?, module?)`.
@@ -991,6 +1146,7 @@ mod tests {
             .get_context(Parameters(GetContextParams {
                 fqdn: "crate::anything".into(),
                 depth: None,
+                query: None,
             }))
             .await
             .expect("tool returns Ok with friendly degradation");
@@ -1125,6 +1281,7 @@ mod tests {
             .get_context(Parameters(GetContextParams {
                 fqdn: "crate::ghost".into(),
                 depth: Some(1),
+                query: None,
             }))
             .await
             .unwrap();
