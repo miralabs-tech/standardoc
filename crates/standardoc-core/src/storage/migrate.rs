@@ -3,9 +3,13 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::storage::error::StorageError;
 use crate::storage::init::run_init_schema;
 
-pub(crate) const SUPPORTED_SCHEMA_VERSION: u32 = 2;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 6;
 
 const V1_TO_V2_SQL: &str = include_str!("../../migrations/v1_to_v2.sql");
+const V2_TO_V3_SQL: &str = include_str!("../../migrations/v2_to_v3.sql");
+const V3_TO_V4_SQL: &str = include_str!("../../migrations/v3_to_v4.sql");
+const V4_TO_V5_SQL: &str = include_str!("../../migrations/v4_to_v5.sql");
+const V5_TO_V6_SQL: &str = include_str!("../../migrations/v5_to_v6.sql");
 
 pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), StorageError> {
     if !table_exists(conn, "schema_meta")? {
@@ -30,6 +34,10 @@ pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), StorageError> {
 fn apply_upgrade(conn: &Connection, from: u32) -> Result<(), StorageError> {
     match from {
         1 => conn.execute_batch(V1_TO_V2_SQL).map_err(StorageError::from),
+        2 => conn.execute_batch(V2_TO_V3_SQL).map_err(StorageError::from),
+        3 => conn.execute_batch(V3_TO_V4_SQL).map_err(StorageError::from),
+        4 => conn.execute_batch(V4_TO_V5_SQL).map_err(StorageError::from),
+        5 => conn.execute_batch(V5_TO_V6_SQL).map_err(StorageError::from),
         other => Err(StorageError::InvalidSchemaMetadata {
             key: "schema_version".into(),
             value: format!("no upgrade path from version {other}"),
@@ -101,9 +109,130 @@ mod tests {
             err,
             StorageError::SchemaVersionTooNew {
                 db: 99,
-                supported: 2,
+                supported: SUPPORTED_SCHEMA_VERSION,
             }
         ));
+    }
+
+    #[test]
+    fn upgrade_adds_last_modified_revision_column_to_legacy_v3_db() {
+        let conn = fresh_conn();
+        run_init_schema(&conn).unwrap();
+        conn.execute_batch(V1_TO_V2_SQL).unwrap();
+        conn.execute_batch(V2_TO_V3_SQL).unwrap();
+        let pre: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('symbols')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            !pre.iter().any(|c| c == "last_modified_revision"),
+            "v3 must NOT have the last_modified_revision column"
+        );
+
+        ensure_schema(&conn).unwrap();
+
+        let post: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('symbols')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            post.iter().any(|c| c == "last_modified_revision"),
+            "v3→v4 upgrade must add the last_modified_revision column"
+        );
+        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn upgrade_seeds_external_lockfile_hash_keys_on_legacy_v4_db() {
+        let conn = fresh_conn();
+        run_init_schema(&conn).unwrap();
+        conn.execute_batch(V1_TO_V2_SQL).unwrap();
+        conn.execute_batch(V2_TO_V3_SQL).unwrap();
+        conn.execute_batch(V3_TO_V4_SQL).unwrap();
+        let pre: Vec<String> = conn
+            .prepare("SELECT key FROM schema_meta")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for key in [
+            "external_cargo_lockfile_hash",
+            "external_npm_lockfile_hash",
+            "external_npm_lockfile_kind",
+            "external_luarocks_hash",
+        ] {
+            assert!(
+                !pre.iter().any(|k| k == key),
+                "v4 must NOT have the {key} schema_meta row"
+            );
+        }
+
+        ensure_schema(&conn).unwrap();
+
+        let post: Vec<(String, String)> = conn
+            .prepare("SELECT key, value FROM schema_meta")
+            .unwrap()
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for key in [
+            "external_cargo_lockfile_hash",
+            "external_npm_lockfile_hash",
+            "external_npm_lockfile_kind",
+            "external_luarocks_hash",
+        ] {
+            let row = post
+                .iter()
+                .find(|(k, _)| k == key)
+                .unwrap_or_else(|| panic!("v4→v5 must seed {key}"));
+            assert_eq!(
+                row.1, "",
+                "{key} must default to blank (unset sentinel), got `{}`",
+                row.1
+            );
+        }
+        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn upgrade_adds_confidence_column_to_legacy_v2_db() {
+        let conn = fresh_conn();
+        run_init_schema(&conn).unwrap();
+        conn.execute_batch(V1_TO_V2_SQL).unwrap();
+        let pre: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('edges')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            !pre.iter().any(|c| c == "confidence"),
+            "v2 must NOT have the confidence column"
+        );
+
+        ensure_schema(&conn).unwrap();
+
+        let post: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('edges')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            post.iter().any(|c| c == "confidence"),
+            "v2→v3 upgrade must add the confidence column"
+        );
+        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
     }
 
     #[test]
@@ -136,7 +265,7 @@ mod tests {
             post.iter().any(|c| c == "attributes"),
             "v1→v2 upgrade must add the attributes column"
         );
-        assert_eq!(read_schema_version(&conn).unwrap(), 2);
+        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
     }
 
     #[test]

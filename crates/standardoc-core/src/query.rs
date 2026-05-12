@@ -18,8 +18,8 @@ use standardoc_ir::{
 };
 
 use crate::storage::conv::{
-    edge_kind_from_sql_text, json_to_signature, kind_from_sql_text, kind_to_sql_text,
-    language_from_sql_text, visibility_from_sql_text, visibility_to_sql_text,
+    edge_confidence_from_sql_text, edge_kind_from_sql_text, json_to_signature, kind_from_sql_text,
+    kind_to_sql_text, language_from_sql_text, visibility_from_sql_text, visibility_to_sql_text,
 };
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
@@ -61,7 +61,7 @@ pub struct NeighborSymbol {
 }
 
 /// Composite shape consumed by the MCP `get_context` tool. Wraps the LSP-side
-/// [`SymbolContext`] (signature + descriptions) with four pre-grouped neighbor
+/// [`SymbolContext`] (signature + descriptions) with six pre-grouped neighbor
 /// vectors selected for LLM consumption (cf. VISION.md L251-262 "chunk parfait
 /// pour LLM"):
 ///
@@ -69,11 +69,13 @@ pub struct NeighborSymbol {
 /// - `callees`     — `edges_from(fqdn)` filtered to [`EdgeKind::Calls`]
 /// - `imports`     — `edges_from(fqdn)` filtered to [`EdgeKind::Imports`]
 /// - `imported_by` — `edges_to(fqdn)`   filtered to [`EdgeKind::Imports`]
-///
-/// Other [`EdgeKind`] variants (Implements / Extends / References / UsesType
-/// / Defines / ExposesApi) are intentionally skipped day-1 (VISION L97 — fewer
-/// fields = clearer LLM contract). They can be added additively post-beta.1
-/// without breaking callers.
+/// - `dependents`  — `edges_to(fqdn)`   for all OTHER kinds (Extends,
+///   Implements, References, UsesType, Defines, ExposesApi).
+///   "Anything that breaks if this symbol changes shape".
+/// - `tests`       — subset of `callers ∪ dependents` whose source FQDN
+///   matches a test naming convention (contains `::tests::`, `::test::`,
+///   or ends in `_test` / `_tests`). Coarse heuristic; treats false
+///   positives as acceptable noise.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolContextWithNeighbors {
     pub context: SymbolContext,
@@ -81,6 +83,10 @@ pub struct SymbolContextWithNeighbors {
     pub callees: Vec<NeighborSymbol>,
     pub imports: Vec<NeighborSymbol>,
     pub imported_by: Vec<NeighborSymbol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependents: Vec<NeighborSymbol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tests: Vec<NeighborSymbol>,
 }
 
 const SYMBOL_COLUMNS: &str = "fqdn, name, kind, language_kind, module, visibility, \
@@ -149,7 +155,7 @@ pub fn edges_from(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Stor
         };
         let rows = collect_edge_rows(
             conn,
-            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved, attributes \
+            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved, attributes, confidence \
              FROM edges WHERE from_symbol_id = ?1 ORDER BY id ASC",
             rusqlite::params![id],
         )?;
@@ -164,7 +170,7 @@ pub fn edges_to(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Storag
         let target_id = lookup_id_by_fqdn(conn, fqdn)?;
         let rows = collect_edge_rows(
             conn,
-            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved, attributes \
+            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved, attributes, confidence \
              FROM edges \
              WHERE (?1 IS NOT NULL AND to_symbol_id = ?1) \
                 OR to_unresolved = ?2 \
@@ -187,16 +193,35 @@ pub fn edges_to(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Storag
     })
 }
 
-/// Symbol-shape filters reused by `search_text`, `list_symbols` and
-/// `find_by_pattern`. Every field is optional; `None` means "no
-/// constraint on that column". `module` is matched exactly against
-/// `symbols.module` — pattern-style module matching belongs to
-/// `find_by_pattern` via wildcards in the pattern argument itself.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Symbol-shape filters reused by `search_text`, `list_symbols`,
+/// `find_by_pattern` and `find_similar`. Every field is optional;
+/// `None` means "no constraint on that column". `module` is matched
+/// exactly against `symbols.module` — pattern-style module matching
+/// belongs to `find_by_pattern` via wildcards in the pattern argument
+/// itself.
+///
+/// `include_external` toggles whether `symbols.is_external = 1` rows
+/// participate in the result. Defaults to `true` so external symbols
+/// (Cargo crates, npm `.d.ts`, luarocks) show up alongside workspace
+/// symbols by default — set to `false` to scope a query to the
+/// workspace-only namespace ("find every public fn I authored").
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolFilter {
     pub kind: Option<Kind>,
     pub visibility: Option<Visibility>,
     pub module: Option<String>,
+    pub include_external: bool,
+}
+
+impl Default for SymbolFilter {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            visibility: None,
+            module: None,
+            include_external: true,
+        }
+    }
 }
 
 pub fn search_text(
@@ -209,6 +234,7 @@ pub fn search_text(
     let kind_text = filter.kind.map(kind_to_sql_text);
     let vis_text = filter.visibility.map(visibility_to_sql_text);
     let module = filter.module.as_deref();
+    let include_external = filter.include_external;
     with_conn(handle, |conn| {
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
@@ -220,12 +246,20 @@ pub fn search_text(
                AND (?2 IS NULL OR s.kind       = ?2) \
                AND (?3 IS NULL OR s.visibility = ?3) \
                AND (?4 IS NULL OR s.module     = ?4) \
+               AND (?5 = 1 OR s.is_external = 0) \
              ORDER BY rank \
-             LIMIT ?5",
+             LIMIT ?6",
         )?;
         let rows = stmt
             .query_map(
-                rusqlite::params![query, kind_text, vis_text, module, limit_i64],
+                rusqlite::params![
+                    query,
+                    kind_text,
+                    vis_text,
+                    module,
+                    include_external,
+                    limit_i64
+                ],
                 read_symbol_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -245,6 +279,7 @@ pub fn list_symbols(
     let kind_text = filter.kind.map(kind_to_sql_text);
     let vis_text = filter.visibility.map(visibility_to_sql_text);
     let module = filter.module.as_deref();
+    let include_external = filter.include_external;
     with_conn(handle, |conn| {
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
@@ -254,12 +289,13 @@ pub fn list_symbols(
              WHERE (?1 IS NULL OR s.kind       = ?1) \
                AND (?2 IS NULL OR s.visibility = ?2) \
                AND (?3 IS NULL OR s.module     = ?3) \
+               AND (?4 = 1 OR s.is_external = 0) \
              ORDER BY s.fqdn \
-             LIMIT ?4",
+             LIMIT ?5",
         )?;
         let rows = stmt
             .query_map(
-                rusqlite::params![kind_text, vis_text, module, limit_i64],
+                rusqlite::params![kind_text, vis_text, module, include_external, limit_i64],
                 read_symbol_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -285,6 +321,7 @@ pub fn find_by_pattern(
     let kind_text = filter.kind.map(kind_to_sql_text);
     let vis_text = filter.visibility.map(visibility_to_sql_text);
     let module = filter.module.as_deref();
+    let include_external = filter.include_external;
     with_conn(handle, |conn| {
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
@@ -295,12 +332,20 @@ pub fn find_by_pattern(
                AND (?2 IS NULL OR s.kind       = ?2) \
                AND (?3 IS NULL OR s.visibility = ?3) \
                AND (?4 IS NULL OR s.module     = ?4) \
+               AND (?5 = 1 OR s.is_external = 0) \
              ORDER BY s.fqdn \
-             LIMIT ?5",
+             LIMIT ?6",
         )?;
         let rows = stmt
             .query_map(
-                rusqlite::params![pattern, kind_text, vis_text, module, limit_i64],
+                rusqlite::params![
+                    pattern,
+                    kind_text,
+                    vis_text,
+                    module,
+                    include_external,
+                    limit_i64
+                ],
                 read_symbol_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -338,6 +383,7 @@ pub fn find_similar(
     let kind_text = filter.kind.map(kind_to_sql_text);
     let vis_text = filter.visibility.map(visibility_to_sql_text);
     let module = filter.module.as_deref();
+    let include_external = filter.include_external;
     with_conn(handle, |conn| {
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
@@ -346,11 +392,12 @@ pub fn find_similar(
              FROM symbols s \
              WHERE (?1 IS NULL OR s.kind       = ?1) \
                AND (?2 IS NULL OR s.visibility = ?2) \
-               AND (?3 IS NULL OR s.module     = ?3)",
+               AND (?3 IS NULL OR s.module     = ?3) \
+               AND (?4 = 1 OR s.is_external = 0)",
         )?;
         let rows = stmt
             .query_map(
-                rusqlite::params![kind_text, vis_text, module],
+                rusqlite::params![kind_text, vis_text, module, include_external],
                 read_symbol_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -492,13 +539,26 @@ pub fn context_for_symbol_with_neighbors(
 
     let mut callers = Vec::new();
     let mut imported_by = Vec::new();
+    let mut dependents = Vec::new();
     for edge in edges_to(handle, fqdn)? {
         match edge.kind {
             EdgeKind::Calls => callers.push(neighbor_inbound(handle, edge, depth)?),
             EdgeKind::Imports => imported_by.push(neighbor_inbound(handle, edge, depth)?),
-            _ => {}
+            EdgeKind::Extends
+            | EdgeKind::Implements
+            | EdgeKind::References
+            | EdgeKind::UsesType
+            | EdgeKind::Defines
+            | EdgeKind::ExposesApi => dependents.push(neighbor_inbound(handle, edge, depth)?),
         }
     }
+
+    let tests: Vec<NeighborSymbol> = callers
+        .iter()
+        .chain(dependents.iter())
+        .filter(|n| neighbor_looks_like_test(n))
+        .cloned()
+        .collect();
 
     Ok(Some(SymbolContextWithNeighbors {
         context,
@@ -506,7 +566,34 @@ pub fn context_for_symbol_with_neighbors(
         callees,
         imports,
         imported_by,
+        dependents,
+        tests,
     }))
+}
+
+/// Coarse, fqdn-based detection of test sites for the blast-radius view.
+/// Captures Rust's `mod tests { ... }` / `#[cfg(test)]` convention, TS's
+/// `*.test.ts` / `*.spec.ts` patterns when surfaced as a `::test` /
+/// `::tests` module segment, and trailing `_test` / `_tests` names.
+/// False positives are accepted — the field is a hint, not a contract.
+fn neighbor_looks_like_test(n: &NeighborSymbol) -> bool {
+    let from = match &n.target {
+        ResolvedOrUnresolved::Resolved { fqdn } => fqdn.as_str(),
+        ResolvedOrUnresolved::Unresolved { name }
+        | ResolvedOrUnresolved::UnresolvedBridge { name, .. } => name.as_str(),
+    };
+    // `.test` and `.spec` are part of an FQDN convention (the symbol's
+    // module fqdn includes the trailing `.test`/`.spec` segment carried
+    // from the source filename), not a file extension. The
+    // `case_sensitive_file_extension_comparisons` lint targets path
+    // comparisons; here the input is workspace-canonical text.
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    let ext_match = from.ends_with(".test") || from.ends_with(".spec");
+    from.contains("::tests::")
+        || from.contains("::test::")
+        || from.ends_with("_test")
+        || from.ends_with("_tests")
+        || ext_match
 }
 
 fn neighbor_outbound(
@@ -581,6 +668,122 @@ pub fn file_info(handle: &IndexHandle, path: &str) -> Result<Option<FileInfo>, S
             byte_size,
             last_scan_error,
         }))
+    })
+}
+
+/// Aggregated result of [`body_for_fqdn`]: the raw source slice covering a
+/// symbol's declared `start_line..=end_line` plus enough metadata for the
+/// caller to know what was returned and whether a `max_lines` cap kicked in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BodySlice {
+    pub fqdn: String,
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub body: String,
+    pub truncated: bool,
+    pub total_body_lines: u32,
+}
+
+/// Returns the raw source text of the symbol at `fqdn`, sliced from the file
+/// on disk between its `start_line` and `end_line`. Returns `None` when no
+/// symbol matches the FQDN. `max_lines` caps the body length and sets
+/// `truncated: true` when applied — useful for huge generated functions.
+///
+/// File I/O is anchored at `IndexHandle::workspace_root()`; the indexed
+/// `location.file` is assumed workspace-relative (the IR contract).
+pub fn body_for_fqdn(
+    handle: &IndexHandle,
+    fqdn: &str,
+    max_lines: Option<u32>,
+) -> Result<Option<BodySlice>, StorageError> {
+    let Some(symbol) = symbol_by_fqdn(handle, fqdn)? else {
+        return Ok(None);
+    };
+    let workspace_root = handle.workspace_root();
+    let file_abs = workspace_root.join(&symbol.location.file);
+    let content = std::fs::read_to_string(&file_abs)?;
+    let all_lines: Vec<&str> = content.lines().collect();
+
+    let start_zero = symbol.location.start_line.saturating_sub(1) as usize;
+    let end_inclusive = (symbol.location.end_line as usize).min(all_lines.len());
+    if start_zero >= end_inclusive {
+        return Ok(Some(BodySlice {
+            fqdn: symbol.fqdn.clone(),
+            file: symbol.location.file.clone(),
+            start_line: symbol.location.start_line,
+            end_line: symbol.location.end_line,
+            body: String::new(),
+            truncated: false,
+            total_body_lines: 0,
+        }));
+    }
+    let slice = &all_lines[start_zero..end_inclusive];
+    let total = u32::try_from(slice.len()).unwrap_or(u32::MAX);
+    let (taken, truncated) = match max_lines {
+        Some(cap) if (cap as usize) < slice.len() => (&slice[..cap as usize], true),
+        _ => (slice, false),
+    };
+    Ok(Some(BodySlice {
+        fqdn: symbol.fqdn.clone(),
+        file: symbol.location.file.clone(),
+        start_line: symbol.location.start_line,
+        end_line: symbol.location.end_line,
+        body: taken.join("\n"),
+        truncated,
+        total_body_lines: total,
+    }))
+}
+
+/// Reads `schema_meta.schema_version` from the connected workspace index.
+/// Useful for the CLI pre-flight schema check: a client can compare the on-disk
+/// version against `SUPPORTED_SCHEMA_VERSION` before spawning daemons.
+pub fn schema_version(handle: &IndexHandle) -> Result<u32, StorageError> {
+    with_conn(handle, |conn| {
+        let raw: String = conn.query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )?;
+        raw.parse::<u32>()
+            .map_err(|_| StorageError::InvalidStoredData {
+                detail: format!("schema_meta.schema_version is not a u32: {raw}"),
+            })
+    })
+}
+
+/// Bulk-lookup the `last_modified_revision` for each FQDN. Missing FQDNs are
+/// simply absent from the returned map — the MCP staleness check treats that
+/// as "symbol no longer indexed", which the agent surfaces back to the user.
+/// Empty input returns an empty map without touching the database.
+pub fn last_modified_revisions_for_fqdns(
+    handle: &IndexHandle,
+    fqdns: &[&str],
+) -> Result<std::collections::HashMap<String, u64>, StorageError> {
+    if fqdns.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    with_conn(handle, |conn| {
+        let placeholders = (1..=fqdns.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT fqdn, last_modified_revision FROM symbols WHERE fqdn IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(fqdns.iter()), |row| {
+            let fqdn: String = row.get(0)?;
+            let rev: i64 = row.get(1)?;
+            #[allow(clippy::cast_sign_loss)]
+            Ok((fqdn, rev.max(0) as u64))
+        })?;
+        let mut map = std::collections::HashMap::with_capacity(fqdns.len());
+        for r in rows {
+            let (fqdn, rev) = r?;
+            map.insert(fqdn, rev);
+        }
+        Ok(map)
     })
 }
 
@@ -668,6 +871,7 @@ struct EdgeRowRaw {
     to_symbol_id: Option<i64>,
     to_unresolved: Option<String>,
     attributes_json: String,
+    confidence_text: String,
 }
 
 fn read_edge_row(row: &Row<'_>) -> rusqlite::Result<EdgeRowRaw> {
@@ -678,6 +882,7 @@ fn read_edge_row(row: &Row<'_>) -> rusqlite::Result<EdgeRowRaw> {
         to_symbol_id: row.get(3)?,
         to_unresolved: row.get(4)?,
         attributes_json: row.get(5)?,
+        confidence_text: row.get(6)?,
     })
 }
 
@@ -725,12 +930,14 @@ fn build_edge(
                 raw.id
             ),
         })?;
+    let confidence = edge_confidence_from_sql_text(&raw.confidence_text)?;
     Ok(RawEdge {
         from_fqdn,
         kind,
         to,
         sites,
         attributes,
+        confidence,
     })
 }
 
@@ -787,8 +994,8 @@ mod tests {
     use crate::storage::symbols::{SymbolInsertContext, insert_symbol};
     use rusqlite::Connection;
     use standardoc_ir::{
-        Blake3Hash, EdgeKind, ExtractedFile, Kind, LanguageKind, Modifiers, Param, RawEdge,
-        RawSymbol, Signature, Site, SourceOrigin, SymbolLocation, TypeRef, Visibility,
+        Blake3Hash, EdgeConfidence, EdgeKind, ExtractedFile, Kind, LanguageKind, Modifiers, Param,
+        RawEdge, RawSymbol, Signature, Site, SourceOrigin, SymbolLocation, TypeRef, Visibility,
     };
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
@@ -821,6 +1028,7 @@ mod tests {
                 byte_size: 100,
                 last_scanned: 1_700_000_000_000,
                 last_scan_error: None,
+                is_external: false,
             },
         )
         .unwrap();
@@ -859,6 +1067,7 @@ mod tests {
                 language: Language::Rust,
                 is_external: false,
                 source_origin: SourceOrigin::Workspace,
+                revision: 0,
             },
         )
         .unwrap();
@@ -931,6 +1140,7 @@ mod tests {
                     language: Language::Rust,
                     is_external: false,
                     source_origin: SourceOrigin::Workspace,
+                    revision: 0,
                 },
             )
             .unwrap();
@@ -1006,6 +1216,7 @@ mod tests {
                     },
                     sites: vec![],
                     attributes: vec![],
+                    confidence: EdgeConfidence::default(),
                 },
             )
             .unwrap();
@@ -1020,6 +1231,7 @@ mod tests {
                     },
                     sites: vec![],
                     attributes: vec![],
+                    confidence: EdgeConfidence::default(),
                 },
             )
             .unwrap();
@@ -1062,6 +1274,7 @@ mod tests {
                     },
                     sites: vec![],
                     attributes: vec![],
+                    confidence: EdgeConfidence::default(),
                 },
             )
             .unwrap();
@@ -1110,6 +1323,7 @@ mod tests {
                     },
                     sites: vec![],
                     attributes: vec![],
+                    confidence: EdgeConfidence::default(),
                 },
             )
             .unwrap();
@@ -1141,6 +1355,7 @@ mod tests {
                     },
                     sites: vec![],
                     attributes: vec![],
+                    confidence: EdgeConfidence::default(),
                 },
             )
             .unwrap();
@@ -1225,6 +1440,7 @@ mod tests {
                 language: Language::Rust,
                 is_external: false,
                 source_origin: SourceOrigin::Workspace,
+                revision: 0,
             },
         )
         .unwrap()
@@ -1654,6 +1870,7 @@ mod tests {
                     byte_size: 4096,
                     last_scanned: 1_700_000_000_000,
                     last_scan_error: Some("boom".into()),
+                    is_external: false,
                 },
             )
             .unwrap();
@@ -1755,6 +1972,7 @@ mod tests {
                 language: Language::Rust,
                 is_external: false,
                 source_origin: SourceOrigin::Workspace,
+                revision: 0,
             },
         )
         .unwrap();
@@ -1903,6 +2121,7 @@ mod tests {
                 to,
                 sites: vec![],
                 attributes: vec![],
+                confidence: EdgeConfidence::default(),
             },
         )
         .unwrap();
@@ -1923,6 +2142,7 @@ mod tests {
                 to,
                 sites: vec![],
                 attributes: vec![],
+                confidence: EdgeConfidence::default(),
             },
         )
         .unwrap();
@@ -2126,6 +2346,7 @@ mod tests {
                     },
                     sites: vec![],
                     attributes: vec![],
+                    confidence: EdgeConfidence::default(),
                 },
             )
             .unwrap();

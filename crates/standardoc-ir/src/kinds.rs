@@ -23,6 +23,15 @@ pub enum EdgeKind {
     ExposesApi,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeConfidence {
+    #[default]
+    Extracted,
+    Inferred,
+    Ambiguous,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Visibility {

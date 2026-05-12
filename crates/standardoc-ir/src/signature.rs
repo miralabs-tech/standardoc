@@ -4,12 +4,13 @@ use crate::bridge_kind::BridgeKind;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Signature {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub params: Vec<Param>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns: Option<TypeRef>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Modifiers::is_default")]
     pub modifiers: Modifiers,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "SignatureMeta::is_default")]
     pub meta: SignatureMeta,
 }
 
@@ -17,6 +18,7 @@ pub struct Signature {
 pub struct Param {
     pub name: String,
     pub ty: TypeRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
 }
 
@@ -35,16 +37,38 @@ impl TypeRef {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Modifiers {
-    #[serde(default, rename = "async")]
+    #[serde(default, rename = "async", skip_serializing_if = "std::ops::Not::not")]
     pub is_async: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deprecated: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub generic_params: Vec<String>,
+    /// Raw text of the `where T: Foo, U: Bar` clause when present. Inline
+    /// generic bounds (`<T: Display>`) are already part of `generic_params`,
+    /// so this only captures the trailing `where` extension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub where_clause: Option<String>,
+}
+
+impl Modifiers {
+    const fn is_default(&self) -> bool {
+        !self.is_async
+            && self.deprecated.is_none()
+            && self.generic_params.is_empty()
+            && self.where_clause.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SignatureMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exposed_via: Option<BridgeKind>,
+}
+
+impl SignatureMeta {
+    const fn is_default(&self) -> bool {
+        self.exposed_via.is_none()
+    }
 }
 
 #[cfg(test)]
@@ -71,6 +95,7 @@ mod tests {
                 is_async: true,
                 deprecated: Some("use create_user_v2".into()),
                 generic_params: vec!["T".into()],
+                where_clause: Some("T: Send".into()),
             },
             meta: SignatureMeta {
                 exposed_via: Some(BridgeKind::from("tauri")),

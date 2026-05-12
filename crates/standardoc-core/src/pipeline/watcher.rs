@@ -12,6 +12,7 @@ use notify_debouncer_full::{
 use walkdir::{DirEntry, WalkDir};
 
 use crate::commands::IngestCommand;
+use crate::pipeline::external_invalidation;
 use crate::pipeline::filters::{GitignoreStack, STDIGNORE_FILENAME, ScanFilters};
 use crate::pipeline::paths::{guess_language, has_supported_extension, to_workspace_relative};
 use crate::pipeline::provider::{ExtractContext, ExtractError, LanguageProvider};
@@ -149,6 +150,21 @@ fn process_path(
             eprintln!("standardoc watcher: .stdignore reload failed: {e}");
         }
         return;
+    }
+
+    // External resolver invalidation: when one of the tracked lockfiles
+    // (`Cargo.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
+    // `.pnp.cjs`) changes, drop the corresponding `is_external = 1` bucket
+    // so the next `resolve_external` call repopulates from the new
+    // dependency tree. Returns early because lockfiles are never indexed
+    // as workspace symbols (no supported extension anyway).
+    match external_invalidation::handle_lockfile_change(handle, workspace_root, abs_path) {
+        Ok(Some(_)) => return,
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("standardoc watcher: lockfile invalidation failed: {e}");
+            return;
+        }
     }
 
     if filters_skipped(filters, &rel) {

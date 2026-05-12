@@ -169,9 +169,12 @@ pub(crate) fn commit_outcomes(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(StorageError::from)?;
+    // All upserts in this batch share the post-commit revision (handle.revision
+    // is bumped once after the transaction succeeds).
+    let next_revision = handle.revision().saturating_add(1);
     for outcome in outcomes {
         match outcome {
-            Outcome::Upsert { extracted, .. } => apply_upsert_file(&tx, extracted)?,
+            Outcome::Upsert { extracted, .. } => apply_upsert_file(&tx, extracted, next_revision)?,
             Outcome::ParseError {
                 rel,
                 language,

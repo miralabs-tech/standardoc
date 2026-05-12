@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use standardoc_ir::{RawEdge, ResolvedOrUnresolved};
 
-use crate::storage::conv::edge_kind_to_sql_text;
+use crate::storage::conv::{edge_confidence_to_sql_text, edge_kind_to_sql_text};
 use crate::storage::error::{StorageError, map_constraint};
 
 pub(crate) fn insert_edge(
@@ -13,8 +13,8 @@ pub(crate) fn insert_edge(
     let attributes_json = serde_json::to_string(&edge.attributes)?;
     let id = conn
         .query_row(
-            "INSERT INTO edges (from_symbol_id, kind, to_symbol_id, to_unresolved, attributes) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
+            "INSERT INTO edges (from_symbol_id, kind, to_symbol_id, to_unresolved, attributes, confidence) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
              RETURNING id",
             rusqlite::params![
                 from_symbol_id,
@@ -22,6 +22,7 @@ pub(crate) fn insert_edge(
                 to_symbol_id,
                 to_unresolved,
                 attributes_json,
+                edge_confidence_to_sql_text(edge.confidence),
             ],
             |row| row.get::<_, i64>(0),
         )
@@ -112,12 +113,14 @@ mod tests {
     use standardoc_ir::{BridgeKind, EdgeKind, Site};
 
     fn make_edge(kind: EdgeKind, to: ResolvedOrUnresolved) -> RawEdge {
+        let confidence = to.default_confidence();
         RawEdge {
             from_fqdn: "crate::caller".into(),
             kind,
             to,
             sites: vec![],
             attributes: vec![],
+            confidence,
         }
     }
 

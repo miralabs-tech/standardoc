@@ -1,6 +1,7 @@
 mod batch;
 pub mod cold_start;
 mod diff;
+pub mod external_invalidation;
 mod filters;
 mod paths;
 mod provider;
@@ -9,6 +10,11 @@ mod watcher;
 mod writer;
 
 pub use cold_start::ColdStartError;
+pub use external_invalidation::{
+    LockfileHashes, NpmLockfileKind, compute_lockfile_hashes, handle_lockfile_change,
+    invalidate_changed_lockfiles, purge_externals_by_origin, read_stored_hashes,
+    tracked_lockfile_paths, write_stored_hashes,
+};
 pub use filters::{GitignoreStack, STDIGNORE_FILENAME, ScanFilters, ensure_stdignore_seed_at};
 pub use provider::{ExtractContext, ExtractError, LanguageProvider};
 pub use watcher::{WatcherError, WatcherHandle, spawn_watcher};

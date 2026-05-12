@@ -1,8 +1,8 @@
 use standardoc_ir::{
-    Blake3Hash, BridgeKind, EdgeKind, ExtractedFile, Kind, Language, LanguageKind, Modifiers,
-    Param, RawAttribute, RawAttributeArg, RawCallArg, RawCallSite, RawDocument, RawEdge, RawSymbol,
-    ResolvedOrUnresolved, Signature, SignatureMeta, Site, SourceOrigin, SymbolLocation, TypeRef,
-    Visibility,
+    Blake3Hash, BridgeKind, EdgeConfidence, EdgeKind, ExtractedFile, Kind, Language, LanguageKind,
+    Modifiers, Param, RawAttribute, RawAttributeArg, RawCallArg, RawCallSite, RawDocument, RawEdge,
+    RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SourceOrigin, SymbolLocation,
+    TypeRef, Visibility,
 };
 
 fn fixture() -> ExtractedFile {
@@ -31,6 +31,7 @@ fn fixture() -> ExtractedFile {
                 is_async: true,
                 deprecated: None,
                 generic_params: vec![],
+                where_clause: None,
             },
             meta: SignatureMeta {
                 exposed_via: Some(BridgeKind::from("tauri")),
@@ -83,6 +84,7 @@ fn fixture() -> ExtractedFile {
             col: 8,
         }],
         attributes: vec![],
+        confidence: EdgeConfidence::Extracted,
     };
 
     let unresolved_edge = RawEdge {
@@ -93,6 +95,7 @@ fn fixture() -> ExtractedFile {
         },
         sites: vec![],
         attributes: vec![],
+        confidence: EdgeConfidence::Ambiguous,
     };
 
     let bridge_edge = RawEdge {
@@ -104,6 +107,7 @@ fn fixture() -> ExtractedFile {
         },
         sites: vec![],
         attributes: vec![],
+        confidence: EdgeConfidence::Inferred,
     };
 
     let call_site = RawCallSite {
@@ -165,6 +169,9 @@ fn keys_match_storage_conventions() {
     assert!(json.contains("\"kind\":\"unresolved_bridge\""));
     assert!(json.contains("\"async\":true"));
     assert!(!json.contains("is_async"));
+    assert!(json.contains("\"confidence\":\"extracted\""));
+    assert!(json.contains("\"confidence\":\"ambiguous\""));
+    assert!(json.contains("\"confidence\":\"inferred\""));
 }
 
 #[test]

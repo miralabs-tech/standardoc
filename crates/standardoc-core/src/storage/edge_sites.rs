@@ -35,7 +35,7 @@ mod tests {
     use crate::storage::edges::insert_edge;
     use crate::storage::symbols::insert_symbol;
     use crate::storage::test_utils::{fresh_conn, sample_symbol, seed_file, symbol_ctx};
-    use standardoc_ir::{EdgeKind, RawEdge, ResolvedOrUnresolved};
+    use standardoc_ir::{EdgeConfidence, EdgeKind, RawEdge, ResolvedOrUnresolved};
 
     fn seed_edge(conn: &Connection) -> i64 {
         seed_file(conn, "src/main.rs");
@@ -56,6 +56,7 @@ mod tests {
                 },
                 sites: vec![],
                 attributes: vec![],
+                confidence: EdgeConfidence::Ambiguous,
             },
         )
         .unwrap()

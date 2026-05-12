@@ -1,0 +1,347 @@
+//! Session handoff DB (`.standardoc-sessions/sessions.db`).
+//!
+//! Lives at a path **distinct** from `.standardoc/` so a workspace reset
+//! (`standardoc rescan --from-scratch`, deleting `.standardoc/`, etc.) does NOT
+//! kill the operator's accumulated session memos. Schema is versioned via
+//! `schema_meta` mirroring the main index, but evolves independently.
+
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use rusqlite::{Connection, OptionalExtension};
+
+mod markdown;
+mod schema;
+
+pub use markdown::dump_sessions_to_markdown;
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionsError {
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("sessions handle is poisoned")]
+    Poisoned,
+    #[error(
+        "session schema version v{db} is newer than supported v{supported} — \
+         upgrade the binary"
+    )]
+    SchemaVersionTooNew { db: u32, supported: u32 },
+    #[error("invalid schema metadata: {key} = {value}")]
+    InvalidSchemaMetadata { key: String, value: String },
+    #[error("invalid stored data: {detail}")]
+    InvalidStoredData { detail: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionRow {
+    pub id: i64,
+    pub slug: String,
+    pub body_md: String,
+    pub supersedes: Option<String>,
+    pub status: SessionStatus,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    Active,
+    Superseded,
+}
+
+impl SessionStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Superseded => "superseded",
+        }
+    }
+
+    pub fn from_sql(s: &str) -> Result<Self, SessionsError> {
+        match s {
+            "active" => Ok(Self::Active),
+            "superseded" => Ok(Self::Superseded),
+            other => Err(SessionsError::InvalidStoredData {
+                detail: format!("unknown session status: {other:?}"),
+            }),
+        }
+    }
+}
+
+/// Workspace-scoped handle to the sessions DB. The connection is wrapped in a
+/// `Mutex` to serialize access — sessions write volume is tiny (a few
+/// operations per chat turn at most) so coarse locking is fine.
+pub struct SessionsHandle {
+    conn: Mutex<Connection>,
+    db_path: PathBuf,
+}
+
+const SESSIONS_DIR: &str = ".standardoc-sessions";
+const SESSIONS_DB: &str = "sessions.db";
+
+impl SessionsHandle {
+    /// Opens (creating if absent) `<workspace>/.standardoc-sessions/sessions.db`.
+    /// Schema is initialised + migrated automatically.
+    pub fn open(workspace_root: &Path) -> Result<Self, SessionsError> {
+        let dir = workspace_root.join(SESSIONS_DIR);
+        std::fs::create_dir_all(&dir)?;
+        let db_path = dir.join(SESSIONS_DB);
+        let conn = Connection::open(&db_path)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; \
+             PRAGMA synchronous = NORMAL;",
+        )?;
+        schema::ensure_schema(&conn)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            db_path,
+        })
+    }
+
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
+    }
+
+    /// Insert (or update by slug) a session. If `supersedes` is provided and
+    /// matches an existing slug, that row's `status` is set to `superseded`.
+    /// The new row's status is always `active`.
+    ///
+    /// `#[allow]` rationale: the `MutexGuard` (`guard`) is held until the
+    /// transaction commits — `tx` borrows from it. Splitting into a
+    /// sub-scope to drop the guard earlier would force the `Ok(id)` to
+    /// duplicate the variable across scopes for no real win.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn save(
+        &self,
+        slug: &str,
+        body_md: &str,
+        supersedes: Option<&str>,
+    ) -> Result<i64, SessionsError> {
+        let mut guard = self.conn.lock().map_err(|_| SessionsError::Poisoned)?;
+        let tx = guard.transaction()?;
+        let now = current_unix_seconds();
+        tx.execute(
+            "INSERT INTO sessions (slug, body_md, supersedes, status, created_at) \
+             VALUES (?1, ?2, ?3, 'active', ?4) \
+             ON CONFLICT(slug) DO UPDATE SET \
+                body_md     = excluded.body_md, \
+                supersedes  = excluded.supersedes, \
+                status      = 'active', \
+                created_at  = excluded.created_at",
+            rusqlite::params![slug, body_md, supersedes, now],
+        )?;
+        let id: i64 =
+            tx.query_row("SELECT id FROM sessions WHERE slug = ?1", [slug], |r| {
+                r.get(0)
+            })?;
+        if let Some(prev) = supersedes {
+            tx.execute(
+                "UPDATE sessions SET status = 'superseded' WHERE slug = ?1",
+                [prev],
+            )?;
+        }
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Lists sessions newest first. `active_only` filters `status = 'active'`.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn list(&self, active_only: bool) -> Result<Vec<SessionRow>, SessionsError> {
+        let guard = self.conn.lock().map_err(|_| SessionsError::Poisoned)?;
+        let sql = if active_only {
+            "SELECT id, slug, body_md, supersedes, status, created_at FROM sessions \
+             WHERE status = 'active' ORDER BY created_at DESC, id DESC"
+        } else {
+            "SELECT id, slug, body_md, supersedes, status, created_at FROM sessions \
+             ORDER BY created_at DESC, id DESC"
+        };
+        let mut stmt = guard.prepare(sql)?;
+        let rows = stmt
+            .query_map([], read_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().collect::<Result<Vec<_>, _>>()
+    }
+
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn get_by_slug(&self, slug: &str) -> Result<Option<SessionRow>, SessionsError> {
+        let guard = self.conn.lock().map_err(|_| SessionsError::Poisoned)?;
+        let raw = guard
+            .query_row(
+                "SELECT id, slug, body_md, supersedes, status, created_at \
+                 FROM sessions WHERE slug = ?1",
+                [slug],
+                read_row,
+            )
+            .optional()?;
+        raw.transpose()
+    }
+
+    /// Most recent active row (the natural reentry point for a new chat).
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn latest(&self) -> Result<Option<SessionRow>, SessionsError> {
+        let guard = self.conn.lock().map_err(|_| SessionsError::Poisoned)?;
+        let raw = guard
+            .query_row(
+                "SELECT id, slug, body_md, supersedes, status, created_at \
+                 FROM sessions WHERE status = 'active' \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                [],
+                read_row,
+            )
+            .optional()?;
+        raw.transpose()
+    }
+}
+
+type RawRow = (i64, String, String, Option<String>, String, i64);
+
+fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<SessionRow, SessionsError>> {
+    let raw: RawRow = (
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    );
+    Ok(build_session_row(raw))
+}
+
+fn build_session_row(raw: RawRow) -> Result<SessionRow, SessionsError> {
+    let (id, slug, body_md, supersedes, status_text, created_at) = raw;
+    let status = SessionStatus::from_sql(&status_text)?;
+    Ok(SessionRow {
+        id,
+        slug,
+        body_md,
+        supersedes,
+        status,
+        created_at,
+    })
+}
+
+fn current_unix_seconds() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn fresh_handle() -> (TempDir, SessionsHandle) {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = SessionsHandle::open(dir.path()).unwrap();
+        (dir, handle)
+    }
+
+    #[test]
+    fn open_creates_db_under_separate_dir() {
+        let (dir, handle) = fresh_handle();
+        let expected = dir.path().join(SESSIONS_DIR).join(SESSIONS_DB);
+        assert_eq!(handle.db_path(), expected);
+        assert!(expected.exists());
+    }
+
+    #[test]
+    fn save_then_get_round_trips() {
+        let (_dir, handle) = fresh_handle();
+        let id = handle.save("s1", "## body 1", None).unwrap();
+        assert!(id > 0);
+        let got = handle.get_by_slug("s1").unwrap().unwrap();
+        assert_eq!(got.slug, "s1");
+        assert_eq!(got.body_md, "## body 1");
+        assert_eq!(got.status, SessionStatus::Active);
+        assert!(got.supersedes.is_none());
+    }
+
+    #[test]
+    fn save_with_same_slug_updates_in_place() {
+        let (_dir, handle) = fresh_handle();
+        let id1 = handle.save("s1", "first", None).unwrap();
+        let id2 = handle.save("s1", "second", None).unwrap();
+        assert_eq!(id1, id2, "UPSERT must preserve the id");
+        let got = handle.get_by_slug("s1").unwrap().unwrap();
+        assert_eq!(got.body_md, "second");
+    }
+
+    #[test]
+    fn supersedes_marks_previous_row_as_superseded() {
+        let (_dir, handle) = fresh_handle();
+        handle.save("s1", "first", None).unwrap();
+        handle.save("s2", "second", Some("s1")).unwrap();
+        let s1 = handle.get_by_slug("s1").unwrap().unwrap();
+        let s2 = handle.get_by_slug("s2").unwrap().unwrap();
+        assert_eq!(s1.status, SessionStatus::Superseded);
+        assert_eq!(s2.status, SessionStatus::Active);
+        assert_eq!(s2.supersedes.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn list_returns_newest_first() {
+        let (_dir, handle) = fresh_handle();
+        handle.save("s1", "first", None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        handle.save("s2", "second", None).unwrap();
+        let all = handle.list(false).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].slug, "s2");
+        assert_eq!(all[1].slug, "s1");
+    }
+
+    #[test]
+    fn list_active_only_filters_superseded() {
+        let (_dir, handle) = fresh_handle();
+        handle.save("old", "old body", None).unwrap();
+        handle.save("new", "new body", Some("old")).unwrap();
+        let active = handle.list(true).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].slug, "new");
+    }
+
+    #[test]
+    fn latest_returns_most_recent_active() {
+        let (_dir, handle) = fresh_handle();
+        handle.save("s1", "first", None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        handle.save("s2", "second", None).unwrap();
+        let latest = handle.latest().unwrap().unwrap();
+        assert_eq!(latest.slug, "s2");
+    }
+
+    #[test]
+    fn latest_skips_superseded_even_if_more_recent_active_exists() {
+        let (_dir, handle) = fresh_handle();
+        handle.save("active", "still here", None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        handle.save("newer", "now superseded", None).unwrap();
+        // Mark `newer` as superseded by inserting another row that supersedes it.
+        handle.save("newest", "live", Some("newer")).unwrap();
+        let latest = handle.latest().unwrap().unwrap();
+        assert_eq!(latest.slug, "newest");
+    }
+
+    #[test]
+    fn get_by_unknown_slug_returns_none() {
+        let (_dir, handle) = fresh_handle();
+        let got = handle.get_by_slug("missing").unwrap();
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn open_is_idempotent_across_reopens() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let h = SessionsHandle::open(dir.path()).unwrap();
+            h.save("s1", "first", None).unwrap();
+        }
+        let h2 = SessionsHandle::open(dir.path()).unwrap();
+        let got = h2.get_by_slug("s1").unwrap().unwrap();
+        assert_eq!(got.body_md, "first");
+    }
+}

@@ -1,5 +1,6 @@
 use standardoc_ir::{
-    EdgeKind, Kind, Language, ResolvedOrUnresolved, Signature, SourceOrigin, Visibility,
+    EdgeConfidence, EdgeKind, Kind, Language, ResolvedOrUnresolved, Signature, SourceOrigin,
+    Visibility,
 };
 
 use crate::storage::error::StorageError;
@@ -141,6 +142,25 @@ pub(crate) fn edge_kind_from_sql_text(s: &str) -> Result<EdgeKind, StorageError>
         "EXPOSES_API" => Ok(EdgeKind::ExposesApi),
         other => Err(StorageError::InvalidStoredData {
             detail: format!("unknown edge kind: {other:?}"),
+        }),
+    }
+}
+
+pub(crate) const fn edge_confidence_to_sql_text(c: EdgeConfidence) -> &'static str {
+    match c {
+        EdgeConfidence::Extracted => "extracted",
+        EdgeConfidence::Inferred => "inferred",
+        EdgeConfidence::Ambiguous => "ambiguous",
+    }
+}
+
+pub(crate) fn edge_confidence_from_sql_text(s: &str) -> Result<EdgeConfidence, StorageError> {
+    match s {
+        "extracted" => Ok(EdgeConfidence::Extracted),
+        "inferred" => Ok(EdgeConfidence::Inferred),
+        "ambiguous" => Ok(EdgeConfidence::Ambiguous),
+        other => Err(StorageError::InvalidStoredData {
+            detail: format!("unknown edge confidence: {other:?}"),
         }),
     }
 }

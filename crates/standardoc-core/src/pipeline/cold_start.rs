@@ -146,10 +146,19 @@ fn cleanup_unseen(handle: &IndexHandle, seen: &[String]) -> Result<(), ColdStart
     // here would let the cascade fire `ON DELETE SET NULL` on
     // `edges.to_symbol_id` while leaving `to_unresolved` untouched —
     // immediately violating the XOR CHECK constraint.
+    //
+    // `is_external = 0` filter (S3-G): external resolvers populate rows
+    // whose path lives OUTSIDE the workspace tree (`~/.cargo/registry/...`,
+    // `node_modules/...`). The workspace walk never sees those paths so a
+    // naive cleanup would purge every cached external on every daemon
+    // boot. The flag is set by external resolvers when they submit their
+    // `ExtractedFile` and read here to skip cleanup.
     let missing: Vec<String> = {
         let mut stmt = tx
             .prepare(
-                "SELECT path FROM files WHERE path NOT IN (SELECT path FROM seen_paths)",
+                "SELECT path FROM files \
+                 WHERE is_external = 0 \
+                   AND path NOT IN (SELECT path FROM seen_paths)",
             )
             .map_err(StorageError::from)?;
         stmt.query_map([], |row| row.get::<_, String>(0))
@@ -395,7 +404,7 @@ mod tests {
         // must route through `apply_delete_file` so `delete_symbol`'s
         // reverse-promote step runs in the SAME transaction.
         use crate::pipeline::batch::apply_upsert_file;
-        use standardoc_ir::{EdgeKind, RawEdge, ResolvedOrUnresolved};
+        use standardoc_ir::{EdgeConfidence, EdgeKind, RawEdge, ResolvedOrUnresolved};
 
         let dir = tempdir().unwrap();
         let handle = IndexHandle::open(dir.path()).unwrap();
@@ -443,6 +452,7 @@ mod tests {
                 },
                 sites: vec![],
                 attributes: vec![],
+                confidence: EdgeConfidence::Extracted,
             }],
             call_sites: vec![],
             documents: vec![],
@@ -450,8 +460,8 @@ mod tests {
         let target = sample_extracted("src/target.rs", "crate::target");
         {
             let conn = handle.pool().unwrap().get().unwrap();
-            apply_upsert_file(&conn, &target).unwrap();
-            apply_upsert_file(&conn, &caller_extracted).unwrap();
+            apply_upsert_file(&conn, &target, 0).unwrap();
+            apply_upsert_file(&conn, &caller_extracted, 0).unwrap();
             // After insert, the resolved-on-insert promotion should have
             // linked the edge to target's symbol id — sanity-check before
             // the cleanup so we know the cascade has something to chew.

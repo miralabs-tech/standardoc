@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use r2d2::Pool;
@@ -12,7 +11,6 @@ use crate::storage::error::StorageError;
 
 pub(crate) struct WriterContext {
     pub(crate) pool: Arc<RwLock<Option<Pool<SqliteConnectionManager>>>>,
-    pub(crate) revision: Arc<AtomicU64>,
 }
 
 pub(crate) fn writer_loop(mut rx: Receiver<IngestCommand>, ctx: &WriterContext) {
@@ -25,11 +23,21 @@ fn process_command(ctx: &WriterContext, cmd: IngestCommand) -> Result<(), Storag
     let pool = acquire_pool(ctx).ok_or(StorageError::RescanInProgress)?;
     let mut conn = pool.get()?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let res = dispatch(&tx, cmd);
+    // Read the current revision from `schema_meta` (persisted v6+) and
+    // tag rows touched by this command with `revision + 1`. The same
+    // transaction commits the row writes AND the bumped revision, so
+    // any reader (LSP + MCP daemons sharing the DB under WAL) sees the
+    // pair atomically.
+    let current_revision: u64 = read_revision(&tx)?;
+    let next_revision = current_revision.saturating_add(1);
+    let res = dispatch(&tx, cmd, next_revision);
     match res {
         Ok(()) => {
+            tx.execute(
+                "UPDATE schema_meta SET value = ?1 WHERE key = 'revision'",
+                [next_revision.to_string()],
+            )?;
             tx.commit()?;
-            ctx.revision.fetch_add(1, Ordering::Release);
             Ok(())
         }
         Err(e) => {
@@ -39,9 +47,26 @@ fn process_command(ctx: &WriterContext, cmd: IngestCommand) -> Result<(), Storag
     }
 }
 
-fn dispatch(conn: &rusqlite::Connection, cmd: IngestCommand) -> Result<(), StorageError> {
+fn read_revision(tx: &rusqlite::Transaction<'_>) -> Result<u64, StorageError> {
+    let raw: String = tx.query_row(
+        "SELECT value FROM schema_meta WHERE key = 'revision'",
+        [],
+        |row| row.get(0),
+    )?;
+    raw.parse::<u64>()
+        .map_err(|_| StorageError::InvalidSchemaMetadata {
+            key: "revision".into(),
+            value: raw,
+        })
+}
+
+fn dispatch(
+    conn: &rusqlite::Connection,
+    cmd: IngestCommand,
+    revision: u64,
+) -> Result<(), StorageError> {
     match cmd {
-        IngestCommand::UpsertFile { extracted, .. } => apply_upsert_file(conn, &extracted),
+        IngestCommand::UpsertFile { extracted, .. } => apply_upsert_file(conn, &extracted, revision),
         IngestCommand::DeleteFile { path } => apply_delete_file(conn, &path),
         IngestCommand::RecordParseError {
             path,
@@ -62,7 +87,6 @@ fn acquire_pool(ctx: &WriterContext) -> Option<Pool<SqliteConnectionManager>> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, RwLock};
     use std::time::{Duration, Instant};
 
@@ -86,9 +110,41 @@ mod tests {
         });
         let pool = Pool::builder().max_size(2).build(manager).unwrap();
         let conn = pool.get().unwrap();
-        crate::storage::init::run_init_schema(&conn).unwrap();
+        crate::storage::migrate::ensure_schema(&conn).unwrap();
         drop(conn);
         pool
+    }
+
+    fn read_revision_via_pool(pool: &Pool<SqliteConnectionManager>) -> u64 {
+        let conn = pool.get().unwrap();
+        let raw: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'revision'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        raw.parse().unwrap()
+    }
+
+    fn wait_revision_via_pool(
+        pool: &Arc<RwLock<Option<Pool<SqliteConnectionManager>>>>,
+        target: u64,
+        timeout: Duration,
+    ) {
+        let start = Instant::now();
+        loop {
+            let inner = pool.read().unwrap().as_ref().cloned();
+            let current = inner.map_or(0, |p| read_revision_via_pool(&p));
+            if current >= target {
+                return;
+            }
+            assert!(
+                start.elapsed() <= timeout,
+                "writer revision did not reach {target} within {timeout:?} (was {current})"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     fn sample_extracted() -> ExtractedFile {
@@ -123,29 +179,15 @@ mod tests {
         }
     }
 
-    fn wait_revision_at_least(revision: &AtomicU64, target: u64, timeout: Duration) {
-        let start = Instant::now();
-        while revision.load(Ordering::Acquire) < target {
-            assert!(
-                start.elapsed() <= timeout,
-                "writer revision did not reach {target} within {timeout:?} (was {})",
-                revision.load(Ordering::Acquire)
-            );
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
-
     #[test]
     fn writer_processes_upsert_and_bumps_revision() {
         let dir = tempdir().unwrap();
         let pool = boot_pool(&dir.path().join("index.db"));
         let pool_lock = Arc::new(RwLock::new(Some(pool)));
-        let revision = Arc::new(AtomicU64::new(0));
         let (tx, rx) = mpsc::channel(8);
 
         let ctx = WriterContext {
             pool: Arc::clone(&pool_lock),
-            revision: Arc::clone(&revision),
         };
         let handle = std::thread::spawn(move || writer_loop(rx, &ctx));
 
@@ -154,7 +196,7 @@ mod tests {
             extracted: sample_extracted(),
         })
         .unwrap();
-        wait_revision_at_least(&revision, 1, Duration::from_secs(2));
+        wait_revision_via_pool(&pool_lock, 1, Duration::from_secs(2));
 
         drop(tx);
         handle.join().unwrap();
@@ -165,12 +207,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let pool = boot_pool(&dir.path().join("index.db"));
         let pool_lock = Arc::new(RwLock::new(Some(pool)));
-        let revision = Arc::new(AtomicU64::new(0));
         let (tx, rx) = mpsc::channel(8);
 
         let ctx = WriterContext {
             pool: Arc::clone(&pool_lock),
-            revision: Arc::clone(&revision),
         };
         let handle = std::thread::spawn(move || writer_loop(rx, &ctx));
 
@@ -180,14 +220,14 @@ mod tests {
             extracted: sample_extracted(),
         })
         .unwrap();
-        wait_revision_at_least(&revision, 1, Duration::from_secs(2));
+        wait_revision_via_pool(&pool_lock, 1, Duration::from_secs(2));
 
         drop(tx);
         handle.join().unwrap();
 
+        let final_revision = read_revision_via_pool(pool_lock.read().unwrap().as_ref().unwrap());
         assert_eq!(
-            revision.load(Ordering::Acquire),
-            1,
+            final_revision, 1,
             "rescan command must not bump revision in 14a (returns Err)"
         );
     }
@@ -197,12 +237,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let pool = boot_pool(&dir.path().join("index.db"));
         let pool_lock = Arc::new(RwLock::new(Some(pool)));
-        let revision = Arc::new(AtomicU64::new(0));
         let (tx, rx) = mpsc::channel::<IngestCommand>(4);
 
         let ctx = WriterContext {
             pool: Arc::clone(&pool_lock),
-            revision: Arc::clone(&revision),
         };
         let handle = std::thread::spawn(move || writer_loop(rx, &ctx));
 

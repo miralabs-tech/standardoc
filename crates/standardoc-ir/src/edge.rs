@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::bridge_kind::BridgeKind;
-use crate::kinds::EdgeKind;
+use crate::kinds::{EdgeConfidence, EdgeKind};
 use crate::location::Site;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -9,10 +9,12 @@ pub struct RawEdge {
     pub from_fqdn: String,
     pub kind: EdgeKind,
     pub to: ResolvedOrUnresolved,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sites: Vec<Site>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attributes: Vec<String>,
+    #[serde(default)]
+    pub confidence: EdgeConfidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -21,6 +23,46 @@ pub enum ResolvedOrUnresolved {
     Resolved { fqdn: String },
     Unresolved { name: String },
     UnresolvedBridge { bridge: BridgeKind, name: String },
+}
+
+impl ResolvedOrUnresolved {
+    /// Default confidence derived purely from the variant: Resolved is
+    /// `Extracted`, UnresolvedBridge is `Inferred`, Unresolved is `Ambiguous`.
+    /// Call sites that have finer information (e.g. a resolver that knows the
+    /// target came from an alias table) should set `RawEdge.confidence`
+    /// explicitly instead of relying on this default.
+    #[must_use]
+    pub const fn default_confidence(&self) -> EdgeConfidence {
+        match self {
+            Self::Resolved { .. } => EdgeConfidence::Extracted,
+            Self::UnresolvedBridge { .. } => EdgeConfidence::Inferred,
+            Self::Unresolved { .. } => EdgeConfidence::Ambiguous,
+        }
+    }
+}
+
+impl RawEdge {
+    /// Build a `RawEdge` whose `confidence` is derived from `to`'s variant via
+    /// `default_confidence()`. Use the struct literal directly when the
+    /// caller needs to set a different confidence.
+    #[must_use]
+    pub const fn with_default_confidence(
+        from_fqdn: String,
+        kind: EdgeKind,
+        to: ResolvedOrUnresolved,
+        sites: Vec<Site>,
+        attributes: Vec<String>,
+    ) -> Self {
+        let confidence = to.default_confidence();
+        Self {
+            from_fqdn,
+            kind,
+            to,
+            sites,
+            attributes,
+            confidence,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -41,6 +83,7 @@ mod tests {
                 col: 8,
             }],
             attributes: vec![],
+            confidence: EdgeConfidence::Extracted,
         };
         let json = serde_json::to_string(&e).unwrap();
         let back: RawEdge = serde_json::from_str(&json).unwrap();
@@ -57,6 +100,7 @@ mod tests {
             },
             sites: vec![],
             attributes: vec![],
+            confidence: EdgeConfidence::Ambiguous,
         };
         let json = serde_json::to_string(&e).unwrap();
         let back: RawEdge = serde_json::from_str(&json).unwrap();
@@ -74,6 +118,7 @@ mod tests {
             },
             sites: vec![],
             attributes: vec![],
+            confidence: EdgeConfidence::Inferred,
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(
@@ -94,6 +139,7 @@ mod tests {
             },
             sites: vec![],
             attributes: vec!["template-bind".into(), "template-event".into()],
+            confidence: EdgeConfidence::Extracted,
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"attributes\""), "json was {json}");
@@ -104,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn attributes_default_to_empty_when_absent_in_json() {
+    fn defaults_when_absent_in_json() {
         let json = r#"{
             "from_fqdn": "crate::a",
             "kind": "CALLS",
@@ -116,5 +162,48 @@ mod tests {
             "attributes should default to empty Vec when absent (migration neutrality)"
         );
         assert!(back.sites.is_empty());
+        assert_eq!(
+            back.confidence,
+            EdgeConfidence::Extracted,
+            "confidence should default to Extracted for legacy JSON without the field"
+        );
+    }
+
+    #[test]
+    fn confidence_serializes_snake_case() {
+        let e = RawEdge {
+            from_fqdn: "a".into(),
+            kind: EdgeKind::Calls,
+            to: ResolvedOrUnresolved::Unresolved { name: "b".into() },
+            sites: vec![],
+            attributes: vec![],
+            confidence: EdgeConfidence::Inferred,
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(
+            json.contains("\"confidence\":\"inferred\""),
+            "json was {json}"
+        );
+    }
+
+    #[test]
+    fn confidence_round_trip_all_variants() {
+        for conf in [
+            EdgeConfidence::Extracted,
+            EdgeConfidence::Inferred,
+            EdgeConfidence::Ambiguous,
+        ] {
+            let e = RawEdge {
+                from_fqdn: "a".into(),
+                kind: EdgeKind::Calls,
+                to: ResolvedOrUnresolved::Unresolved { name: "b".into() },
+                sites: vec![],
+                attributes: vec![],
+                confidence: conf,
+            };
+            let json = serde_json::to_string(&e).unwrap();
+            let back: RawEdge = serde_json::from_str(&json).unwrap();
+            assert_eq!(e, back);
+        }
     }
 }
