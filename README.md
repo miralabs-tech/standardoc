@@ -14,7 +14,8 @@
 ## 🧠 What is Standardoc?
 
 Standardoc transforms your code into a **structured, queryable knowledge graph** —
-the AST is the source of truth, kept live by a file watcher, served over MCP and LSP.
+language ASTs are normalized into a canonical IR, indexed live, and exposed
+through MCP and LSP.
 
 AI agents stop guessing. They query.
 
@@ -34,6 +35,10 @@ Code → Language Providers → Canonical IR → SQLite Graph → MCP / LSP → 
 ---
 
 ## 📦 Install
+
+> [!WARNING]
+> Official binaries are distributed only through GitHub Releases and official editor marketplaces.
+> Always verify the repository owner before downloading binaries.
 
 **Rust toolchain** (CLI + MCP + LSP daemon, single binary `stdoc`) :
 
