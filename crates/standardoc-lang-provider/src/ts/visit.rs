@@ -90,17 +90,20 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
 
     fn emit_call(&mut self, to: ResolvedOrUnresolved, span: Span) {
         let site = self.ctx.span_site(span);
+        let confidence = to.default_confidence();
         self.ctx.push_edge(RawEdge {
             from_fqdn: self.enclosing_fqdn.clone(),
             kind: EdgeKind::Calls,
             to,
             sites: vec![site],
             attributes: vec![],
+            confidence,
         });
     }
 
     fn emit_template_ref(&mut self, name: &str, span: Span, attribute: &str) {
         let to = self.ctx.resolve_call(name, &self.current_module);
+        let confidence = to.default_confidence();
         let site = self.ctx.span_site(span);
         self.ctx.push_edge(RawEdge {
             from_fqdn: self.enclosing_fqdn.clone(),
@@ -108,6 +111,7 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
             to,
             sites: vec![site],
             attributes: vec![attribute.to_string()],
+            confidence,
         });
     }
 

@@ -123,11 +123,7 @@ pub(crate) fn extract_blocks(source: &str) -> SfcDocument {
         };
         match tag_name.as_str() {
             "script" => doc.scripts.push(block),
-            "template" => {
-                if doc.template.is_none() {
-                    doc.template = Some(block);
-                }
-            }
+            "template" if doc.template.is_none() => doc.template = Some(block),
             "style" => doc.styles.push(block),
             _ => {}
         }

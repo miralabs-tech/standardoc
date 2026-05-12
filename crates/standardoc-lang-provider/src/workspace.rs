@@ -275,18 +275,19 @@ fn template_ref_to_edge(
     module_fqdn: &str,
 ) -> RawEdge {
     let (line, col) = byte_offset_to_line_col(content, r.byte_offset);
+    let to = ResolvedOrUnresolved::Unresolved { name: r.name };
+    let confidence = to.default_confidence();
     RawEdge {
         from_fqdn: module_fqdn.to_string(),
         kind: EdgeKind::References,
-        to: ResolvedOrUnresolved::Unresolved {
-            name: r.name,
-        },
+        to,
         sites: vec![Site {
             file: path.to_string(),
             line,
             col,
         }],
         attributes: vec![template_attr_to_slug(r.attribute).to_string()],
+        confidence,
     }
 }
 

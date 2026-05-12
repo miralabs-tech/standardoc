@@ -1,13 +1,16 @@
 use proc_macro2::Span;
-use standardoc_ir::{EdgeKind, RawEdge, ResolvedOrUnresolved, Site};
+use standardoc_ir::{
+    EdgeKind, Kind, LanguageKind, RawEdge, RawSymbol, ResolvedOrUnresolved, Site, Visibility,
+};
 use syn::spanned::Spanned;
 
-use super::walk::{WalkContext, col_from_span, line_from_span};
+use super::walk::{WalkContext, col_from_span, line_from_span, span_to_location};
 
 pub(crate) fn process_use(ctx: &mut WalkContext, item: &syn::ItemUse, current_module: &str) {
     let span = item.span();
+    let is_public = matches!(item.vis, syn::Visibility::Public(_));
     let mut prefix: Vec<String> = Vec::new();
-    walk_tree(ctx, &item.tree, &mut prefix, current_module, span);
+    walk_tree(ctx, &item.tree, &mut prefix, current_module, span, is_public);
 }
 
 fn walk_tree(
@@ -16,11 +19,12 @@ fn walk_tree(
     prefix: &mut Vec<String>,
     current_module: &str,
     span: Span,
+    is_public: bool,
 ) {
     match tree {
         syn::UseTree::Path(path) => {
             prefix.push(path.ident.to_string());
-            walk_tree(ctx, &path.tree, prefix, current_module, span);
+            walk_tree(ctx, &path.tree, prefix, current_module, span, is_public);
             prefix.pop();
         }
         syn::UseTree::Name(name) => {
@@ -28,35 +32,35 @@ fn walk_tree(
             // `use foo::{self};` → import the prefix itself, alias = last segment of prefix.
             if leaf == "self" {
                 if let Some(last) = prefix.last().cloned() {
-                    emit_import(ctx, prefix, &last, current_module, span);
+                    emit_import(ctx, prefix, &last, current_module, span, is_public);
                 }
                 return;
             }
             let mut full = prefix.clone();
             full.push(leaf.clone());
-            emit_import(ctx, &full, &leaf, current_module, span);
+            emit_import(ctx, &full, &leaf, current_module, span, is_public);
         }
         syn::UseTree::Rename(rename) => {
             let leaf = rename.ident.to_string();
             let alias = rename.rename.to_string();
             if leaf == "self" {
                 // `use foo::{self as bar};`
-                emit_import(ctx, prefix, &alias, current_module, span);
+                emit_import(ctx, prefix, &alias, current_module, span, is_public);
                 return;
             }
             let mut full = prefix.clone();
             full.push(leaf);
-            emit_import(ctx, &full, &alias, current_module, span);
+            emit_import(ctx, &full, &alias, current_module, span, is_public);
         }
         syn::UseTree::Glob(_) => {
             if prefix.is_empty() {
                 return;
             }
-            emit_glob_import(ctx, prefix, current_module, span);
+            emit_glob_import(ctx, prefix, current_module, span, is_public);
         }
         syn::UseTree::Group(group) => {
             for sub in &group.items {
-                walk_tree(ctx, sub, prefix, current_module, span);
+                walk_tree(ctx, sub, prefix, current_module, span, is_public);
             }
         }
     }
@@ -68,6 +72,7 @@ fn emit_import(
     alias_name: &str,
     current_module: &str,
     span: Span,
+    is_public: bool,
 ) {
     let raw = full_path.join("::");
     let canonical = ctx
@@ -75,29 +80,74 @@ fn emit_import(
         .unwrap_or_else(|| raw.clone());
     ctx.add_alias(alias_name.to_string(), canonical.clone());
     let to = import_target(ctx, &canonical);
+    let confidence = to.default_confidence();
     let from = ctx.core.file_module_fqdn.clone();
     let file = ctx.core.file_path.clone();
+    let attributes = if is_public {
+        vec!["re-export".to_string()]
+    } else {
+        vec![]
+    };
     ctx.push_edge(RawEdge {
-        from_fqdn: from,
+        from_fqdn: from.clone(),
         kind: EdgeKind::Imports,
         to,
         sites: vec![Site {
-            file,
+            file: file.clone(),
             line: line_from_span(span),
             col: col_from_span(span),
         }],
-        attributes: vec![],
+        attributes,
+        confidence,
     });
+
+    // Phantom symbol so `query::symbol_by_fqdn("<current_module>::<alias>")`
+    // matches API-surface names that are re-exported under a shorter path
+    // (e.g. `serde::Deserialize` re-exported from `serde::de::Deserialize`).
+    // Item-level only — module re-exports (`pub use foo;` flattening a whole
+    // module) are punt beta.2. Kind=Type by default since we cannot know
+    // the target kind without resolving cross-file.
+    if is_public {
+        let phantom_fqdn = format!("{from}::{alias_name}");
+        ctx.push_symbol(RawSymbol {
+            name: alias_name.to_string(),
+            fqdn: phantom_fqdn,
+            kind: Kind::Type,
+            language_kind: LanguageKind::from("re_export"),
+            module: Some(from),
+            visibility: Visibility::Public,
+            location: span_to_location(span, &file),
+            signature: None,
+            body_hash: None,
+            attributes: vec![],
+        });
+    }
 }
 
-fn emit_glob_import(ctx: &mut WalkContext, prefix: &[String], current_module: &str, span: Span) {
+fn emit_glob_import(
+    ctx: &mut WalkContext,
+    prefix: &[String],
+    current_module: &str,
+    span: Span,
+    is_public: bool,
+) {
     let raw = prefix.join("::");
     let canonical = ctx
         .canonicalize(&raw, current_module)
         .unwrap_or_else(|| raw.clone());
     let to = import_target(ctx, &canonical);
+    let confidence = to.default_confidence();
     let from = ctx.core.file_module_fqdn.clone();
     let file = ctx.core.file_path.clone();
+    // Module-level wildcard re-export. We do not synthesize phantom symbols
+    // here — we would need to walk the target module to know what items it
+    // exposes (chicken-and-egg in a single-file pass). The edge attribute
+    // is enough for downstream resolvers to follow the wildcard if needed.
+    let attributes = if is_public {
+        vec!["re-export".to_string(), "wildcard".to_string()]
+    } else {
+        vec![]
+    };
     ctx.push_edge(RawEdge {
         from_fqdn: from,
         kind: EdgeKind::Imports,
@@ -107,7 +157,8 @@ fn emit_glob_import(ctx: &mut WalkContext, prefix: &[String], current_module: &s
             line: line_from_span(span),
             col: col_from_span(span),
         }],
-        attributes: vec![],
+        attributes,
+        confidence,
     });
 }
 
@@ -133,16 +184,19 @@ pub(crate) fn process_extern_crate(ctx: &mut WalkContext, item: &syn::ItemExtern
     let span = item.span();
     let from = ctx.core.file_module_fqdn.clone();
     let file = ctx.core.file_path.clone();
+    let to = ResolvedOrUnresolved::Unresolved { name: crate_name };
+    let confidence = to.default_confidence();
     ctx.push_edge(RawEdge {
         from_fqdn: from,
         kind: EdgeKind::Imports,
-        to: ResolvedOrUnresolved::Unresolved { name: crate_name },
+        to,
         sites: vec![Site {
             file,
             line: line_from_span(span),
             col: col_from_span(span),
         }],
         attributes: vec![],
+        confidence,
     });
 }
 
@@ -313,6 +367,93 @@ mod tests {
         assert!(names.contains(&"std::io::Read".to_string()));
         assert!(names.contains(&"std::io::Write".to_string()));
         assert!(names.contains(&"std::fmt".to_string()));
+    }
+
+    #[test]
+    fn pub_use_emits_phantom_symbol_and_marks_edge_as_re_export() {
+        let parsed = parse("pub use foo::Bar;");
+        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+
+        let phantom = symbols
+            .iter()
+            .find(|s| s.fqdn == "c::Bar")
+            .expect("phantom re-export symbol must be emitted at the short fqdn");
+        assert_eq!(phantom.name, "Bar");
+        assert!(matches!(phantom.kind, standardoc_ir::Kind::Type));
+        assert_eq!(phantom.language_kind.as_str(), "re_export");
+        assert!(matches!(
+            phantom.visibility,
+            standardoc_ir::Visibility::Public
+        ));
+
+        let imp = imports(&edges);
+        assert_eq!(imp.len(), 1);
+        assert!(
+            imp[0].attributes.contains(&"re-export".to_string()),
+            "edge attributes must mark this as a re-export, got {:?}",
+            imp[0].attributes
+        );
+    }
+
+    #[test]
+    fn non_pub_use_does_not_emit_phantom_or_re_export_attribute() {
+        let parsed = parse("use foo::Bar;");
+        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+
+        assert!(
+            !symbols.iter().any(|s| s.fqdn == "c::Bar"),
+            "non-pub `use` must not produce a phantom symbol"
+        );
+        let imp = imports(&edges);
+        assert_eq!(imp.len(), 1);
+        assert!(
+            imp[0].attributes.is_empty(),
+            "private use must not carry re-export attribute, got {:?}",
+            imp[0].attributes
+        );
+    }
+
+    #[test]
+    fn pub_use_with_alias_emits_phantom_at_alias_fqdn() {
+        let parsed = parse("pub use foo::Bar as B;");
+        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+
+        assert!(
+            symbols.iter().any(|s| s.fqdn == "c::B"),
+            "phantom must use the alias name, not the original"
+        );
+        assert!(
+            !symbols.iter().any(|s| s.fqdn == "c::Bar"),
+            "original name must not leak when an alias is given"
+        );
+        let imp = imports(&edges);
+        assert!(imp[0].attributes.contains(&"re-export".to_string()));
+    }
+
+    #[test]
+    fn pub_use_glob_emits_wildcard_re_export_edge_no_phantom() {
+        let parsed = parse("pub use foo::*;");
+        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+
+        // No phantom symbol for wildcard re-exports — we cannot enumerate
+        // the target module's items in a single-file pass.
+        assert!(
+            symbols.is_empty() || !symbols.iter().any(|s| s.fqdn.contains('*')),
+            "wildcard re-export must not synthesize a phantom"
+        );
+        let imp = imports(&edges);
+        assert_eq!(imp.len(), 1);
+        assert!(imp[0].attributes.contains(&"re-export".to_string()));
+        assert!(imp[0].attributes.contains(&"wildcard".to_string()));
+    }
+
+    #[test]
+    fn pub_use_group_emits_one_phantom_per_leaf() {
+        let parsed = parse("pub use foo::{a, b};");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+
+        assert!(symbols.iter().any(|s| s.fqdn == "c::a"));
+        assert!(symbols.iter().any(|s| s.fqdn == "c::b"));
     }
 
     #[test]

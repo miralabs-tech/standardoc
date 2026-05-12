@@ -79,6 +79,12 @@ pub(crate) fn extract_file(
 
     walk(content, &ast, &mut ctx);
 
+    // Post-walk pass: enrich Lua signatures (typing-free at AST level) with
+    // any EmmyLua / LuaCATS annotations carried by the symbol's RawDocument.
+    // The raw doc text stays intact on the documents side; this just lifts
+    // the typed pieces into the structured Signature.
+    enrich_signatures_from_emmylua(&mut ctx.core.symbols, &ctx.core.documents);
+
     Ok(ExtractedFile {
         file: workspace_relative_path.into(),
         language: Language::Lua,
@@ -91,6 +97,30 @@ pub(crate) fn extract_file(
         call_sites: vec![],
         documents: ctx.core.documents,
     })
+}
+
+/// Mutate each `RawSymbol` whose fqdn has a matching `RawDocument`, lifting
+/// `@param` / `@return` tags from the doc text into the structured
+/// `Signature`. Symbols without a signature are skipped (no place to write
+/// the typed fields into).
+fn enrich_signatures_from_emmylua(
+    symbols: &mut [RawSymbol],
+    documents: &[standardoc_ir::RawDocument],
+) {
+    use std::collections::HashMap;
+    let docs_by_fqdn: HashMap<&str, &str> = documents
+        .iter()
+        .map(|d| (d.symbol_fqdn.as_str(), d.description.as_str()))
+        .collect();
+    for sym in symbols {
+        let Some(doc_text) = docs_by_fqdn.get(sym.fqdn.as_str()) else {
+            continue;
+        };
+        let Some(sig) = sym.signature.as_mut() else {
+            continue;
+        };
+        super::emmylua::enrich_signature(sig, doc_text);
+    }
 }
 
 // --- per-stmt extractors ---------------------------------------------------
@@ -195,12 +225,15 @@ pub(crate) fn extract_local_assignment(
         // Detect `local x = require("a.b.c")` and emit IMPORTS edge.
         if let Some(require_arg) = rhs.and_then(extract_require_arg) {
             let pos = Node::start_position(*name_token).unwrap_or_default();
+            let to = resolve_require(&require_arg);
+            let confidence = to.default_confidence();
             ctx.push_edge(RawEdge {
                 from_fqdn: ctx.core.file_module_fqdn.clone(),
                 kind: EdgeKind::Imports,
-                to: resolve_require(&require_arg),
+                to,
                 sites: vec![site_for(&ctx.core.file_path, pos)],
                 attributes: vec![],
+                confidence,
             });
         }
 
@@ -308,12 +341,15 @@ fn record_calls_in_block(
                 for expr in la.expressions() {
                     if let Some(req) = extract_require_arg(expr) {
                         let pos = Node::start_position(la.local_token()).unwrap_or_default();
+                        let to = resolve_require(&req);
+                        let confidence = to.default_confidence();
                         ctx.push_edge(RawEdge {
                             from_fqdn: caller_fqdn.to_string(),
                             kind: EdgeKind::Imports,
-                            to: resolve_require(&req),
+                            to,
                             sites: vec![site_for(&ctx.core.file_path, pos)],
                             attributes: vec![],
+                            confidence,
                         });
                     }
                 }
@@ -321,12 +357,15 @@ fn record_calls_in_block(
             Stmt::Assignment(a) => {
                 for expr in a.expressions() {
                     if let Some(req) = extract_require_arg(expr) {
+                        let to = resolve_require(&req);
+                        let confidence = to.default_confidence();
                         ctx.push_edge(RawEdge {
                             from_fqdn: caller_fqdn.to_string(),
                             kind: EdgeKind::Imports,
-                            to: resolve_require(&req),
+                            to,
                             sites: vec![],
                             attributes: vec![],
+                            confidence,
                         });
                     }
                 }
@@ -353,24 +392,30 @@ fn record_calls_in_block(
 fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &FunctionCall) {
     // Distinguish `require("x.y")` (IMPORTS) from regular calls (CALLS).
     if let Some(req) = require_arg_from_call(fc) {
+        let to = resolve_require(&req);
+        let confidence = to.default_confidence();
         ctx.push_edge(RawEdge {
             from_fqdn: from_fqdn.to_string(),
             kind: EdgeKind::Imports,
-            to: resolve_require(&req),
+            to,
             sites: vec![site_for(&ctx.core.file_path, call_start(fc))],
             attributes: vec![],
+            confidence,
         });
         return;
     }
     let Some(call_name) = call_target_name(fc) else {
         return;
     };
+    let to = ResolvedOrUnresolved::Unresolved { name: call_name };
+    let confidence = to.default_confidence();
     ctx.push_edge(RawEdge {
         from_fqdn: from_fqdn.to_string(),
         kind: EdgeKind::Calls,
-        to: ResolvedOrUnresolved::Unresolved { name: call_name },
+        to,
         sites: vec![site_for(&ctx.core.file_path, call_start(fc))],
         attributes: vec![],
+        confidence,
     });
 }
 

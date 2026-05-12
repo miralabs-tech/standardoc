@@ -5,6 +5,7 @@ use std::sync::RwLock;
 use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
 use standardoc_ir::ExtractedFile;
 
+mod emmylua;
 mod extract;
 mod extract_doc;
 mod helpers;

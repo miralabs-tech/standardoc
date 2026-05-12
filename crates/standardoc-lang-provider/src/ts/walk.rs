@@ -202,12 +202,139 @@ fn process_item_p1(ctx: &mut TsWalkContext<'_>, item: &ModuleItem, current_modul
         ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(it)) => {
             process_export_default_decl(ctx, it, current_module);
         }
+        ModuleItem::ModuleDecl(ModuleDecl::ExportAll(it)) => {
+            // `export * from "./foo"` — re-exports every symbol of "./foo".
+            process_re_export_all(ctx, it, current_module);
+        }
+        ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(it)) => {
+            // `export { x } from "./foo"` — re-exports named symbols. Without
+            // `src` this is a local re-export (no cross-module traceability) —
+            // we skip it day-1, mirroring `process_import`'s alias-only path.
+            if let Some(src) = &it.src {
+                process_re_export_named(ctx, src, &it.specifiers, it.span, current_module);
+            }
+        }
         ModuleItem::Stmt(Stmt::Decl(decl)) => {
             process_decl(ctx, decl, current_module, false, decl.span().lo);
         }
-        // Namespace export / re-export (`export {…}`, `export * from …`,
-        // `export = …`) and bare expression statements are PUNTed day-1.
+        // `export = …` / TS-only export forms are PUNTed day-1.
         _ => {}
+    }
+}
+
+fn process_re_export_all(
+    ctx: &mut TsWalkContext<'_>,
+    item: &swc_core::ecma::ast::ExportAll,
+    current_module: &str,
+) {
+    let spec = item.src.value.to_string_lossy().into_owned();
+    let canonical = resolve_import(
+        &spec,
+        &ctx.from_file_abs_path,
+        &ctx.package_root,
+        &ctx.package_name,
+        ctx.tsconfig.as_ref(),
+    )
+    .unwrap_or_else(|| spec.clone());
+    let target = if ctx.core.defined_fqdns.contains(&canonical) {
+        ResolvedOrUnresolved::Resolved { fqdn: canonical }
+    } else {
+        ResolvedOrUnresolved::Unresolved { name: canonical }
+    };
+    let confidence = target.default_confidence();
+    ctx.push_edge(RawEdge {
+        from_fqdn: current_module.to_string(),
+        kind: EdgeKind::Imports,
+        to: target,
+        sites: vec![ctx.span_site(item.span)],
+        attributes: vec!["re-export".to_string(), "wildcard".to_string()],
+        confidence,
+    });
+}
+
+fn process_re_export_named(
+    ctx: &mut TsWalkContext<'_>,
+    src: &swc_core::ecma::ast::Str,
+    specifiers: &[swc_core::ecma::ast::ExportSpecifier],
+    span: Span,
+    current_module: &str,
+) {
+    use swc_core::ecma::ast::ExportSpecifier;
+    let spec = src.value.to_string_lossy().into_owned();
+    let canonical = resolve_import(
+        &spec,
+        &ctx.from_file_abs_path,
+        &ctx.package_root,
+        &ctx.package_name,
+        ctx.tsconfig.as_ref(),
+    )
+    .unwrap_or_else(|| spec.clone());
+    if specifiers.is_empty() {
+        let target = if ctx.core.defined_fqdns.contains(&canonical) {
+            ResolvedOrUnresolved::Resolved { fqdn: canonical }
+        } else {
+            ResolvedOrUnresolved::Unresolved { name: canonical }
+        };
+        let confidence = target.default_confidence();
+        ctx.push_edge(RawEdge {
+            from_fqdn: current_module.to_string(),
+            kind: EdgeKind::Imports,
+            to: target,
+            sites: vec![ctx.span_site(span)],
+            attributes: vec!["re-export".to_string()],
+            confidence,
+        });
+        return;
+    }
+    for spec_item in specifiers {
+        let imported_name = match spec_item {
+            ExportSpecifier::Named(named) => match &named.orig {
+                ModuleExportName::Ident(i) => i.sym.to_string(),
+                ModuleExportName::Str(s) => s.value.to_string_lossy().into_owned(),
+            },
+            ExportSpecifier::Default(_) => "default".to_string(),
+            ExportSpecifier::Namespace(_) => {
+                // `export * as ns from …` — emit a single edge to the module.
+                let target = if ctx.core.defined_fqdns.contains(&canonical) {
+                    ResolvedOrUnresolved::Resolved {
+                        fqdn: canonical.clone(),
+                    }
+                } else {
+                    ResolvedOrUnresolved::Unresolved {
+                        name: canonical.clone(),
+                    }
+                };
+                let confidence = target.default_confidence();
+                ctx.push_edge(RawEdge {
+                    from_fqdn: current_module.to_string(),
+                    kind: EdgeKind::Imports,
+                    to: target,
+                    sites: vec![ctx.span_site(span)],
+                    attributes: vec!["re-export".to_string(), "namespace".to_string()],
+                    confidence,
+                });
+                continue;
+            }
+        };
+        let target_fqdn = format!("{canonical}::{imported_name}");
+        let target = if ctx.core.defined_fqdns.contains(&target_fqdn) {
+            ResolvedOrUnresolved::Resolved {
+                fqdn: target_fqdn.clone(),
+            }
+        } else {
+            ResolvedOrUnresolved::Unresolved {
+                name: target_fqdn.clone(),
+            }
+        };
+        let confidence = target.default_confidence();
+        ctx.push_edge(RawEdge {
+            from_fqdn: current_module.to_string(),
+            kind: EdgeKind::Imports,
+            to: target,
+            sites: vec![ctx.span_site(span)],
+            attributes: vec!["re-export".to_string()],
+            confidence,
+        });
     }
 }
 
@@ -456,12 +583,14 @@ fn process_import(ctx: &mut TsWalkContext<'_>, item: &ImportDecl, current_module
                 target: target.clone(),
             },
         );
+        let confidence = target.default_confidence();
         ctx.push_edge(RawEdge {
             from_fqdn: current_module.to_string(),
             kind: EdgeKind::Imports,
             to: target,
             sites: vec![ctx.span_site(span)],
             attributes: vec![],
+            confidence,
         });
     }
     if item.specifiers.is_empty() {
@@ -472,12 +601,14 @@ fn process_import(ctx: &mut TsWalkContext<'_>, item: &ImportDecl, current_module
         } else {
             ResolvedOrUnresolved::Unresolved { name: canonical }
         };
+        let confidence = target.default_confidence();
         ctx.push_edge(RawEdge {
             from_fqdn: current_module.to_string(),
             kind: EdgeKind::Imports,
             to: target,
             sites: vec![ctx.span_site(span)],
             attributes: vec![],
+            confidence,
         });
     }
 }
@@ -546,33 +677,173 @@ fn extract_class_inner(
     if let Some(super_class) = &class.super_class {
         let span = super_class.span();
         let to = ctx.resolve_call(&render_expr_name(super_class), parent_fqdn);
+        let confidence = to.default_confidence();
         ctx.push_edge(RawEdge {
             from_fqdn: class_fqdn.clone(),
             kind: EdgeKind::Extends,
             to,
             sites: vec![ctx.span_site(span)],
             attributes: vec![],
+            confidence,
         });
     }
     for impl_target in &class.implements {
         let span = impl_target.span;
         let to = ctx.resolve_call(&render_ts_entity_name(&impl_target.expr), parent_fqdn);
+        let confidence = to.default_confidence();
         ctx.push_edge(RawEdge {
             from_fqdn: class_fqdn.clone(),
             kind: EdgeKind::Implements,
             to,
             sites: vec![ctx.span_site(span)],
             attributes: vec![],
+            confidence,
         });
     }
 
     for member in &class.body {
-        if let ClassMember::Method(method) = member
-            && let Some(method_name) = method_name_string(&method.key)
-        {
-            let method_sym = extract_method(ctx, method, &class_fqdn, &method_name);
-            ctx.push_symbol_with_doc(method_sym, method.span.lo);
+        match member {
+            ClassMember::Method(method) => {
+                if let Some(method_name) = method_name_string(&method.key) {
+                    let method_sym = extract_method(ctx, method, &class_fqdn, &method_name);
+                    ctx.push_symbol_with_doc(method_sym, method.span.lo);
+                }
+            }
+            ClassMember::PrivateMethod(pmethod) => {
+                let private_name = format!("#{}", pmethod.key.name);
+                let sym = extract_private_method(ctx, pmethod, &class_fqdn, &private_name);
+                ctx.push_symbol_with_doc(sym, pmethod.span.lo);
+            }
+            ClassMember::Constructor(ctor) => {
+                let sym = extract_constructor(ctx, ctor, &class_fqdn);
+                ctx.push_symbol_with_doc(sym, ctor.span.lo);
+            }
+            ClassMember::ClassProp(prop) => {
+                if let Some(prop_name) = method_name_string(&prop.key) {
+                    let sym = extract_class_prop(ctx, prop, &class_fqdn, &prop_name);
+                    ctx.push_symbol_with_doc(sym, prop.span.lo);
+                }
+            }
+            ClassMember::PrivateProp(pprop) => {
+                let private_name = format!("#{}", pprop.key.name);
+                let sym = extract_private_prop(ctx, pprop, &class_fqdn, &private_name);
+                ctx.push_symbol_with_doc(sym, pprop.span.lo);
+            }
+            // TsIndexSignature is a typing artifact (`[key: string]: T`) with no
+            // symbol identity. Empty / StaticBlock / AutoAccessor are skipped
+            // day-1 — additive enrichment if usage surfaces a real need.
+            _ => {}
         }
+    }
+}
+
+fn extract_constructor(
+    ctx: &TsWalkContext<'_>,
+    ctor: &swc_core::ecma::ast::Constructor,
+    class_fqdn: &str,
+) -> RawSymbol {
+    let fqdn = format!("{class_fqdn}::constructor");
+    let span = ctor.span;
+    let raw_access = ctor.accessibility.map(|a| match a {
+        swc_core::ecma::ast::Accessibility::Public => "public",
+        swc_core::ecma::ast::Accessibility::Private => "private",
+        swc_core::ecma::ast::Accessibility::Protected => "protected",
+    });
+    let visibility = map_access_modifier(raw_access, raw_access.is_none());
+    RawSymbol {
+        name: "constructor".to_string(),
+        fqdn,
+        kind: Kind::Function,
+        language_kind: LanguageKind::from("constructor"),
+        module: Some(class_fqdn.to_string()),
+        visibility,
+        location: ctx.span_location(span),
+        signature: None,
+        body_hash: ctx.body_hash_of(span),
+        attributes: vec![],
+    }
+}
+
+fn extract_class_prop(
+    ctx: &TsWalkContext<'_>,
+    prop: &swc_core::ecma::ast::ClassProp,
+    class_fqdn: &str,
+    prop_name: &str,
+) -> RawSymbol {
+    let fqdn = format!("{class_fqdn}::{prop_name}");
+    let span = prop.span;
+    let raw_access = prop.accessibility.map(|a| match a {
+        swc_core::ecma::ast::Accessibility::Public => "public",
+        swc_core::ecma::ast::Accessibility::Private => "private",
+        swc_core::ecma::ast::Accessibility::Protected => "protected",
+    });
+    let visibility = map_access_modifier(raw_access, raw_access.is_none());
+    let language_kind = if prop.is_static {
+        LanguageKind::from("static_property")
+    } else {
+        LanguageKind::from("property")
+    };
+    RawSymbol {
+        name: prop_name.to_string(),
+        fqdn,
+        kind: Kind::Value,
+        language_kind,
+        module: Some(class_fqdn.to_string()),
+        visibility,
+        location: ctx.span_location(span),
+        signature: None,
+        body_hash: ctx.body_hash_of(span),
+        attributes: vec![],
+    }
+}
+
+fn extract_private_method(
+    ctx: &TsWalkContext<'_>,
+    method: &swc_core::ecma::ast::PrivateMethod,
+    class_fqdn: &str,
+    method_name: &str,
+) -> RawSymbol {
+    let fqdn = format!("{class_fqdn}::{method_name}");
+    let span = method.span;
+    RawSymbol {
+        name: method_name.to_string(),
+        fqdn,
+        kind: Kind::Function,
+        language_kind: LanguageKind::from("method"),
+        module: Some(class_fqdn.to_string()),
+        // ECMAScript `#name` private is always private regardless of TS accessibility.
+        visibility: Visibility::Private,
+        location: ctx.span_location(span),
+        signature: Some(build_function_signature(ctx, &method.function)),
+        body_hash: ctx.body_hash_of(span),
+        attributes: vec![],
+    }
+}
+
+fn extract_private_prop(
+    ctx: &TsWalkContext<'_>,
+    prop: &swc_core::ecma::ast::PrivateProp,
+    class_fqdn: &str,
+    prop_name: &str,
+) -> RawSymbol {
+    let fqdn = format!("{class_fqdn}::{prop_name}");
+    let span = prop.span;
+    let language_kind = if prop.is_static {
+        LanguageKind::from("static_property")
+    } else {
+        LanguageKind::from("property")
+    };
+    RawSymbol {
+        name: prop_name.to_string(),
+        fqdn,
+        kind: Kind::Value,
+        language_kind,
+        module: Some(class_fqdn.to_string()),
+        visibility: Visibility::Private,
+        location: ctx.span_location(span),
+        signature: None,
+        body_hash: ctx.body_hash_of(span),
+        attributes: vec![],
     }
 }
 
@@ -675,12 +946,14 @@ fn extract_interface_decl(
     for ext in &item.extends {
         let span = ext.span;
         let to = ctx.resolve_call(&render_expr_name(&ext.expr), parent_fqdn);
+        let confidence = to.default_confidence();
         ctx.push_edge(RawEdge {
             from_fqdn: fqdn.clone(),
             kind: EdgeKind::Extends,
             to,
             sites: vec![ctx.span_site(span)],
             attributes: vec![],
+            confidence,
         });
     }
 }
@@ -765,6 +1038,7 @@ fn build_function_signature(
             is_async: function.is_async,
             deprecated: None,
             generic_params,
+            where_clause: None,
         },
         meta: SignatureMeta::default(),
     }
@@ -852,6 +1126,7 @@ fn signature_from_declarator(
                     is_async: arrow.is_async,
                     deprecated: None,
                     generic_params,
+                    where_clause: None,
                 },
                 meta: SignatureMeta::default(),
             })
