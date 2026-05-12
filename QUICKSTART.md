@@ -10,17 +10,17 @@
 
 ```sh
 cargo install standardoc-cli
-stdoc --version
+standardoc --version
 ```
 
-You now have a single binary `stdoc` with sub-commands:
+You now have a single binary `standardoc` with sub-commands:
 
 ```sh
-stdoc lsp <workspace>             # primary writer daemon (acquires fs lock)
-stdoc mcp <workspace> --readonly  # read-only MCP daemon
-stdoc index <workspace>           # one-shot scan + index
-stdoc rescan <workspace>          # rebuild from scratch
-stdoc purge-excluded <workspace>  # drop symbols matching .stdignore
+standardoc lsp <workspace>             # primary writer daemon (acquires fs lock)
+standardoc mcp <workspace> --readonly  # read-only MCP daemon
+standardoc index <workspace>           # one-shot scan + index
+standardoc rescan <workspace>          # rebuild from scratch
+standardoc purge-excluded <workspace>  # drop symbols matching .stdignore
 ```
 
 You can stop here if you only want CLI / standalone MCP usage with Claude
@@ -114,7 +114,7 @@ You also need an active LSP daemon (the **primary writer**) to keep the index
 fresh. Run it in a terminal:
 
 ```sh
-stdoc lsp /abs/path/to/workspace
+standardoc lsp /abs/path/to/workspace
 ```
 
 The LSP holds the workspace fs lock; multiple `--readonly` MCP clients can
@@ -139,7 +139,7 @@ removals trigger an auto re-index of the affected subtree.
 
 ### Pause / purge
 
-- `stdoc purge-excluded <workspace>` removes from the index any symbol whose
+- `standardoc purge-excluded <workspace>` removes from the index any symbol whose
   source file now matches `.stdignore` (useful after enriching the file).
 
 ---

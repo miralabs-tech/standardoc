@@ -72,7 +72,7 @@
   description: 'standardoc-ir (IR types, FQDN, edges, symbols)'
 - name: 'area/cli'
   color: '5319e7'
-  description: 'standardoc-cli (single binary `stdoc` with sub-commands)'
+  description: 'standardoc-cli (single binary `standardoc` with sub-commands)'
 - name: 'area/lsp'
   color: '5319e7'
   description: 'LSP daemon (writer, hover, navigation, diagnostics)'

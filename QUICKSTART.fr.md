@@ -11,17 +11,17 @@ par les agents IA.
 
 ```sh
 cargo install standardoc-cli
-stdoc --version
+standardoc --version
 ```
 
-Vous avez maintenant un binaire unique `stdoc` avec ses sous-commandes :
+Vous avez maintenant un binaire unique `standardoc` avec ses sous-commandes :
 
 ```sh
-stdoc lsp <workspace>             # daemon writer principal (acquiert le fs lock)
-stdoc mcp <workspace> --readonly  # daemon MCP en lecture seule
-stdoc index <workspace>           # scan + index ponctuel
-stdoc rescan <workspace>          # rebuild from scratch
-stdoc purge-excluded <workspace>  # supprime les symboles matchant .stdignore
+standardoc lsp <workspace>             # daemon writer principal (acquiert le fs lock)
+standardoc mcp <workspace> --readonly  # daemon MCP en lecture seule
+standardoc index <workspace>           # scan + index ponctuel
+standardoc rescan <workspace>          # rebuild from scratch
+standardoc purge-excluded <workspace>  # supprime les symboles matchant .stdignore
 ```
 
 Vous pouvez vous arrêter ici si vous ne voulez que l'usage CLI / MCP standalone
@@ -117,7 +117,7 @@ Vous avez aussi besoin d'un daemon LSP actif (le **writer principal**) pour
 garder l'index frais. Lancez-le dans un terminal :
 
 ```sh
-stdoc lsp /chemin/abs/vers/workspace
+standardoc lsp /chemin/abs/vers/workspace
 ```
 
 Le LSP tient le fs lock du workspace ; plusieurs clients MCP `--readonly`
@@ -143,7 +143,7 @@ sous-arbre concerné.
 
 ### Pause / purge
 
-- `stdoc purge-excluded <workspace>` retire de l'index tout symbole dont le
+- `standardoc purge-excluded <workspace>` retire de l'index tout symbole dont le
   fichier source matche désormais `.stdignore` (utile après enrichissement
   du fichier).
 

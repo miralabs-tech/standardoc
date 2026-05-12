@@ -1,7 +1,7 @@
 name: Release
 
 # Triggered when a tag matching `v*` is pushed (e.g. `v1.0.0-beta.1`).
-# Builds pre-compiled `stdoc` binaries for Linux x64/arm64, macOS x64/arm64,
+# Builds pre-compiled `standardoc` binaries for Linux x64/arm64, macOS x64/arm64,
 # Windows x64; generates a `version.json` manifest consumed by the VSCode
 # extension's future version selector; creates a GitHub Release with
 # archives + checksums + manifest attached, body pulled from CHANGELOG.md.
@@ -72,16 +72,16 @@ jobs:
           mkdir -p staging
           cp README.md QUICKSTART.md CHANGELOG.md TODO-LIST.md LICENSE staging/
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp target/${{ matrix.target }}/release/stdoc.exe staging/
+            cp target/${{ matrix.target }}/release/standardoc.exe staging/
           else
-            cp target/${{ matrix.target }}/release/stdoc staging/
+            cp target/${{ matrix.target }}/release/standardoc staging/
           fi
 
       - name: Archive (tar.gz)
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
-          name="stdoc-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="standardoc-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mv staging "$name"
           tar czf "${name}.tar.gz" "$name"
           shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
@@ -90,7 +90,7 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $name = "stdoc-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          $name = "standardoc-$env:GITHUB_REF_NAME-${{ matrix.target }}"
           Move-Item staging $name
           Compress-Archive -Path $name -DestinationPath "$name.zip"
           $hash = (Get-FileHash -Algorithm SHA256 "$name.zip").Hash.ToLower()
@@ -98,12 +98,12 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: stdoc-${{ matrix.target }}
+          name: standardoc-${{ matrix.target }}
           path: |
-            stdoc-*.tar.gz
-            stdoc-*.tar.gz.sha256
-            stdoc-*.zip
-            stdoc-*.zip.sha256
+            standardoc-*.tar.gz
+            standardoc-*.tar.gz.sha256
+            standardoc-*.zip
+            standardoc-*.zip.sha256
           if-no-files-found: error
 
   release:
@@ -150,7 +150,7 @@ jobs:
           first=1
           for t in "${!targets[@]}"; do
             ext="${targets[$t]}"
-            file="stdoc-${REF_NAME}-${t}.${ext}"
+            file="standardoc-${REF_NAME}-${t}.${ext}"
             sha_file="release-assets/${file}.sha256"
             if [ ! -f "$sha_file" ]; then
               echo "::warning::missing checksum for $file"

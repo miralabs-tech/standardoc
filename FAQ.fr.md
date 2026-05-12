@@ -34,12 +34,12 @@ trait `LanguageProvider` — voir [`crates/standardoc-lang-provider/`](crates/st
 cargo install standardoc-cli
 ```
 
-Ça vous donne le binaire `stdoc`. Pour le flow VSCode intégré, installez en
+Ça vous donne le binaire `standardoc`. Pour le flow VSCode intégré, installez en
 plus l'extension Standardoc. Walkthrough complet : [QUICKSTART.fr.md](QUICKSTART.fr.md).
 
 ## L'extension VSCode est obligatoire ?
 
-Non. Le CLI marche standalone — vous pouvez lancer `stdoc lsp <ws>` + `stdoc
+Non. Le CLI marche standalone — vous pouvez lancer `standardoc lsp <ws>` + `standardoc
 mcp <ws> --readonly` dans deux terminaux et utiliser Standardoc depuis Claude
 Desktop, Cursor, le CLI Claude Code, ou n'importe quel client MCP-aware.
 L'extension rend juste le flow seamless dans VSCode.

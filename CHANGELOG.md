@@ -11,7 +11,7 @@ Targeting `v1.0.0-beta.1`. Major rewrite from the v0 prototype:
 - AST-direct Rust + TS providers (`syn`, `swc`)
 - SQLite + FTS5 graph storage (zero-duplication external content)
 - 2 MCP tools day-1 (`find_symbol`, `get_context`)
-- Single binary `stdoc` with sub-commands (LSP, MCP, index, rescan, watch, query, purge-excluded)
+- Single binary `standardoc` with sub-commands (LSP, MCP, index, rescan, watch, query, purge-excluded)
 - LSP daemon = primary writer, MCP daemons = read-only
 - VSCode extension with daemon supervisor + init opt-in flow
 - AI agent skill generation for Claude Code

@@ -34,12 +34,12 @@ native parsers or tree-sitter. Adding a language = implementing the
 cargo install standardoc-cli
 ```
 
-That gets you the `stdoc` binary. For the integrated VSCode flow, install the
+That gets you the `standardoc` binary. For the integrated VSCode flow, install the
 Standardoc extension on top. Full walkthrough: [QUICKSTART.md](QUICKSTART.md).
 
 ## Is the VSCode extension required?
 
-No. The CLI works standalone — you can run `stdoc lsp <ws>` + `stdoc mcp <ws>
+No. The CLI works standalone — you can run `standardoc lsp <ws>` + `standardoc mcp <ws>
 --readonly` in two terminals and use Standardoc from Claude Desktop, Cursor,
 the Claude Code CLI, or any MCP-aware client. The extension just makes the
 flow seamless inside VSCode.
