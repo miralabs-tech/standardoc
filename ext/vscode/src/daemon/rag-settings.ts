@@ -37,16 +37,37 @@ export async function writeRagEmbedder(embedder: RagEmbedder): Promise<void> {
     .update(SETTING_EMBEDDER, embedder, vscode.ConfigurationTarget.Workspace);
 }
 
+/** Debounce window for RAG settings changes. Coalesces rapid double
+ * fires (settings.json batched save, QuickPick double-click, …) into a
+ * single callback so the supervisor restarts only once per intent. */
+const WATCH_DEBOUNCE_MS = 200;
+
 /**
- * Subscribes to configuration changes that affect the RAG flags. Returns
- * a disposable. `callback` is invoked synchronously on every change
- * that touches either `ragEnabled` or `ragEmbedder` — the caller
- * decides whether to debounce or trigger a restart.
+ * Subscribes to configuration changes that affect the RAG flags. The
+ * callback fires `WATCH_DEBOUNCE_MS` after the LAST observed change
+ * to either `ragEnabled` or `ragEmbedder` — rapid double-fires
+ * collapse into a single callback. Returns a disposable that cancels
+ * the pending fire on dispose.
  */
 export function watchRagSettings(callback: (next: RagSettings) => void): vscode.Disposable {
-  return vscode.workspace.onDidChangeConfiguration(e => {
-    if (e.affectsConfiguration(SETTING_ENABLED) || e.affectsConfiguration(SETTING_EMBEDDER)) {
-      callback(readRagSettings());
+  let pending: ReturnType<typeof setTimeout> | null = null;
+  const subscription = vscode.workspace.onDidChangeConfiguration(e => {
+    if (!(e.affectsConfiguration(SETTING_ENABLED) || e.affectsConfiguration(SETTING_EMBEDDER))) {
+      return;
     }
+    if (pending !== null) clearTimeout(pending);
+    pending = setTimeout(() => {
+      pending = null;
+      callback(readRagSettings());
+    }, WATCH_DEBOUNCE_MS);
   });
+  return {
+    dispose: () => {
+      if (pending !== null) {
+        clearTimeout(pending);
+        pending = null;
+      }
+      subscription.dispose();
+    },
+  };
 }
