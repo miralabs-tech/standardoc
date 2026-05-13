@@ -34,6 +34,17 @@ use crate::mcp::usage::{
 
 const FIND_SYMBOL_DEFAULT_LIMIT: u8 = 20;
 const FIND_SYMBOL_MAX_LIMIT: u8 = 100;
+/// Similarity floor for the `did_you_mean` suggestion bundle attached to
+/// empty `find_symbol` / `find_symbols_by_pattern` results. Lower than
+/// `find_similar_symbols`'s default 0.8 because the caller has already
+/// observed a zero-hit query — surfacing weaker alternatives is the
+/// load-bearing value here. Strictly less than the existing
+/// `clamp_threshold` floor would still keep noise out for completely
+/// unrelated names.
+const DID_YOU_MEAN_THRESHOLD: f32 = 0.6;
+/// Hard cap on the size of the `did_you_mean` array. Five is enough to
+/// surface typo / cluster matches without flooding the tool response.
+const DID_YOU_MEAN_LIMIT: usize = 5;
 const GET_CONTEXT_DEFAULT_DEPTH: u8 = 1;
 const FIND_SIMILAR_DEFAULT_THRESHOLD: f32 = 0.8;
 const CHUNK_REFS_DEFAULT_LIMIT: u32 = 10;
@@ -261,7 +272,7 @@ impl StandardocMcp {
     /// exact `module` (no wildcards — use `find_symbols_by_pattern` for
     /// glob-style module/name matching).
     #[tool(
-        description = "Full-text search across the workspace index over symbol names and FQDNs. Returns ranked matches as a JSON array. `limit` defaults to 20 and is capped at 100 server-side. Use this to discover symbols when you only know a fragment of the name; follow up with `get_context` to drill into a specific FQDN. Optional filters: `kind` (function/type/value/module/macro), `visibility` (public/private/crate/protected), `module` (exact match on the symbol's module fqdn)."
+        description = "Full-text search across the workspace index over symbol names and FQDNs. Returns ranked matches as a JSON array. `limit` defaults to 20 and is capped at 100 server-side. Use this to discover symbols when you only know a fragment of the name; follow up with `get_context` to drill into a specific FQDN. Optional filters: `kind` (function/type/value/module/macro), `visibility` (public/private/crate/protected), `module` (exact match on the symbol's module fqdn). When the query returns zero matches, the response switches to `{results: [], did_you_mean: [{fqdn, name, kind, score}, ...]}` with up to 5 strsim-based suggestions (threshold 0.6). One probe is enough — accept the absence rather than trying variant names."
     )]
     async fn find_symbol(
         &self,
@@ -286,12 +297,30 @@ impl StandardocMcp {
         )?;
         let limit = clamp_limit(params.limit);
         let handle = self.handle.clone();
+        let filter_for_search = filter.clone();
+        let trimmed_for_search = trimmed.clone();
         let result = tokio::task::spawn_blocking(move || {
-            query::search_text(&handle, &trimmed, limit as usize, &filter)
+            query::search_text(&handle, &trimmed_for_search, limit as usize, &filter_for_search)
         })
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
+
+        if result.is_empty() {
+            let suggestions = compute_did_you_mean(self.handle.clone(), trimmed, filter).await?;
+            if !suggestions.is_empty() {
+                return Ok(success_json_with_usage(
+                    &serde_json::json!({
+                        "results": Vec::<RawSymbol>::new(),
+                        "did_you_mean": suggestions,
+                    }),
+                    self.handle.workspace_root(),
+                    "find_symbol",
+                    None,
+                    Vec::new(),
+                ));
+            }
+        }
 
         let files = files_from_symbols(&result);
         Ok(success_json_with_usage(
@@ -352,7 +381,7 @@ impl StandardocMcp {
     /// Combine with the same filters as `find_symbol` to scope the
     /// search.
     #[tool(
-        description = "Glob-pattern search over symbol names and FQDNs (SQLite GLOB: `*`, `?`, `[abc]`, case-sensitive). A symbol matches when either its name or its fqdn satisfies the pattern. Use this to detect cross-module duplications (e.g. `strip_*_extension` to catch every `strip_<lang>_extension` helper). Optional filters: `kind`, `visibility`, `module` — same semantics as `find_symbol`."
+        description = "Glob-pattern search over symbol names and FQDNs (SQLite GLOB: `*`, `?`, `[abc]`, case-sensitive). A symbol matches when either its name or its fqdn satisfies the pattern. Use this to detect cross-module duplications (e.g. `strip_*_extension` to catch every `strip_<lang>_extension` helper). Optional filters: `kind`, `visibility`, `module` — same semantics as `find_symbol`. When the pattern returns zero matches, the response switches to `{results: [], did_you_mean: [...]}` running strsim on the pattern's core (wildcards stripped) — useful for typos like `*to_token_string*` → `to_token_stream`."
     )]
     async fn find_symbols_by_pattern(
         &self,
@@ -377,12 +406,38 @@ impl StandardocMcp {
         )?;
         let limit = clamp_limit(params.limit);
         let handle = self.handle.clone();
+        let filter_for_search = filter.clone();
+        let trimmed_for_search = trimmed.clone();
         let result = tokio::task::spawn_blocking(move || {
-            query::find_by_pattern(&handle, &trimmed, &filter, limit as usize)
+            query::find_by_pattern(
+                &handle,
+                &trimmed_for_search,
+                &filter_for_search,
+                limit as usize,
+            )
         })
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
+
+        if result.is_empty() {
+            let core = glob_core_text(&trimmed);
+            if !core.is_empty() {
+                let suggestions = compute_did_you_mean(self.handle.clone(), core, filter).await?;
+                if !suggestions.is_empty() {
+                    return Ok(success_json_with_usage(
+                        &serde_json::json!({
+                            "results": Vec::<RawSymbol>::new(),
+                            "did_you_mean": suggestions,
+                        }),
+                        self.handle.workspace_root(),
+                        "find_symbols_by_pattern",
+                        None,
+                        Vec::new(),
+                    ));
+                }
+            }
+        }
 
         let files = files_from_symbols(&result);
         Ok(success_json_with_usage(
@@ -1330,6 +1385,55 @@ fn parse_visibility(s: &str) -> Result<Visibility, ErrorData> {
     }
 }
 
+/// Runs the strsim-backed similarity search to populate the
+/// `did_you_mean` field surfaced by `find_symbol` /
+/// `find_symbols_by_pattern` when the primary query returns zero hits.
+/// Returns a slim JSON array `[{fqdn, name, kind, score}, ...]` capped
+/// at `DID_YOU_MEAN_LIMIT` and floored at `DID_YOU_MEAN_THRESHOLD`.
+async fn compute_did_you_mean(
+    handle: IndexHandle,
+    text: String,
+    filter: SymbolFilter,
+) -> Result<Vec<serde_json::Value>, ErrorData> {
+    let pairs = tokio::task::spawn_blocking(move || {
+        query::find_similar(
+            &handle,
+            &text,
+            DID_YOU_MEAN_THRESHOLD,
+            &filter,
+            DID_YOU_MEAN_LIMIT,
+        )
+    })
+    .await
+    .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+    .map_err(|e| server_error_to_rmcp(&e.into()))?;
+    Ok(pairs
+        .into_iter()
+        .map(|(sym, score)| {
+            serde_json::json!({
+                "fqdn": sym.fqdn,
+                "name": sym.name,
+                "kind": serde_json::to_value(sym.kind).unwrap_or(serde_json::Value::Null),
+                "score": score,
+            })
+        })
+        .collect())
+}
+
+/// Strips SQLite GLOB wildcards (`*`, `?`, `[`, `]`) from a pattern to
+/// extract a "core name" usable for similarity scoring. Backs the
+/// `did_you_mean` enrichment on empty `find_symbols_by_pattern`
+/// results — e.g. `*to_token_string*` → `to_token_string`, then strsim
+/// surfaces `to_token_stream`.
+fn glob_core_text(pattern: &str) -> String {
+    pattern
+        .chars()
+        .filter(|c| !matches!(c, '*' | '?' | '[' | ']'))
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 fn success_json<T: Serialize>(value: &T) -> CallToolResult {
     match serde_json::to_string_pretty(value) {
         Ok(json) => CallToolResult::success(vec![Content::text(json)]),
@@ -1800,6 +1904,33 @@ mod tests {
         assert!(parse_threshold(Some(f32::NAN)).is_err());
         assert!(parse_threshold(Some(f32::INFINITY)).is_err());
         assert!(parse_threshold(Some(f32::NEG_INFINITY)).is_err());
+    }
+
+    #[test]
+    fn glob_core_text_strips_star_wildcard() {
+        assert_eq!(glob_core_text("*to_token_string*"), "to_token_string");
+    }
+
+    #[test]
+    fn glob_core_text_strips_question_and_bracket_wildcards_but_keeps_inner_chars() {
+        // Brackets themselves are stripped ; the character class content
+        // is kept verbatim — strsim still benefits even from `[abc]`
+        // alternatives rather than dropping the whole group.
+        assert_eq!(glob_core_text("get_?[abc]_value"), "get_abc_value");
+    }
+
+    #[test]
+    fn glob_core_text_empty_for_only_wildcards() {
+        assert_eq!(glob_core_text("***"), "");
+        assert_eq!(glob_core_text("?*[]"), "");
+    }
+
+    #[test]
+    fn glob_core_text_preserves_alphanumeric_and_separators() {
+        assert_eq!(
+            glob_core_text("standardoc-cli::main"),
+            "standardoc-cli::main"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

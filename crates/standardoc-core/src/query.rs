@@ -230,6 +230,10 @@ pub fn search_text(
     limit: usize,
     filter: &SymbolFilter,
 ) -> Result<Vec<RawSymbol>, StorageError> {
+    let sanitized = sanitize_fts5_query(query);
+    if sanitized.is_empty() {
+        return Ok(Vec::new());
+    }
     let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
     let kind_text = filter.kind.map(kind_to_sql_text);
     let vis_text = filter.visibility.map(visibility_to_sql_text);
@@ -253,7 +257,7 @@ pub fn search_text(
         let rows = stmt
             .query_map(
                 rusqlite::params![
-                    query,
+                    sanitized,
                     kind_text,
                     vis_text,
                     module,
@@ -265,6 +269,32 @@ pub fn search_text(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter().map(build_symbol).collect()
     })
+}
+
+/// Strips FTS5 syntactic chars (`-` NOT prefix, `"` phrase quoting,
+/// `*` prefix wildcard, `:` column filter, `^` initial-token op, `()`
+/// grouping, `+` NEAR/B etween) from the user's query and replaces them
+/// with spaces. Multiple resulting tokens become an implicit-AND match.
+///
+/// Required because `find_symbol("standardoc-cli")` would otherwise be
+/// parsed by FTS5 as `standardoc NOT cli` — excluding the very thing
+/// the caller asked for. Standardoc's `find_symbol` is a high-level
+/// search API, not an FTS5 console ; users expect "match all tokens".
+fn sanitize_fts5_query(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut last_was_space = true;
+    for c in raw.chars() {
+        let keep = c.is_alphanumeric() || c == '_';
+        if keep {
+            out.push(c);
+            last_was_space = false;
+        } else if !last_was_space {
+            out.push(' ');
+            last_was_space = true;
+        }
+    }
+    out.truncate(out.trim_end().len());
+    out
 }
 
 /// Returns symbols matching `filter` ordered by canonical fqdn. No
@@ -1844,6 +1874,53 @@ mod tests {
         let edges = edges_to(&handle, "external::thing").unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].from_fqdn, "crate::caller");
+    }
+
+    #[test]
+    fn sanitize_fts5_query_strips_hyphen_and_joins_with_space() {
+        assert_eq!(sanitize_fts5_query("standardoc-cli"), "standardoc cli");
+    }
+
+    #[test]
+    fn sanitize_fts5_query_replaces_double_colon_with_space() {
+        assert_eq!(sanitize_fts5_query("Type::method"), "Type method");
+    }
+
+    #[test]
+    fn sanitize_fts5_query_collapses_consecutive_specials() {
+        assert_eq!(sanitize_fts5_query("foo---bar::baz"), "foo bar baz");
+    }
+
+    #[test]
+    fn sanitize_fts5_query_preserves_alphanumeric_and_underscore_unchanged() {
+        assert_eq!(sanitize_fts5_query("my_func2"), "my_func2");
+    }
+
+    #[test]
+    fn sanitize_fts5_query_empty_for_only_special_chars() {
+        assert_eq!(sanitize_fts5_query("---"), "");
+        assert_eq!(sanitize_fts5_query(""), "");
+        assert_eq!(sanitize_fts5_query("   "), "");
+    }
+
+    #[test]
+    fn search_text_matches_hyphenated_query() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol(&conn, "src/main.rs", "cli_entry", "standardoc_cli::cli_entry", 1);
+        }
+        let results = search_text(&handle, "standardoc-cli", 10, &SymbolFilter::default()).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fqdn, "standardoc_cli::cli_entry");
+    }
+
+    #[test]
+    fn search_text_returns_empty_for_only_special_chars_query() {
+        let (_dir, handle) = open_handle();
+        let results = search_text(&handle, "---", 10, &SymbolFilter::default()).unwrap();
+        assert!(results.is_empty());
     }
 
     #[test]
