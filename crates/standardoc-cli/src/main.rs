@@ -65,6 +65,19 @@ enum Command {
         /// transport supported and is the default — this flag is ignored.
         #[arg(long, hide = true)]
         stdio: bool,
+
+        /// Enable the RAG (prose retrieval) layer alongside the LSP daemon.
+        /// The LSP daemon is the primary write-side in the ext VSCode setup,
+        /// so this is where the RAG cold-start + watcher belong. Same sidecar
+        /// `.standardoc/rag.db` as the MCP `--rag` path.
+        #[arg(long)]
+        rag: bool,
+
+        /// Embedder backend used when `--rag` is set. Same semantics as the
+        /// MCP sub-command (`mock` = deterministic stub, `candle` = BGE-small
+        /// downloaded to `~/.cache/standardoc/models/` on first run).
+        #[arg(long, default_value = "mock", value_parser = ["mock", "candle"])]
+        embedder: String,
     },
 
     /// Run the MCP daemon. Default transport: stdio. Use `--http` to serve
@@ -227,7 +240,12 @@ fn main_inner() -> Result<(), ServerError> {
         Command::Query(args) => cmd_query(&args),
         Command::Rescan { path } => cmd_rescan(&path),
         Command::PurgeExcluded { path, yes } => cmd_purge_excluded(&path, yes),
-        Command::Lsp { path, stdio: _ } => cmd_lsp(&path),
+        Command::Lsp {
+            path,
+            stdio: _,
+            rag,
+            embedder,
+        } => cmd_lsp(&path, rag, &embedder),
         Command::Mcp {
             path,
             readonly,
@@ -259,18 +277,29 @@ fn cmd_schema_version(path: &Path) -> Result<(), ServerError> {
     Ok(())
 }
 
-fn cmd_lsp(path: &Path) -> Result<(), ServerError> {
+fn cmd_lsp(path: &Path, rag: bool, embedder: &str) -> Result<(), ServerError> {
     let provider: Arc<dyn standardoc_core::LanguageProvider> = Arc::new(WorkspaceProvider::new());
     let handle = IndexHandle::open(path)?;
     let _ = warn::boot_binary_sweep(handle.workspace_root());
     let _ = warn::boot_lockfile_invalidation_sweep(&handle, handle.workspace_root());
     let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
 
+    let rag_pipeline = if rag {
+        Some(build_rag_pipeline(handle.workspace_root(), embedder)?)
+    } else {
+        None
+    };
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(ServerError::Io)?;
-    runtime.block_on(standardoc_server::serve_lsp(handle, provider, filters))
+    runtime.block_on(standardoc_server::serve_lsp(
+        handle,
+        provider,
+        filters,
+        rag_pipeline,
+    ))
 }
 
 fn cmd_mcp(

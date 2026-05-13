@@ -30,6 +30,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const lsp = new LspClient(workspaceRoot, output);
   const mcp = new McpClient(workspaceRoot, output, port);
   const initialRag = readRagSettings();
+  lsp.setRagSettings(initialRag);
   mcp.setRagSettings(initialRag);
   output.appendLine(
     `[mcp] rag settings: enabled=${initialRag.enabled} embedder=${initialRag.embedder}`,
@@ -53,6 +54,7 @@ export function activate(context: vscode.ExtensionContext): void {
       output.appendLine(
         `[mcp] rag settings changed: enabled=${next.enabled} embedder=${next.embedder} — restarting daemon`,
       );
+      lsp.setRagSettings(next);
       mcp.setRagSettings(next);
       statusBar.update(supervisor.current(), next);
       // The daemon retries SQLite open on transient lock-release races

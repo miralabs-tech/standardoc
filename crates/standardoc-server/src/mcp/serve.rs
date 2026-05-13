@@ -196,7 +196,7 @@ pub fn kick_off_indexing(
     });
 }
 
-fn run_rag_cold_start(
+pub(crate) fn run_rag_cold_start(
     pipeline: &Arc<RagPipeline>,
     handle: &IndexHandle,
     filters: &Arc<RwLock<ScanFilters>>,
@@ -211,7 +211,7 @@ fn run_rag_cold_start(
     }
 }
 
-fn spawn_rag_watcher_into_slot(
+pub(crate) fn spawn_rag_watcher_into_slot(
     slot: &Arc<std::sync::Mutex<Option<standardoc_core::RagWatcherHandle>>>,
     handle: IndexHandle,
     pipeline: Arc<RagPipeline>,
