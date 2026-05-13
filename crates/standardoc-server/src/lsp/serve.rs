@@ -45,12 +45,16 @@ pub async fn serve_lsp(
         let watcher_slot = Arc::clone(&rag_watcher_slot);
         let relink_slot = Arc::clone(&rag_relink_slot);
         tokio::task::spawn_blocking(move || {
-            // On a fresh workspace the AST cold-start may still be running
-            // when RAG cold-start fires; the initial `relink_all` runs
-            // against an empty workspace_fqdns list and produces
-            // frontmatter-only links. The revision-relink watcher
-            // catches up automatically once the AST cold-start commits
-            // and bumps `handle.revision()`.
+            // T-B Phase 2 : wait for the AST cold-start to commit at
+            // least once before running the initial relink, so the
+            // workspace_fqdns lookup sees the real graph rather than
+            // an empty list. The wait is capped at 30 s (graceful
+            // timeout — empty workspaces stay at revision 0 forever),
+            // and the revision-relink watcher takes over for any
+            // subsequent bumps. The cold-start chunker / embedder
+            // still run unconditionally so prose-side changes are
+            // captured regardless of AST readiness.
+            wait_for_first_revision_bump(&handle_for_rag);
             run_rag_relink_all(&pipeline, &handle_for_rag);
             run_rag_cold_start(&pipeline, &handle_for_rag, &filters_for_rag);
             spawn_revision_relink_into_slot(
@@ -69,6 +73,24 @@ pub async fn serve_lsp(
     drop(rag_watcher_slot);
     drop(rag_relink_slot);
     Ok(())
+}
+
+/// Spins until `handle.revision()` reports a non-zero value or
+/// [`AST_COLD_START_WAIT_CAP`] elapses. Returns immediately on any
+/// observed bump : the first commit is enough for the relink that
+/// follows to see SOME workspace fqdns rather than an empty list.
+/// Empty workspaces (no Rust/TS files) stay at revision 0 forever ;
+/// the cap prevents the LSP RAG layer from hanging.
+fn wait_for_first_revision_bump(handle: &IndexHandle) {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(500);
+    const CAP: std::time::Duration = std::time::Duration::from_secs(30);
+    let start = std::time::Instant::now();
+    while start.elapsed() < CAP {
+        if handle.revision() > 0 {
+            return;
+        }
+        std::thread::sleep(POLL);
+    }
 }
 
 /// Build the `LspService` and its `ClientSocket` without consuming them via
