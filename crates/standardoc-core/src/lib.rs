@@ -20,8 +20,8 @@ pub use pipeline::{
 };
 pub use rag::{
     CoreSymbolLookup, FrontmatterDirective, RagPipeline, RagPipelineError, RagWatcherHandle,
-    WORKSPACE_FQDN_LIMIT, discover_prose_sources, is_convention_path, read_frontmatter_directive,
-    spawn_rag_watcher,
+    RevisionRelinkHandle, WORKSPACE_FQDN_LIMIT, discover_prose_sources, is_convention_path,
+    read_frontmatter_directive, spawn_rag_watcher, spawn_revision_relink_watcher,
 };
 pub use sessions::{
     SessionRow, SessionStatus, SessionsError, SessionsHandle, UsagePeriod, UsageStatsRow,

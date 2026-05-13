@@ -17,6 +17,7 @@
 mod discovery;
 mod lookup;
 mod pipeline;
+mod relink_watcher;
 mod watcher;
 
 pub use discovery::{
@@ -24,4 +25,5 @@ pub use discovery::{
 };
 pub use lookup::{CoreSymbolLookup, WORKSPACE_FQDN_LIMIT};
 pub use pipeline::{RagPipeline, RagPipelineError};
+pub use relink_watcher::{RevisionRelinkHandle, spawn_revision_relink_watcher};
 pub use watcher::{RagWatcherHandle, spawn_rag_watcher};

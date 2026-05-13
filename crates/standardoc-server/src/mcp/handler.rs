@@ -15,7 +15,8 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use standardoc_core::{
-    IndexHandle, LanguageProvider, RagWatcherHandle, ResolveOutcome, ResolverRegistry, ScanFilters,
+    IndexHandle, LanguageProvider, RagWatcherHandle, ResolveOutcome, ResolverRegistry,
+    RevisionRelinkHandle, ScanFilters,
     SessionsHandle, UsagePeriod, WatcherHandle, dump_sessions_to_markdown,
     query::{self, SymbolFilter},
 };
@@ -91,6 +92,10 @@ pub struct StandardocMcp {
     index_ready: Arc<AtomicBool>,
     watcher: Arc<Mutex<Option<WatcherHandle>>>,
     rag_watcher: Arc<Mutex<Option<RagWatcherHandle>>>,
+    /// Optional revision-driven re-link watcher (track T-B). Lives
+    /// alongside `rag_watcher`. Holds the join handle so dropping the
+    /// `StandardocMcp` joins the thread on shutdown.
+    rag_relink_watcher: Arc<Mutex<Option<RevisionRelinkHandle>>>,
     /// In-memory cache of `(fqdn → ts_unix)` recording when each FQDN
     /// was last fetched at `depth=1`. Drives the "naked depth=2"
     /// routing hint: a depth=2 call with no recent depth=1 on the
@@ -120,6 +125,7 @@ impl StandardocMcp {
             index_ready: Arc::new(AtomicBool::new(false)),
             watcher: Arc::new(Mutex::new(None)),
             rag_watcher: Arc::new(Mutex::new(None)),
+            rag_relink_watcher: Arc::new(Mutex::new(None)),
             recent_depth1: Arc::new(Mutex::new(HashMap::new())),
             tool_router: Self::tool_router(),
         }
@@ -842,6 +848,10 @@ impl StandardocMcp {
 
     pub fn rag_watcher_slot(&self) -> Arc<Mutex<Option<RagWatcherHandle>>> {
         Arc::clone(&self.rag_watcher)
+    }
+
+    pub fn rag_relink_watcher_slot(&self) -> Arc<Mutex<Option<RevisionRelinkHandle>>> {
+        Arc::clone(&self.rag_relink_watcher)
     }
 
     /// Enables the RAG layer for this handler. Builder-style so existing

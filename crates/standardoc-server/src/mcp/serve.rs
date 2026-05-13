@@ -9,7 +9,8 @@ use rmcp::transport::streamable_http_server::tower::{
     StreamableHttpServerConfig, StreamableHttpService,
 };
 use standardoc_core::{
-    IndexHandle, LanguageProvider, RagPipeline, ScanFilters, spawn_rag_watcher, spawn_watcher,
+    IndexHandle, LanguageProvider, RagPipeline, ScanFilters, spawn_rag_watcher,
+    spawn_revision_relink_watcher, spawn_watcher,
 };
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -154,12 +155,19 @@ pub fn kick_off_indexing(
             // workspace where the LSP has not yet populated index.db,
             // the linker's workspace_fqdns lookup will return an empty
             // list, producing frontmatter-only links. The watcher will
-            // pick up subsequent `.md` saves ; the user can also hit
-            // `Standardoc: Rebuild RAG index` once the LSP cold start
-            // completes to backfill the auto-fqdn / auto-name links.
+            // pick up subsequent `.md` saves ; the revision watcher
+            // catches up via `relink_all` once the LSP cold start
+            // bumps `handle.revision()`.
             let rag_watcher_slot = mcp.rag_watcher_slot();
+            let rag_relink_slot = mcp.rag_relink_watcher_slot();
             tokio::spawn(async move {
+                run_rag_relink_all(&pipeline, &handle);
                 run_rag_cold_start(&pipeline, &handle, &filters);
+                spawn_revision_relink_into_slot(
+                    &rag_relink_slot,
+                    handle.clone(),
+                    Arc::clone(&pipeline),
+                );
                 spawn_rag_watcher_into_slot(&rag_watcher_slot, handle, pipeline, filters);
             });
         }
@@ -168,6 +176,7 @@ pub fn kick_off_indexing(
 
     let watcher_slot = mcp.watcher_slot();
     let rag_watcher_slot = mcp.rag_watcher_slot();
+    let rag_relink_slot = mcp.rag_relink_watcher_slot();
     tokio::spawn(async move {
         match run_cold_start_with_progress(
             handle.clone(),
@@ -187,7 +196,13 @@ pub fn kick_off_indexing(
                     Err(e) => eprintln!("standardoc mcp: watcher boot failed: {e}"),
                 }
                 if let Some(pipeline) = rag_pipeline {
+                    run_rag_relink_all(&pipeline, &handle);
                     run_rag_cold_start(&pipeline, &handle, &filters);
+                    spawn_revision_relink_into_slot(
+                        &rag_relink_slot,
+                        handle.clone(),
+                        Arc::clone(&pipeline),
+                    );
                     spawn_rag_watcher_into_slot(&rag_watcher_slot, handle, pipeline, filters);
                 }
             }
@@ -224,6 +239,36 @@ pub(crate) fn spawn_rag_watcher_into_slot(
             }
         }
         Err(e) => eprintln!("standardoc mcp: rag watcher boot failed: {e}"),
+    }
+}
+
+/// One-shot relink pass against the current AST graph. Cheap when the
+/// workspace fqdn set hasn't changed since the previous sweep (single
+/// `SELECT value FROM schema_meta` + BLAKE3 over the sorted fqdn list).
+/// Errors are logged and swallowed — the daemon must boot even when
+/// relink fails.
+pub(crate) fn run_rag_relink_all(pipeline: &Arc<RagPipeline>, handle: &IndexHandle) {
+    if let Err(e) = pipeline.relink_all(handle.workspace_root(), handle) {
+        eprintln!("standardoc mcp: rag relink_all failed: {e}");
+    }
+}
+
+/// Spawns the revision-driven relink watcher and stashes the handle in
+/// `slot`. Errors are logged ; the absence of a revision watcher only
+/// means the daemon falls back to the boot-time relink — long-running
+/// editing sessions may drift until the next restart.
+pub(crate) fn spawn_revision_relink_into_slot(
+    slot: &Arc<std::sync::Mutex<Option<standardoc_core::RevisionRelinkHandle>>>,
+    handle: IndexHandle,
+    pipeline: Arc<RagPipeline>,
+) {
+    match spawn_revision_relink_watcher(handle, pipeline) {
+        Ok(w) => {
+            if let Ok(mut g) = slot.lock() {
+                *g = Some(w);
+            }
+        }
+        Err(e) => eprintln!("standardoc mcp: rag relink watcher boot failed: {e}"),
     }
 }
 

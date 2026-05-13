@@ -69,6 +69,20 @@ impl RagStore {
         read_meta(&guard, key)
     }
 
+    /// Upserts a `schema_meta` key/value. Counterpart to [`read_meta`].
+    /// Backs the workspace fqdn hash storage used by the relink-all
+    /// early-exit path.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn write_meta(&self, key: &str, value: &str) -> Result<(), RagError> {
+        let guard = self.conn.lock().map_err(|_| RagError::Poisoned)?;
+        guard.execute(
+            "INSERT INTO schema_meta(key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
     /// Atomically replaces every chunk + embedding tied to `source_path`.
     /// Mirrors `apply_documents` in `standardoc-core::pipeline` :
     /// delete-then-insert in one transaction. `pieces` and `vectors`
@@ -304,6 +318,42 @@ impl RagStore {
             "SELECT text_hash FROM chunks WHERE source_path = ?1 ORDER BY chunk_idx ASC",
         )?;
         let rows = stmt.query_map([source_path], |r| r.get::<_, String>(0))?;
+        let out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(out)
+    }
+
+    /// Returns `(chunk_id, text)` for every chunk currently stored for
+    /// `source_path`, in `chunk_idx` ASC order. Backs the graph-change
+    /// re-link pass : the chunker / embedder are NOT re-run, only the
+    /// `chunk_symbol_links` rows are rewritten against the current
+    /// workspace fqdn set.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn chunks_with_text_for_source(
+        &self,
+        source_path: &str,
+    ) -> Result<Vec<(ChunkId, String)>, RagError> {
+        let guard = self.conn.lock().map_err(|_| RagError::Poisoned)?;
+        let mut stmt = guard.prepare(
+            "SELECT id, text FROM chunks WHERE source_path = ?1 ORDER BY chunk_idx ASC",
+        )?;
+        let rows = stmt.query_map([source_path], |r| {
+            Ok((ChunkId(r.get::<_, i64>(0)?), r.get::<_, String>(1)?))
+        })?;
+        let out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(out)
+    }
+
+    /// Distinct `source_path` values currently present in the `chunks`
+    /// table. Backs `relink_all` discovery — we only relink sources
+    /// already chunked (no need to re-run prose-side filesystem
+    /// discovery, which is `run_rag_cold_start`'s job).
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn distinct_source_paths(&self) -> Result<Vec<String>, RagError> {
+        let guard = self.conn.lock().map_err(|_| RagError::Poisoned)?;
+        let mut stmt = guard.prepare(
+            "SELECT DISTINCT source_path FROM chunks ORDER BY source_path ASC",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(out)
     }
@@ -699,5 +749,76 @@ mod tests {
     fn bytes_to_vec_rejects_malformed_length() {
         let res = bytes_to_vec(&[0, 1, 2]);
         assert!(matches!(res, Err(RagError::InvalidStoredData { .. })));
+    }
+
+    #[test]
+    fn write_meta_upserts_idempotently_and_read_meta_observes_value() {
+        let (_dir, store) = fresh_store();
+        assert!(store.read_meta("custom_key").unwrap().is_none());
+        store.write_meta("custom_key", "v1").unwrap();
+        assert_eq!(store.read_meta("custom_key").unwrap().as_deref(), Some("v1"));
+        store.write_meta("custom_key", "v2").unwrap();
+        assert_eq!(store.read_meta("custom_key").unwrap().as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn chunks_with_text_for_source_returns_ordered_pairs() {
+        let (_dir, store) = fresh_store();
+        let pieces = vec![
+            ChunkPiece {
+                text: "first chunk".into(),
+                section_header: None,
+                byte_start: 0,
+                byte_end: 11,
+            },
+            ChunkPiece {
+                text: "second chunk".into(),
+                section_header: None,
+                byte_start: 11,
+                byte_end: 23,
+            },
+        ];
+        let vectors = vec![dummy_vector(1), dummy_vector(2)];
+        let ids = store
+            .replace_chunks_for_source("README.md", &pieces, &vectors)
+            .unwrap();
+        let pairs = store.chunks_with_text_for_source("README.md").unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], (ids[0], "first chunk".to_string()));
+        assert_eq!(pairs[1], (ids[1], "second chunk".to_string()));
+    }
+
+    #[test]
+    fn chunks_with_text_for_source_returns_empty_for_unknown_source() {
+        let (_dir, store) = fresh_store();
+        let pairs = store
+            .chunks_with_text_for_source("does/not/exist.md")
+            .unwrap();
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn distinct_source_paths_lists_every_stored_source_sorted() {
+        let (_dir, store) = fresh_store();
+        let piece = ChunkPiece {
+            text: "x".into(),
+            section_header: None,
+            byte_start: 0,
+            byte_end: 1,
+        };
+        let vec = dummy_vector(1);
+        let vecs = std::slice::from_ref(&vec);
+        let pieces = std::slice::from_ref(&piece);
+        store.replace_chunks_for_source("zeta.md", pieces, vecs).unwrap();
+        store.replace_chunks_for_source("alpha.md", pieces, vecs).unwrap();
+        store.replace_chunks_for_source("mu.md", pieces, vecs).unwrap();
+        let paths = store.distinct_source_paths().unwrap();
+        assert_eq!(paths, vec!["alpha.md", "mu.md", "zeta.md"]);
+    }
+
+    #[test]
+    fn distinct_source_paths_empty_for_fresh_store() {
+        let (_dir, store) = fresh_store();
+        assert!(store.distinct_source_paths().unwrap().is_empty());
     }
 }
