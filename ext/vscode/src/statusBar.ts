@@ -18,9 +18,9 @@ const renderStatus = matcher<DaemonState, StatusRender>()
     text: '$(sync~spin) Standardoc',
     tooltip: 'Standardoc daemon starting…',
   }))
-  .with({ kind: 'ready' }, ({ pid }) => ({
+  .with({ kind: 'ready' }, () => ({
     text: '$(check) Standardoc',
-    tooltip: `Standardoc daemon ready (pid ${pid})`,
+    tooltip: 'Standardoc daemon ready',
   }))
   .with({ kind: 'restarting' }, ({ attempt }) => ({
     text: '$(sync~spin) Standardoc',

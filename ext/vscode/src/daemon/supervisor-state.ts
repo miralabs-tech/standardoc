@@ -4,7 +4,7 @@ import { describeFatalConfig, type FatalConfig } from './fatal-marker';
 export type DaemonState =
   | { kind: 'stopped' }
   | { kind: 'starting' }
-  | { kind: 'ready'; pid: number }
+  | { kind: 'ready' }
   | { kind: 'restarting'; attempt: number }
   | { kind: 'failed'; reason: string }
   /**
@@ -19,7 +19,9 @@ export type DaemonState =
 export const describeState = matcher<DaemonState, string>()
   .with({ kind: 'stopped' }, () => 'Stopped')
   .with({ kind: 'starting' }, () => 'Starting')
-  .with({ kind: 'ready' }, ({ pid }) => `Ready (pid ${pid})`)
+  // 'ready' carries no PID — the supervisor aggregates two separate
+  // children (LSP + MCP). Displaying `pid 0` was a placeholder leak.
+  .with({ kind: 'ready' }, () => 'Ready')
   .with({ kind: 'restarting' }, ({ attempt }) => `Restarting (attempt ${attempt})`)
   .with({ kind: 'failed' }, ({ reason }) => `Failed: ${reason}`)
   .with({ kind: 'fatal_config' }, ({ config }) => `Fatal config: ${describeFatalConfig(config)}`)

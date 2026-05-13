@@ -79,7 +79,7 @@ export class DaemonSupervisor implements vscode.Disposable {
         `pre-flight ok (db=${preflight.db ?? 'none'}, supported=${preflight.supported})`,
       );
       await this.startClientsParallel(binary.path);
-      this.setState({ kind: 'ready', pid: 0 });
+      this.setState({ kind: 'ready' });
       this.scheduleResetCounter();
     } catch (e) {
       const reason = describeError(e);
@@ -105,7 +105,33 @@ export class DaemonSupervisor implements vscode.Disposable {
     throw new Error(`${which} start failed: ${describeError(failure)}`);
   }
 
+  /**
+   * Stops the daemon then spawns it again. Concurrent calls are
+   * serialised via an internal Promise chain : if a restart is already
+   * in flight when a second call arrives, the second one queues behind
+   * it. Each tail reads the LATEST `ragSettings` snapshot at spawn
+   * time, so the daemon always boots with the most-recent settings
+   * regardless of how many restart calls overlap.
+   *
+   * Rationale (T-C) : the `watchRagSettings` callback can fire twice in
+   * rapid succession when the user toggles two settings near-
+   * simultaneously (e.g. editing settings.json with both lines saved
+   * at once, or QuickPick double-fire). Without sequencing,
+   * `stop()` on the second call could race against the first call's
+   * `spawn()` and leave clients dangling.
+   */
   async restart(): Promise<void> {
+    const next = this.restartChain.then(() => this.doRestart());
+    // Swallow the rejection on the chain itself so subsequent restarts
+    // stay sequential ; the returned promise still surfaces the error
+    // to the immediate caller.
+    this.restartChain = next.catch(() => {});
+    return next;
+  }
+
+  private restartChain: Promise<void> = Promise.resolve();
+
+  private async doRestart(): Promise<void> {
     await this.stop();
     await this.spawn();
   }
