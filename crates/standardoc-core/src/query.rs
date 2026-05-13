@@ -673,7 +673,8 @@ pub fn file_info(handle: &IndexHandle, path: &str) -> Result<Option<FileInfo>, S
 
 /// Aggregated result of [`body_for_fqdn`]: the raw source slice covering a
 /// symbol's declared `start_line..=end_line` plus enough metadata for the
-/// caller to know what was returned and whether a `max_lines` cap kicked in.
+/// caller to know what was returned and whether a `max_lines` cap or any of
+/// the noise-stripping options kicked in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BodySlice {
     pub fqdn: String,
@@ -683,19 +684,52 @@ pub struct BodySlice {
     pub body: String,
     pub truncated: bool,
     pub total_body_lines: u32,
+    /// Number of leading "noise" lines (doc comments, attributes, blank
+    /// lines between them) dropped by `BodyOptions::strip_attrs`. Zero
+    /// when stripping is disabled or the body had no leading noise.
+    #[serde(default)]
+    pub stripped_lines: u32,
+    /// `true` when `BodyOptions::signature_only` truncated the body at
+    /// the first line containing `{`. Independent of `truncated` (which
+    /// only reflects the `max_lines` cap).
+    #[serde(default)]
+    pub signature_only: bool,
+}
+
+/// Knobs controlling the slice returned by [`body_for_fqdn`]. Defaults give
+/// the legacy "verbatim slice" behavior.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BodyOptions {
+    /// Cap on the number of returned lines. When the slice exceeds this
+    /// count, the response is truncated and `BodySlice.truncated = true`.
+    pub max_lines: Option<u32>,
+    /// Drop leading doc comments (`///`, `//!`, `//`, `/* … */`, `/** … */`)
+    /// AND attribute lines (`#[…]`, `#![…]` — including their multi-line
+    /// continuations) AND any blank lines interleaved between them.
+    /// Stops at the first line that is neither comment, attribute, nor
+    /// blank. Massive shrink for handlers buried under verbose
+    /// `#[tool(description = "…")]` blocks.
+    pub strip_attrs: bool,
+    /// Truncate the body just after the first line containing `{` (the
+    /// opening brace of the function block). For Rust / TS / JS / C-like
+    /// targets this returns the full multi-line signature without the
+    /// implementation. Combine with `strip_attrs` to get the cleanest
+    /// signature view. No-op for languages without `{` (Python, Lua —
+    /// punted to a future per-language handler).
+    pub signature_only: bool,
 }
 
 /// Returns the raw source text of the symbol at `fqdn`, sliced from the file
 /// on disk between its `start_line` and `end_line`. Returns `None` when no
-/// symbol matches the FQDN. `max_lines` caps the body length and sets
-/// `truncated: true` when applied — useful for huge generated functions.
+/// symbol matches the FQDN. See [`BodyOptions`] for the ways the slice can
+/// be trimmed.
 ///
 /// File I/O is anchored at `IndexHandle::workspace_root()`; the indexed
 /// `location.file` is assumed workspace-relative (the IR contract).
 pub fn body_for_fqdn(
     handle: &IndexHandle,
     fqdn: &str,
-    max_lines: Option<u32>,
+    opts: &BodyOptions,
 ) -> Result<Option<BodySlice>, StorageError> {
     let Some(symbol) = symbol_by_fqdn(handle, fqdn)? else {
         return Ok(None);
@@ -716,13 +750,32 @@ pub fn body_for_fqdn(
             body: String::new(),
             truncated: false,
             total_body_lines: 0,
+            stripped_lines: 0,
+            signature_only: false,
         }));
     }
-    let slice = &all_lines[start_zero..end_inclusive];
-    let total = u32::try_from(slice.len()).unwrap_or(u32::MAX);
-    let (taken, truncated) = match max_lines {
-        Some(cap) if (cap as usize) < slice.len() => (&slice[..cap as usize], true),
-        _ => (slice, false),
+    let raw_slice: &[&str] = &all_lines[start_zero..end_inclusive];
+    let total = u32::try_from(raw_slice.len()).unwrap_or(u32::MAX);
+
+    let stripped_count = if opts.strip_attrs {
+        count_leading_noise_lines(raw_slice)
+    } else {
+        0
+    };
+    let after_strip: &[&str] = &raw_slice[stripped_count..];
+
+    let (after_signature, signature_truncated) = if opts.signature_only {
+        match after_strip.iter().position(|l| l.contains('{')) {
+            Some(i) => (&after_strip[..=i], true),
+            None => (after_strip, false),
+        }
+    } else {
+        (after_strip, false)
+    };
+
+    let (taken, truncated) = match opts.max_lines {
+        Some(cap) if (cap as usize) < after_signature.len() => (&after_signature[..cap as usize], true),
+        _ => (after_signature, false),
     };
     Ok(Some(BodySlice {
         fqdn: symbol.fqdn.clone(),
@@ -732,7 +785,78 @@ pub fn body_for_fqdn(
         body: taken.join("\n"),
         truncated,
         total_body_lines: total,
+        stripped_lines: u32::try_from(stripped_count).unwrap_or(u32::MAX),
+        signature_only: signature_truncated,
     }))
+}
+
+/// Counts how many leading lines of `slice` look like noise:
+/// `///` / `//!` / `//` doc comments, `/* … */` block comments, `#[…]` /
+/// `#![…]` attributes (with multi-line continuations balanced via paren
+/// depth), and blank lines interleaved between them. Stops at the first
+/// non-noise line. Pure function — easy to test in isolation.
+fn count_leading_noise_lines(slice: &[&str]) -> usize {
+    let mut i = 0usize;
+    let mut paren_depth: i32 = 0;
+    let mut in_block_comment = false;
+    while i < slice.len() {
+        let raw = slice[i];
+        let line = raw.trim_start();
+        if in_block_comment {
+            if line.contains("*/") {
+                in_block_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        if paren_depth > 0 {
+            paren_depth += paren_depth_delta(raw);
+            i += 1;
+            continue;
+        }
+        if line.is_empty() {
+            i += 1;
+            continue;
+        }
+        if line.starts_with("///") || line.starts_with("//!") || line.starts_with("//") {
+            i += 1;
+            continue;
+        }
+        if line.starts_with("/**") || line.starts_with("/*") {
+            if !line.contains("*/") {
+                in_block_comment = true;
+            }
+            i += 1;
+            continue;
+        }
+        if line.starts_with("#[") || line.starts_with("#![") {
+            paren_depth += paren_depth_delta(raw);
+            i += 1;
+            continue;
+        }
+        // `*` continuation of a `/* …` block comment we missed by starting
+        // mid-block (shouldn't happen with well-formed slices, but cheap
+        // to handle).
+        if line.starts_with('*') && !line.starts_with("*/") {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    i
+}
+
+#[inline]
+fn paren_depth_delta(line: &str) -> i32 {
+    let mut d: i32 = 0;
+    for c in line.chars() {
+        match c {
+            '(' | '[' => d += 1,
+            ')' | ']' => d -= 1,
+            _ => {}
+        }
+    }
+    d
 }
 
 /// Reads `schema_meta.schema_version` from the connected workspace index.
@@ -980,6 +1104,75 @@ fn load_edge_sites(conn: &Connection, edge_id: i64) -> Result<Vec<Site>, Storage
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod body_helper_tests {
+    use super::count_leading_noise_lines;
+
+    #[test]
+    fn count_leading_noise_lines_returns_zero_when_first_line_is_code() {
+        let lines = vec!["pub fn foo() {", "    do_thing();", "}"];
+        assert_eq!(count_leading_noise_lines(&lines), 0);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_strips_doc_comments() {
+        let lines = vec![
+            "/// This is the doc.",
+            "/// Second doc line.",
+            "pub fn foo() {",
+        ];
+        assert_eq!(count_leading_noise_lines(&lines), 2);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_strips_simple_attribute() {
+        let lines = vec!["#[inline]", "pub fn foo() {"];
+        assert_eq!(count_leading_noise_lines(&lines), 1);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_strips_multi_line_attribute_via_paren_depth() {
+        let lines = vec![
+            "#[tool(",
+            "    description = \"long\"",
+            ")]",
+            "async fn handler() {",
+        ];
+        assert_eq!(count_leading_noise_lines(&lines), 3);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_strips_doc_then_attr_then_blank() {
+        let lines = vec![
+            "/// A function.",
+            "#[allow(dead_code)]",
+            "",
+            "fn f() {",
+        ];
+        assert_eq!(count_leading_noise_lines(&lines), 3);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_strips_block_comment_spanning_lines() {
+        let lines = vec!["/*", " * Multi-line block.", " */", "fn f() {"];
+        assert_eq!(count_leading_noise_lines(&lines), 3);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_handles_indented_attributes() {
+        let lines = vec!["    /// indented doc", "    #[inline]", "    fn inner() {"];
+        assert_eq!(count_leading_noise_lines(&lines), 2);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_stops_at_first_non_noise_line() {
+        let lines = vec!["/// doc", "fn first() {", "/// doc on inner", "fn nested() {"];
+        // Only the first /// is leading noise; everything after the `fn first()`
+        // is body and must be preserved.
+        assert_eq!(count_leading_noise_lines(&lines), 1);
+    }
 }
 
 #[cfg(test)]

@@ -373,11 +373,12 @@ impl StandardocMcp {
     /// in the file on disk — exactly what a reader would see if they opened the
     /// file at those line numbers. Use this when you need to reason about the
     /// actual code of a known FQDN (the graph tells you WHERE; this tells you
-    /// WHAT). `max_lines` clamps long bodies; the response carries `truncated`
-    /// + `total_body_lines` so the caller can decide whether to re-call without
-    /// the cap.
+    /// WHAT). `max_lines` clamps long bodies; `strip_attrs` drops leading docs
+    /// + attribute blocks; `signature_only` truncates after the opening `{`.
+    /// The response carries `truncated`, `stripped_lines` and `signature_only`
+    /// so the caller can audit what was returned vs. the verbatim slice.
     #[tool(
-        description = "Returns the raw source text of a symbol identified by FQDN, sliced from the file at its declared start_line..end_line. Pair with `get_context` (graph relations) when you need to actually read the function body. Optional `max_lines` caps the response and sets `truncated=true` so you know to re-fetch if needed. Returns `null` when no symbol matches the FQDN — call `find_symbol` first if you only have a name fragment."
+        description = "Returns the raw source text of a symbol identified by FQDN, sliced from the file at its declared start_line..end_line. Pair with `get_context` (graph relations) when you need to actually read the function body. Optional knobs: `max_lines` caps total output (`truncated=true` flag), `strip_attrs=true` drops leading doc comments / `#[…]` attribute blocks (`stripped_lines` count), `signature_only=true` truncates after the first `{` (returns just the multi-line signature). Returns `null` when no symbol matches the FQDN — call `find_symbol` first if you only have a name fragment."
     )]
     async fn get_body(
         &self,
@@ -390,9 +391,13 @@ impl StandardocMcp {
         }
         let handle = self.handle.clone();
         let fqdn = params.fqdn;
-        let max_lines = params.max_lines;
+        let opts = query::BodyOptions {
+            max_lines: params.max_lines,
+            strip_attrs: params.strip_attrs.unwrap_or(false),
+            signature_only: params.signature_only.unwrap_or(false),
+        };
         let result =
-            tokio::task::spawn_blocking(move || query::body_for_fqdn(&handle, &fqdn, max_lines))
+            tokio::task::spawn_blocking(move || query::body_for_fqdn(&handle, &fqdn, &opts))
                 .await
                 .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
                 .map_err(|e| server_error_to_rmcp(&e.into()))?;
@@ -1017,8 +1022,9 @@ pub struct ResolveExternalJson {
     pub detail: Option<String>,
 }
 
-/// Tool input — `get_body(fqdn, max_lines?)`. Forwarded to
-/// `query::body_for_fqdn`. Returns `null` if `fqdn` is not in the index.
+/// Tool input — `get_body(fqdn, max_lines?, strip_attrs?, signature_only?)`.
+/// Forwarded to `query::body_for_fqdn`. Returns `null` if `fqdn` is not in
+/// the index.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct GetBodyParams {
     /// Fully-qualified domain name of the target symbol (e.g.
@@ -1028,6 +1034,21 @@ pub(crate) struct GetBodyParams {
     /// exceeds this count, the response is truncated and `truncated=true` is
     /// set so the caller knows to re-fetch with a higher cap (or none).
     pub max_lines: Option<u32>,
+    /// When `true`, drop leading doc comments (`///`, `//!`, `//`,
+    /// `/* … */`) AND attribute lines (`#[…]`, `#![…]`, including
+    /// multi-line continuations) AND blank lines between them. The
+    /// response carries `stripped_lines` so the caller can audit the
+    /// shrink. Massive savings for handlers with verbose
+    /// `#[tool(description = "…")]` blocks.
+    #[serde(default)]
+    pub strip_attrs: Option<bool>,
+    /// When `true`, truncate the body just after the first line containing
+    /// `{` (the opening brace of the function / impl / type block). Returns
+    /// the multi-line signature without the implementation. Combine with
+    /// `strip_attrs` for the cleanest signature view. The response carries
+    /// `signature_only: true` to confirm. No-op when no `{` is present.
+    #[serde(default)]
+    pub signature_only: Option<bool>,
 }
 
 /// Tool input — `session_save(slug, body_md, supersedes?)`. Persists or
@@ -1671,6 +1692,8 @@ mod tests {
             .get_body(Parameters(GetBodyParams {
                 fqdn: "crate::foo".into(),
                 max_lines: None,
+                strip_attrs: None,
+                signature_only: None,
             }))
             .await
             .expect("tool returns Ok with friendly degradation");
@@ -1685,6 +1708,8 @@ mod tests {
             .get_body(Parameters(GetBodyParams {
                 fqdn: "crate::nope::never_indexed".into(),
                 max_lines: None,
+                strip_attrs: None,
+                signature_only: None,
             }))
             .await
             .unwrap();

@@ -103,21 +103,34 @@ imported_by, dependents, tests) as a graph slice.
 - **depth=2 (rich)** — same + full \`resolved_symbol\` payload for
   Resolved targets. For reasoning about actual code.
 
-### get_body(fqdn, max_lines?)
+### get_body(fqdn, max_lines?, strip_attrs?, signature_only?)
 
 Returns the raw source text of a symbol identified by FQDN, sliced
 from the file at its declared \`start_line..end_line\`. Pair with
 \`get_context\` (graph relations) when you need to actually read the
 function body — the graph tells you WHERE, this tells you WHAT.
 
-- \`max_lines\` clamps long bodies; the response carries
-  \`truncated\` + \`total_body_lines\` so you can re-fetch without the
-  cap when needed.
-- Returns \`null\` when no symbol matches the FQDN — call
-  \`find_symbol\` first if you only have a name fragment.
+Three orthogonal knobs to keep the response tight:
+
+- \`max_lines\` clamps total returned lines. Response sets
+  \`truncated: true\` and \`total_body_lines\` so you can re-fetch
+  without the cap when needed.
+- \`strip_attrs: true\` drops leading doc comments (\`///\`, \`//\`,
+  \`/* … */\`) AND attribute blocks (\`#[…]\`, \`#![…]\` — multi-line
+  attrs are detected via paren depth). Response sets
+  \`stripped_lines: N\`. Massive shrink on handlers buried under
+  verbose \`#[tool(description = "…")]\` blocks.
+- \`signature_only: true\` truncates after the first line containing
+  \`{\` — returns the multi-line signature without the
+  implementation. Response sets \`signature_only: true\`. Combine
+  with \`strip_attrs\` for the cleanest signature view.
+
+Returns \`null\` when no symbol matches the FQDN — call
+\`find_symbol\` first if you only have a name fragment.
 
 \`\`\`
-get_body("crate::module::function_name", 80)
+get_body("crate::module::function_name", null, true, true)
+// → multi-line signature only, no docs/attrs noise.
 \`\`\`
 
 ### resolve_external(fqdn)
