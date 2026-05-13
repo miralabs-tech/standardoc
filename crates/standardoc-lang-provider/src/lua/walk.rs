@@ -87,7 +87,7 @@ pub(crate) fn walk(content: &str, ast: &Ast, ctx: &mut LuaWalkContext) {
         match stmt {
             Stmt::LocalFunction(lf) => extract::extract_local_function(ctx, lf, content),
             Stmt::FunctionDeclaration(fd) => {
-                extract::extract_function_declaration(ctx, fd, content)
+                extract::extract_function_declaration(ctx, fd, content);
             }
             Stmt::LocalAssignment(la) => extract::extract_local_assignment(ctx, la, content),
             Stmt::Assignment(a) => extract::extract_assignment(ctx, a, content),
