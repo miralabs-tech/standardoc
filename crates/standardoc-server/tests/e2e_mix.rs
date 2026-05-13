@@ -502,7 +502,10 @@ fn cold_start_indexes_vue_and_svelte_alongside_rust_ts_lua() {
     // Vue side: module + symbols + a template-event edge.
     let vue_syms = query::symbols_by_file(&handle, "src/App.vue").unwrap();
     let vue_names: Vec<&str> = vue_syms.iter().map(|s| s.name.as_str()).collect();
-    assert!(vue_names.contains(&"title"), "vue title missing: {vue_names:?}");
+    assert!(
+        vue_names.contains(&"title"),
+        "vue title missing: {vue_names:?}"
+    );
     assert!(
         vue_names.contains(&"increment"),
         "vue increment missing: {vue_names:?}"
@@ -522,7 +525,10 @@ fn cold_start_indexes_vue_and_svelte_alongside_rust_ts_lua() {
     // Svelte side: module + symbol + a template-event edge.
     let sv_syms = query::symbols_by_file(&handle, "src/Counter.svelte").unwrap();
     let sv_names: Vec<&str> = sv_syms.iter().map(|s| s.name.as_str()).collect();
-    assert!(sv_names.contains(&"count"), "svelte count missing: {sv_names:?}");
+    assert!(
+        sv_names.contains(&"count"),
+        "svelte count missing: {sv_names:?}"
+    );
     assert!(
         sv_names.contains(&"reset"),
         "svelte reset missing: {sv_names:?}"
@@ -532,8 +538,7 @@ fn cold_start_indexes_vue_and_svelte_alongside_rust_ts_lua() {
     let svelte_events: Vec<&ResolvedOrUnresolved> = sv_edges
         .iter()
         .filter(|e| {
-            e.kind == EdgeKind::References
-                && e.attributes.iter().any(|a| a == "template-event")
+            e.kind == EdgeKind::References && e.attributes.iter().any(|a| a == "template-event")
         })
         .map(|e| &e.to)
         .collect();

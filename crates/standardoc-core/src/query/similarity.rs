@@ -123,10 +123,7 @@ mod tests {
         // Upper would shred acronyms like `HTTP` into single chars. Acronym-
         // aware tokenisation (lookahead on Upper→Upper→lower) is a refinement
         // we can add post-beta.1 if it materialises in real workspaces.
-        assert_eq!(
-            toks("Strip_RS_Extension"),
-            vec!["strip", "rs", "extension"]
-        );
+        assert_eq!(toks("Strip_RS_Extension"), vec!["strip", "rs", "extension"]);
     }
 
     #[test]
@@ -232,10 +229,7 @@ mod tests {
     #[test]
     fn score_unrelated_names_below_threshold() {
         let s = score("buy_apple", "render_widget");
-        assert!(
-            s < 0.6,
-            "unrelated names should score below 0.6, got {s}"
-        );
+        assert!(s < 0.6, "unrelated names should score below 0.6, got {s}");
     }
 
     #[test]

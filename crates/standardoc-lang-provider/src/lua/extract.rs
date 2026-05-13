@@ -125,11 +125,7 @@ fn enrich_signatures_from_emmylua(
 
 // --- per-stmt extractors ---------------------------------------------------
 
-pub(crate) fn extract_local_function(
-    ctx: &mut LuaWalkContext,
-    lf: &LocalFunction,
-    content: &str,
-) {
+pub(crate) fn extract_local_function(ctx: &mut LuaWalkContext, lf: &LocalFunction, content: &str) {
     let name = ident_text(lf.name()).to_string();
     if name.is_empty() {
         return;
@@ -473,7 +469,11 @@ fn var_to_dotted_path(var: &Var) -> Option<String> {
     match var {
         Var::Name(t) => {
             let n = ident_text(t);
-            if n.is_empty() { None } else { Some(n.to_string()) }
+            if n.is_empty() {
+                None
+            } else {
+                Some(n.to_string())
+            }
         }
         Var::Expression(ve) => {
             let head = match ve.prefix() {
@@ -505,7 +505,11 @@ fn var_to_dotted_path(var: &Var) -> Option<String> {
 fn index_dot_name(idx: &full_moon::ast::Index) -> Option<String> {
     if let full_moon::ast::Index::Dot { name, .. } = idx {
         let n = ident_text(name);
-        if n.is_empty() { None } else { Some(n.to_string()) }
+        if n.is_empty() {
+            None
+        } else {
+            Some(n.to_string())
+        }
     } else {
         None
     }
@@ -725,7 +729,11 @@ mod tests {
     fn local_function_extracted_as_private() {
         let src = "local function helper(a, b) return a + b end\n";
         let r = extract(src, "main.lua", "main.lua");
-        let sym = r.symbols.iter().find(|s| s.name == "helper").expect("helper");
+        let sym = r
+            .symbols
+            .iter()
+            .find(|s| s.name == "helper")
+            .expect("helper");
         assert_eq!(sym.fqdn, "myapp::main::helper");
         assert_eq!(sym.kind, Kind::Function);
         assert_eq!(sym.visibility, Visibility::Private);
@@ -812,7 +820,11 @@ mod tests {
     fn require_with_parens_emits_imports_edge() {
         let src = "local strings = require(\"utils.strings\")\n";
         let r = extract(src, "main.lua", "main.lua");
-        let imports: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Imports).collect();
+        let imports: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Imports)
+            .collect();
         assert_eq!(imports.len(), 1);
         match &imports[0].to {
             ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "utils.strings"),
@@ -824,7 +836,11 @@ mod tests {
     fn require_with_string_arg_no_parens_emits_imports_edge() {
         let src = "local x = require \"json\"\n";
         let r = extract(src, "main.lua", "main.lua");
-        let imports: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Imports).collect();
+        let imports: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Imports)
+            .collect();
         assert_eq!(imports.len(), 1);
         match &imports[0].to {
             ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "json"),
@@ -836,7 +852,11 @@ mod tests {
     fn top_level_function_call_emits_calls_edge() {
         let src = "doStuff()\n";
         let r = extract(src, "main.lua", "main.lua");
-        let calls: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        let calls: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].from_fqdn, "myapp::main");
         match &calls[0].to {
@@ -849,7 +869,11 @@ mod tests {
     fn dotted_call_recorded_with_dotted_name() {
         let src = "M.greet(\"hi\")\n";
         let r = extract(src, "main.lua", "main.lua");
-        let calls: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        let calls: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
         assert_eq!(calls.len(), 1);
         match &calls[0].to {
             ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "M.greet"),
@@ -861,7 +885,11 @@ mod tests {
     fn method_call_recorded_with_colon_name() {
         let src = "obj:run(1)\n";
         let r = extract(src, "main.lua", "main.lua");
-        let calls: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        let calls: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
         assert_eq!(calls.len(), 1);
         match &calls[0].to {
             ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "obj:run"),
@@ -873,7 +901,11 @@ mod tests {
     fn nested_call_inside_function_body_records_call_from_caller() {
         let src = "local function caller() callee() end\n";
         let r = extract(src, "main.lua", "main.lua");
-        let calls: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        let calls: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].from_fqdn, "myapp::main::caller");
         match &calls[0].to {
@@ -955,7 +987,11 @@ mod tests {
     fn require_inside_function_body_is_recorded_against_caller() {
         let src = "local function init() local m = require(\"sys\") end\n";
         let r = extract(src, "main.lua", "main.lua");
-        let imports: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Imports).collect();
+        let imports: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Imports)
+            .collect();
         assert_eq!(imports.len(), 1);
         assert_eq!(imports[0].from_fqdn, "myapp::main::init");
     }

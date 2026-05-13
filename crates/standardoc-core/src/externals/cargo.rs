@@ -129,11 +129,7 @@ impl Resolver for CargoResolver {
         // 5. Match the requested crate by name. Take the first matching
         //    package — workspaces with multiple versions of the same
         //    crate are rare day-1 and accept slight over-extraction.
-        let Some(package) = metadata
-            .packages
-            .iter()
-            .find(|p| p.name == crate_name)
-        else {
+        let Some(package) = metadata.packages.iter().find(|p| p.name == crate_name) else {
             return Ok(ResolveOutcome::NotInThisRegistry);
         };
 
@@ -182,11 +178,7 @@ impl Resolver for CargoResolver {
 /// reference external crates).
 fn crate_name_of_fqdn(fqdn: &str) -> Option<&str> {
     let (head, _rest) = fqdn.split_once("::")?;
-    if head.is_empty() {
-        None
-    } else {
-        Some(head)
-    }
+    if head.is_empty() { None } else { Some(head) }
 }
 
 #[derive(Debug, Deserialize)]
@@ -310,10 +302,7 @@ fn rewrite_for_external(
     extracted.source_origin = origin;
 }
 
-fn poll_for_symbol(
-    handle: &IndexHandle,
-    fqdn: &str,
-) -> Result<Option<RawSymbol>, ExternalsError> {
+fn poll_for_symbol(handle: &IndexHandle, fqdn: &str) -> Result<Option<RawSymbol>, ExternalsError> {
     let deadline = Instant::now() + SUBMIT_DRAIN_TIMEOUT;
     loop {
         if let Some(sym) = query::symbol_by_fqdn(handle, fqdn)? {
@@ -352,10 +341,7 @@ mod tests {
     #[test]
     fn crate_name_of_fqdn_extracts_first_segment() {
         assert_eq!(crate_name_of_fqdn("serde::Deserialize"), Some("serde"));
-        assert_eq!(
-            crate_name_of_fqdn("tokio::runtime::Builder"),
-            Some("tokio")
-        );
+        assert_eq!(crate_name_of_fqdn("tokio::runtime::Builder"), Some("tokio"));
     }
 
     #[test]
@@ -383,7 +369,12 @@ mod tests {
             call_sites: vec![],
             documents: vec![],
         };
-        rewrite_for_external(&mut extracted, "serde-1.0.0", "src/lib.rs", SourceOrigin::CargoRegistry);
+        rewrite_for_external(
+            &mut extracted,
+            "serde-1.0.0",
+            "src/lib.rs",
+            SourceOrigin::CargoRegistry,
+        );
         assert_eq!(extracted.file, "external://cargo/serde-1.0.0/src/lib.rs");
         assert!(extracted.is_external);
         assert_eq!(extracted.source_origin, SourceOrigin::CargoRegistry);

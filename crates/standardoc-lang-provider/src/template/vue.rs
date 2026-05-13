@@ -25,11 +25,7 @@ use crate::utils::find_top_level_keyword;
 /// The function never panics on malformed templates — unknown directive
 /// names, unmatched braces and stray quotes are silently skipped to
 /// keep the indexer running over WIP edits.
-pub(crate) fn parse(
-    template_src: &str,
-    base_offset: usize,
-    sink: &mut dyn TemplateRefSink,
-) {
+pub(crate) fn parse(template_src: &str, base_offset: usize, sink: &mut dyn TemplateRefSink) {
     let bytes = template_src.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -91,8 +87,8 @@ pub(crate) fn parse(
 pub(crate) fn split_v_for(value: &str) -> (String, Vec<String>) {
     // Match either ` in ` or ` of ` (Vue 3 supports both).
     let trimmed = value.trim();
-    let split_at = find_top_level_keyword(trimmed, " in ")
-        .or_else(|| find_top_level_keyword(trimmed, " of "));
+    let split_at =
+        find_top_level_keyword(trimmed, " in ").or_else(|| find_top_level_keyword(trimmed, " of "));
     let Some((kw_pos, kw_len)) = split_at else {
         return (trimmed.to_string(), Vec::new());
     };
@@ -105,9 +101,7 @@ pub(crate) fn split_v_for(value: &str) -> (String, Vec<String>) {
 // --- helpers --------------------------------------------------------------
 
 fn is_component_ref_tag(name: &str) -> bool {
-    name.chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_uppercase())
+    name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
 }
 
 /// Walks attributes from `from` until the closing `>` (or `/>`) emitting
@@ -244,9 +238,7 @@ fn emit_attribute_refs(
         // offsets stay accurate — we look for the iterable text starting
         // at the position where the original value contained ` in ` or
         // ` of `. Cheap & robust vs tracking offsets through the splitter.
-        let inner_offset = value
-            .find(iterable.as_str())
-            .map_or(0, |pos| pos);
+        let inner_offset = value.find(iterable.as_str()).map_or(0, |pos| pos);
         extract_identifiers_from_expression(
             &iterable,
             base_offset + value_start + inner_offset,
@@ -333,25 +325,37 @@ mod tests {
     #[test]
     fn at_event_handler_is_emitted_as_event() {
         let refs = collect(r#"<button @click="handleClick">x</button>"#);
-        assert_eq!(names_with_attr(&refs, TemplateAttribute::Event), vec!["handleClick"]);
+        assert_eq!(
+            names_with_attr(&refs, TemplateAttribute::Event),
+            vec!["handleClick"]
+        );
     }
 
     #[test]
     fn v_on_event_handler_is_emitted_as_event() {
         let refs = collect(r#"<button v-on:click="handleClick">x</button>"#);
-        assert_eq!(names_with_attr(&refs, TemplateAttribute::Event), vec!["handleClick"]);
+        assert_eq!(
+            names_with_attr(&refs, TemplateAttribute::Event),
+            vec!["handleClick"]
+        );
     }
 
     #[test]
     fn colon_bind_is_emitted_as_bind() {
         let refs = collect(r#"<input :value="model" />"#);
-        assert_eq!(names_with_attr(&refs, TemplateAttribute::Bind), vec!["model"]);
+        assert_eq!(
+            names_with_attr(&refs, TemplateAttribute::Bind),
+            vec!["model"]
+        );
     }
 
     #[test]
     fn v_bind_long_form_is_emitted_as_bind() {
         let refs = collect(r#"<input v-bind:value="model" />"#);
-        assert_eq!(names_with_attr(&refs, TemplateAttribute::Bind), vec!["model"]);
+        assert_eq!(
+            names_with_attr(&refs, TemplateAttribute::Bind),
+            vec!["model"]
+        );
     }
 
     #[test]
@@ -469,8 +473,10 @@ mod tests {
     fn multiple_attrs_each_emit_their_attribute_kind() {
         let src = r#"<button @click="onClick" :disabled="loading" v-if="show">x</button>"#;
         let refs = collect(src);
-        let by_attr: std::collections::HashMap<&str, TemplateAttribute> =
-            refs.iter().map(|r| (r.name.as_str(), r.attribute)).collect();
+        let by_attr: std::collections::HashMap<&str, TemplateAttribute> = refs
+            .iter()
+            .map(|r| (r.name.as_str(), r.attribute))
+            .collect();
         assert_eq!(by_attr["onClick"], TemplateAttribute::Event);
         assert_eq!(by_attr["loading"], TemplateAttribute::Bind);
         assert_eq!(by_attr["show"], TemplateAttribute::Directive);

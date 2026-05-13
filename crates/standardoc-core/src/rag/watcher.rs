@@ -137,7 +137,10 @@ const fn is_relevant_kind(kind: EventKind) -> bool {
 fn to_workspace_relative_md(path: &Path, workspace_root: &Path) -> Option<String> {
     let rel = path.strip_prefix(workspace_root).ok()?;
     let s = rel.to_string_lossy().replace('\\', "/");
-    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")) {
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+    {
         return None;
     }
     Some(s)
@@ -154,4 +157,3 @@ fn should_index(path: &Path, rel: &str) -> bool {
         FrontmatterDirective::Rag,
     )
 }
-

@@ -218,11 +218,7 @@ fn resolve_via_pnp(
 /// shape — the `/` is part of the name, the `::` separator is unique.
 fn package_name_of_fqdn(fqdn: &str) -> Option<&str> {
     let (head, _rest) = fqdn.split_once("::")?;
-    if head.is_empty() {
-        None
-    } else {
-        Some(head)
-    }
+    if head.is_empty() { None } else { Some(head) }
 }
 
 fn walk_and_submit_package(
@@ -321,7 +317,9 @@ fn is_minified_js(path: &Path, content: &str) -> bool {
     if !is_js {
         return false;
     }
-    content.lines().any(|line| line.len() > MINIFIED_LINE_THRESHOLD)
+    content
+        .lines()
+        .any(|line| line.len() > MINIFIED_LINE_THRESHOLD)
 }
 
 fn rewrite_for_external(
@@ -335,10 +333,7 @@ fn rewrite_for_external(
     extracted.source_origin = origin;
 }
 
-fn poll_for_symbol(
-    handle: &IndexHandle,
-    fqdn: &str,
-) -> Result<Option<RawSymbol>, ExternalsError> {
+fn poll_for_symbol(handle: &IndexHandle, fqdn: &str) -> Result<Option<RawSymbol>, ExternalsError> {
     let deadline = Instant::now() + SUBMIT_DRAIN_TIMEOUT;
     loop {
         if let Some(sym) = query::symbol_by_fqdn(handle, fqdn)? {

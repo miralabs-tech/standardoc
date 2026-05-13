@@ -66,7 +66,9 @@ fn dispatch(
     revision: u64,
 ) -> Result<(), StorageError> {
     match cmd {
-        IngestCommand::UpsertFile { extracted, .. } => apply_upsert_file(conn, &extracted, revision),
+        IngestCommand::UpsertFile { extracted, .. } => {
+            apply_upsert_file(conn, &extracted, revision)
+        }
         IngestCommand::DeleteFile { path } => apply_delete_file(conn, &path),
         IngestCommand::RecordParseError {
             path,

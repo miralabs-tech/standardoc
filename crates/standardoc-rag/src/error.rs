@@ -25,6 +25,8 @@ pub enum RagError {
     Embedder { detail: String },
     #[error("model file not found at {path}")]
     ModelNotFound { path: PathBuf },
-    #[error("model dimension mismatch: chunk used model with dim={chunk_dim}, store expects dim={store_dim}")]
+    #[error(
+        "model dimension mismatch: chunk used model with dim={chunk_dim}, store expects dim={store_dim}"
+    )]
     DimensionMismatch { chunk_dim: u32, store_dim: u32 },
 }

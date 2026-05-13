@@ -287,7 +287,10 @@ mod tests {
         });
         let chunks = chunker.chunk(src).unwrap();
         assert!(chunks.len() >= 2);
-        let headers: Vec<_> = chunks.iter().filter_map(|c| c.section_header.clone()).collect();
+        let headers: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.section_header.clone())
+            .collect();
         assert!(headers.iter().any(|h| h == "Alpha"));
         assert!(headers.iter().any(|h| h == "Beta"));
     }
@@ -298,7 +301,10 @@ mod tests {
         let src = "## Outer\n### Sub-A\na b c d\n### Sub-B\ne f g h\n";
         let chunker = tiny_chunker();
         let chunks = chunker.chunk(src).unwrap();
-        let headers: Vec<_> = chunks.iter().filter_map(|c| c.section_header.clone()).collect();
+        let headers: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.section_header.clone())
+            .collect();
         assert!(headers.iter().any(|h| h == "Sub-A"));
         assert!(headers.iter().any(|h| h == "Sub-B"));
     }
@@ -359,8 +365,20 @@ mod tests {
         let src = "preamble paragraph here\n## Alpha\nbody one\n## Beta\nbody two\n";
         let chunks = tiny_chunker().chunk(src).unwrap();
         // Preamble has no header.
-        assert!(chunks.iter().any(|c| c.section_header.is_none() && c.text.contains("preamble")));
-        assert!(chunks.iter().any(|c| c.section_header.as_deref() == Some("Alpha")));
-        assert!(chunks.iter().any(|c| c.section_header.as_deref() == Some("Beta")));
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.section_header.is_none() && c.text.contains("preamble"))
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.section_header.as_deref() == Some("Alpha"))
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.section_header.as_deref() == Some("Beta"))
+        );
     }
 }

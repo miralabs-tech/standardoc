@@ -89,10 +89,8 @@ const SCAN_SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".standardoc
 /// exit status indicates a problem.
 #[must_use]
 pub fn probe_binary(default_name: &str, env_override: &str) -> BinaryAvailability {
-    let path = std::env::var(env_override).map_or_else(
-        |_| PathBuf::from(default_name),
-        PathBuf::from,
-    );
+    let path =
+        std::env::var(env_override).map_or_else(|_| PathBuf::from(default_name), PathBuf::from);
     probe_path(&path)
 }
 
@@ -165,9 +163,7 @@ fn find_manifest_dir(root: &Path, filename: &str) -> Option<PathBuf> {
                 .is_some_and(|n| SCAN_SKIP_DIRS.contains(&n))
         })
         .filter_map(Result::ok)
-        .filter(|entry| {
-            entry.file_type().is_file() && entry.file_name().to_str() == Some(filename)
-        })
+        .filter(|entry| entry.file_type().is_file() && entry.file_name().to_str() == Some(filename))
         .filter_map(|entry| {
             entry
                 .path()
@@ -326,7 +322,10 @@ mod tests {
     fn find_package_json_returns_root_when_present() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("package.json"), "{}").unwrap();
-        assert_eq!(find_package_json(dir.path()), Some(dir.path().to_path_buf()));
+        assert_eq!(
+            find_package_json(dir.path()),
+            Some(dir.path().to_path_buf())
+        );
     }
 
     #[test]

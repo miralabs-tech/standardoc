@@ -60,7 +60,9 @@ export default { name: 'App' };
 "#;
     write(root, "src/App.vue", sfc);
     let provider = WorkspaceProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(sfc, "src/App.vue", &ctx).expect("ok");
 
     assert_eq!(extracted.language, Language::Vue);
@@ -82,7 +84,9 @@ const message = 'hi';
 "#;
     write(root, "src/Hello.vue", sfc);
     let provider = WorkspaceProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(sfc, "src/Hello.vue", &ctx).unwrap();
 
     let interp = refs_with_attr(&extracted.edges, "template-interpolation");
@@ -103,7 +107,9 @@ const visible = true;
 "#;
     write(root, "src/Toggle.vue", sfc);
     let provider = WorkspaceProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(sfc, "src/Toggle.vue", &ctx).unwrap();
 
     let dirs = refs_with_attr(&extracted.edges, "template-directive");
@@ -124,7 +130,9 @@ function handleClick() {}
 "#;
     write(root, "src/Button.vue", sfc);
     let provider = WorkspaceProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(sfc, "src/Button.vue", &ctx).unwrap();
 
     let events = refs_with_attr(&extracted.edges, "template-event");
@@ -145,7 +153,9 @@ import UserCard from './UserCard.vue';
 "#;
     write(root, "src/App.vue", sfc);
     let provider = WorkspaceProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(sfc, "src/App.vue", &ctx).unwrap();
 
     let comps = refs_with_attr(&extracted.edges, "template-component-ref");
@@ -167,7 +177,9 @@ function increment() { /* ... */ }
 "#;
     write(root, "src/Counter.vue", sfc);
     let provider = WorkspaceProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(sfc, "src/Counter.vue", &ctx).unwrap();
 
     let names: Vec<&str> = extracted.symbols.iter().map(|s| s.name.as_str()).collect();
@@ -187,7 +199,9 @@ let count = 0;
 "#;
     write(root, "src/Counter.svelte", sfc);
     let provider = WorkspaceProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(sfc, "src/Counter.svelte", &ctx).unwrap();
 
     assert_eq!(extracted.language, Language::Svelte);
@@ -207,7 +221,9 @@ function handleClick() {}
 "#;
     write(root, "src/Btn.svelte", sfc);
     let provider = WorkspaceProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(sfc, "src/Btn.svelte", &ctx).unwrap();
 
     let events = refs_with_attr(&extracted.edges, "template-event");
@@ -228,7 +244,9 @@ let users = [];
 "#;
     write(root, "src/List.svelte", sfc);
     let provider = WorkspaceProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(sfc, "src/List.svelte", &ctx).unwrap();
 
     let dirs = refs_with_attr(&extracted.edges, "template-directive");
@@ -247,7 +265,9 @@ import Header from './Header.svelte';
 "#;
     write(root, "src/App.svelte", sfc);
     let provider = WorkspaceProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(sfc, "src/App.svelte", &ctx).unwrap();
 
     let comps = refs_with_attr(&extracted.edges, "template-component-ref");

@@ -493,11 +493,9 @@ mod tests {
         // Caller's outbound edge survived as Unresolved with the deleted
         // target's fqdn — the XOR invariant held throughout the cascade.
         let (to_id, to_unresolved): (Option<i64>, Option<String>) = conn
-            .query_row(
-                "SELECT to_symbol_id, to_unresolved FROM edges",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .query_row("SELECT to_symbol_id, to_unresolved FROM edges", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap();
         assert_eq!(to_id, None);
         assert_eq!(to_unresolved.as_deref(), Some("crate::target"));

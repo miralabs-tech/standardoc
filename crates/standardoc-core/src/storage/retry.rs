@@ -133,10 +133,7 @@ mod tests {
                 supported: 1,
             })
         });
-        assert!(matches!(
-            res,
-            Err(StorageError::SchemaVersionTooNew { .. })
-        ));
+        assert!(matches!(res, Err(StorageError::SchemaVersionTooNew { .. })));
         assert_eq!(*calls.borrow(), 1);
     }
 
@@ -158,7 +155,9 @@ mod tests {
     fn is_transient_message_matches_known_sqlite_phrases() {
         assert!(is_transient_message("database is locked"));
         assert!(is_transient_message("Database is locked"));
-        assert!(is_transient_message("connection pool error: locking protocol"));
+        assert!(is_transient_message(
+            "connection pool error: locking protocol"
+        ));
         assert!(is_transient_message("database is busy"));
         assert!(!is_transient_message("schema mismatch"));
         assert!(!is_transient_message("disk full"));

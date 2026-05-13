@@ -132,10 +132,9 @@ impl SessionsHandle {
                 created_at  = excluded.created_at",
             rusqlite::params![slug, body_md, supersedes, now],
         )?;
-        let id: i64 =
-            tx.query_row("SELECT id FROM sessions WHERE slug = ?1", [slug], |r| {
-                r.get(0)
-            })?;
+        let id: i64 = tx.query_row("SELECT id FROM sessions WHERE slug = ?1", [slug], |r| {
+            r.get(0)
+        })?;
         if let Some(prev) = supersedes {
             tx.execute(
                 "UPDATE sessions SET status = 'superseded' WHERE slug = ?1",
@@ -223,20 +222,16 @@ impl SessionsHandle {
     /// counters plus a `ratio` of `bytes_out / baseline_bytes` (0.0 when the
     /// baseline is empty — fresh install, no calls yet).
     #[allow(clippy::significant_drop_tightening)]
-    pub fn query_usage_stats(
-        &self,
-        period: UsagePeriod,
-    ) -> Result<UsageStatsRow, SessionsError> {
+    pub fn query_usage_stats(&self, period: UsagePeriod) -> Result<UsageStatsRow, SessionsError> {
         let guard = self.conn.lock().map_err(|_| SessionsError::Poisoned)?;
         let now = current_unix_seconds();
         let since = period.since(now);
-        let (calls, bytes_out_total, baseline_bytes_total): (i64, i64, i64) = guard
-            .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(bytes_out), 0), COALESCE(SUM(baseline_bytes), 0) \
+        let (calls, bytes_out_total, baseline_bytes_total): (i64, i64, i64) = guard.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(bytes_out), 0), COALESCE(SUM(baseline_bytes), 0) \
                  FROM usage_stats WHERE ts_unix >= ?1",
-                [since],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
+            [since],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
         let bytes_saved = baseline_bytes_total - bytes_out_total;
         let ratio = if baseline_bytes_total > 0 {
             #[allow(clippy::cast_precision_loss)]
@@ -483,8 +478,12 @@ mod tests {
     #[test]
     fn query_usage_stats_aggregates_multiple_rows() {
         let (_dir, handle) = fresh_handle();
-        handle.log_usage("get_context", Some("a"), 100, 1000).unwrap();
-        handle.log_usage("get_context", Some("b"), 200, 2000).unwrap();
+        handle
+            .log_usage("get_context", Some("a"), 100, 1000)
+            .unwrap();
+        handle
+            .log_usage("get_context", Some("b"), 200, 2000)
+            .unwrap();
         handle.log_usage("find_symbol", None, 50, 0).unwrap();
         let stats = handle.query_usage_stats(UsagePeriod::All).unwrap();
         assert_eq!(stats.calls, 3);
@@ -496,7 +495,9 @@ mod tests {
     #[test]
     fn query_usage_stats_period_filters_old_rows() {
         let (_dir, handle) = fresh_handle();
-        handle.log_usage("get_context", Some("recent"), 100, 1000).unwrap();
+        handle
+            .log_usage("get_context", Some("recent"), 100, 1000)
+            .unwrap();
         // Backdate one row by 8 days so it falls outside the week window.
         {
             let guard = handle.conn.lock().unwrap();
@@ -513,7 +514,10 @@ mod tests {
         assert_eq!(day.calls, 1);
         assert_eq!(day.bytes_out_total, 100);
         let week = handle.query_usage_stats(UsagePeriod::Week).unwrap();
-        assert_eq!(week.calls, 1, "week window still excludes the 8-day-old row");
+        assert_eq!(
+            week.calls, 1,
+            "week window still excludes the 8-day-old row"
+        );
         let all = handle.query_usage_stats(UsagePeriod::All).unwrap();
         assert_eq!(all.calls, 2);
     }

@@ -75,11 +75,7 @@ struct CallVisitor<'a, 'b> {
 }
 
 impl<'a, 'b> CallVisitor<'a, 'b> {
-    fn new(
-        ctx: &'a mut TsWalkContext<'b>,
-        current_module: &str,
-        enclosing_fqdn: &str,
-    ) -> Self {
+    fn new(ctx: &'a mut TsWalkContext<'b>, current_module: &str, enclosing_fqdn: &str) -> Self {
         Self {
             ctx,
             current_module: current_module.to_string(),
@@ -466,9 +462,7 @@ mod tests {
     fn refs_with_attribute<'a>(edges: &'a [RawEdge], attr: &str) -> Vec<&'a RawEdge> {
         edges
             .iter()
-            .filter(|e| {
-                e.kind == EdgeKind::References && e.attributes.iter().any(|a| a == attr)
-            })
+            .filter(|e| e.kind == EdgeKind::References && e.attributes.iter().any(|a| a == attr))
             .collect()
     }
 
@@ -482,9 +476,7 @@ mod tests {
 
     #[test]
     fn jsx_uppercase_tag_emits_component_ref() {
-        let (_, edges) = run_tsx(
-            "function App() { return <Header />; }",
-        );
+        let (_, edges) = run_tsx("function App() { return <Header />; }");
         let comp = refs_with_attribute(&edges, "template-component-ref");
         assert_eq!(comp.len(), 1);
         assert!(ref_target_name(comp[0]).ends_with("Header"));
@@ -499,9 +491,7 @@ mod tests {
 
     #[test]
     fn jsx_attribute_expression_emits_template_bind() {
-        let (_, edges) = run_tsx(
-            "function App() { return <input value={text} />; }",
-        );
+        let (_, edges) = run_tsx("function App() { return <input value={text} />; }");
         let bind = refs_with_attribute(&edges, "template-bind");
         let names: Vec<&str> = bind.iter().map(|e| ref_target_name(e)).collect();
         assert!(names.iter().any(|n| n.ends_with("text")));
@@ -509,9 +499,7 @@ mod tests {
 
     #[test]
     fn jsx_child_expression_emits_template_interpolation() {
-        let (_, edges) = run_tsx(
-            "function App() { return <p>{message}</p>; }",
-        );
+        let (_, edges) = run_tsx("function App() { return <p>{message}</p>; }");
         let interp = refs_with_attribute(&edges, "template-interpolation");
         let names: Vec<&str> = interp.iter().map(|e| ref_target_name(e)).collect();
         assert!(names.iter().any(|n| n.ends_with("message")));
@@ -519,9 +507,7 @@ mod tests {
 
     #[test]
     fn jsx_spread_attribute_emits_template_bind() {
-        let (_, edges) = run_tsx(
-            "function App(props: any) { return <input {...props} />; }",
-        );
+        let (_, edges) = run_tsx("function App(props: any) { return <input {...props} />; }");
         let bind = refs_with_attribute(&edges, "template-bind");
         let names: Vec<&str> = bind.iter().map(|e| ref_target_name(e)).collect();
         assert!(names.iter().any(|n| n.ends_with("props")));
@@ -529,9 +515,8 @@ mod tests {
 
     #[test]
     fn jsx_event_handler_call_inside_attribute_also_emits_calls_edge() {
-        let (_, edges) = run_tsx(
-            "function App() { return <button onClick={() => handle(payload)} />; }",
-        );
+        let (_, edges) =
+            run_tsx("function App() { return <button onClick={() => handle(payload)} />; }");
         // Both the handle CALL and the handle/payload REFERENCES (Bind).
         let cs = calls(&edges);
         let bind = refs_with_attribute(&edges, "template-bind");
@@ -544,9 +529,7 @@ mod tests {
 
     #[test]
     fn jsx_member_access_in_child_emits_root_only() {
-        let (_, edges) = run_tsx(
-            "function App() { return <p>{user.name}</p>; }",
-        );
+        let (_, edges) = run_tsx("function App() { return <p>{user.name}</p>; }");
         let interp = refs_with_attribute(&edges, "template-interpolation");
         let names: Vec<&str> = interp.iter().map(|e| ref_target_name(e)).collect();
         assert!(names.iter().any(|n| n.ends_with("user")));
@@ -555,18 +538,14 @@ mod tests {
 
     #[test]
     fn jsx_static_string_attribute_does_not_emit_ref() {
-        let (_, edges) = run_tsx(
-            r#"function App() { return <div className="static" />; }"#,
-        );
+        let (_, edges) = run_tsx(r#"function App() { return <div className="static" />; }"#);
         let bind = refs_with_attribute(&edges, "template-bind");
         assert!(bind.is_empty());
     }
 
     #[test]
     fn jsx_nested_components_both_emit_component_ref() {
-        let (_, edges) = run_tsx(
-            "function App() { return <Layout><Header /></Layout>; }",
-        );
+        let (_, edges) = run_tsx("function App() { return <Layout><Header /></Layout>; }");
         let comp = refs_with_attribute(&edges, "template-component-ref");
         let names: Vec<&str> = comp.iter().map(|e| ref_target_name(e)).collect();
         assert!(names.iter().any(|n| n.ends_with("Layout")));
@@ -575,9 +554,7 @@ mod tests {
 
     #[test]
     fn jsx_globals_filtered_in_interpolation() {
-        let (_, edges) = run_tsx(
-            "function App() { return <p>{Math.max(a, b)}</p>; }",
-        );
+        let (_, edges) = run_tsx("function App() { return <p>{Math.max(a, b)}</p>; }");
         let interp = refs_with_attribute(&edges, "template-interpolation");
         let names: Vec<&str> = interp.iter().map(|e| ref_target_name(e)).collect();
         assert!(!names.iter().any(|n| n.ends_with("Math")));

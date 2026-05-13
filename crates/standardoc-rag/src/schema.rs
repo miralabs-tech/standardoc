@@ -73,7 +73,11 @@ pub fn ensure_schema(conn: &Connection, model: &EmbedModel) -> Result<(), RagErr
 }
 
 fn seed_schema_meta(conn: &Connection, model: &EmbedModel) -> Result<(), RagError> {
-    upsert_meta(conn, "schema_version", &SUPPORTED_SCHEMA_VERSION.to_string())?;
+    upsert_meta(
+        conn,
+        "schema_version",
+        &SUPPORTED_SCHEMA_VERSION.to_string(),
+    )?;
     upsert_meta(conn, "embed_model_id", &model.id)?;
     upsert_meta(conn, "embed_dim", &model.dim.to_string())?;
     upsert_meta_if_absent(
@@ -124,11 +128,9 @@ fn read_schema_version(conn: &Connection) -> Result<u32, RagError> {
 pub fn read_meta(conn: &Connection, key: &str) -> Result<Option<String>, RagError> {
     use rusqlite::OptionalExtension;
     let value: Option<String> = conn
-        .query_row(
-            "SELECT value FROM schema_meta WHERE key = ?1",
-            [key],
-            |r| r.get(0),
-        )
+        .query_row("SELECT value FROM schema_meta WHERE key = ?1", [key], |r| {
+            r.get(0)
+        })
         .optional()?;
     Ok(value)
 }

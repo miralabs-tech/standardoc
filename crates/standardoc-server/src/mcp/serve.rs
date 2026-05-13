@@ -119,7 +119,10 @@ pub async fn serve_mcp_http(
         .map_err(|e| ServerError::Io(io::Error::other(format!("axum serve: {e}"))))
 }
 
-fn write_endpoint_file(workspace_root: &std::path::Path, endpoint: &str) -> Result<(), ServerError> {
+fn write_endpoint_file(
+    workspace_root: &std::path::Path,
+    endpoint: &str,
+) -> Result<(), ServerError> {
     let path = workspace_root.join(".standardoc").join("mcp.endpoint");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(ServerError::Io)?;

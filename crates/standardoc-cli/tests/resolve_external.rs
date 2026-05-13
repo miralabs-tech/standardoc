@@ -92,15 +92,9 @@ fn registry_resolves_serde_deserialize_via_cargo_metadata() {
                     s.fqdn, s.kind, s.location.file
                 );
             }
-            let total = query::list_symbols(
-                &handle,
-                &query::SymbolFilter::default(),
-                10,
-            )
-            .expect("list_symbols must not error");
-            eprintln!(
-                "--- diagnostic: first 10 of indexed symbols (any name) ---"
-            );
+            let total = query::list_symbols(&handle, &query::SymbolFilter::default(), 10)
+                .expect("list_symbols must not error");
+            eprintln!("--- diagnostic: first 10 of indexed symbols (any name) ---");
             for s in &total {
                 eprintln!("  fqdn=`{}` kind={:?}", s.fqdn, s.kind);
             }

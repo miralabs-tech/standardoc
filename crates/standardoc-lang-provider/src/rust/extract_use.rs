@@ -10,7 +10,14 @@ pub(crate) fn process_use(ctx: &mut WalkContext, item: &syn::ItemUse, current_mo
     let span = item.span();
     let is_public = matches!(item.vis, syn::Visibility::Public(_));
     let mut prefix: Vec<String> = Vec::new();
-    walk_tree(ctx, &item.tree, &mut prefix, current_module, span, is_public);
+    walk_tree(
+        ctx,
+        &item.tree,
+        &mut prefix,
+        current_module,
+        span,
+        is_public,
+    );
 }
 
 fn walk_tree(

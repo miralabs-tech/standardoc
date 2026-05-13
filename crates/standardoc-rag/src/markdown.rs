@@ -52,7 +52,9 @@ pub fn split_by_heading(source: &str, level: usize) -> Vec<Section<'_>> {
     let mut byte_pos = 0usize;
 
     for line in source.split_inclusive('\n') {
-        if line_starts_with_heading(line, prefix) && !line_starts_with_heading(line, &format!("{prefix}#")) {
+        if line_starts_with_heading(line, prefix)
+            && !line_starts_with_heading(line, &format!("{prefix}#"))
+        {
             if byte_pos > current_start || current_header.is_some() {
                 push_if_meaningful(
                     &mut sections,

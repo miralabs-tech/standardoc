@@ -145,7 +145,10 @@ mod tests {
             post.iter().any(|c| c == "last_modified_revision"),
             "v3→v4 upgrade must add the last_modified_revision column"
         );
-        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -199,7 +202,10 @@ mod tests {
                 row.1
             );
         }
-        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -232,7 +238,10 @@ mod tests {
             post.iter().any(|c| c == "confidence"),
             "v2→v3 upgrade must add the confidence column"
         );
-        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -265,7 +274,10 @@ mod tests {
             post.iter().any(|c| c == "attributes"),
             "v1→v2 upgrade must add the attributes column"
         );
-        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
     }
 
     #[test]

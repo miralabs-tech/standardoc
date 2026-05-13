@@ -139,7 +139,11 @@ fn parse_directive(frontmatter_body: &str) -> FrontmatterDirective {
         let Some(rest) = line.trim_start().strip_prefix("standardoc:") else {
             continue;
         };
-        let value = rest.trim().trim_matches('"').trim_matches('\'').to_ascii_lowercase();
+        let value = rest
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_ascii_lowercase();
         return match value.as_str() {
             "rag" | "true" => FrontmatterDirective::Rag,
             "false" | "off" | "no" => FrontmatterDirective::Disabled,
@@ -190,12 +194,30 @@ mod tests {
 
     #[test]
     fn parse_directive_recognises_rag_and_false() {
-        assert_eq!(parse_directive("standardoc: rag\n"), FrontmatterDirective::Rag);
-        assert_eq!(parse_directive("standardoc: \"rag\"\n"), FrontmatterDirective::Rag);
-        assert_eq!(parse_directive("standardoc: true\n"), FrontmatterDirective::Rag);
-        assert_eq!(parse_directive("standardoc: false\n"), FrontmatterDirective::Disabled);
-        assert_eq!(parse_directive("standardoc: no\n"), FrontmatterDirective::Disabled);
-        assert_eq!(parse_directive("standardoc: bogus\n"), FrontmatterDirective::Absent);
+        assert_eq!(
+            parse_directive("standardoc: rag\n"),
+            FrontmatterDirective::Rag
+        );
+        assert_eq!(
+            parse_directive("standardoc: \"rag\"\n"),
+            FrontmatterDirective::Rag
+        );
+        assert_eq!(
+            parse_directive("standardoc: true\n"),
+            FrontmatterDirective::Rag
+        );
+        assert_eq!(
+            parse_directive("standardoc: false\n"),
+            FrontmatterDirective::Disabled
+        );
+        assert_eq!(
+            parse_directive("standardoc: no\n"),
+            FrontmatterDirective::Disabled
+        );
+        assert_eq!(
+            parse_directive("standardoc: bogus\n"),
+            FrontmatterDirective::Absent
+        );
         assert_eq!(parse_directive("title: hi\n"), FrontmatterDirective::Absent);
     }
 

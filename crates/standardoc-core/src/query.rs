@@ -923,13 +923,11 @@ fn build_edge(
         }
     };
     let sites = load_edge_sites(conn, raw.id)?;
-    let attributes: Vec<String> =
-        serde_json::from_str(&raw.attributes_json).map_err(|e| StorageError::InvalidStoredData {
-            detail: format!(
-                "edges.id={} has malformed attributes JSON: {e}",
-                raw.id
-            ),
-        })?;
+    let attributes: Vec<String> = serde_json::from_str(&raw.attributes_json).map_err(|e| {
+        StorageError::InvalidStoredData {
+            detail: format!("edges.id={} has malformed attributes JSON: {e}", raw.id),
+        }
+    })?;
     let confidence = edge_confidence_from_sql_text(&raw.confidence_text)?;
     Ok(RawEdge {
         from_fqdn,
@@ -1401,7 +1399,8 @@ mod tests {
             seed_symbol(&conn, "src/main.rs", "tick_one", "crate::tick_one", 1);
             seed_symbol(&conn, "src/main.rs", "tick_two", "crate::tick_two", 2);
         }
-        let got = search_text(&handle, "tick_one OR tick_two", 1, &SymbolFilter::default()).unwrap();
+        let got =
+            search_text(&handle, "tick_one OR tick_two", 1, &SymbolFilter::default()).unwrap();
         assert_eq!(got.len(), 1);
     }
 
@@ -1453,12 +1452,22 @@ mod tests {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
             seed_symbol_full(
-                &conn, "src/main.rs", "marker", "crate::marker_fn",
-                Kind::Function, Visibility::Public, None,
+                &conn,
+                "src/main.rs",
+                "marker",
+                "crate::marker_fn",
+                Kind::Function,
+                Visibility::Public,
+                None,
             );
             seed_symbol_full(
-                &conn, "src/main.rs", "marker", "crate::marker_ty",
-                Kind::Type, Visibility::Public, None,
+                &conn,
+                "src/main.rs",
+                "marker",
+                "crate::marker_ty",
+                Kind::Type,
+                Visibility::Public,
+                None,
             );
         }
         let only_types = SymbolFilter {
@@ -1477,12 +1486,22 @@ mod tests {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
             seed_symbol_full(
-                &conn, "src/main.rs", "thing", "crate::thing_pub",
-                Kind::Function, Visibility::Public, None,
+                &conn,
+                "src/main.rs",
+                "thing",
+                "crate::thing_pub",
+                Kind::Function,
+                Visibility::Public,
+                None,
             );
             seed_symbol_full(
-                &conn, "src/main.rs", "thing", "crate::thing_priv",
-                Kind::Function, Visibility::Private, None,
+                &conn,
+                "src/main.rs",
+                "thing",
+                "crate::thing_priv",
+                Kind::Function,
+                Visibility::Private,
+                None,
             );
         }
         let only_private = SymbolFilter {
@@ -1500,10 +1519,24 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "a", "crate::a",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs", "b", "crate::b",
-                Kind::Type, Visibility::Private, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "a",
+                "crate::a",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "b",
+                "crate::b",
+                Kind::Type,
+                Visibility::Private,
+                None,
+            );
         }
         let got = list_symbols(&handle, &SymbolFilter::default(), 50).unwrap();
         assert_eq!(got.len(), 2);
@@ -1518,12 +1551,33 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "pub_one", "crate::pub_one",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs", "priv_one", "crate::priv_one",
-                Kind::Function, Visibility::Private, None);
-            seed_symbol_full(&conn, "src/main.rs", "priv_two", "crate::priv_two",
-                Kind::Function, Visibility::Private, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "pub_one",
+                "crate::pub_one",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "priv_one",
+                "crate::priv_one",
+                Kind::Function,
+                Visibility::Private,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "priv_two",
+                "crate::priv_two",
+                Kind::Function,
+                Visibility::Private,
+                None,
+            );
         }
         let filter = SymbolFilter {
             visibility: Some(Visibility::Private),
@@ -1540,10 +1594,24 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "f1", "crate::a::f1",
-                Kind::Function, Visibility::Public, Some("crate::a"));
-            seed_symbol_full(&conn, "src/main.rs", "f2", "crate::b::f2",
-                Kind::Function, Visibility::Public, Some("crate::b"));
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "f1",
+                "crate::a::f1",
+                Kind::Function,
+                Visibility::Public,
+                Some("crate::a"),
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "f2",
+                "crate::b::f2",
+                Kind::Function,
+                Visibility::Public,
+                Some("crate::b"),
+            );
         }
         let filter = SymbolFilter {
             module: Some("crate::a".into()),
@@ -1561,9 +1629,15 @@ mod tests {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
             for i in 0..5 {
-                seed_symbol_full(&conn, "src/main.rs",
-                    &format!("f{i}"), &format!("crate::f{i}"),
-                    Kind::Function, Visibility::Public, None);
+                seed_symbol_full(
+                    &conn,
+                    "src/main.rs",
+                    &format!("f{i}"),
+                    &format!("crate::f{i}"),
+                    Kind::Function,
+                    Visibility::Public,
+                    None,
+                );
             }
         }
         let got = list_symbols(&handle, &SymbolFilter::default(), 3).unwrap();
@@ -1576,20 +1650,36 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "strip_rs_extension", "crate::a::strip_rs_extension",
-                Kind::Function, Visibility::Private, None);
-            seed_symbol_full(&conn, "src/main.rs", "strip_ts_extension", "crate::b::strip_ts_extension",
-                Kind::Function, Visibility::Private, None);
-            seed_symbol_full(&conn, "src/main.rs", "compute_path", "crate::c::compute_path",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_rs_extension",
+                "crate::a::strip_rs_extension",
+                Kind::Function,
+                Visibility::Private,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_ts_extension",
+                "crate::b::strip_ts_extension",
+                Kind::Function,
+                Visibility::Private,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "compute_path",
+                "crate::c::compute_path",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
-        let got = find_by_pattern(
-            &handle,
-            "strip_*_extension",
-            &SymbolFilter::default(),
-            50,
-        )
-        .unwrap();
+        let got =
+            find_by_pattern(&handle, "strip_*_extension", &SymbolFilter::default(), 50).unwrap();
         let names: Vec<&str> = got.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["strip_rs_extension", "strip_ts_extension"]);
     }
@@ -1600,20 +1690,36 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "do_a", "myapp::utils::do_a",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs", "do_b", "myapp::utils::do_b",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs", "do_c", "other::do_c",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "do_a",
+                "myapp::utils::do_a",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "do_b",
+                "myapp::utils::do_b",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "do_c",
+                "other::do_c",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
-        let got = find_by_pattern(
-            &handle,
-            "myapp::utils::*",
-            &SymbolFilter::default(),
-            50,
-        )
-        .unwrap();
+        let got =
+            find_by_pattern(&handle, "myapp::utils::*", &SymbolFilter::default(), 50).unwrap();
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|s| s.fqdn.starts_with("myapp::utils::")));
     }
@@ -1624,10 +1730,24 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "helper_one", "crate::helper_one",
-                Kind::Function, Visibility::Private, None);
-            seed_symbol_full(&conn, "src/main.rs", "helper_two", "crate::helper_two",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "helper_one",
+                "crate::helper_one",
+                Kind::Function,
+                Visibility::Private,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "helper_two",
+                "crate::helper_two",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
         let filter = SymbolFilter {
             visibility: Some(Visibility::Private),
@@ -1644,8 +1764,15 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "foo", "crate::foo",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "foo",
+                "crate::foo",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
         let got = find_by_pattern(&handle, "nope_*", &SymbolFilter::default(), 50).unwrap();
         assert!(got.is_empty());
@@ -1657,18 +1784,42 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_rs_extension", "crate::a::strip_rs_extension",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_ts_extension", "crate::b::strip_ts_extension",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_lua_extension", "crate::c::strip_lua_extension",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs",
-                "render_widget", "crate::d::render_widget",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_rs_extension",
+                "crate::a::strip_rs_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_ts_extension",
+                "crate::b::strip_ts_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_lua_extension",
+                "crate::c::strip_lua_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "render_widget",
+                "crate::d::render_widget",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
         let got = find_similar(
             &handle,
@@ -1680,8 +1831,7 @@ mod tests {
         .unwrap();
         let names: Vec<&str> = got.iter().map(|(s, _)| s.name.as_str()).collect();
         assert!(
-            names.contains(&"strip_ts_extension")
-                && names.contains(&"strip_lua_extension"),
+            names.contains(&"strip_ts_extension") && names.contains(&"strip_lua_extension"),
             "expected templated family in result, got {names:?}"
         );
         assert!(
@@ -1696,15 +1846,33 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_rs_extension", "crate::a::strip_rs_extension",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_rs_extension", "crate::b::strip_rs_extension",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_ts_extension", "crate::c::strip_ts_extension",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_rs_extension",
+                "crate::a::strip_rs_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_rs_extension",
+                "crate::b::strip_rs_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_ts_extension",
+                "crate::c::strip_ts_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
         let got = find_similar(
             &handle,
@@ -1727,13 +1895,25 @@ mod tests {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
             // Closest cousin: 1-char-diff
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_ts_extension", "crate::a::strip_ts_extension",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_ts_extension",
+                "crate::a::strip_ts_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
             // Slightly weaker cousin: 3-chars-diff
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_lua_extension", "crate::b::strip_lua_extension",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_lua_extension",
+                "crate::b::strip_lua_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
         let got = find_similar(
             &handle,
@@ -1744,10 +1924,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got.len(), 2);
-        assert!(
-            got[0].1 >= got[1].1,
-            "results must be sorted by score desc"
-        );
+        assert!(got[0].1 >= got[1].1, "results must be sorted by score desc");
         assert_eq!(got[0].0.name, "strip_ts_extension");
         assert_eq!(got[1].0.name, "strip_lua_extension");
     }
@@ -1758,18 +1935,18 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs",
-                "buy_apple", "crate::a::buy_apple",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "buy_apple",
+                "crate::a::buy_apple",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
-        let got = find_similar(
-            &handle,
-            "render_widget",
-            0.95,
-            &SymbolFilter::default(),
-            50,
-        )
-        .unwrap();
+        let got =
+            find_similar(&handle, "render_widget", 0.95, &SymbolFilter::default(), 50).unwrap();
         assert!(got.is_empty(), "high threshold must drop unrelated names");
     }
 
@@ -1779,12 +1956,24 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_ts_extension", "crate::a::strip_ts_extension",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_lua_extension", "crate::b::strip_lua_extension",
-                Kind::Function, Visibility::Private, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_ts_extension",
+                "crate::a::strip_ts_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_lua_extension",
+                "crate::b::strip_lua_extension",
+                Kind::Function,
+                Visibility::Private,
+                None,
+            );
         }
         let filter = SymbolFilter {
             visibility: Some(Visibility::Public),
@@ -1804,8 +1993,15 @@ mod tests {
             for label in ["ts", "lua", "py", "go", "js"] {
                 let name = format!("strip_{label}_extension");
                 let fqdn = format!("crate::{label}::strip_{label}_extension");
-                seed_symbol_full(&conn, "src/main.rs", &name, &fqdn,
-                    Kind::Function, Visibility::Public, None);
+                seed_symbol_full(
+                    &conn,
+                    "src/main.rs",
+                    &name,
+                    &fqdn,
+                    Kind::Function,
+                    Visibility::Public,
+                    None,
+                );
             }
         }
         let got = find_similar(
@@ -1822,14 +2018,7 @@ mod tests {
     #[test]
     fn find_similar_empty_index_returns_empty() {
         let (_dir, handle) = open_handle();
-        let got = find_similar(
-            &handle,
-            "anything",
-            0.5,
-            &SymbolFilter::default(),
-            50,
-        )
-        .unwrap();
+        let got = find_similar(&handle, "anything", 0.5, &SymbolFilter::default(), 50).unwrap();
         assert!(got.is_empty());
     }
 
@@ -1839,12 +2028,24 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_ts_extension", "crate::a::strip_ts_extension",
-                Kind::Function, Visibility::Public, Some("crate::a"));
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_lua_extension", "crate::b::strip_lua_extension",
-                Kind::Function, Visibility::Public, Some("crate::b"));
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_ts_extension",
+                "crate::a::strip_ts_extension",
+                Kind::Function,
+                Visibility::Public,
+                Some("crate::a"),
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_lua_extension",
+                "crate::b::strip_lua_extension",
+                Kind::Function,
+                Visibility::Public,
+                Some("crate::b"),
+            );
         }
         let filter = SymbolFilter {
             module: Some("crate::a".into()),

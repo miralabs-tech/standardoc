@@ -196,9 +196,9 @@ fn main() -> ExitCode {
 /// side. Keep the supervisor's `parseFatalMarker` in sync.
 fn fatal_marker_for(err: &ServerError) -> Option<String> {
     match err {
-        ServerError::Storage(StorageError::SchemaVersionTooNew { db, supported }) => Some(
-            format!("STDOC_FATAL: schema_too_new db={db} supported={supported}"),
-        ),
+        ServerError::Storage(StorageError::SchemaVersionTooNew { db, supported }) => Some(format!(
+            "STDOC_FATAL: schema_too_new db={db} supported={supported}"
+        )),
         _ => None,
     }
 }
@@ -346,9 +346,8 @@ fn load_or_download_candle() -> Result<CandleBgeSmall, ServerError> {
         );
         let dl_result = CandleBgeSmall::download(&model_dir);
         eprintln!("STDOC_RAG_DL_DONE");
-        dl_result.map_err(|e| {
-            ServerError::Io(io::Error::other(format!("rag model download: {e}")))
-        })?;
+        dl_result
+            .map_err(|e| ServerError::Io(io::Error::other(format!("rag model download: {e}"))))?;
         eprintln!("standardoc rag: model downloaded");
     }
     CandleBgeSmall::load(model_dir)
@@ -448,7 +447,8 @@ fn cmd_query(args: &QueryArgs) -> Result<(), ServerError> {
         return Ok(());
     }
     if let Some(text) = args.text.as_deref() {
-        let results = query::search_text(&handle, text, args.limit, &query::SymbolFilter::default())?;
+        let results =
+            query::search_text(&handle, text, args.limit, &query::SymbolFilter::default())?;
         print_symbol_list(&results);
         return Ok(());
     }

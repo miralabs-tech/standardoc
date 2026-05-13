@@ -160,7 +160,10 @@ pub fn read_stored_hashes(handle: &IndexHandle) -> Result<LockfileHashes, Storag
             _ => {}
         }
     }
-    let npm = match (npm_hash, npm_kind_raw.as_deref().and_then(NpmLockfileKind::parse)) {
+    let npm = match (
+        npm_hash,
+        npm_kind_raw.as_deref().and_then(NpmLockfileKind::parse),
+    ) {
         (Some(h), Some(kind)) => Some((kind, h)),
         _ => None,
     };
@@ -201,11 +204,7 @@ pub fn write_stored_hashes(
     Ok(())
 }
 
-fn update_meta(
-    tx: &rusqlite::Transaction<'_>,
-    key: &str,
-    value: &str,
-) -> Result<(), StorageError> {
+fn update_meta(tx: &rusqlite::Transaction<'_>, key: &str, value: &str) -> Result<(), StorageError> {
     tx.execute(
         "UPDATE schema_meta SET value = ?1 WHERE key = ?2",
         rusqlite::params![value, key],
@@ -595,7 +594,12 @@ mod tests {
     fn handle_lockfile_change_maps_npm_lockfiles_to_node_modules_origin() {
         let dir = tempdir().unwrap();
         let handle = IndexHandle::open(dir.path()).unwrap();
-        for name in ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".pnp.cjs"] {
+        for name in [
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            ".pnp.cjs",
+        ] {
             std::fs::write(handle.workspace_root().join(name), "x").unwrap();
             let result = handle_lockfile_change(
                 &handle,

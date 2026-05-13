@@ -102,10 +102,7 @@ impl RagStore {
         let now = current_unix_seconds();
         let mut guard = self.conn.lock().map_err(|_| RagError::Poisoned)?;
         let tx = guard.transaction()?;
-        tx.execute(
-            "DELETE FROM chunks WHERE source_path = ?1",
-            [source_path],
-        )?;
+        tx.execute("DELETE FROM chunks WHERE source_path = ?1", [source_path])?;
         let mut ids = Vec::with_capacity(pieces.len());
         for (idx, (piece, vector)) in pieces.iter().zip(vectors.iter()).enumerate() {
             let text_hash = blake3::hash(piece.text.as_bytes()).to_hex().to_string();
@@ -429,7 +426,10 @@ mod tests {
             store.read_meta("embed_model_id").unwrap().as_deref(),
             Some("bge-small-en-v1.5"),
         );
-        assert_eq!(store.read_meta("embed_dim").unwrap().as_deref(), Some("384"));
+        assert_eq!(
+            store.read_meta("embed_dim").unwrap().as_deref(),
+            Some("384")
+        );
     }
 
     #[test]
@@ -611,7 +611,9 @@ mod tests {
             };
             store.replace_links_for_chunk(id, &[link]).unwrap();
         }
-        let refs = store.refs_for_symbol_with_query("x::y", &target, 10).unwrap();
+        let refs = store
+            .refs_for_symbol_with_query("x::y", &target, 10)
+            .unwrap();
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].uri, ids[1].to_uri());
     }

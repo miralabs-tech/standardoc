@@ -110,13 +110,8 @@ impl Resolver for LuarocksResolver {
             _ => return Ok(ResolveOutcome::NotInThisRegistry),
         };
 
-        let submitted = walk_and_submit_rock(
-            handle,
-            provider,
-            &rock_dir,
-            rock_name,
-            self.source_origin(),
-        )?;
+        let submitted =
+            walk_and_submit_rock(handle, provider, &rock_dir, rock_name, self.source_origin())?;
         if submitted == 0 {
             return Ok(ResolveOutcome::NotInThisRegistry);
         }
@@ -136,11 +131,7 @@ impl Resolver for LuarocksResolver {
 /// scope/namespace convention so this is identical to the cargo case.
 fn rock_name_of_fqdn(fqdn: &str) -> Option<&str> {
     let (head, _rest) = fqdn.split_once("::")?;
-    if head.is_empty() {
-        None
-    } else {
-        Some(head)
-    }
+    if head.is_empty() { None } else { Some(head) }
 }
 
 fn run_luarocks_rock_dir(
@@ -245,10 +236,7 @@ fn rewrite_for_external(
     extracted.source_origin = origin;
 }
 
-fn poll_for_symbol(
-    handle: &IndexHandle,
-    fqdn: &str,
-) -> Result<Option<RawSymbol>, ExternalsError> {
+fn poll_for_symbol(handle: &IndexHandle, fqdn: &str) -> Result<Option<RawSymbol>, ExternalsError> {
     let deadline = Instant::now() + SUBMIT_DRAIN_TIMEOUT;
     loop {
         if let Some(sym) = query::symbol_by_fqdn(handle, fqdn)? {

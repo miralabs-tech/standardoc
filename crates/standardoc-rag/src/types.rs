@@ -10,7 +10,9 @@ pub const RAG_URI_SCHEME: &str = "rag";
 /// Opaque integer id assigned by the rag store. 1:1 with `chunks.id`
 /// (`INTEGER PRIMARY KEY AUTOINCREMENT`). Wrapped to keep accidental
 /// conflation with `RawSymbol`-side ids type-checked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct ChunkId(pub i64);
 
@@ -30,9 +32,11 @@ impl ChunkId {
     /// id with the default store implicit ; this Phase A parser is strict.
     pub fn from_uri(uri: &str) -> Result<Self, RagError> {
         let prefix = format!("{RAG_URI_SCHEME}://");
-        let rest = uri.strip_prefix(&prefix).ok_or_else(|| RagError::InvalidUri {
-            uri: uri.to_string(),
-        })?;
+        let rest = uri
+            .strip_prefix(&prefix)
+            .ok_or_else(|| RagError::InvalidUri {
+                uri: uri.to_string(),
+            })?;
         let id: i64 = rest.parse().map_err(|_| RagError::InvalidUri {
             uri: uri.to_string(),
         })?;

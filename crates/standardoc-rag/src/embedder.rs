@@ -98,17 +98,15 @@ impl CandleBgeSmall {
 
         let device = Device::Cpu;
         let config_text = std::fs::read_to_string(&config_path)?;
-        let config: Config = serde_json::from_str(&config_text).map_err(|e| {
-            RagError::Embedder {
+        let config: Config =
+            serde_json::from_str(&config_text).map_err(|e| RagError::Embedder {
                 detail: format!("config parse: {e}"),
-            }
-        })?;
+            })?;
 
-        let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
-            RagError::Embedder {
+        let mut tokenizer =
+            Tokenizer::from_file(&tokenizer_path).map_err(|e| RagError::Embedder {
                 detail: format!("tokenizer load: {e}"),
-            }
-        })?;
+            })?;
         tokenizer.with_padding(Some(PaddingParams {
             strategy: PaddingStrategy::BatchLongest,
             ..PaddingParams::default()
@@ -127,11 +125,12 @@ impl CandleBgeSmall {
         // `unsafe_code = forbid` ; we cannot use it. Fallback : read the
         // safetensors file into memory (less memory-efficient but safe).
         let weights_bytes = std::fs::read(&weights_path)?;
-        let vb = VarBuilder::from_buffered_safetensors(weights_bytes, DTYPE, &device).map_err(
-            |e| RagError::Embedder {
-                detail: format!("safetensors buffer: {e}"),
-            },
-        )?;
+        let vb =
+            VarBuilder::from_buffered_safetensors(weights_bytes, DTYPE, &device).map_err(|e| {
+                RagError::Embedder {
+                    detail: format!("safetensors buffer: {e}"),
+                }
+            })?;
         let bert = BertModel::load(vb, &config).map_err(|e| RagError::Embedder {
             detail: format!("bert load: {e}"),
         })?;
@@ -241,11 +240,12 @@ impl Embedder for CandleBgeSmall {
                 detail: format!("attn tensor: {e}"),
             }
         })?;
-        let type_ids_t = Tensor::zeros((batch_size, max_len), DType::U32, &self.device).map_err(
-            |e| RagError::Embedder {
-                detail: format!("type_ids tensor: {e}"),
-            },
-        )?;
+        let type_ids_t =
+            Tensor::zeros((batch_size, max_len), DType::U32, &self.device).map_err(|e| {
+                RagError::Embedder {
+                    detail: format!("type_ids tensor: {e}"),
+                }
+            })?;
 
         let hidden = {
             let bert = self.bert.lock().map_err(|_| RagError::Poisoned)?;
@@ -290,9 +290,11 @@ fn mean_pool(hidden: &Tensor, attention: &Tensor) -> Result<Tensor, RagError> {
     let counts = attention_f.sum_keepdim(1).map_err(|e| RagError::Embedder {
         detail: format!("counts: {e}"),
     })?;
-    summed.broadcast_div(&counts).map_err(|e| RagError::Embedder {
-        detail: format!("pooled div: {e}"),
-    })
+    summed
+        .broadcast_div(&counts)
+        .map_err(|e| RagError::Embedder {
+            detail: format!("pooled div: {e}"),
+        })
 }
 
 fn l2_normalize(t: &Tensor) -> Result<Tensor, RagError> {
@@ -344,7 +346,10 @@ impl Embedder for MockEmbedder {
     }
 
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, RagError> {
-        Ok(texts.iter().map(|t| mock_vector(t, self.model.dim)).collect())
+        Ok(texts
+            .iter()
+            .map(|t| mock_vector(t, self.model.dim))
+            .collect())
     }
 }
 
@@ -472,7 +477,9 @@ mod tests {
             return;
         }
         let embedder = CandleBgeSmall::load(dir).unwrap();
-        let v = embedder.embed("the quick brown fox jumps over the lazy dog").unwrap();
+        let v = embedder
+            .embed("the quick brown fox jumps over the lazy dog")
+            .unwrap();
         assert_eq!(v.len(), 384);
         let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-3, "norm = {norm}");

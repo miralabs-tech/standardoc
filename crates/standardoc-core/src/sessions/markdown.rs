@@ -49,8 +49,8 @@ fn render_markdown(rows: &[SessionRow]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::SessionStatus;
+    use super::*;
 
     fn fresh_handle() -> (tempfile::TempDir, SessionsHandle) {
         let dir = tempfile::tempdir().unwrap();

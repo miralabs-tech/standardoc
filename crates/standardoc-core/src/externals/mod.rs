@@ -244,9 +244,7 @@ mod tests {
             path: &str,
             _ctx: &ExtractContext<'_>,
         ) -> Result<ExtractedFile, crate::pipeline::ExtractError> {
-            Err(crate::pipeline::ExtractError::UnsupportedLanguage {
-                file: path.into(),
-            })
+            Err(crate::pipeline::ExtractError::UnsupportedLanguage { file: path.into() })
         }
     }
 

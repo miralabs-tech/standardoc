@@ -63,7 +63,6 @@ pub(crate) fn extract_file(
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

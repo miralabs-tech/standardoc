@@ -208,7 +208,6 @@ fn language_for(path: &str) -> Language {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -141,12 +141,7 @@ impl IndexHandle {
             let _probe = pool.get()?;
             Ok::<_, StorageError>(pool)
         })?;
-        Self::wire_handle(
-            pool,
-            workspace_root,
-            None,
-            "standardoc-writer-secondary",
-        )
+        Self::wire_handle(pool, workspace_root, None, "standardoc-writer-secondary")
     }
 
     /// Builds the inner state (pool, writer thread, sender) shared by
@@ -166,10 +161,7 @@ impl IndexHandle {
         let writer_handle = std::thread::Builder::new()
             .name(writer_thread_name.to_string())
             .spawn(move || {
-                writer_loop(
-                    receiver,
-                    &WriterContext { pool: writer_pool },
-                );
+                writer_loop(receiver, &WriterContext { pool: writer_pool });
             })
             .map_err(StorageError::Io)?;
 

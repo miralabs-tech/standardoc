@@ -35,8 +35,7 @@ pub(crate) fn find_rockspec(file_abs_path: &Path, workspace_root: &Path) -> Opti
         if let Ok(entries) = std::fs::read_dir(current) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("rockspec") && path.is_file()
-                {
+                if path.extension().and_then(|s| s.to_str()) == Some("rockspec") && path.is_file() {
                     return Some(path);
                 }
             }

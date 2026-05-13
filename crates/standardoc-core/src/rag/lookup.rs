@@ -36,19 +36,20 @@ impl SymbolLookup for CoreSymbolLookup<'_> {
             include_external: false,
             ..SymbolFilter::default()
         };
-        let symbols = query::list_symbols(self.handle, &filter, WORKSPACE_FQDN_LIMIT)
-            .map_err(|e| RagError::InvalidStoredData {
-                detail: format!("list_symbols: {e}"),
+        let symbols =
+            query::list_symbols(self.handle, &filter, WORKSPACE_FQDN_LIMIT).map_err(|e| {
+                RagError::InvalidStoredData {
+                    detail: format!("list_symbols: {e}"),
+                }
             })?;
         Ok(symbols.into_iter().map(|s| s.fqdn).collect())
     }
 
     fn def_site_path(&self, fqdn: &str) -> Result<Option<String>, RagError> {
-        let symbol = query::symbol_by_fqdn(self.handle, fqdn).map_err(|e| {
-            RagError::InvalidStoredData {
+        let symbol =
+            query::symbol_by_fqdn(self.handle, fqdn).map_err(|e| RagError::InvalidStoredData {
                 detail: format!("symbol_by_fqdn({fqdn}): {e}"),
-            }
-        })?;
+            })?;
         Ok(symbol.map(|s| s.location.file))
     }
 }

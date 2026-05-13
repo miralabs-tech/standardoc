@@ -97,7 +97,10 @@ mod tests {
         let err = ensure_schema(&conn).unwrap_err();
         assert!(matches!(
             err,
-            SessionsError::SchemaVersionTooNew { db: 99, supported: 2 }
+            SessionsError::SchemaVersionTooNew {
+                db: 99,
+                supported: 2
+            }
         ));
     }
 

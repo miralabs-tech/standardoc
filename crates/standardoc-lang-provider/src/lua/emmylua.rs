@@ -77,11 +77,7 @@ fn parse_param_row(s: &str) -> Option<(String, String)> {
     // that introduces a description. Simplest robust heuristic: take the
     // first whitespace-delimited token as the type. EmmyLua allows complex
     // composite types `string|number|nil` — those are non-space tokens.
-    let ty = rest
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let ty = rest.split_whitespace().next().unwrap_or("").to_string();
     if ty.is_empty() {
         return None;
     }

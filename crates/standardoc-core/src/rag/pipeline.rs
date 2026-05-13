@@ -98,16 +98,16 @@ impl RagPipeline {
         handle: &IndexHandle,
     ) -> Result<Vec<ChunkId>, RagPipelineError> {
         let abs_path = workspace_root.join(source_path);
-        let source_text = std::fs::read_to_string(&abs_path).map_err(|source| {
-            RagPipelineError::Io {
+        let source_text =
+            std::fs::read_to_string(&abs_path).map_err(|source| RagPipelineError::Io {
                 path: source_path.to_string(),
                 source,
-            }
-        })?;
+            })?;
         let pieces = self.chunker.chunk(&source_text)?;
 
         if pieces.is_empty() {
-            self.store.replace_chunks_for_source(source_path, &[], &[])?;
+            self.store
+                .replace_chunks_for_source(source_path, &[], &[])?;
             return Ok(Vec::new());
         }
 
@@ -186,8 +186,7 @@ mod tests {
 
     fn fresh_pipeline_with_handle() -> (TempDir, RagPipeline, IndexHandle) {
         let dir = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(RagStore::open(dir.path(), EmbedModel::bge_small_en_v1_5()).unwrap());
+        let store = Arc::new(RagStore::open(dir.path(), EmbedModel::bge_small_en_v1_5()).unwrap());
         let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new());
         let pipeline = RagPipeline::with_defaults(store, embedder);
         let handle = IndexHandle::open(dir.path()).unwrap();
@@ -231,9 +230,7 @@ mod tests {
         std::fs::write(dir.path().join("README.md"), "# r\n\nrows.\n").unwrap();
         std::fs::create_dir_all(dir.path().join("docs")).unwrap();
         std::fs::write(dir.path().join("docs/a.md"), "# a\n\nrows.\n").unwrap();
-        let filters = ScanFilters::from_stack(
-            crate::pipeline::GitignoreStack::build(dir.path()),
-        );
+        let filters = ScanFilters::from_stack(crate::pipeline::GitignoreStack::build(dir.path()));
         let processed = pipeline
             .run_cold_start(dir.path(), &filters, &handle)
             .unwrap();

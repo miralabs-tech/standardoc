@@ -126,10 +126,7 @@ mod tests {
 
     #[test]
     fn sum_distinct_file_sizes_dedupes() {
-        let dir = fixture_workspace_with_files(&[
-            ("src/a.rs", "aaa"),
-            ("src/b.rs", "bbbbb"),
-        ]);
+        let dir = fixture_workspace_with_files(&[("src/a.rs", "aaa"), ("src/b.rs", "bbbbb")]);
         let sum = sum_distinct_file_sizes(
             dir.path(),
             ["src/a.rs", "src/a.rs", "src/b.rs"]
@@ -162,8 +159,7 @@ mod tests {
     #[test]
     fn sum_distinct_file_sizes_empty_input() {
         let dir = tempfile::tempdir().unwrap();
-        let sum =
-            sum_distinct_file_sizes(dir.path(), std::iter::empty::<String>());
+        let sum = sum_distinct_file_sizes(dir.path(), std::iter::empty::<String>());
         assert_eq!(sum, 0);
     }
 }

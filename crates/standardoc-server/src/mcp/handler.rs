@@ -13,8 +13,8 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use standardoc_core::{
-    IndexHandle, LanguageProvider, RagWatcherHandle, ResolveOutcome, ResolverRegistry,
-    ScanFilters, SessionsHandle, UsagePeriod, WatcherHandle, dump_sessions_to_markdown,
+    IndexHandle, LanguageProvider, RagWatcherHandle, ResolveOutcome, ResolverRegistry, ScanFilters,
+    SessionsHandle, UsagePeriod, WatcherHandle, dump_sessions_to_markdown,
     query::{self, SymbolFilter},
 };
 use standardoc_ir::SourceOrigin;
@@ -169,9 +169,7 @@ impl StandardocMcp {
         let chunks = tokio::task::spawn_blocking(move || store.fetch_by_uris(&uris))
             .await
             .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-            .map_err(|e| {
-                ErrorData::internal_error(format!("rag fetch_by_uris: {e}"), None)
-            })?;
+            .map_err(|e| ErrorData::internal_error(format!("rag fetch_by_uris: {e}"), None))?;
         Ok(success_json::<Vec<Chunk>>(&chunks))
     }
 
@@ -393,12 +391,11 @@ impl StandardocMcp {
         let handle = self.handle.clone();
         let fqdn = params.fqdn;
         let max_lines = params.max_lines;
-        let result = tokio::task::spawn_blocking(move || {
-            query::body_for_fqdn(&handle, &fqdn, max_lines)
-        })
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-        .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        let result =
+            tokio::task::spawn_blocking(move || query::body_for_fqdn(&handle, &fqdn, max_lines))
+                .await
+                .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+                .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
         match result {
             Some(slice) => {
@@ -450,9 +447,7 @@ impl StandardocMcp {
         let period_str = params.period.unwrap_or_else(|| "all".to_string());
         let period = UsagePeriod::from_str_loose(&period_str).ok_or_else(|| {
             ErrorData::invalid_params(
-                format!(
-                    "unknown period `{period_str}` — expected one of: day, week, all"
-                ),
+                format!("unknown period `{period_str}` — expected one of: day, week, all"),
                 None,
             )
         })?;
@@ -1591,7 +1586,10 @@ mod tests {
             .await;
         // Invalid filter is a parameter error — surfaces as Err on the
         // tool invocation, NOT a graceful CallToolResult.
-        assert!(result.is_err(), "invalid `kind` must be rejected with ErrorData");
+        assert!(
+            result.is_err(),
+            "invalid `kind` must be rejected with ErrorData"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1709,7 +1707,10 @@ mod tests {
                 period: Some("eternity".into()),
             }))
             .await;
-        assert!(err.is_err(), "unknown period must be rejected with ErrorData");
+        assert!(
+            err.is_err(),
+            "unknown period must be rejected with ErrorData"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

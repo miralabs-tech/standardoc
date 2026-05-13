@@ -286,12 +286,7 @@ mod tests {
     #[test]
     fn byte_offset_is_added_to_base() {
         let mut sink: Vec<TemplateRef> = Vec::new();
-        extract_identifiers_from_expression(
-            "user",
-            100,
-            TemplateAttribute::Bind,
-            &mut sink,
-        );
+        extract_identifiers_from_expression("user", 100, TemplateAttribute::Bind, &mut sink);
         assert_eq!(sink[0].byte_offset, 100);
     }
 
@@ -305,8 +300,10 @@ mod tests {
             TemplateAttribute::Interpolation,
             &mut sink,
         );
-        let by_offset: std::collections::HashMap<&str, usize> =
-            sink.iter().map(|r| (r.name.as_str(), r.byte_offset)).collect();
+        let by_offset: std::collections::HashMap<&str, usize> = sink
+            .iter()
+            .map(|r| (r.name.as_str(), r.byte_offset))
+            .collect();
         assert_eq!(by_offset["a"], 10);
         assert_eq!(by_offset["b"], 14);
     }
@@ -321,7 +318,10 @@ mod tests {
 
     #[test]
     fn ternary_emits_all_three_operand_idents() {
-        let refs = collect("flag ? primary : fallback", TemplateAttribute::Interpolation);
+        let refs = collect(
+            "flag ? primary : fallback",
+            TemplateAttribute::Interpolation,
+        );
         let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["flag", "primary", "fallback"]);
     }

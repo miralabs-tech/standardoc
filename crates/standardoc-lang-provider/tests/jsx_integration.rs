@@ -50,12 +50,17 @@ export function App() {
 "#;
     write(root, "src/App.tsx", src);
     let provider = WorkspaceProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(src, "src/App.tsx", &ctx).unwrap();
 
     assert_eq!(extracted.language, Language::TypeScript);
     let comps = refs_with_attr(&extracted.edges, "template-component-ref");
-    assert!(!comps.is_empty(), "expected at least one component-ref edge");
+    assert!(
+        !comps.is_empty(),
+        "expected at least one component-ref edge"
+    );
     let names: Vec<&str> = comps.iter().map(|e| ref_name(e)).collect();
     // `Header` is a default import — TsProvider resolves through the
     // import alias table to `@app/web::src::Header::default` (the
@@ -78,7 +83,9 @@ fn tsx_attribute_expression_emits_template_bind() {
 "#;
     write(root, "src/App.tsx", src);
     let provider = WorkspaceProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(src, "src/App.tsx", &ctx).unwrap();
 
     let bind = refs_with_attr(&extracted.edges, "template-bind");
@@ -98,7 +105,9 @@ fn jsx_child_interpolation_emits_template_interpolation() {
 "#;
     write(root, "src/App.jsx", src);
     let provider = WorkspaceProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(src, "src/App.jsx", &ctx).unwrap();
 
     assert_eq!(extracted.language, Language::JavaScript);

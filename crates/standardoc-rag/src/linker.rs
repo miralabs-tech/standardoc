@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use crate::error::RagError;
-use crate::score::{apply_def_site_boost, applies_def_site_boost, compute_link_confidence};
+use crate::score::{applies_def_site_boost, apply_def_site_boost, compute_link_confidence};
 use crate::types::{ChunkId, ChunkSymbolLink, LinkSource};
 
 /// Minimum length of a short name that gets scanned for substring hits.
@@ -100,7 +100,12 @@ impl Linker for DefaultLinker {
             }
             for fqdn in &workspace_fqdns {
                 if chunk_text.contains(fqdn.as_str()) {
-                    upsert_dominant(&mut links, *chunk_id, fqdn.clone(), LinkSource::AutoFqdnExact);
+                    upsert_dominant(
+                        &mut links,
+                        *chunk_id,
+                        fqdn.clone(),
+                        LinkSource::AutoFqdnExact,
+                    );
                 }
             }
             for (fqdn, short) in &short_names {
@@ -246,7 +251,9 @@ pub const fn dominant_source(a: LinkSource, b: LinkSource) -> LinkSource {
 /// consumer ; the chunker already includes frontmatter as text in its
 /// first chunk (cheap, the linker re-reads it).
 pub fn extract_frontmatter_block(source: &str) -> Option<&str> {
-    let stripped = source.strip_prefix("---\n").or_else(|| source.strip_prefix("---\r\n"))?;
+    let stripped = source
+        .strip_prefix("---\n")
+        .or_else(|| source.strip_prefix("---\r\n"))?;
     let end_idx = stripped.find("\n---")?;
     Some(&stripped[..end_idx])
 }
@@ -297,8 +304,7 @@ mod tests {
     #[test]
     fn base_confidences_are_strictly_ordered() {
         assert!(
-            LinkSource::Frontmatter.base_confidence()
-                > LinkSource::AutoFqdnExact.base_confidence()
+            LinkSource::Frontmatter.base_confidence() > LinkSource::AutoFqdnExact.base_confidence()
         );
         assert!(
             LinkSource::AutoFqdnExact.base_confidence()
@@ -310,21 +316,30 @@ mod tests {
     fn frontmatter_inline_array() {
         let fm = "standardoc: rag\nsymbols: [auth::login, auth::logout]\n";
         let s = extract_frontmatter_symbols(fm).unwrap();
-        assert_eq!(s, vec!["auth::login".to_string(), "auth::logout".to_string()]);
+        assert_eq!(
+            s,
+            vec!["auth::login".to_string(), "auth::logout".to_string()]
+        );
     }
 
     #[test]
     fn frontmatter_inline_array_with_quotes() {
         let fm = "symbols: [\"auth::login\", 'auth::logout']\n";
         let s = extract_frontmatter_symbols(fm).unwrap();
-        assert_eq!(s, vec!["auth::login".to_string(), "auth::logout".to_string()]);
+        assert_eq!(
+            s,
+            vec!["auth::login".to_string(), "auth::logout".to_string()]
+        );
     }
 
     #[test]
     fn frontmatter_bare_list() {
         let fm = "symbols:\n  - auth::login\n  - auth::logout\n";
         let s = extract_frontmatter_symbols(fm).unwrap();
-        assert_eq!(s, vec!["auth::login".to_string(), "auth::logout".to_string()]);
+        assert_eq!(
+            s,
+            vec!["auth::login".to_string(), "auth::logout".to_string()]
+        );
     }
 
     #[test]
@@ -428,8 +443,8 @@ mod tests {
 
     #[test]
     fn link_def_site_boost_applied_when_paths_co_locate() {
-        let lookup = FakeLookup::new(&["auth::login"])
-            .with_def_site("auth::login", "src/auth/login.rs");
+        let lookup =
+            FakeLookup::new(&["auth::login"]).with_def_site("auth::login", "src/auth/login.rs");
         let chunk_text = "auth::login lives here";
         let input = LinkInput {
             source_path: "docs/auth/login.md",
@@ -445,8 +460,8 @@ mod tests {
 
     #[test]
     fn link_def_site_boost_not_applied_for_unrelated_path() {
-        let lookup = FakeLookup::new(&["auth::login"])
-            .with_def_site("auth::login", "src/auth/login.rs");
+        let lookup =
+            FakeLookup::new(&["auth::login"]).with_def_site("auth::login", "src/auth/login.rs");
         let input = LinkInput {
             source_path: "docs/random/notes.md",
             frontmatter_raw: None,

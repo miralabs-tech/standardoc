@@ -968,7 +968,10 @@ mod tests {
             .as_deref();
         assert!(wc.is_some(), "where clause must be captured");
         let text = wc.unwrap();
-        assert!(!text.starts_with("where"), "leading `where` must be stripped: `{text}`");
+        assert!(
+            !text.starts_with("where"),
+            "leading `where` must be stripped: `{text}`"
+        );
         assert!(text.contains("Send"));
         assert!(text.contains("Sync"));
     }
