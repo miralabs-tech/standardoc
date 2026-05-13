@@ -81,14 +81,56 @@ pub struct SessionsHandle {
 const SESSIONS_DIR: &str = ".standardoc-sessions";
 const SESSIONS_DB: &str = "sessions.db";
 
+const fn is_transient_sessions_err(err: &SessionsError) -> bool {
+    let SessionsError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) = err else {
+        return false;
+    };
+    matches!(
+        code.code,
+        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked,
+    ) || code.extended_code == rusqlite::ffi::SQLITE_PROTOCOL
+}
+
+/// Backoff schedule (cumulative ~1.55 s) for retrying sessions DB open
+/// when SQLite reports a transient busy/locked condition. Concrete races
+/// in the field: CLI + daemon both opening on first ever creation, and
+/// the fire-and-forget usage logger racing the next tool call's open.
+/// Both compete on the exclusive lock taken by `PRAGMA journal_mode =
+/// WAL` until the first creator finishes the conversion.
+const OPEN_BACKOFF_MS: &[u64] = &[50, 100, 200, 400, 800];
+
 impl SessionsHandle {
     /// Opens (creating if absent) `<workspace>/.standardoc-sessions/sessions.db`.
-    /// Schema is initialised + migrated automatically.
+    /// Schema is initialised + migrated automatically. Transient SQLite
+    /// busy/locked errors trigger an exponential-backoff retry; permanent
+    /// errors (schema too new, IO-not-found, …) propagate immediately.
     pub fn open(workspace_root: &Path) -> Result<Self, SessionsError> {
         let dir = workspace_root.join(SESSIONS_DIR);
         std::fs::create_dir_all(&dir)?;
         let db_path = dir.join(SESSIONS_DB);
-        let conn = Connection::open(&db_path)?;
+        let mut idx = 0usize;
+        loop {
+            match Self::try_open_once(&db_path) {
+                Ok(handle) => return Ok(handle),
+                Err(err) => {
+                    if !is_transient_sessions_err(&err) || idx >= OPEN_BACKOFF_MS.len() {
+                        return Err(err);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(OPEN_BACKOFF_MS[idx]));
+                    idx += 1;
+                }
+            }
+        }
+    }
+
+    fn try_open_once(db_path: &Path) -> Result<Self, SessionsError> {
+        let conn = Connection::open(db_path)?;
+        // Set the busy timeout at the C level BEFORE any PRAGMA so that
+        // PRAGMA journal_mode = WAL (which takes an exclusive lock) waits
+        // for concurrent openers instead of failing immediately with
+        // SQLITE_BUSY. The outer retry catches the case where this still
+        // surfaces as busy on tight races.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; \
              PRAGMA synchronous = NORMAL;",
@@ -96,7 +138,7 @@ impl SessionsHandle {
         schema::ensure_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
-            db_path,
+            db_path: db_path.to_path_buf(),
         })
     }
 

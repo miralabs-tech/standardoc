@@ -1745,11 +1745,15 @@ mod tests {
             }))
             .await
             .unwrap();
-        // log_usage_fire_and_forget is async — poll the sessions.db for up to
-        // 1s until the row lands. Avoids flaking when the spawn races the test.
+        // log_usage_fire_and_forget hops through tokio::task::spawn ->
+        // spawn_blocking -> SessionsHandle::open + INSERT. On starved CI
+        // runners (2-vCPU Linux/macOS) the chain can take well over 1s to
+        // resolve. Poll up to ~5s before giving up so the test reflects
+        // real failures (e.g. swallowed open error) rather than scheduling
+        // jitter.
         let h = SessionsHandle::open(&workspace).expect("open sessions");
         let mut stats = h.query_usage_stats(UsagePeriod::All).unwrap();
-        for _ in 0..20 {
+        for _ in 0..100 {
             if stats.calls > 0 {
                 break;
             }
@@ -1758,7 +1762,9 @@ mod tests {
         }
         assert!(
             stats.calls >= 1,
-            "expected at least one logged call, got {stats:?}"
+            "expected at least one logged call after ~5s of polling, got \
+             {stats:?} — fire-and-forget spawn likely failed silently \
+             (check SessionsHandle::open or the spawn_blocking chain)"
         );
     }
 }
