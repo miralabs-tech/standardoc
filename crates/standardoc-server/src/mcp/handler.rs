@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
@@ -13,7 +14,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use standardoc_core::{
     IndexHandle, LanguageProvider, RagWatcherHandle, ResolveOutcome, ResolverRegistry,
-    ScanFilters, SessionsHandle, WatcherHandle, dump_sessions_to_markdown,
+    ScanFilters, SessionsHandle, UsagePeriod, WatcherHandle, dump_sessions_to_markdown,
     query::{self, SymbolFilter},
 };
 use standardoc_ir::SourceOrigin;
@@ -23,6 +24,10 @@ use standardoc_rag::store::RagStore;
 use standardoc_rag::types::{Chunk, ChunkRef};
 
 use crate::mcp::error::{SessionsErr, server_error_to_rmcp, sessions_err_to_rmcp};
+use crate::mcp::usage::{
+    files_from_body, files_from_context, files_from_similar, files_from_symbols,
+    log_usage_fire_and_forget, sum_distinct_file_sizes,
+};
 
 const FIND_SYMBOL_DEFAULT_LIMIT: u8 = 20;
 const FIND_SYMBOL_MAX_LIMIT: u8 = 100;
@@ -127,7 +132,15 @@ impl StandardocMcp {
                 let chunk_refs = self
                     .chunk_refs_for(&params.fqdn, params.query.as_deref())
                     .await?;
-                Ok(success_json(&GetContextResponse { ctx, chunk_refs }))
+                let response = GetContextResponse { ctx, chunk_refs };
+                let files = files_from_context(&response.ctx);
+                Ok(success_json_with_usage(
+                    &response,
+                    self.handle.workspace_root(),
+                    "get_context",
+                    Some(params.fqdn),
+                    files,
+                ))
             }
             None => Ok(CallToolResult::success(vec![Content::text(
                 "no symbol found for the given FQDN",
@@ -201,7 +214,14 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
-        Ok(success_json(&result))
+        let files = files_from_symbols(&result);
+        Ok(success_json_with_usage(
+            &result,
+            self.handle.workspace_root(),
+            "find_symbol",
+            None,
+            files,
+        ))
     }
 
     /// Filter-only listing — no FTS query, no glob pattern. Returns
@@ -237,7 +257,14 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
-        Ok(success_json(&result))
+        let files = files_from_symbols(&result);
+        Ok(success_json_with_usage(
+            &result,
+            self.handle.workspace_root(),
+            "list_symbols",
+            None,
+            files,
+        ))
     }
 
     /// Glob-pattern search over `name` and `fqdn`. Uses SQLite's `GLOB`
@@ -278,7 +305,14 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
-        Ok(success_json(&result))
+        let files = files_from_symbols(&result);
+        Ok(success_json_with_usage(
+            &result,
+            self.handle.workspace_root(),
+            "find_symbols_by_pattern",
+            None,
+            files,
+        ))
     }
 
     /// Similarity-scored search around an anchor name. Returns symbols whose
@@ -322,11 +356,18 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
+        let files = files_from_similar(&result);
         let envelope: Vec<SimilarSymbolJson> = result
             .into_iter()
             .map(|(symbol, score)| SimilarSymbolJson { score, symbol })
             .collect();
-        Ok(success_json(&envelope))
+        Ok(success_json_with_usage(
+            &envelope,
+            self.handle.workspace_root(),
+            "find_similar_symbols",
+            None,
+            files,
+        ))
     }
 
     /// Returns the raw source text of the symbol identified by `fqdn`. This is
@@ -360,7 +401,17 @@ impl StandardocMcp {
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
         match result {
-            Some(slice) => Ok(success_json(&slice)),
+            Some(slice) => {
+                let files = files_from_body(&slice);
+                let fqdn = slice.fqdn.clone();
+                Ok(success_json_with_usage(
+                    &slice,
+                    self.handle.workspace_root(),
+                    "get_body",
+                    Some(fqdn),
+                    files,
+                ))
+            }
             None => Ok(CallToolResult::success(vec![Content::text(
                 "no symbol found for the given FQDN",
             )])),
@@ -378,6 +429,42 @@ impl StandardocMcp {
     async fn current_revision(&self) -> Result<CallToolResult, ErrorData> {
         let revision = self.handle.revision();
         Ok(success_json(&CurrentRevisionJson { revision }))
+    }
+
+    /// Aggregated read-path telemetry — the running tally of bytes the
+    /// standardoc tools have returned vs. the raw file bytes those same
+    /// responses pointed at. The baseline is `sum(file_sizes)` of the
+    /// distinct source files referenced by each response (the honest
+    /// "what an AI would have consumed reading the relevant sources
+    /// raw" floor — no estimation multiplier). Returns counts + bytes
+    /// totals + a compression `ratio` in `[0, +∞)`. Only successful
+    /// read-path tool calls are logged (no `indexing_in_progress`,
+    /// `no symbol found`, or blank-query early returns).
+    #[tool(
+        description = "Returns aggregated standardoc tool usage metrics: `calls`, `bytes_out_total` (what tools returned to the AI), `baseline_bytes_total` (sum of file sizes of distinct source files referenced — what an AI would have consumed reading those raw), `bytes_saved` (baseline - out, can be negative when neighbors inflate the response), and `ratio = bytes_out / baseline`. `period` accepts `day`, `week`, `all` (default). The baseline is graph-grounded — no estimation multiplier — so a ratio of 0.14 means standardoc returned 14% of the raw bytes of the relevant source files."
+    )]
+    async fn usage_stats(
+        &self,
+        Parameters(params): Parameters<UsageStatsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let period_str = params.period.unwrap_or_else(|| "all".to_string());
+        let period = UsagePeriod::from_str_loose(&period_str).ok_or_else(|| {
+            ErrorData::invalid_params(
+                format!(
+                    "unknown period `{period_str}` — expected one of: day, week, all"
+                ),
+                None,
+            )
+        })?;
+        let workspace = self.handle.workspace_root().to_path_buf();
+        let row = tokio::task::spawn_blocking(move || {
+            let h = SessionsHandle::open(&workspace).map_err(SessionsErr::from)?;
+            h.query_usage_stats(period).map_err(SessionsErr::from)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(sessions_err_to_rmcp)?;
+        Ok(success_json(&row))
     }
 
     /// Persist a session handoff memo into `.standardoc-sessions/sessions.db`.
@@ -958,6 +1045,17 @@ pub(crate) struct CurrentRevisionJson {
     pub revision: u64,
 }
 
+/// Tool input — `usage_stats(period?)`. Accepted period strings (case-insensitive):
+/// `day` / `d` / `today`, `week` / `w` / `7d`, `all` (default).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct UsageStatsParams {
+    /// Window scope. Defaults to `"all"`. Accepts `day`, `week`, `all` (and
+    /// their aliases listed above). Anything else returns an invalid-params
+    /// error rather than silently coercing.
+    #[serde(default)]
+    pub period: Option<String>,
+}
+
 /// Tool input — `check_stale(fetched: [{fqdn, fetched_at_revision}, ...])`.
 /// The server is stateless; the caller tracks (fqdn → revision_at_fetch) across
 /// turns and asks "what changed since".
@@ -1059,6 +1157,38 @@ fn success_json<T: Serialize>(value: &T) -> CallToolResult {
             "failed to serialize tool result: {e}"
         ))]),
     }
+}
+
+/// Same as `success_json`, but also records the call in `usage_stats`
+/// (table in `sessions.db`) with the response byte count and a baseline
+/// computed from the workspace-relative `files` referenced by the
+/// response. Logging is best-effort and fire-and-forget — a SQLite or
+/// runtime hiccup will never bubble up to the caller.
+fn success_json_with_usage<T: Serialize>(
+    value: &T,
+    workspace_root: &Path,
+    tool_name: &'static str,
+    fqdn: Option<String>,
+    files: Vec<String>,
+) -> CallToolResult {
+    let json = match serde_json::to_string_pretty(value) {
+        Ok(j) => j,
+        Err(e) => {
+            return CallToolResult::error(vec![Content::text(format!(
+                "failed to serialize tool result: {e}"
+            ))]);
+        }
+    };
+    let bytes_out = u64::try_from(json.len()).unwrap_or(u64::MAX);
+    let baseline = sum_distinct_file_sizes(workspace_root, files);
+    log_usage_fire_and_forget(
+        workspace_root.to_path_buf(),
+        tool_name,
+        fqdn,
+        bytes_out,
+        baseline,
+    );
+    CallToolResult::success(vec![Content::text(json)])
 }
 
 fn clamp_limit(raw: Option<u8>) -> u8 {
@@ -1555,5 +1685,79 @@ mod tests {
             .await
             .expect("tool returns Ok with friendly degradation");
         assert!(body_text(&result).contains("Workspace indexing in progress"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn usage_stats_empty_returns_zero_counters() {
+        let (_dir, mcp) = fixture();
+        let result = mcp
+            .usage_stats(Parameters(UsageStatsParams { period: None }))
+            .await
+            .unwrap();
+        let body = body_text(&result);
+        assert!(body.contains("\"calls\": 0"), "got `{body}`");
+        assert!(body.contains("\"bytes_out_total\": 0"), "got `{body}`");
+        assert!(body.contains("\"baseline_bytes_total\": 0"), "got `{body}`");
+        assert!(body.contains("\"period\": \"all\""), "got `{body}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn usage_stats_unknown_period_rejected() {
+        let (_dir, mcp) = fixture();
+        let err = mcp
+            .usage_stats(Parameters(UsageStatsParams {
+                period: Some("eternity".into()),
+            }))
+            .await;
+        assert!(err.is_err(), "unknown period must be rejected with ErrorData");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn usage_stats_aliases_accepted() {
+        let (_dir, mcp) = fixture();
+        for alias in ["day", "Today", "week", "7d", "all", ""] {
+            let result = mcp
+                .usage_stats(Parameters(UsageStatsParams {
+                    period: Some(alias.into()),
+                }))
+                .await;
+            assert!(
+                result.is_ok(),
+                "alias `{alias}` should be accepted, got {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn find_symbol_logs_usage_row_for_successful_call() {
+        let (dir, mcp) = fixture();
+        cold_start_workspace(&mcp, dir.path());
+        let workspace = dir.path().to_path_buf();
+        let _ = mcp
+            .find_symbol(Parameters(FindSymbolParams {
+                query: "anything".into(),
+                limit: None,
+                kind: None,
+                visibility: None,
+                module: None,
+                include_external: None,
+            }))
+            .await
+            .unwrap();
+        // log_usage_fire_and_forget is async — poll the sessions.db for up to
+        // 1s until the row lands. Avoids flaking when the spawn races the test.
+        let h = SessionsHandle::open(&workspace).expect("open sessions");
+        let mut stats = h.query_usage_stats(UsagePeriod::All).unwrap();
+        for _ in 0..20 {
+            if stats.calls > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            stats = h.query_usage_stats(UsagePeriod::All).unwrap();
+        }
+        assert!(
+            stats.calls >= 1,
+            "expected at least one logged call, got {stats:?}"
+        );
     }
 }
