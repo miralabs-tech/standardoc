@@ -37,6 +37,28 @@ workspace:
 3. **Raw Read / Grep / Glob** — last resort, or for plain-text needs
    (comments, strings, build files, markdown).
 
+## 3-phase MCP-first protocol (mandatory pacing)
+
+To keep responses tight and avoid blowing the context window, every
+investigation should walk these three phases in order. Skipping
+straight to Phase 3 on cold context is the most expensive mistake.
+
+| Phase           | Tools                                                                                  | Cost / call     | Goal                                                |
+| --------------- | -------------------------------------------------------------------------------------- | --------------- | --------------------------------------------------- |
+| 1. **Explore**  | \`find_symbol\`, \`list_symbols\`, \`find_symbols_by_pattern\` — **always with filters** | ~0.5–2 KB       | Cartographier les FQDNs candidats                   |
+| 2. **Cibler**   | \`get_context(fqdn, depth=1)\`                                                         | ~1–3 KB         | Voir les voisins en FQDN-only, repérer les 1-3 qui comptent |
+| 3. **Drill**    | \`get_context(fqdn, depth=2)\` ou \`get_body(fqdn, …, strip_attrs=true, signature_only=true)\` | ~5–15 KB        | Lecture détaillée, **uniquement** sur les voisins validés en Phase 2 |
+
+**Daemon-side enforcement:** when \`get_context(depth=2)\` is called on
+a FQDN that has not had a \`depth=1\` call in the last 5 minutes, the
+response includes a \`routing_hint\` explaining the protocol. Treat
+that hint as a correction signal — back off, run depth=1 first, then
+return to depth=2 only on the specific neighbor you actually need.
+
+Rule of thumb: you should be able to name the exact symbol and the
+specific reason before reaching for depth=2 or unbounded \`get_body\`.
+If you can't, you're still in Phase 1 or Phase 2.
+
 ## Discovery tools
 
 ### find_symbol(query, limit?)

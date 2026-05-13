@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rmcp::ErrorData;
 use rmcp::handler::server::tool::ToolRouter;
@@ -35,6 +37,19 @@ const GET_CONTEXT_DEFAULT_DEPTH: u8 = 1;
 const FIND_SIMILAR_DEFAULT_THRESHOLD: f32 = 0.8;
 const CHUNK_REFS_DEFAULT_LIMIT: u32 = 10;
 const FETCH_CHUNKS_MAX_INPUT: usize = 64;
+
+/// Window during which a prior `get_context(fqdn, depth=1)` is considered
+/// a "scoping pass" that justifies a follow-up `depth=2` on the same FQDN.
+/// Outside the window (or with no prior depth=1 at all), the depth=2 call
+/// is flagged as "naked" via `routing_hint` so the caller learns to map
+/// neighbors before drilling.
+const NAKED_DEPTH_2_WINDOW_SECS: i64 = 300;
+
+/// Drop tracker entries older than this on each insert. Bounds memory
+/// growth without LRU bookkeeping. Comfortably above
+/// `NAKED_DEPTH_2_WINDOW_SECS` so the cleanup never races a legitimate
+/// late depth=2.
+const RECENT_DEPTH1_RETENTION_SECS: i64 = 1800;
 
 /// Dispatch target for the rmcp `ServiceExt::serve` boot. Holds:
 /// - `handle`: query / submit gateway into the index
@@ -71,6 +86,12 @@ pub struct StandardocMcp {
     index_ready: Arc<AtomicBool>,
     watcher: Arc<Mutex<Option<WatcherHandle>>>,
     rag_watcher: Arc<Mutex<Option<RagWatcherHandle>>>,
+    /// In-memory cache of `(fqdn → ts_unix)` recording when each FQDN
+    /// was last fetched at `depth=1`. Drives the "naked depth=2"
+    /// routing hint: a depth=2 call with no recent depth=1 on the
+    /// same FQDN gets a hint nudging the 3-phase explore→cible→drill
+    /// protocol. Transient — resets on daemon restart, no persistence.
+    recent_depth1: Arc<Mutex<HashMap<String, i64>>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -94,6 +115,7 @@ impl StandardocMcp {
             index_ready: Arc::new(AtomicBool::new(false)),
             watcher: Arc::new(Mutex::new(None)),
             rag_watcher: Arc::new(Mutex::new(None)),
+            recent_depth1: Arc::new(Mutex::new(HashMap::new())),
             tool_router: Self::tool_router(),
         }
     }
@@ -103,9 +125,11 @@ impl StandardocMcp {
     /// `depth` selects the shape's richness — see [`SymbolContextWithNeighbors`].
     /// When the daemon was booted with a RAG store, the response also carries
     /// `chunk_refs` (lightweight URI envelopes). Fetch chunk text via the
-    /// `fetch_chunks` tool.
+    /// `fetch_chunks` tool. The response sets `routing_hint` when a depth=2
+    /// call is made without a recent depth=1 scoping pass — an in-band nudge
+    /// to follow the explore→cible→drill protocol.
     #[tool(
-        description = "Aggregate context for a symbol identified by its fully-qualified name (FQDN). Returns the symbol's signature, descriptions, four pre-grouped neighbor lists (callers, callees, imports, imported_by) AND lightweight `chunk_refs` envelopes pointing at related prose chunks (markdown docs, ADRs, design notes). `depth=1` returns neighbor FQDNs only — cheap, suited to graph exploration. `depth=2` enriches each resolved neighbor with its full RawSymbol — suited to reasoning. Hard-clamped to 1..=2. The `chunk_refs` field is empty when no prose is linked or the RAG layer is not enabled — fetch their text via the `fetch_chunks` tool with the URIs (`rag://<id>`)."
+        description = "Aggregate context for a symbol identified by its fully-qualified name (FQDN). Returns the symbol's signature, descriptions, four pre-grouped neighbor lists (callers, callees, imports, imported_by) AND lightweight `chunk_refs` envelopes pointing at related prose chunks (markdown docs, ADRs, design notes). \n\n**Pick `depth` deliberately:** `depth=1` returns neighbor FQDNs only — cheap, the right call to map a symbol's neighborhood. `depth=2` enriches each resolved neighbor with its full RawSymbol — only worth it when you have already used a depth=1 pass to identify which neighbors matter. Hard-clamped to 1..=2. The response carries `routing_hint` when a depth=2 call is detected without a prior depth=1 on the same FQDN within the last 5 minutes — that's a signal to map first, drill second.\n\nThe `chunk_refs` field is empty when no prose is linked or the RAG layer is not enabled — fetch their text via the `fetch_chunks` tool with the URIs (`rag://<id>`)."
     )]
     async fn get_context(
         &self,
@@ -118,6 +142,12 @@ impl StandardocMcp {
         }
 
         let depth = params.depth.unwrap_or(GET_CONTEXT_DEFAULT_DEPTH);
+        let now = current_unix_seconds();
+        let routing_hint = self.compute_routing_hint(&params.fqdn, depth, now);
+        if depth <= 1 {
+            self.record_recent_depth1(&params.fqdn, now);
+        }
+
         let handle = self.handle.clone();
         let fqdn = params.fqdn.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -132,7 +162,11 @@ impl StandardocMcp {
                 let chunk_refs = self
                     .chunk_refs_for(&params.fqdn, params.query.as_deref())
                     .await?;
-                let response = GetContextResponse { ctx, chunk_refs };
+                let response = GetContextResponse {
+                    ctx,
+                    chunk_refs,
+                    routing_hint,
+                };
                 let files = files_from_context(&response.ctx);
                 Ok(success_json_with_usage(
                     &response,
@@ -146,6 +180,42 @@ impl StandardocMcp {
                 "no symbol found for the given FQDN",
             )])),
         }
+    }
+
+    /// Returns `Some(message)` when `depth >= 2` was requested for a FQDN
+    /// that has not had a `depth=1` call in the last
+    /// `NAKED_DEPTH_2_WINDOW_SECS` seconds (or ever, since boot). The
+    /// message nudges callers towards the 3-phase explore→cible→drill
+    /// protocol so depth=2 stays a deliberate drill rather than a default.
+    fn compute_routing_hint(&self, fqdn: &str, depth: u8, now: i64) -> Option<String> {
+        if depth < 2 {
+            return None;
+        }
+        let recent = self
+            .recent_depth1
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(fqdn).copied());
+        let was_recent = recent.is_some_and(|ts| now - ts <= NAKED_DEPTH_2_WINDOW_SECS);
+        if was_recent {
+            return None;
+        }
+        Some(
+            "depth=2 was requested without a prior depth=1 scoping pass on this FQDN within \
+             the last 5 minutes. The cheap protocol is: (1) explore via find_symbol / \
+             list_symbols / find_symbols_by_pattern; (2) cibler via get_context(fqdn, depth=1) \
+             to map neighbor FQDNs; (3) drill into depth=2 only on the 1-3 neighbors that matter. \
+             A naked depth=2 on a symbol with many edges can return 5-15 KB."
+                .to_owned(),
+        )
+    }
+
+    fn record_recent_depth1(&self, fqdn: &str, now: i64) {
+        let Ok(mut guard) = self.recent_depth1.lock() else {
+            return;
+        };
+        guard.retain(|_, ts| now - *ts <= RECENT_DEPTH1_RETENTION_SECS);
+        guard.insert(fqdn.to_owned(), now);
     }
 
     /// Resolves a list of `rag://<id>` URIs to the underlying prose
@@ -840,12 +910,16 @@ impl StandardocMcp {
 /// from `query::context_for_symbol_with_neighbors`, plus `chunk_refs`
 /// added via `#[serde(flatten)]` so the JSON layout stays a single flat
 /// object (consumers that don't know about RAG see an extra optional
-/// `chunk_refs` field and can ignore it).
+/// `chunk_refs` field and can ignore it). `routing_hint` is `None` for
+/// well-paced calls and emits an in-band 3-phase nudge when a depth=2
+/// call lands without a recent depth=1 scoping pass on the same FQDN.
 #[derive(Debug, Serialize)]
 pub(crate) struct GetContextResponse {
     #[serde(flatten)]
     pub ctx: query::SymbolContextWithNeighbors,
     pub chunk_refs: Vec<ChunkRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing_hint: Option<String>,
 }
 
 /// Tool input — `fetch_chunks(uris)`. Resolves `rag://<id>` URIs to the
@@ -1284,6 +1358,15 @@ fn clamp_limit(raw: Option<u8>) -> u8 {
         .clamp(1, FIND_SYMBOL_MAX_LIMIT)
 }
 
+/// Wall-clock seconds since the Unix epoch. Cheap helper used by the
+/// in-memory `recent_depth1` tracker — no need to drag a sessions
+/// dependency in.
+fn current_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
 fn indexing_in_progress_message(progress: Option<(u64, u64)>) -> String {
     match progress {
         Some((done, total)) if total > 0 => format!(
@@ -1698,6 +1781,64 @@ mod tests {
             .await
             .expect("tool returns Ok with friendly degradation");
         assert!(body_text(&result).contains("Workspace indexing in progress"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compute_routing_hint_is_none_for_depth_one() {
+        let (_dir, mcp) = fixture();
+        assert_eq!(mcp.compute_routing_hint("crate::any", 1, 1_000), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compute_routing_hint_fires_for_naked_depth_two() {
+        let (_dir, mcp) = fixture();
+        let hint = mcp.compute_routing_hint("crate::any", 2, 1_000);
+        assert!(hint.is_some(), "naked depth=2 must surface a routing hint");
+        let msg = hint.unwrap();
+        assert!(msg.contains("depth=2"), "got `{msg}`");
+        assert!(msg.contains("depth=1"), "got `{msg}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compute_routing_hint_silent_after_recent_depth_one() {
+        let (_dir, mcp) = fixture();
+        let now = 10_000_i64;
+        mcp.record_recent_depth1("crate::scoped", now - 60);
+        // 60 s after a depth=1 call, depth=2 should be hint-free.
+        assert_eq!(
+            mcp.compute_routing_hint("crate::scoped", 2, now),
+            None,
+            "depth=2 within the 5 min window must NOT trigger the hint"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compute_routing_hint_fires_again_when_window_expires() {
+        let (_dir, mcp) = fixture();
+        let now = 10_000_i64;
+        mcp.record_recent_depth1("crate::stale", now - 600);
+        // 10 min later, the prior depth=1 is outside the 5 min window.
+        let hint = mcp.compute_routing_hint("crate::stale", 2, now);
+        assert!(hint.is_some(), "stale scoping pass must not silence the hint");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn record_recent_depth_one_evicts_entries_older_than_retention() {
+        let (_dir, mcp) = fixture();
+        let now = 100_000_i64;
+        mcp.record_recent_depth1("crate::ancient", now - 5_000);
+        // Insert another entry far enough in the future that the retention
+        // window (1800 s) drops the ancient one on the next sweep.
+        mcp.record_recent_depth1("crate::fresh", now + 2_000);
+        let (has_ancient, has_fresh) = {
+            let guard = mcp.recent_depth1.lock().unwrap();
+            (
+                guard.contains_key("crate::ancient"),
+                guard.contains_key("crate::fresh"),
+            )
+        };
+        assert!(!has_ancient);
+        assert!(has_fresh);
     }
 
     #[tokio::test(flavor = "multi_thread")]
