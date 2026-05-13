@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use standardoc_core::{
-    IndexHandle, RagPipeline, ScanFilters, StorageError, cold_start, spawn_watcher,
+    IndexHandle, RagPipeline, ScanFilters, SessionsHandle, StorageError, UsagePeriod, cold_start,
+    spawn_watcher,
 };
 use standardoc_ir::{RawEdge, RawSymbol, ResolvedOrUnresolved};
 use standardoc_lang_provider::WorkspaceProvider;
@@ -116,6 +117,21 @@ enum Command {
     /// VSCode uses this as a pre-flight check before spawning the LSP/MCP
     /// daemons.
     SchemaVersion { path: PathBuf },
+
+    /// Wipe rows from the workspace's `usage_stats` telemetry table. Used to
+    /// baseline the token-savings counter before a measurement run. Does NOT
+    /// touch the index — the daemon may stay up.
+    ResetUsage {
+        path: PathBuf,
+
+        /// Window to wipe. `today` (last 24 h), `week` (last 7 d), or `all`.
+        #[arg(long, value_parser = ["today", "day", "week", "all"])]
+        period: String,
+
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Args)]
@@ -220,6 +236,7 @@ fn main_inner() -> Result<(), ServerError> {
             embedder,
         } => cmd_mcp(&path, readonly, http, rag, &embedder),
         Command::SchemaVersion { path } => cmd_schema_version(&path),
+        Command::ResetUsage { path, period, yes } => cmd_reset_usage(&path, &period, yes),
     }
 }
 
@@ -506,6 +523,52 @@ fn cmd_purge_excluded(path: &Path, yes_flag: bool) -> Result<(), ServerError> {
     handle.delete_paths(&candidates)?;
     println!("purged {} path(s)", candidates.len());
     Ok(())
+}
+
+fn cmd_reset_usage(path: &Path, period: &str, yes_flag: bool) -> Result<(), ServerError> {
+    let parsed = UsagePeriod::from_str_loose(period).ok_or_else(|| {
+        io::Error::other(format!(
+            "invalid --period {period:?}: expected `today`, `week`, or `all`"
+        ))
+    })?;
+    let handle = SessionsHandle::open(path)
+        .map_err(|e| io::Error::other(format!("open sessions.db: {e}")))?;
+    let preview = handle
+        .query_usage_stats(parsed)
+        .map_err(|e| io::Error::other(format!("count rows: {e}")))?;
+    if preview.calls == 0 {
+        println!("(nothing to reset for period `{period}`)");
+        return Ok(());
+    }
+    if !confirm_destructive(
+        &format!("reset {} usage_stats row(s) for period `{period}`?", preview.calls),
+        yes_flag,
+    )? {
+        println!("aborted");
+        return Ok(());
+    }
+    let deleted = handle
+        .reset_usage(parsed)
+        .map_err(|e| io::Error::other(format!("reset rows: {e}")))?;
+    println!("reset {deleted} row(s) from period `{period}`");
+    Ok(())
+}
+
+fn confirm_destructive(prompt: &str, yes_flag: bool) -> Result<bool, ServerError> {
+    if yes_flag {
+        return Ok(true);
+    }
+    if !io::stdin().is_terminal() {
+        return Err(io::Error::other(format!(
+            "non-interactive shell: pass --yes to confirm — {prompt}"
+        ))
+        .into());
+    }
+    eprint!("{prompt} [y/N] ");
+    let _ = io::stderr().flush();
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES"))
 }
 
 fn confirm_purge(count: usize, yes_flag: bool) -> Result<bool, ServerError> {

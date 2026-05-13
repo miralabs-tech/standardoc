@@ -291,6 +291,22 @@ impl SessionsHandle {
             ratio,
         })
     }
+
+    /// Deletes `usage_stats` rows scoped to `period`. Returns the number of
+    /// rows actually removed. `Day`/`Week` wipe only the trailing window;
+    /// `All` empties the table. Used by the CLI `reset-usage` subcommand
+    /// (and the VSCode "Reset token savings" wrapper) to baseline before a
+    /// measurement run — never logged itself.
+    pub fn reset_usage(&self, period: UsagePeriod) -> Result<u64, SessionsError> {
+        let now = current_unix_seconds();
+        let since = period.since(now);
+        let deleted = self
+            .conn
+            .lock()
+            .map_err(|_| SessionsError::Poisoned)?
+            .execute("DELETE FROM usage_stats WHERE ts_unix >= ?1", [since])?;
+        Ok(deleted as u64)
+    }
 }
 
 /// Period filter for `query_usage_stats`. `Day` / `Week` are sliding windows
@@ -573,6 +589,48 @@ mod tests {
         assert_eq!(stats.baseline_bytes_total, 0);
         assert_eq!(stats.bytes_saved, 0);
         assert!((stats.ratio - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn reset_usage_all_wipes_every_row_and_returns_count() {
+        let (_dir, handle) = fresh_handle();
+        handle.log_usage("get_context", Some("a"), 10, 100).unwrap();
+        handle.log_usage("find_symbol", Some("b"), 20, 200).unwrap();
+        let deleted = handle.reset_usage(UsagePeriod::All).unwrap();
+        assert_eq!(deleted, 2);
+        let stats = handle.query_usage_stats(UsagePeriod::All).unwrap();
+        assert_eq!(stats.calls, 0);
+    }
+
+    #[test]
+    fn reset_usage_day_keeps_rows_older_than_window() {
+        let (_dir, handle) = fresh_handle();
+        handle
+            .log_usage("get_context", Some("recent"), 100, 1000)
+            .unwrap();
+        // Backdate a row by 8 days so it falls outside the day window.
+        {
+            let guard = handle.conn.lock().unwrap();
+            let cutoff = current_unix_seconds() - 8 * 86_400;
+            guard
+                .execute(
+                    "INSERT INTO usage_stats (tool_name, fqdn, bytes_out, baseline_bytes, ts_unix) \
+                     VALUES ('get_context', 'old', 999, 9999, ?1)",
+                    [cutoff],
+                )
+                .unwrap();
+        }
+        let deleted = handle.reset_usage(UsagePeriod::Day).unwrap();
+        assert_eq!(deleted, 1, "only the recent row falls inside the day window");
+        let all = handle.query_usage_stats(UsagePeriod::All).unwrap();
+        assert_eq!(all.calls, 1, "the 8-day-old row survives a Day reset");
+    }
+
+    #[test]
+    fn reset_usage_returns_zero_on_empty_table() {
+        let (_dir, handle) = fresh_handle();
+        let deleted = handle.reset_usage(UsagePeriod::All).unwrap();
+        assert_eq!(deleted, 0);
     }
 
     #[test]

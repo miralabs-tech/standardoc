@@ -115,6 +115,11 @@
         "command": "Standardoc.showTokenSavings",
         "title": "Show token savings",
         "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.resetTokenSavings",
+        "title": "Reset token savings…",
+        "category": "Standardoc"
       }
     ],
     "configuration": {

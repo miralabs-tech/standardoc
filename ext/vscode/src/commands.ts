@@ -62,6 +62,9 @@ export function registerCommands(context: vscode.ExtensionContext, ctx: CommandC
     vscode.commands.registerCommand('Standardoc.showTokenSavings', () =>
       commandShowTokenSavings(ctx),
     ),
+    vscode.commands.registerCommand('Standardoc.resetTokenSavings', () =>
+      commandResetTokenSavings(ctx),
+    ),
   );
 }
 
@@ -89,6 +92,54 @@ async function commandShowTokenSavings(ctx: CommandContext): Promise<void> {
   }
   const stats = JSON.parse(raw) as UsageStatsJson;
   void vscode.window.showInformationMessage(formatUsageStats(stats));
+}
+
+async function commandResetTokenSavings(ctx: CommandContext): Promise<void> {
+  const items: TokenSavingsPeriodItem[] = [
+    { label: 'All time', detail: 'wipe every logged tool call', value: 'all' },
+    { label: 'Last 7 days', value: 'week' },
+    { label: 'Last 24h', value: 'day' },
+  ];
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Standardoc reset token savings — scope?',
+  });
+  if (!picked) return;
+
+  const confirm = await vscode.window.showWarningMessage(
+    `Wipe usage_stats rows for ${picked.label.toLowerCase()}?\n\n` +
+      'This is destructive — used to baseline before a measurement run.\n' +
+      'The daemon stays up; only the telemetry table is touched.',
+    { modal: true },
+    'Reset',
+  );
+  if (confirm !== 'Reset') return;
+
+  let binaryPath: string;
+  try {
+    const resolved = await resolveBinary(ctx.context);
+    binaryPath = resolved.path;
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Cannot resolve standardoc binary: ${describeError(e)}`);
+    return;
+  }
+
+  ctx.output.show(true);
+  ctx.output.appendLine(`[reset-usage] running standardoc reset-usage --period ${picked.value}…`);
+  const exitCode = await runChildToOutput(
+    binaryPath,
+    ['reset-usage', ctx.workspaceRoot, '--period', picked.value, '--yes'],
+    ctx.output,
+  );
+
+  if (exitCode === 0) {
+    void vscode.window.showInformationMessage(
+      `Standardoc: token savings reset (${picked.label.toLowerCase()})`,
+    );
+  } else {
+    void vscode.window.showErrorMessage(
+      `Reset failed (exit ${exitCode}). See Standardoc output for details.`,
+    );
+  }
 }
 
 async function commandRagToggle(): Promise<void> {
@@ -320,6 +371,10 @@ async function commandStatusBarMenu(_ctx: CommandContext): Promise<void> {
     },
     { label: '$(history) Rebuild RAG index', commandId: 'Standardoc.rag.rebuild' },
     { label: '$(graph) Show token savings', commandId: 'Standardoc.showTokenSavings' },
+    {
+      label: '$(clear-all) Reset token savings…',
+      commandId: 'Standardoc.resetTokenSavings',
+    },
   ];
   const picked = await vscode.window.showQuickPick(items, {
     placeHolder: 'Standardoc — choose an action',
