@@ -145,6 +145,28 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+
+    /// Preview which workspace-relative paths a single `.stdignore`
+    /// pattern would match. Output is JSON on stdout
+    /// (`{pattern, matches, total_count, truncated, walk_truncated}`).
+    /// Backs the VSCode extension's `.stdignore` hover provider — the
+    /// extension shells out to this sub-command so the preview uses
+    /// the exact same `ignore` crate matcher as the daemon.
+    StdignorePreview {
+        /// Workspace root to walk.
+        path: PathBuf,
+
+        /// Gitignore-syntax pattern to test. Single-line ; comments
+        /// (`#`) and blank patterns are accepted and return zero
+        /// matches.
+        #[arg(long)]
+        pattern: String,
+
+        /// Maximum number of matches to include in the response.
+        /// `total_count` keeps counting beyond this cap.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[derive(Args)]
@@ -255,6 +277,11 @@ fn main_inner() -> Result<(), ServerError> {
         } => cmd_mcp(&path, readonly, http, rag, &embedder),
         Command::SchemaVersion { path } => cmd_schema_version(&path),
         Command::ResetUsage { path, period, yes } => cmd_reset_usage(&path, &period, yes),
+        Command::StdignorePreview {
+            path,
+            pattern,
+            limit,
+        } => cmd_stdignore_preview(&path, &pattern, limit),
     }
 }
 
@@ -551,6 +578,19 @@ fn cmd_purge_excluded(path: &Path, yes_flag: bool) -> Result<(), ServerError> {
 
     handle.delete_paths(&candidates)?;
     println!("purged {} path(s)", candidates.len());
+    Ok(())
+}
+
+fn cmd_stdignore_preview(
+    workspace: &Path,
+    pattern: &str,
+    limit: usize,
+) -> Result<(), ServerError> {
+    let preview = standardoc_core::preview_pattern_matches(workspace, pattern, limit)
+        .map_err(|e| io::Error::other(format!("stdignore preview: {e}")))?;
+    let json = serde_json::to_string(&preview)
+        .map_err(|e| io::Error::other(format!("serialize preview: {e}")))?;
+    println!("{json}");
     Ok(())
 }
 

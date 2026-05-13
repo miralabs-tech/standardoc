@@ -163,6 +163,21 @@
         "id": "standardoc.mcp",
         "label": "Standardoc"
       }
+    ],
+    "languages": [
+      {
+        "id": "stdignore",
+        "aliases": ["Standardoc Ignore", "stdignore"],
+        "filenames": [".stdignore"],
+        "configuration": "./language-configuration/stdignore.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "stdignore",
+        "scopeName": "source.stdignore",
+        "path": "./syntaxes/stdignore.tmLanguage.json"
+      }
     ]
   },
   "scripts": {

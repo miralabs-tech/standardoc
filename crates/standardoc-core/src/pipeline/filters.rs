@@ -140,6 +140,113 @@ pub fn ensure_stdignore_seed_at(workspace_root: &Path) -> std::io::Result<()> {
     std::fs::write(path, STDIGNORE_SEED)
 }
 
+/// Hard cap on the number of filesystem entries scanned by
+/// [`preview_pattern_matches`]. A misbehaving pattern (e.g. `**` with
+/// no filter) on a huge workspace would otherwise walk every node ;
+/// this stops at 50k entries and reports `walk_truncated: true` so
+/// callers can surface "scan was capped" in the UI.
+pub const PATTERN_PREVIEW_WALK_CAP: usize = 50_000;
+
+/// Aggregated output of [`preview_pattern_matches`]. The `matches`
+/// vector is capped at the caller-supplied `limit` ; `total_count`
+/// keeps counting beyond the cap so the UI can show "20 shown of 134".
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PatternPreview {
+    pub pattern: String,
+    pub matches: Vec<String>,
+    pub total_count: usize,
+    pub truncated: bool,
+    /// `true` when the walk hit [`PATTERN_PREVIEW_WALK_CAP`] before
+    /// completing — `total_count` is a lower bound in that case.
+    pub walk_truncated: bool,
+}
+
+/// Errors specific to [`preview_pattern_matches`]. The two failure
+/// modes are : the gitignore-syntax pattern is malformed, or the
+/// matcher build itself blew up (`ignore::Error`).
+#[derive(Debug, thiserror::Error)]
+pub enum PatternPreviewError {
+    #[error("invalid .stdignore pattern: {0}")]
+    InvalidPattern(#[from] ignore::Error),
+}
+
+/// Walks `workspace_root` and collects every entry that matches a
+/// single gitignore-syntax `pattern`. Used by the VSCode extension's
+/// `.stdignore` hover provider to surface which paths a line would
+/// catch BEFORE the user commits to the edit — a "preview" rather
+/// than a guess.
+///
+/// The matcher built here is independent of any existing `.stdignore`
+/// in the workspace : it represents what THIS one pattern in
+/// isolation would match. The walk does not skip well-known mega-dirs
+/// (a user typing `.git/` should see what falls under it), but caps
+/// at [`PATTERN_PREVIEW_WALK_CAP`] entries to bound the worst case.
+///
+/// `limit` clamps the size of the returned `matches` vector while
+/// `total_count` keeps counting unbounded (up to the walk cap).
+pub fn preview_pattern_matches(
+    workspace_root: &Path,
+    pattern: &str,
+    limit: usize,
+) -> Result<PatternPreview, PatternPreviewError> {
+    let trimmed = pattern.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return Ok(PatternPreview {
+            pattern: pattern.to_string(),
+            matches: Vec::new(),
+            total_count: 0,
+            truncated: false,
+            walk_truncated: false,
+        });
+    }
+    let mut builder = GitignoreBuilder::new(workspace_root);
+    builder.add_line(None, trimmed)?;
+    let matcher = builder.build()?;
+
+    let mut hits: Vec<String> = Vec::new();
+    let mut total: usize = 0;
+    let mut walk_truncated = false;
+    for (scanned, entry) in WalkDir::new(workspace_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .enumerate()
+    {
+        if scanned >= PATTERN_PREVIEW_WALK_CAP {
+            walk_truncated = true;
+            break;
+        }
+        let path = entry.path();
+        let Ok(rel) = path.strip_prefix(workspace_root) else {
+            continue;
+        };
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let is_dir = entry.file_type().is_dir();
+        // `matched_path_or_any_parents` so files INSIDE an ignored
+        // directory still report as matched — `target/` should
+        // surface every file under it, not just the `target` entry.
+        if matches!(
+            matcher.matched_path_or_any_parents(rel, is_dir),
+            Match::Ignore(_)
+        ) {
+            total += 1;
+            if hits.len() < limit {
+                hits.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+
+    Ok(PatternPreview {
+        pattern: pattern.to_string(),
+        matches: hits,
+        total_count: total,
+        truncated: total > limit,
+        walk_truncated,
+    })
+}
+
 fn collect_layers(workspace_root: &Path) -> Vec<Layer> {
     let mut layers = Vec::new();
 
@@ -397,4 +504,46 @@ mod tests {
         let stack = GitignoreStack::build(dir.path());
         assert!(!stack.is_ignored(""));
     }
+
+    #[test]
+    fn preview_pattern_matches_returns_paths_under_target_directory() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "");
+        write(dir.path(), "target/debug/foo.rs", "");
+        write(dir.path(), "target/release/bar.rs", "");
+        let preview = preview_pattern_matches(dir.path(), "target/", 20).unwrap();
+        assert_eq!(preview.pattern, "target/");
+        assert!(preview.matches.iter().any(|p| p == "target"
+            || p == "target/debug"
+            || p == "target/debug/foo.rs"));
+        // Three entries under target/ (target dir + debug + release + 2 files)
+        // — count is whatever the walker enumerates, all of which match.
+        assert!(preview.total_count >= 3);
+        assert!(!preview.matches.iter().any(|p| p == "src/lib.rs"));
+        assert!(!preview.walk_truncated);
+    }
+
+    #[test]
+    fn preview_pattern_matches_returns_empty_for_blank_or_comment() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "");
+        for blank in &["", "   ", "# comment line", "  # indented comment"] {
+            let preview = preview_pattern_matches(dir.path(), blank, 20).unwrap();
+            assert!(preview.matches.is_empty());
+            assert_eq!(preview.total_count, 0);
+        }
+    }
+
+    #[test]
+    fn preview_pattern_matches_truncates_at_limit_while_counting_total() {
+        let dir = tempdir().unwrap();
+        for i in 0..10 {
+            write(dir.path(), &format!("logs/file{i}.log"), "");
+        }
+        let preview = preview_pattern_matches(dir.path(), "*.log", 3).unwrap();
+        assert_eq!(preview.matches.len(), 3);
+        assert_eq!(preview.total_count, 10);
+        assert!(preview.truncated);
+    }
+
 }
