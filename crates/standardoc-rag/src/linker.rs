@@ -33,6 +33,7 @@ pub const SHORT_NAME_MIN_LEN: usize = 4;
 pub const SHORT_NAME_STOPLIST: &[&str] = &[
     "data", "default", "done", "file", "find", "from", "info", "init", "into", "iter", "kind",
     "load", "make", "name", "next", "node", "open", "path", "read", "self", "take", "text", "with",
+    "write",
 ];
 
 /// Input fed to the linker per-file. The orchestrator (typically

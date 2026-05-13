@@ -80,24 +80,59 @@ pub fn discover_prose_sources(workspace_root: &Path, filters: &ScanFilters) -> V
     out
 }
 
-/// `README.md` at any depth (workspace root + sub-package roots) plus
-/// any `docs/**/*.md` qualify as convention paths. Comparison is
-/// case-sensitive (matches the actual on-disk path).
+/// A path qualifies as convention prose when EITHER:
+/// 1. its filename is in [`ROOT_DOC_FILES`] (at any depth — workspace
+///    root, sub-package root, vendored package root) ; OR
+/// 2. it lives under one of the [`PROSE_DIR_PREFIXES`] (docs/, notes/,
+///    ...) at any depth.
 ///
-/// Sub-package README inclusion is intentional : monorepo workspaces
-/// commonly keep the user-facing prose next to each crate / package
-/// (e.g. `standardoc/README.md`, `frontend/README.md`). Files the user
+/// Comparison is case-sensitive (matches the actual on-disk path).
+/// Sub-package inclusion is intentional : monorepo workspaces commonly
+/// keep prose next to each crate / package (e.g.
+/// `standardoc/README.md`, `frontend/CHANGELOG.md`). Files the user
 /// doesn't want indexed can opt out with `--- standardoc: false ---`
 /// in their frontmatter ; the `.stdignore` exclusion list also runs
 /// before the convention check.
 pub fn is_convention_path(rel_path: &str) -> bool {
-    if rel_path == "README.md" {
-        return true;
+    matches_root_doc_file(rel_path) || starts_with_prose_dir(rel_path)
+}
+
+/// Filenames recognised as prose entry points regardless of nesting
+/// depth. README is the historic baseline ; CHANGELOG / ARCHITECTURE /
+/// CONTRIBUTING are added so monorepos that keep these next to each
+/// sub-package don't need per-file frontmatter opt-in.
+const ROOT_DOC_FILES: &[&str] = &[
+    "README.md",
+    "CHANGELOG.md",
+    "ARCHITECTURE.md",
+    "CONTRIBUTING.md",
+];
+
+/// Directory prefixes whose contents are prose by convention. `docs/`
+/// is the historic baseline ; `notes/` covers project memos / session
+/// handoffs that the v1.0-beta refactor of standardoc-core actively
+/// uses (`notes/locks/`, `notes/done/`).
+const PROSE_DIR_PREFIXES: &[&str] = &["docs/", "docs\\", "notes/", "notes\\"];
+
+fn matches_root_doc_file(rel_path: &str) -> bool {
+    for name in ROOT_DOC_FILES {
+        if rel_path == *name {
+            return true;
+        }
+        if rel_path
+            .rsplit_once(['/', '\\'])
+            .is_some_and(|(_, last)| last == *name)
+        {
+            return true;
+        }
     }
-    if rel_path.ends_with("/README.md") || rel_path.ends_with("\\README.md") {
-        return true;
-    }
-    rel_path.starts_with("docs/") || rel_path.starts_with("docs\\")
+    false
+}
+
+fn starts_with_prose_dir(rel_path: &str) -> bool {
+    PROSE_DIR_PREFIXES
+        .iter()
+        .any(|p| rel_path.starts_with(p))
 }
 
 /// Reads the opening of `path` and returns the `standardoc:` directive
@@ -176,7 +211,10 @@ mod tests {
         assert!(is_convention_path("README.md"));
         assert!(is_convention_path("docs/architecture.md"));
         assert!(is_convention_path("docs/sub/nested.md"));
-        assert!(!is_convention_path("notes/random.md"));
+        // Notes are now part of the convention (T-G : project memos /
+        // session handoffs / locks).
+        assert!(is_convention_path("notes/random.md"));
+        assert!(is_convention_path("notes/locks/storage-4a.md"));
         assert!(!is_convention_path("src/lib.rs"));
     }
 
@@ -187,9 +225,16 @@ mod tests {
         assert!(is_convention_path("crates/foo/README.md"));
         // Backslash path (Windows-style) also recognised.
         assert!(is_convention_path("standardoc\\README.md"));
-        // Other markdowns at the same depth are NOT auto-included.
-        assert!(!is_convention_path("standardoc/CHANGELOG.md"));
+        // CHANGELOG / CONTRIBUTING / ARCHITECTURE at any depth are now
+        // auto-included alongside README (T-G).
+        assert!(is_convention_path("CHANGELOG.md"));
+        assert!(is_convention_path("standardoc/CHANGELOG.md"));
+        assert!(is_convention_path("CONTRIBUTING.md"));
+        assert!(is_convention_path("docs/ARCHITECTURE.md"));
+        // Files NOT in the doc-file list and outside prose dirs remain
+        // out — opt-in via frontmatter directive if you want them.
         assert!(!is_convention_path("standardoc/notes.md"));
+        assert!(!is_convention_path("standardoc/random.md"));
     }
 
     #[test]
@@ -242,29 +287,37 @@ mod tests {
     }
 
     #[test]
-    fn discover_picks_up_readme_and_docs_by_convention() {
+    fn discover_picks_up_readme_docs_and_notes_by_convention() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write(root, "README.md", "# r\n");
         write(root, "docs/a.md", "# a\n");
         write(root, "docs/sub/b.md", "# b\n");
+        // T-G : notes/** is now part of the convention.
         write(root, "notes/random.md", "# n\n");
+        // Random other .md is NOT auto-included.
+        write(root, "random.md", "# x\n");
         let filters = fresh_filters(root);
         let mut found = discover_prose_sources(root, &filters);
         found.sort();
-        assert_eq!(found, vec!["README.md", "docs/a.md", "docs/sub/b.md"]);
+        assert_eq!(
+            found,
+            vec!["README.md", "docs/a.md", "docs/sub/b.md", "notes/random.md"]
+        );
     }
 
     #[test]
     fn discover_picks_up_frontmatter_opt_in_anywhere() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write(root, "notes/x.md", "---\nstandardoc: rag\n---\nbody\n");
-        write(root, "notes/y.md", "no frontmatter\n");
+        // Frontmatter opt-in is exercised on a non-convention path so
+        // the assertion is unambiguous (notes/ became a convention in T-G).
+        write(root, "scratch/x.md", "---\nstandardoc: rag\n---\nbody\n");
+        write(root, "scratch/y.md", "no frontmatter\n");
         let filters = fresh_filters(root);
         let found = discover_prose_sources(root, &filters);
-        assert!(found.contains(&"notes/x.md".to_string()));
-        assert!(!found.contains(&"notes/y.md".to_string()));
+        assert!(found.contains(&"scratch/x.md".to_string()));
+        assert!(!found.contains(&"scratch/y.md".to_string()));
     }
 
     #[test]
