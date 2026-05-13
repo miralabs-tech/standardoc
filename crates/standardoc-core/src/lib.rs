@@ -24,7 +24,8 @@ pub use rag::{
     spawn_rag_watcher,
 };
 pub use sessions::{
-    SessionRow, SessionStatus, SessionsError, SessionsHandle, dump_sessions_to_markdown,
+    SessionRow, SessionStatus, SessionsError, SessionsHandle, UsagePeriod, UsageStatsRow,
+    dump_sessions_to_markdown,
 };
 pub use storage::error::StorageError;
 pub use storage::handle::IndexHandle;

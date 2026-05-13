@@ -193,6 +193,115 @@ impl SessionsHandle {
             .optional()?;
         raw.transpose()
     }
+
+    /// Records a single tool invocation in the `usage_stats` table. The `fqdn`
+    /// is `None` for tools that operate on the whole index rather than a
+    /// specific symbol (e.g. `find_symbol`, `list_symbols`). `baseline_bytes`
+    /// is the sum of file sizes of distinct source files referenced by the
+    /// response — the honest "what an AI would have read raw" floor. Returns
+    /// the inserted row id. Callers typically swallow errors (best-effort
+    /// metric, never fail a tool call because of it).
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn log_usage(
+        &self,
+        tool_name: &str,
+        fqdn: Option<&str>,
+        bytes_out: i64,
+        baseline_bytes: i64,
+    ) -> Result<i64, SessionsError> {
+        let guard = self.conn.lock().map_err(|_| SessionsError::Poisoned)?;
+        let now = current_unix_seconds();
+        guard.execute(
+            "INSERT INTO usage_stats (tool_name, fqdn, bytes_out, baseline_bytes, ts_unix) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![tool_name, fqdn, bytes_out, baseline_bytes, now],
+        )?;
+        Ok(guard.last_insert_rowid())
+    }
+
+    /// Aggregates `usage_stats` rows scoped to `period`. Returns the rolled-up
+    /// counters plus a `ratio` of `bytes_out / baseline_bytes` (0.0 when the
+    /// baseline is empty — fresh install, no calls yet).
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn query_usage_stats(
+        &self,
+        period: UsagePeriod,
+    ) -> Result<UsageStatsRow, SessionsError> {
+        let guard = self.conn.lock().map_err(|_| SessionsError::Poisoned)?;
+        let now = current_unix_seconds();
+        let since = period.since(now);
+        let (calls, bytes_out_total, baseline_bytes_total): (i64, i64, i64) = guard
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(bytes_out), 0), COALESCE(SUM(baseline_bytes), 0) \
+                 FROM usage_stats WHERE ts_unix >= ?1",
+                [since],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        let bytes_saved = baseline_bytes_total - bytes_out_total;
+        let ratio = if baseline_bytes_total > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let r = bytes_out_total as f64 / baseline_bytes_total as f64;
+            r
+        } else {
+            0.0
+        };
+        Ok(UsageStatsRow {
+            period: period.as_str().to_string(),
+            calls,
+            bytes_out_total,
+            baseline_bytes_total,
+            bytes_saved,
+            ratio,
+        })
+    }
+}
+
+/// Period filter for `query_usage_stats`. `Day` / `Week` are sliding windows
+/// anchored at `now`; `All` returns the full table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsagePeriod {
+    Day,
+    Week,
+    All,
+}
+
+impl UsagePeriod {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::All => "all",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "day" | "d" | "today" => Some(Self::Day),
+            "week" | "w" | "7d" => Some(Self::Week),
+            "all" | "" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    pub const fn since(self, now: i64) -> i64 {
+        match self {
+            Self::Day => now - 86_400,
+            Self::Week => now - 604_800,
+            Self::All => 0,
+        }
+    }
+}
+
+/// Aggregated counters returned by `query_usage_stats`. Ratio is `bytes_out /
+/// baseline_bytes` (0.0 when no data) — the honest compression factor.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UsageStatsRow {
+    pub period: String,
+    pub calls: i64,
+    pub bytes_out_total: i64,
+    pub baseline_bytes_total: i64,
+    pub bytes_saved: i64,
+    pub ratio: f64,
 }
 
 type RawRow = (i64, String, String, Option<String>, String, i64);
@@ -343,5 +452,99 @@ mod tests {
         let h2 = SessionsHandle::open(dir.path()).unwrap();
         let got = h2.get_by_slug("s1").unwrap().unwrap();
         assert_eq!(got.body_md, "first");
+    }
+
+    #[test]
+    fn log_usage_inserts_row() {
+        let (_dir, handle) = fresh_handle();
+        let id = handle
+            .log_usage("get_context", Some("crate::foo"), 250, 1800)
+            .unwrap();
+        assert!(id > 0);
+        let stats = handle.query_usage_stats(UsagePeriod::All).unwrap();
+        assert_eq!(stats.calls, 1);
+        assert_eq!(stats.bytes_out_total, 250);
+        assert_eq!(stats.baseline_bytes_total, 1800);
+        assert_eq!(stats.bytes_saved, 1550);
+        assert!((stats.ratio - (250.0 / 1800.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn log_usage_accepts_null_fqdn() {
+        let (_dir, handle) = fresh_handle();
+        handle.log_usage("find_symbol", None, 80, 0).unwrap();
+        let stats = handle.query_usage_stats(UsagePeriod::All).unwrap();
+        assert_eq!(stats.calls, 1);
+        assert_eq!(stats.bytes_out_total, 80);
+        assert_eq!(stats.baseline_bytes_total, 0);
+        assert!((stats.ratio - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn query_usage_stats_aggregates_multiple_rows() {
+        let (_dir, handle) = fresh_handle();
+        handle.log_usage("get_context", Some("a"), 100, 1000).unwrap();
+        handle.log_usage("get_context", Some("b"), 200, 2000).unwrap();
+        handle.log_usage("find_symbol", None, 50, 0).unwrap();
+        let stats = handle.query_usage_stats(UsagePeriod::All).unwrap();
+        assert_eq!(stats.calls, 3);
+        assert_eq!(stats.bytes_out_total, 350);
+        assert_eq!(stats.baseline_bytes_total, 3000);
+        assert_eq!(stats.bytes_saved, 2650);
+    }
+
+    #[test]
+    fn query_usage_stats_period_filters_old_rows() {
+        let (_dir, handle) = fresh_handle();
+        handle.log_usage("get_context", Some("recent"), 100, 1000).unwrap();
+        // Backdate one row by 8 days so it falls outside the week window.
+        {
+            let guard = handle.conn.lock().unwrap();
+            let cutoff = current_unix_seconds() - 8 * 86_400;
+            guard
+                .execute(
+                    "INSERT INTO usage_stats (tool_name, fqdn, bytes_out, baseline_bytes, ts_unix) \
+                     VALUES ('get_context', 'old', 999, 9999, ?1)",
+                    [cutoff],
+                )
+                .unwrap();
+        }
+        let day = handle.query_usage_stats(UsagePeriod::Day).unwrap();
+        assert_eq!(day.calls, 1);
+        assert_eq!(day.bytes_out_total, 100);
+        let week = handle.query_usage_stats(UsagePeriod::Week).unwrap();
+        assert_eq!(week.calls, 1, "week window still excludes the 8-day-old row");
+        let all = handle.query_usage_stats(UsagePeriod::All).unwrap();
+        assert_eq!(all.calls, 2);
+    }
+
+    #[test]
+    fn query_usage_stats_empty_returns_zero_ratio() {
+        let (_dir, handle) = fresh_handle();
+        let stats = handle.query_usage_stats(UsagePeriod::All).unwrap();
+        assert_eq!(stats.calls, 0);
+        assert_eq!(stats.bytes_out_total, 0);
+        assert_eq!(stats.baseline_bytes_total, 0);
+        assert_eq!(stats.bytes_saved, 0);
+        assert!((stats.ratio - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn usage_period_parse_accepts_aliases() {
+        assert_eq!(UsagePeriod::from_str_loose("day"), Some(UsagePeriod::Day));
+        assert_eq!(UsagePeriod::from_str_loose("D"), Some(UsagePeriod::Day));
+        assert_eq!(UsagePeriod::from_str_loose("Today"), Some(UsagePeriod::Day));
+        assert_eq!(UsagePeriod::from_str_loose("week"), Some(UsagePeriod::Week));
+        assert_eq!(UsagePeriod::from_str_loose("7d"), Some(UsagePeriod::Week));
+        assert_eq!(UsagePeriod::from_str_loose("all"), Some(UsagePeriod::All));
+        assert_eq!(UsagePeriod::from_str_loose(""), Some(UsagePeriod::All));
+        assert_eq!(UsagePeriod::from_str_loose("xxx"), None);
+    }
+
+    #[test]
+    fn usage_period_since_matches_window() {
+        assert_eq!(UsagePeriod::Day.since(1_000_000), 1_000_000 - 86_400);
+        assert_eq!(UsagePeriod::Week.since(1_000_000), 1_000_000 - 604_800);
+        assert_eq!(UsagePeriod::All.since(1_000_000), 0);
     }
 }
