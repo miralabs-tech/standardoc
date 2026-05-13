@@ -147,30 +147,17 @@ pub fn kick_off_indexing(
 
     if handle.is_readonly() {
         index_ready.store(true, Ordering::Release);
-        if let Some(pipeline) = rag_pipeline {
-            // rag.db is sidecar — no fs4 contention with the primary
-            // LSP daemon — so the MCP --readonly daemon runs the RAG
-            // cold start itself. Background tokio task so we don't
-            // block axum::serve from booting. Note: on a FRESH
-            // workspace where the LSP has not yet populated index.db,
-            // the linker's workspace_fqdns lookup will return an empty
-            // list, producing frontmatter-only links. The watcher will
-            // pick up subsequent `.md` saves ; the revision watcher
-            // catches up via `relink_all` once the LSP cold start
-            // bumps `handle.revision()`.
-            let rag_watcher_slot = mcp.rag_watcher_slot();
-            let rag_relink_slot = mcp.rag_relink_watcher_slot();
-            tokio::spawn(async move {
-                run_rag_relink_all(&pipeline, &handle);
-                run_rag_cold_start(&pipeline, &handle, &filters);
-                spawn_revision_relink_into_slot(
-                    &rag_relink_slot,
-                    handle.clone(),
-                    Arc::clone(&pipeline),
-                );
-                spawn_rag_watcher_into_slot(&rag_watcher_slot, handle, pipeline, filters);
-            });
-        }
+        // MCP --readonly is the SECONDARY daemon in the dual-daemon
+        // setup : the LSP holds the fs4 lock and owns every write —
+        // AST AND RAG. rag.db is sidecar so SQLite WAL would
+        // technically allow concurrent writes, but two writers racing
+        // on the same `chunks` rows produced a `FOREIGN KEY constraint
+        // failed` when one daemon's relink read chunk ids that the
+        // other daemon's cold-start had already replaced. The pipeline
+        // is still wired into [`StandardocMcp`] via `with_rag_components`
+        // so query-time `chunk_refs` / `fetch_chunks` keep working ;
+        // we just don't kick off any background write tasks here.
+        drop(rag_pipeline);
         return;
     }
 
