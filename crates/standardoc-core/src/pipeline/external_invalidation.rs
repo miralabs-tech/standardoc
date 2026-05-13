@@ -86,7 +86,7 @@ pub struct LockfileHashes {
 /// `package-lock.json` because PnP overrides classic resolution).
 ///
 /// Luarocks has no canonical lockfile on disk so `LockfileHashes::luarocks`
-/// stays `None` here — the [`super::watcher`]-side and the
+/// stays `None` here — the `watcher`-side and the
 /// [`crate::externals::luarocks::LuarocksResolver`] are the ones who
 /// hash the `luarocks list --porcelain` snapshot.
 pub fn compute_lockfile_hashes(workspace_root: &Path) -> Result<LockfileHashes, StorageError> {

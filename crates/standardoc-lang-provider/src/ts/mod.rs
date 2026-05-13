@@ -143,7 +143,7 @@ impl TsProvider {
 
 impl TsProvider {
     /// External-`.d.ts` entry point used by `externals::npm::NpmResolver`.
-    /// Sets [`TsExtractMode::ExternalDts`] so the visit layer skips
+    /// Sets `TsExtractMode::ExternalDts` (crate-private) so the visit layer skips
     /// CALLS edges + body hashing for declaration files. The path is
     /// treated as a workspace-relative pointer into a virtual
     /// `node_modules/<pkg>/...` tree mounted under `ctx.workspace_root`;

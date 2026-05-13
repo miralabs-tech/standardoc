@@ -173,7 +173,8 @@ fn main() -> ExitCode {
 /// the VSCode extension supervisor (and other daemon supervisors) need
 /// to recognise WITHOUT regex-parsing the human-readable error message.
 ///
-/// The shape is stable and parsed by [`standardoc::src::daemon::supervisor`]:
+/// The shape is stable and parsed by the VSCode extension supervisor at
+/// `ext/vscode/src/daemon/supervisor.ts`:
 ///
 /// ```text
 /// STDOC_FATAL: <code> <key>=<value> ...

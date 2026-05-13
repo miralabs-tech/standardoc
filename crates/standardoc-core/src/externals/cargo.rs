@@ -53,9 +53,9 @@ pub struct CargoResolver {
 impl CargoResolver {
     /// Constructs the resolver and probes the `cargo` binary once. The
     /// caller (typically [`super::ResolverRegistry::for_workspace`])
-    /// gates construction behind [`super::workspace_has_cargo_lock`] —
-    /// if no `Cargo.lock` exists, the resolver is omitted from the
-    /// registry entirely.
+    /// gates construction behind [`super::find_cargo_lock`] — if no
+    /// `Cargo.lock` is reachable from the workspace root, the resolver
+    /// is omitted from the registry entirely.
     #[must_use]
     pub fn new(workspace_root: PathBuf) -> Self {
         let binary = binary_detection::probe_binary("cargo", binary_detection::ENV_CARGO_PATH);

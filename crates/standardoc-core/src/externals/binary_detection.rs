@@ -133,7 +133,7 @@ pub(crate) fn probe_path(path: &Path) -> BinaryAvailability {
 
 /// Returns the directory containing a `Cargo.lock` reachable from
 /// `root`. Checks `root` itself first (typical case), then walks DOWN
-/// up to [`SCAN_MAX_DEPTH`] levels to discover monorepo subprojects —
+/// up to `SCAN_MAX_DEPTH` levels to discover monorepo subprojects —
 /// the shallowest match wins. Returns `None` when no `Cargo.lock`
 /// is found anywhere within the bounded tree.
 #[must_use]
@@ -189,7 +189,7 @@ pub fn workspace_has_pnp_cjs(root: &Path) -> bool {
 /// workspace root AFTER consulting the workspace's `.stdignore`. A
 /// `.lua` file that matches an ignore pattern is treated as absent for
 /// the purpose of LuarocksResolver registration. Bounded walk depth
-/// (see [`SCAN_MAX_DEPTH`]) avoids descending into deep vendored trees
+/// (see `SCAN_MAX_DEPTH`) avoids descending into deep vendored trees
 /// on pure Rust+TS projects.
 #[must_use]
 pub fn workspace_has_lua_files(root: &Path) -> bool {
