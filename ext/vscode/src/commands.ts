@@ -37,6 +37,29 @@ export interface CommandContext {
   readonly spawnSupervisor: () => void;
 }
 
+type UnlinkResult = 'deleted' | 'missing' | { kind: 'failed'; message: string };
+
+const UNLINK_RETRY_DELAYS_MS: readonly number[] = [0, 300, 600, 1200, 2000];
+
+async function unlinkWithRetry(target: string): Promise<UnlinkResult> {
+  let lastError: unknown;
+  for (const delay of UNLINK_RETRY_DELAYS_MS) {
+    if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+    try {
+      await fs.promises.unlink(target);
+      return 'deleted';
+    } catch (e: unknown) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return 'missing';
+      if (code !== 'EBUSY' && code !== 'EPERM') {
+        return { kind: 'failed', message: describeError(e) };
+      }
+      lastError = e;
+    }
+  }
+  return { kind: 'failed', message: describeError(lastError) };
+}
+
 export function registerCommands(context: vscode.ExtensionContext, ctx: CommandContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('Standardoc.daemon.restart', () => commandDaemonRestart(ctx)),
@@ -204,15 +227,12 @@ async function commandRagRebuild(ctx: CommandContext): Promise<void> {
   const ragShm = `${ragDb}-shm`;
   let deleted = 0;
   for (const target of [ragDb, ragWal, ragShm]) {
-    try {
-      await fs.promises.unlink(target);
+    const result = await unlinkWithRetry(target);
+    if (result === 'deleted') {
       deleted += 1;
       ctx.output.appendLine(`[rag-rebuild] deleted ${target}`);
-    } catch (e: unknown) {
-      const code = (e as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
-        ctx.output.appendLine(`[rag-rebuild] could not delete ${target}: ${describeError(e)}`);
-      }
+    } else if (typeof result === 'object') {
+      ctx.output.appendLine(`[rag-rebuild] could not delete ${target}: ${result.message}`);
     }
   }
   ctx.output.appendLine(`[rag-rebuild] removed ${deleted} file(s), restarting daemon…`);
