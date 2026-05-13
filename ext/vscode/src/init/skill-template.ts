@@ -146,15 +146,45 @@ Returns \`{status, fqdn, source_origin?, symbol?, missing_binary?, detail?}\`:
 resolve_external("serde::Deserialize")
 \`\`\`
 
-## Freshness tracking
+## Boot-time capability check
 
 ### current_revision()
 
-Returns the current workspace revision — a monotonic counter that bumps
-on every successful index write (cold-start ingest, watcher upsert,
-external resolution). Cheap call; no parameters. Pair with \`check_stale\`
-to detect when symbols you previously cited have been modified since
-your last fetch.
+Returns the current workspace revision AND the daemon's wired
+capabilities. Call this ONCE at session start to learn what's
+available, then route your tool flow accordingly.
+
+\`\`\`json
+{
+  "revision": 354,
+  "rag": {
+    "enabled": true,
+    "embedder": { "id": "bge-small-en-v1.5", "dim": 384 }
+  },
+  "watcher": { "active": true },
+  "indexing": { "ready": true }
+}
+\`\`\`
+
+**Decision matrix:**
+
+- \`rag.enabled = false\` → never call \`fetch_chunks\`; do not pass
+  \`query\` to \`get_context\` (will be ignored).
+- \`rag.enabled = true\` AND \`rag.embedder = null\` → \`chunk_refs\` are
+  populated but link-confidence ordered only; passing \`query\` to
+  \`get_context\` is a no-op (silent).
+- \`rag.embedder.id\` known → semantic re-rank works; pass natural-
+  language \`query\` to \`get_context\` for relevant prose.
+- \`indexing.ready = false\` → cold start in progress; read tools
+  return a friendly "indexing in progress" text. Wait or back off.
+- \`watcher.active = false\` after \`indexing.ready = true\` → the daemon
+  was booted in \`--readonly\` mode. The index will not refresh on file
+  edits; rely on \`check_stale\` against the revision you observed.
+
+The \`revision\` is a monotonic counter that bumps on every successful
+index write (cold-start ingest, watcher upsert, external resolution).
+Pair it with \`check_stale\` to detect when symbols you previously
+cited have been modified since your last fetch.
 
 ### check_stale(fetched: [{fqdn, fetched_at_revision}, ...])
 

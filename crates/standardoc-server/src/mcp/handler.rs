@@ -415,17 +415,42 @@ impl StandardocMcp {
         }
     }
 
-    /// Read-only snapshot of the workspace revision counter. The number is
-    /// monotonic — every successful write (cold-start ingest, watcher upsert,
-    /// rescan) bumps it by 1. Callers can record the revision they observed
-    /// alongside each fetched FQDN and later feed those pairs into
-    /// `check_stale` to detect what changed.
+    /// Read-only snapshot of the workspace revision counter PLUS daemon
+    /// capabilities. The `revision` number is monotonic — every successful
+    /// write (cold-start ingest, watcher upsert, rescan) bumps it by 1. The
+    /// `rag` / `watcher` / `indexing` blocks let callers introspect what
+    /// the daemon is wired with, so an AI can pick the right tool path
+    /// (e.g. omit `query` from `get_context` when `rag.embedder` is null).
     #[tool(
-        description = "Returns the current workspace revision number — a monotonic counter that bumps on every successful index write. Pair it with `check_stale` to detect when fqdns you have already cited have been modified since you last fetched them. Cheap call; no parameters."
+        description = "Returns the current workspace revision number AND daemon capabilities (`rag.enabled`, `rag.embedder`, `watcher.active`, `indexing.ready`). Use the revision with `check_stale` to detect when fqdns you have already cited have been modified. Use the capabilities at session boot to decide tool flow — passing `query` to `get_context` only re-ranks chunks when `rag.embedder` is non-null. Cheap call; no parameters."
     )]
     async fn current_revision(&self) -> Result<CallToolResult, ErrorData> {
         let revision = self.handle.revision();
-        Ok(success_json(&CurrentRevisionJson { revision }))
+        let rag_enabled = self.rag_store.is_some();
+        let embedder = self.rag_embedder.as_ref().map(|e| {
+            let model = e.model();
+            EmbedderInfoJson {
+                id: model.id.clone(),
+                dim: model.dim,
+            }
+        });
+        let watcher_active = self
+            .watcher
+            .lock()
+            .ok()
+            .is_some_and(|guard| guard.is_some());
+        let ready = self.index_ready.load(Ordering::Acquire);
+        Ok(success_json(&CurrentRevisionJson {
+            revision,
+            rag: RagCapabilityJson {
+                enabled: rag_enabled,
+                embedder,
+            },
+            watcher: WatcherCapabilityJson {
+                active: watcher_active,
+            },
+            indexing: IndexingCapabilityJson { ready },
+        }))
     }
 
     /// Aggregated read-path telemetry — the running tally of bytes the
@@ -1034,10 +1059,57 @@ pub(crate) struct SessionDumpMdParams {
     pub target_path: String,
 }
 
-/// Tool output for `current_revision`.
+/// Tool output for `current_revision`. The legacy `revision` field is kept
+/// as the first key so callers that only deserialize `{revision}` keep
+/// working; new fields surface daemon capabilities so an AI can decide
+/// at boot whether passing `query` to `get_context` will re-rank chunks
+/// (`rag.embedder.is_some()`), whether the live watcher is debouncing
+/// edits (`watcher.active`), and whether early read calls would hit the
+/// "indexing in progress" branch (`indexing.ready`).
 #[derive(Debug, Serialize)]
 pub(crate) struct CurrentRevisionJson {
     pub revision: u64,
+    pub rag: RagCapabilityJson,
+    pub watcher: WatcherCapabilityJson,
+    pub indexing: IndexingCapabilityJson,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RagCapabilityJson {
+    /// `true` when the daemon was booted with `--rag` and a `RagStore`
+    /// was successfully opened. Implies `fetch_chunks` is callable and
+    /// `chunk_refs` are populated on `get_context` responses.
+    pub enabled: bool,
+    /// Embedder identity. `Some` when `enabled` AND an embedder is wired
+    /// — only then does passing `query` to `get_context` re-rank
+    /// `chunk_refs` by cosine similarity. `None` with `enabled: true`
+    /// means link-confidence ordering only (the `query` arg is silently
+    /// ignored).
+    pub embedder: Option<EmbedderInfoJson>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct EmbedderInfoJson {
+    /// Short model id (e.g. `"bge-small-en-v1.5"`, `"mock-blake3-128"`).
+    /// Mirrors `EmbedModel.id` stored in the RAG schema metadata.
+    pub id: String,
+    /// Vector dimension produced by this embedder.
+    pub dim: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct WatcherCapabilityJson {
+    /// `true` once the cold-start spawn has installed the live notify
+    /// watcher. `false` while indexing is still running OR when the
+    /// daemon was booted in `--readonly` mode (no writer, no watcher).
+    pub active: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct IndexingCapabilityJson {
+    /// `true` once cold start has flipped `index_ready`. Calls before
+    /// this short-circuit with the `"indexing in progress"` text.
+    pub ready: bool,
 }
 
 /// Tool input — `usage_stats(period?)`. Accepted period strings (case-insensitive):
@@ -1636,6 +1708,54 @@ mod tests {
         // Empty workspace = 0 writes = revision stays 0. We rely on the field
         // shape rather than the exact value here.
         assert!(body.contains("\"revision\""), "got `{body}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn current_revision_reports_rag_disabled_on_default_fixture() {
+        let (_dir, mcp) = fixture();
+        let result = mcp.current_revision().await.unwrap();
+        let body = body_text(&result);
+        assert!(
+            body.contains("\"rag\""),
+            "expected rag capability block, got `{body}`"
+        );
+        assert!(
+            body.contains("\"enabled\": false"),
+            "fixture has no RAG store, got `{body}`"
+        );
+        // embedder must be `null` when no embedder is wired.
+        assert!(body.contains("\"embedder\": null"), "got `{body}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn current_revision_reports_indexing_not_ready_before_cold_start() {
+        let (_dir, mcp) = fixture();
+        let result = mcp.current_revision().await.unwrap();
+        let body = body_text(&result);
+        assert!(
+            body.contains("\"indexing\""),
+            "expected indexing block, got `{body}`"
+        );
+        assert!(body.contains("\"ready\": false"), "got `{body}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn current_revision_reports_indexing_ready_after_cold_start() {
+        let (dir, mcp) = fixture();
+        cold_start_workspace(&mcp, dir.path());
+        let result = mcp.current_revision().await.unwrap();
+        let body = body_text(&result);
+        assert!(body.contains("\"ready\": true"), "got `{body}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn current_revision_reports_watcher_active_when_handle_present() {
+        let (_dir, mcp) = fixture();
+        // No watcher has been spawned by the fixture, so this must be false.
+        let result = mcp.current_revision().await.unwrap();
+        let body = body_text(&result);
+        assert!(body.contains("\"watcher\""), "got `{body}`");
+        assert!(body.contains("\"active\": false"), "got `{body}`");
     }
 
     #[tokio::test(flavor = "multi_thread")]
