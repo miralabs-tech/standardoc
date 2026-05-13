@@ -15,7 +15,7 @@ when_to_use: ALWAYS use Standardoc FIRST when exploring or modifying code
   → (3) raw file Read/Grep/Glob. Skip Standardoc only for pure text
   matching (strings, comments, config files unrelated to code symbols)
   or for files at a known path that you just need to read verbatim.
-allowed-tools: mcp__standardoc__find_symbol mcp__standardoc__get_context mcp__standardoc__list_symbols mcp__standardoc__find_symbols_by_pattern mcp__standardoc__find_similar_symbols mcp__standardoc__get_body mcp__standardoc__resolve_external mcp__standardoc__current_revision mcp__standardoc__check_stale mcp__standardoc__usage_stats mcp__standardoc__session_save mcp__standardoc__session_list mcp__standardoc__session_get mcp__standardoc__session_dump_md
+allowed-tools: mcp__standardoc__find_symbol mcp__standardoc__get_context mcp__standardoc__list_symbols mcp__standardoc__find_symbols_by_pattern mcp__standardoc__find_similar_symbols mcp__standardoc__get_body mcp__standardoc__fetch_chunks mcp__standardoc__resolve_external mcp__standardoc__current_revision mcp__standardoc__check_stale mcp__standardoc__usage_stats mcp__standardoc__session_save mcp__standardoc__session_list mcp__standardoc__session_get mcp__standardoc__session_dump_md
 ---
 
 # Standardoc — Primary Code Navigation
@@ -59,6 +59,17 @@ Rule of thumb: you should be able to name the exact symbol and the
 specific reason before reaching for depth=2 or unbounded \`get_body\`.
 If you can't, you're still in Phase 1 or Phase 2.
 
+## FQDN input convention
+
+Every exact-match endpoint (\`get_body\`, \`get_context\`,
+\`resolve_external\`, \`check_stale\`, and the \`module\` filter on every
+search tool) normalises \`.\` to \`::\` at the MCP boundary. You can
+type the FQDN in OOP style (\`Type.method\`) or canonical style
+(\`Type::method\`) — both resolve to the same stored row. The
+canonical form on disk stays \`::\`, and that's what the server
+returns in every \`fqdn\` field. Don't try alternative separators
+(\`/\`, \`->\`, \`-\`); only \`.\` is normalised.
+
 ## Discovery tools
 
 ### find_symbol(query, limit?)
@@ -66,6 +77,18 @@ If you can't, you're still in Phase 1 or Phase 2.
 Fuzzy FTS5 search over symbol names → array of \`RawSymbol\` with FQDN,
 kind, file:line. Optional filters: \`kind\`, \`visibility\`, \`module\`,
 \`include_external\` (default true).
+
+Hyphens, dots, and \`::\` in the query are split into AND-tokens
+server-side — \`find_symbol("standardoc-cli")\` matches the same
+symbols as \`find_symbol("standardoc cli")\`. No need to escape.
+
+**Empty result enrichment** : when the query produces zero matches,
+the response switches from a bare array to
+\`{results: [], did_you_mean: [{fqdn, name, kind, score}, …]}\` with
+up to 5 strsim-scored suggestions (threshold 0.6). Accept the
+\`did_you_mean\` list as the answer instead of spinning variant
+queries. If the suggestions don't fit, the symbol genuinely doesn't
+exist.
 
 \`\`\`
 find_symbol("createUser", 5)
@@ -89,6 +112,12 @@ Glob-pattern search over symbol \`name\` and \`fqdn\` (SQLite \`GLOB\`:
 shape and want a deterministic match — e.g. \`strip_*_extension\` to
 catch every \`strip_<lang>_extension\` helper, or
 \`myapp::utils::*\` to enumerate a module.
+
+Same \`did_you_mean\` enrichment as \`find_symbol\` on empty result :
+\`{results: [], did_you_mean: [...]}\` with strsim run on the
+pattern's core (wildcards stripped). \`*to_token_string*\` surfaces
+\`to_token_stream\` in one call — accept it rather than guessing
+spellings.
 
 \`\`\`
 find_symbols_by_pattern("strip_*_extension")
@@ -150,9 +179,46 @@ Three orthogonal knobs to keep the response tight:
 Returns \`null\` when no symbol matches the FQDN — call
 \`find_symbol\` first if you only have a name fragment.
 
+**Indentation is compacted** before the body reaches you : the
+longest leading-whitespace prefix shared by every non-blank line is
+stripped (\`dedented_prefix_len\` reports how many bytes were shaved),
+and remaining uniform 4-space (or 2-space) runs are converted to
+\`\\t\` (\`indent_unit\` is \`"\\t"\` for tab-indented output, \`""\` when
+the residual indent was mixed and left verbatim). Column positions
+inside the returned body are NOT 1:1 with the source file — refetch
+verbatim by reading the file directly at \`start_line\` if you need
+column-exact positions.
+
 \`\`\`
 get_body("crate::module::function_name", null, true, true)
 // → multi-line signature only, no docs/attrs noise.
+\`\`\`
+
+### fetch_chunks(uris)
+
+Resolves a list of \`rag://<id>\` URIs (the references surfaced in
+\`chunk_refs\` on \`get_context\`) to full \`Chunk\` rows
+\`{id, source_path, chunk_idx, text, text_hash, section_header,
+byte_start, byte_end, created_at}\`. Unknown / non-existent ids are
+silently skipped — diff inputs vs outputs to detect drops. Returns
+chunks ordered by id ASC.
+
+The chunk-aware reasoning loop :
+
+\`\`\`
+get_context(fqdn, depth=1, query?)
+  → response.chunk_refs = [{uri, confidence, source_path, section_header}, ...]
+fetch_chunks([uri1, uri2, ...])
+  → [{text, ...}, ...]   // the actual prose to consider alongside the graph
+\`\`\`
+
+\`get_context\` alone gives you envelopes ; \`fetch_chunks\` retrieves
+the actual text. Don't fetch every chunk — pick the 1-3 with the
+highest \`confidence\` (or the ones whose \`section_header\` matches
+your task) and fetch only those.
+
+\`\`\`
+fetch_chunks(["rag://42", "rag://17"])
 \`\`\`
 
 ### resolve_external(fqdn)
@@ -261,6 +327,10 @@ A ratio of 0.14 means standardoc surfaced 14% of the raw bytes for
 the relevant source files — the rest is context the AI did not pay
 for. Only successful read-path tool calls are logged.
 
+\`reset_usage_stats\` exists as a separate \`stdoc reset-usage\` CLI
+sub-command for baselining a measurement run — invoke it from the
+shell when you want a clean zero before counting bytes saved.
+
 ## Session handoffs
 
 A separate SQLite DB at \`.standardoc-sessions/sessions.db\` (path
@@ -318,6 +388,15 @@ accidental DB loss.
 1. \`find_symbol("Z")\` → discover related symbols
 2. For each, \`get_context(fqdn, 1)\` → map the surrounding graph
 3. Read source files only after you have located the right entry points
+
+**"Pull in prose / docs alongside the code graph"**
+
+1. \`current_revision()\` → confirm \`rag.enabled = true\`.
+2. \`get_context(fqdn, 1, query?)\` → response carries
+   \`chunk_refs: [{uri, confidence, source_path, section_header}]\`.
+3. \`fetch_chunks([top_uri])\` → actual prose text. Pair the prose with
+   the graph slice from step 2 for full picture (graph says WHERE
+   and WHO ; prose says WHY).
 
 **"Detect templated/duplicate names across modules"**
 
