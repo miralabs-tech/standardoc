@@ -5,7 +5,7 @@ use quote::ToTokens;
 use standardoc_ir::{
     EdgeKind, Kind, LanguageKind, Modifiers, Param, RawAttribute, RawAttributeArg, RawDocument,
     RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation,
-    TypeRef, Visibility,
+    TypeRef, Visibility, compact_rust_tokens,
 };
 use syn::spanned::Spanned;
 
@@ -544,18 +544,18 @@ fn extract_signature(sig: &syn::Signature) -> Signature {
     let params = sig.inputs.iter().map(extract_param).collect();
     let returns = match &sig.output {
         syn::ReturnType::Default => None,
-        syn::ReturnType::Type(_, ty) => Some(TypeRef::new(ty.to_token_stream().to_string())),
+        syn::ReturnType::Type(_, ty) => Some(TypeRef::new(render_compact(ty))),
     };
     let generic_params = sig
         .generics
         .params
         .iter()
-        .map(|p| p.to_token_stream().to_string())
+        .map(render_compact)
         .collect();
     let where_clause = sig.generics.where_clause.as_ref().map(|wc| {
         // `to_token_stream` includes the leading `where` keyword which we
         // strip so consumers see just the predicates.
-        let raw = wc.to_token_stream().to_string();
+        let raw = render_compact(wc);
         match raw.strip_prefix("where ") {
             Some(s) => s.to_string(),
             None => raw,
@@ -595,8 +595,8 @@ fn extract_param(arg: &syn::FnArg) -> Param {
             }
         }
         syn::FnArg::Typed(pat_type) => Param {
-            name: pat_type.pat.to_token_stream().to_string(),
-            ty: TypeRef::new(pat_type.ty.to_token_stream().to_string()),
+            name: render_compact(pat_type.pat.as_ref()),
+            ty: TypeRef::new(render_compact(pat_type.ty.as_ref())),
             default: None,
         },
     }
@@ -606,7 +606,7 @@ fn extract_attributes(attrs: &[syn::Attribute], path: &str) -> Vec<RawAttribute>
     attrs
         .iter()
         .map(|attr| RawAttribute {
-            name: attr.path().to_token_stream().to_string(),
+            name: render_compact(attr.path()),
             args: meta_to_args(&attr.meta),
             site: Site {
                 file: path.into(),
@@ -622,12 +622,12 @@ fn meta_to_args(meta: &syn::Meta) -> Vec<RawAttributeArg> {
         syn::Meta::Path(_) => vec![],
         syn::Meta::List(list) => vec![RawAttributeArg {
             key: None,
-            value: list.tokens.to_string(),
+            value: compact_rust_tokens(&list.tokens.to_string()),
             is_string_literal: false,
         }],
         syn::Meta::NameValue(nv) => vec![RawAttributeArg {
             key: None,
-            value: nv.value.to_token_stream().to_string(),
+            value: render_compact(&nv.value),
             is_string_literal: false,
         }],
     }
@@ -640,11 +640,20 @@ fn extract_deprecated(attrs: &[syn::Attribute]) -> Option<String> {
         }
         return Some(match &attr.meta {
             syn::Meta::Path(_) => String::new(),
-            syn::Meta::List(list) => list.tokens.to_string(),
-            syn::Meta::NameValue(nv) => nv.value.to_token_stream().to_string(),
+            syn::Meta::List(list) => compact_rust_tokens(&list.tokens.to_string()),
+            syn::Meta::NameValue(nv) => render_compact(&nv.value),
         });
     }
     None
+}
+
+/// Local helper: renders a `ToTokens`-bearing AST node into the compact
+/// canonical Rust display form. The Rust provider sources every `display`
+/// / `name` string from `quote`'s pretty-printer, which inserts a space
+/// between every token tree — `compact_rust_tokens` re-collapses those
+/// spaces so the IR row payload is small.
+fn render_compact<T: ToTokens + ?Sized>(t: &T) -> String {
+    compact_rust_tokens(&t.to_token_stream().to_string())
 }
 
 /// Returns the trailing identifier of a `Type::Path` (e.g. `Foo` for
@@ -938,7 +947,7 @@ mod tests {
         assert_eq!(symbols[0].attributes.len(), 1);
         assert_eq!(symbols[0].attributes[0].name, "derive");
         assert_eq!(symbols[0].attributes[0].args.len(), 1);
-        assert_eq!(symbols[0].attributes[0].args[0].value, "Debug , Clone");
+        assert_eq!(symbols[0].attributes[0].args[0].value, "Debug, Clone");
     }
 
     #[test]

@@ -1017,7 +1017,7 @@ fn build_function_signature(
         .return_type
         .as_ref()
         .and_then(|ann| ctx.span_snippet(ann.type_ann.span()))
-        .map(|s| TypeRef::new(s.trim()));
+        .map(TypeRef::new);
     let generic_params = function
         .type_params
         .as_ref()
@@ -1057,7 +1057,7 @@ fn render_pat(ctx: &TsWalkContext<'_>, pat: &Pat) -> (String, TypeRef, Option<St
                 .type_ann
                 .as_ref()
                 .and_then(|ann| ctx.span_snippet(ann.type_ann.span()))
-                .map_or_else(|| TypeRef::new("any"), |s| TypeRef::new(s.trim()));
+                .map_or_else(|| TypeRef::new("any"), TypeRef::new);
             (name, ty, None)
         }
         Pat::Assign(assign) => {
@@ -1073,7 +1073,7 @@ fn render_pat(ctx: &TsWalkContext<'_>, pat: &Pat) -> (String, TypeRef, Option<St
                 .type_ann
                 .as_ref()
                 .and_then(|ann| ctx.span_snippet(ann.type_ann.span()))
-                .map_or(inner_ty, |s| TypeRef::new(s.trim()));
+                .map_or(inner_ty, TypeRef::new);
             (format!("...{name}"), ty, default)
         }
         Pat::Array(_) | Pat::Object(_) => {
@@ -1105,7 +1105,7 @@ fn signature_from_declarator(
                 .return_type
                 .as_ref()
                 .and_then(|ann| ctx.span_snippet(ann.type_ann.span()))
-                .map(|s| TypeRef::new(s.trim()));
+                .map(TypeRef::new);
             let generic_params = arrow
                 .type_params
                 .as_ref()
