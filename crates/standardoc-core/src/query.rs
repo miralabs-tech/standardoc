@@ -694,6 +694,21 @@ pub struct BodySlice {
     /// only reflects the `max_lines` cap).
     #[serde(default)]
     pub signature_only: bool,
+    /// Number of leading-whitespace bytes shared by every non-blank line
+    /// of the returned slice that were stripped to dedent the body. Zero
+    /// when the body had no common indent (or only one non-blank line at
+    /// column 0). Pure compaction signal — the original column positions
+    /// can be recovered by re-reading the file at `start_line`.
+    #[serde(default)]
+    pub dedented_prefix_len: u32,
+    /// What one indent level in the returned `body` looks like. `"\t"`
+    /// when leading 4-space (or 2-space) runs were converted to tabs OR
+    /// the source already used tabs. Empty when the body has no indented
+    /// line, or when the residual indent is too irregular to canonicalize
+    /// (mixed tabs+spaces, non-power-of-2 widths) — in that case the
+    /// body is returned verbatim post-dedent.
+    #[serde(default)]
+    pub indent_unit: String,
 }
 
 /// Knobs controlling the slice returned by [`body_for_fqdn`]. Defaults give
@@ -752,6 +767,8 @@ pub fn body_for_fqdn(
             total_body_lines: 0,
             stripped_lines: 0,
             signature_only: false,
+            dedented_prefix_len: 0,
+            indent_unit: String::new(),
         }));
     }
     let raw_slice: &[&str] = &all_lines[start_zero..end_inclusive];
@@ -777,16 +794,19 @@ pub fn body_for_fqdn(
         Some(cap) if (cap as usize) < after_signature.len() => (&after_signature[..cap as usize], true),
         _ => (after_signature, false),
     };
+    let compact = compact_body_indent(taken);
     Ok(Some(BodySlice {
         fqdn: symbol.fqdn.clone(),
         file: symbol.location.file.clone(),
         start_line: symbol.location.start_line,
         end_line: symbol.location.end_line,
-        body: taken.join("\n"),
+        body: compact.body,
         truncated,
         total_body_lines: total,
         stripped_lines: u32::try_from(stripped_count).unwrap_or(u32::MAX),
         signature_only: signature_truncated,
+        dedented_prefix_len: compact.dedented_prefix_len,
+        indent_unit: compact.indent_unit,
     }))
 }
 
@@ -857,6 +877,173 @@ fn paren_depth_delta(line: &str) -> i32 {
         }
     }
     d
+}
+
+/// Output of [`compact_body_indent`]: a body string ready to serialize
+/// plus enough metadata for the caller (and downstream tools) to know
+/// what was done.
+struct CompactedBody {
+    body: String,
+    dedented_prefix_len: u32,
+    indent_unit: String,
+}
+
+/// Compacts the indentation of a body slice for over-the-wire transport.
+///
+/// Two passes:
+///   1. **Dedent common prefix.** Find the longest leading-whitespace
+///      sequence shared by every non-blank line and strip it. A method
+///      body indented at 8 spaces inside an impl block becomes flush-left
+///      — multi-KB savings on long bodies.
+///   2. **Tab-convert residual leading runs.** If every remaining
+///      non-blank line is indented with a uniform-width space run (every
+///      width a multiple of 4, or every width a multiple of 2), each
+///      such run is converted to `\t`. Sources that already use tabs
+///      pass through unchanged.
+///
+/// Mixed or irregular indent (tabs + spaces in the same line, or
+/// non-power-of-2 widths) skips pass 2 and returns the dedented body
+/// verbatim with `indent_unit = ""`. The line *content* is never altered
+/// beyond leading whitespace — `taken.join("\n")` semantics are preserved
+/// when no compaction is applicable.
+fn compact_body_indent(lines: &[&str]) -> CompactedBody {
+    if lines.is_empty() {
+        return CompactedBody {
+            body: String::new(),
+            dedented_prefix_len: 0,
+            indent_unit: String::new(),
+        };
+    }
+
+    let common = longest_common_leading_ws(lines);
+    let prefix_len = common.len();
+
+    let stripped: Vec<String> = lines
+        .iter()
+        .map(|l| {
+            if l.starts_with(common) {
+                l[prefix_len..].to_string()
+            } else {
+                String::new()
+            }
+        })
+        .collect();
+
+    let unit = detect_indent_unit(&stripped);
+    let (final_lines, indent_unit) = match unit {
+        Some(width) if width > 0 => {
+            let converted: Vec<String> = stripped
+                .iter()
+                .map(|l| convert_leading_spaces_to_tabs(l, width))
+                .collect();
+            (converted, "\t".to_string())
+        }
+        Some(_) => (stripped, String::new()),
+        None => (stripped, "\t".to_string()),
+    };
+
+    CompactedBody {
+        body: final_lines.join("\n"),
+        dedented_prefix_len: u32::try_from(prefix_len).unwrap_or(u32::MAX),
+        indent_unit,
+    }
+}
+
+fn leading_ws(s: &str) -> &str {
+    let end = s
+        .bytes()
+        .take_while(|b| matches!(*b, b' ' | b'\t'))
+        .count();
+    &s[..end]
+}
+
+fn longest_common_leading_ws<'a>(lines: &[&'a str]) -> &'a str {
+    let mut iter = lines.iter().filter(|l| !l.trim().is_empty());
+    let Some(first) = iter.next() else {
+        return "";
+    };
+    let mut prefix = leading_ws(first);
+    for line in iter {
+        let lw = leading_ws(line);
+        let n = prefix
+            .bytes()
+            .zip(lw.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        prefix = &prefix[..n];
+        if prefix.is_empty() {
+            break;
+        }
+    }
+    prefix
+}
+
+/// Returns:
+/// - `None` when leading whitespace is already entirely tabs — no
+///   conversion is necessary; the output uses tabs natively.
+/// - `Some(width)` with `width > 0` when every non-blank line's leading
+///   whitespace is a multiple of `width` spaces (try 4 first, fall back
+///   to 2) — conversion is applicable.
+/// - `Some(0)` when the residual is irregular (mixed tabs+spaces on the
+///   same line, or non-multiple widths) — leave the body verbatim and
+///   report `indent_unit = ""`.
+fn detect_indent_unit(lines: &[String]) -> Option<usize> {
+    let mut has_tab_only = false;
+    let mut space_widths: Vec<usize> = Vec::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let lw = leading_ws(line);
+        if lw.is_empty() {
+            continue;
+        }
+        let has_tab = lw.bytes().any(|b| b == b'\t');
+        let has_space = lw.bytes().any(|b| b == b' ');
+        if has_tab && has_space {
+            return Some(0);
+        }
+        if has_tab {
+            has_tab_only = true;
+        } else {
+            space_widths.push(lw.len());
+        }
+    }
+    if has_tab_only && space_widths.is_empty() {
+        return None;
+    }
+    if has_tab_only {
+        return Some(0);
+    }
+    if space_widths.is_empty() {
+        return Some(0);
+    }
+    if space_widths.iter().all(|n| *n % 4 == 0) {
+        return Some(4);
+    }
+    if space_widths.iter().all(|n| *n % 2 == 0) {
+        return Some(2);
+    }
+    Some(0)
+}
+
+fn convert_leading_spaces_to_tabs(line: &str, width: usize) -> String {
+    let bytes = line.as_bytes();
+    let mut tabs = 0;
+    let mut i = 0;
+    while i + width <= bytes.len() && bytes[i..i + width].iter().all(|b| *b == b' ') {
+        tabs += 1;
+        i += width;
+    }
+    if tabs == 0 {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(tabs + bytes.len() - i);
+    for _ in 0..tabs {
+        out.push('\t');
+    }
+    out.push_str(&line[i..]);
+    out
 }
 
 /// Reads `schema_meta.schema_version` from the connected workspace index.
@@ -1172,6 +1359,109 @@ mod body_helper_tests {
         // Only the first /// is leading noise; everything after the `fn first()`
         // is body and must be preserved.
         assert_eq!(count_leading_noise_lines(&lines), 1);
+    }
+
+    use super::compact_body_indent;
+
+    #[test]
+    fn compact_body_indent_dedents_common_4_space_prefix_and_converts_to_tabs() {
+        // A method body indented 4 spaces inside an impl block.
+        let lines = vec![
+            "    fn foo(&self) -> u32 {",
+            "        self.x + 1",
+            "    }",
+        ];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 4);
+        assert_eq!(out.indent_unit, "\t");
+        assert_eq!(out.body, "fn foo(&self) -> u32 {\n\tself.x + 1\n}");
+    }
+
+    #[test]
+    fn compact_body_indent_dedents_8_space_then_tab_compacts_residual() {
+        let lines = vec![
+            "        fn deep() {",
+            "            inner();",
+            "                more();",
+            "        }",
+        ];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 8);
+        assert_eq!(out.indent_unit, "\t");
+        assert_eq!(out.body, "fn deep() {\n\tinner();\n\t\tmore();\n}");
+    }
+
+    #[test]
+    fn compact_body_indent_preserves_tab_source_verbatim() {
+        let lines = vec!["fn foo() {", "\tinner();", "\t\tnested();", "}"];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 0);
+        assert_eq!(out.indent_unit, "\t");
+        assert_eq!(out.body, "fn foo() {\n\tinner();\n\t\tnested();\n}");
+    }
+
+    #[test]
+    fn compact_body_indent_converts_2_space_indent_to_tabs() {
+        // TypeScript-style 2-space indent.
+        let lines = vec![
+            "export function foo() {",
+            "  if (x) {",
+            "    bar();",
+            "  }",
+            "}",
+        ];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 0);
+        assert_eq!(out.indent_unit, "\t");
+        assert_eq!(
+            out.body,
+            "export function foo() {\n\tif (x) {\n\t\tbar();\n\t}\n}"
+        );
+    }
+
+    #[test]
+    fn compact_body_indent_blank_lines_do_not_break_dedent() {
+        let lines = vec![
+            "    fn foo() {",
+            "",
+            "        let x = 1;",
+            "    }",
+        ];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 4);
+        assert_eq!(out.indent_unit, "\t");
+        // Blank line stays empty (its leading-ws was shorter than common prefix).
+        assert_eq!(out.body, "fn foo() {\n\n\tlet x = 1;\n}");
+    }
+
+    #[test]
+    fn compact_body_indent_skips_conversion_on_mixed_indent() {
+        // One line uses tabs, another uses 3 spaces — non-uniform residual.
+        let lines = vec!["fn foo() {", "\tinner();", "   weird();", "}"];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 0);
+        // Tabs present but spaces are non-multiple-of-2 / 4 → unit empty,
+        // body returned verbatim post-(no-op) dedent.
+        assert_eq!(out.indent_unit, "");
+        assert_eq!(out.body, "fn foo() {\n\tinner();\n   weird();\n}");
+    }
+
+    #[test]
+    fn compact_body_indent_empty_input_returns_empty() {
+        let lines: Vec<&str> = vec![];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 0);
+        assert_eq!(out.indent_unit, "");
+        assert_eq!(out.body, "");
+    }
+
+    #[test]
+    fn compact_body_indent_single_line_no_indent_no_op() {
+        let lines = vec!["fn foo() {}"];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 0);
+        assert_eq!(out.indent_unit, "");
+        assert_eq!(out.body, "fn foo() {}");
     }
 }
 
