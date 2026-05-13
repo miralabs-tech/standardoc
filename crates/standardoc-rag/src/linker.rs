@@ -22,6 +22,19 @@ use crate::types::{ChunkId, ChunkSymbolLink, LinkSource};
 /// Shorter names (`new`, `id`, `as`) generate too much noise.
 pub const SHORT_NAME_MIN_LEN: usize = 4;
 
+/// Common generic method names filtered from the auto-name-substring scan.
+/// A FQDN whose terminal segment (case-insensitive) matches one of these
+/// is skipped before the chunk text scan — otherwise verbs like `open` /
+/// `load` / `path` produce spurious links from any prose that mentions
+/// them in passing (e.g. README "Commands: open the dashboard" → linked
+/// to every `Type::open` symbol in the workspace). Items below
+/// `SHORT_NAME_MIN_LEN` are already excluded upstream; this list targets
+/// the 4+-char common cases. Lowercase, sorted alphabetically.
+pub const SHORT_NAME_STOPLIST: &[&str] = &[
+    "data", "default", "done", "file", "find", "from", "info", "init", "into", "iter", "kind",
+    "load", "make", "name", "next", "node", "open", "path", "read", "self", "take", "text", "with",
+];
+
 /// Input fed to the linker per-file. The orchestrator (typically
 /// `standardoc-core::pipeline::apply_documents` or its RAG sibling)
 /// produces it after running the chunker.
@@ -164,9 +177,16 @@ fn derive_short_names(fqdns: &[String]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for fqdn in fqdns {
         let short = fqdn.rsplit("::").next().unwrap_or(fqdn);
-        if short.len() >= SHORT_NAME_MIN_LEN {
-            out.push((fqdn.clone(), short.to_string()));
+        if short.len() < SHORT_NAME_MIN_LEN {
+            continue;
         }
+        if SHORT_NAME_STOPLIST
+            .iter()
+            .any(|w| w.eq_ignore_ascii_case(short))
+        {
+            continue;
+        }
+        out.push((fqdn.clone(), short.to_string()));
     }
     out
 }
@@ -505,5 +525,71 @@ mod tests {
         let pairs: Vec<_> = out.iter().map(|l| (l.chunk_id, l.fqdn.clone())).collect();
         assert!(pairs.contains(&(ChunkId(10), "auth::login".to_string())));
         assert!(pairs.contains(&(ChunkId(11), "billing::charge".to_string())));
+    }
+
+    #[test]
+    fn derive_short_names_excludes_stoplist_entries() {
+        let fqdns = vec![
+            "sessions::SessionsHandle::open".to_string(),
+            "core::IndexHandle::load".to_string(),
+            "core::Foo::path".to_string(),
+            "billing::charge_invoice".to_string(),
+            "auth::do_login".to_string(),
+        ];
+        let pairs = derive_short_names(&fqdns);
+        let shorts: Vec<&str> = pairs.iter().map(|(_, s)| s.as_str()).collect();
+        assert!(!shorts.contains(&"open"), "stoplisted `open` must be excluded");
+        assert!(!shorts.contains(&"load"), "stoplisted `load` must be excluded");
+        assert!(!shorts.contains(&"path"), "stoplisted `path` must be excluded");
+        assert!(shorts.contains(&"charge_invoice"));
+        assert!(shorts.contains(&"do_login"));
+    }
+
+    #[test]
+    fn derive_short_names_stoplist_is_case_insensitive() {
+        let fqdns = vec![
+            "weird::Open".to_string(),
+            "weird::OPEN".to_string(),
+            "weird::oPeN".to_string(),
+        ];
+        let pairs = derive_short_names(&fqdns);
+        assert!(
+            pairs.is_empty(),
+            "stoplist match must ignore ASCII case, got: {pairs:?}",
+        );
+    }
+
+    #[test]
+    fn link_drops_stoplisted_short_names() {
+        let lookup = FakeLookup::new(&["sessions::SessionsHandle::open"]);
+        // README-style prose that incidentally mentions `open` — must NOT
+        // produce an auto-name-substring link to `SessionsHandle::open`.
+        let chunk_text = "Commands: open the dashboard from the menu.";
+        let input = LinkInput {
+            source_path: "README.md",
+            frontmatter_raw: None,
+            chunks: &[(ChunkId(42), chunk_text)],
+        };
+        let out = DefaultLinker.link(&input, &lookup).unwrap();
+        assert!(
+            out.is_empty(),
+            "stoplisted short name `open` must not produce a substring link, got: {out:?}",
+        );
+    }
+
+    #[test]
+    fn link_keeps_frontmatter_signal_even_when_short_name_is_stoplisted() {
+        let lookup = FakeLookup::new(&["sessions::SessionsHandle::open"]);
+        // Frontmatter is an explicit author-side directive — must override
+        // the stoplist filter (which only affects the AutoNameSubstring path).
+        let input = LinkInput {
+            source_path: "docs/sessions.md",
+            frontmatter_raw: Some("symbols: [sessions::SessionsHandle::open]\n"),
+            chunks: &[(ChunkId(43), "the session opens here")],
+        };
+        let out = DefaultLinker.link(&input, &lookup).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, LinkSource::Frontmatter);
+        assert_eq!(out[0].fqdn, "sessions::SessionsHandle::open");
     }
 }

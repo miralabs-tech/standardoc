@@ -36,6 +36,11 @@ const FIND_SYMBOL_MAX_LIMIT: u8 = 100;
 const GET_CONTEXT_DEFAULT_DEPTH: u8 = 1;
 const FIND_SIMILAR_DEFAULT_THRESHOLD: f32 = 0.8;
 const CHUNK_REFS_DEFAULT_LIMIT: u32 = 10;
+/// Minimum blended confidence for a `ChunkRef` to be surfaced through the
+/// MCP layer. Chunks below this floor are filtered out — without this gate,
+/// `AutoNameSubstring` links (base 0.4) too often promote thematically
+/// irrelevant prose (generic README mentions of `open` / `load` / etc.).
+const CHUNK_REF_MIN_CONFIDENCE: f32 = 0.55;
 const FETCH_CHUNKS_MAX_INPUT: usize = 64;
 
 /// Window during which a prior `get_context(fqdn, depth=1)` is considered
@@ -881,9 +886,11 @@ impl StandardocMcp {
         };
         let fqdn_owned = fqdn.to_string();
 
-        if let (Some(q), Some(embedder)) = (query, self.rag_embedder.clone()) {
+        let mut refs: Vec<ChunkRef> = if let (Some(q), Some(embedder)) =
+            (query, self.rag_embedder.clone())
+        {
             let q_owned = q.to_string();
-            let refs = tokio::task::spawn_blocking(move || -> Result<Vec<ChunkRef>, ErrorData> {
+            tokio::task::spawn_blocking(move || -> Result<Vec<ChunkRef>, ErrorData> {
                 let vector = embedder.embed(&q_owned).map_err(|e| {
                     ErrorData::internal_error(format!("rag embed query: {e}"), None)
                 })?;
@@ -892,16 +899,17 @@ impl StandardocMcp {
                     .map_err(|e| ErrorData::internal_error(format!("rag re-rank: {e}"), None))
             })
             .await
-            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?;
-            return refs;
-        }
+            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))??
+        } else {
+            tokio::task::spawn_blocking(move || {
+                store.refs_for_symbol(&fqdn_owned, CHUNK_REFS_DEFAULT_LIMIT)
+            })
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+            .unwrap_or_default()
+        };
 
-        let refs = tokio::task::spawn_blocking(move || {
-            store.refs_for_symbol(&fqdn_owned, CHUNK_REFS_DEFAULT_LIMIT)
-        })
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-        .unwrap_or_default();
+        refs.retain(|r| r.confidence >= CHUNK_REF_MIN_CONFIDENCE);
         Ok(refs)
     }
 }
@@ -1405,6 +1413,44 @@ mod tests {
     fn indexing_message_omits_progress_when_zero_total() {
         let msg = indexing_in_progress_message(Some((0, 0)));
         assert!(!msg.contains('/'), "got `{msg}`");
+    }
+
+    #[test]
+    fn chunk_ref_min_confidence_filters_strictly_below_threshold() {
+        use standardoc_rag::ChunkRef;
+        let mut refs = vec![
+            ChunkRef {
+                uri: "rag://1".to_string(),
+                confidence: 0.80,
+                source_path: "high.md".to_string(),
+                section_header: None,
+            },
+            ChunkRef {
+                uri: "rag://2".to_string(),
+                confidence: 0.55,
+                source_path: "exact.md".to_string(),
+                section_header: None,
+            },
+            ChunkRef {
+                uri: "rag://3".to_string(),
+                confidence: 0.5499,
+                source_path: "just_below.md".to_string(),
+                section_header: None,
+            },
+            ChunkRef {
+                uri: "rag://4".to_string(),
+                confidence: 0.40,
+                source_path: "noise.md".to_string(),
+                section_header: None,
+            },
+        ];
+        refs.retain(|r| r.confidence >= CHUNK_REF_MIN_CONFIDENCE);
+        let uris: Vec<&str> = refs.iter().map(|r| r.uri.as_str()).collect();
+        assert_eq!(
+            uris,
+            vec!["rag://1", "rag://2"],
+            "must keep >= threshold (inclusive) and preserve input order",
+        );
     }
 
     use standardoc_core::{ScanFilters, cold_start};
