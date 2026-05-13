@@ -110,6 +110,11 @@
         "command": "Standardoc.rag.rebuild",
         "title": "Rebuild RAG index",
         "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.showTokenSavings",
+        "title": "Show token savings",
+        "category": "Standardoc"
       }
     ],
     "configuration": {

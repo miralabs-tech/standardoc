@@ -56,6 +56,7 @@ describe('buildSkillContent', () => {
       'mcp__standardoc__resolve_external',
       'mcp__standardoc__current_revision',
       'mcp__standardoc__check_stale',
+      'mcp__standardoc__usage_stats',
       'mcp__standardoc__session_save',
       'mcp__standardoc__session_list',
       'mcp__standardoc__session_get',
@@ -76,6 +77,7 @@ describe('buildSkillContent', () => {
     expect(c).toContain('### resolve_external(');
     expect(c).toContain('### current_revision()');
     expect(c).toContain('### check_stale(');
+    expect(c).toContain('### usage_stats(');
     expect(c).toContain('### session_save(');
     expect(c).toContain('### session_list(');
     expect(c).toContain('### session_get(');

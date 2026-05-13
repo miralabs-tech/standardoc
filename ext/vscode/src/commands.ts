@@ -6,7 +6,13 @@ import type { DaemonSupervisor } from './daemon/supervisor';
 import type { LspClient } from './lsp/client';
 import type { McpClient } from './mcp/client';
 import type { RawSymbolJson, SymbolContextWithNeighborsJson } from './mcp/types';
-import { formatSymbolContext, parseToolResult, pickTopFqdn } from './commands-render';
+import {
+  formatSymbolContext,
+  formatUsageStats,
+  parseToolResult,
+  pickTopFqdn,
+  type UsageStatsJson,
+} from './commands-render';
 import {
   clearGlobalInitState,
   initializeWorkspace,
@@ -53,7 +59,36 @@ export function registerCommands(context: vscode.ExtensionContext, ctx: CommandC
     vscode.commands.registerCommand('Standardoc.rag.toggle', () => commandRagToggle()),
     vscode.commands.registerCommand('Standardoc.rag.switchEmbedder', () => commandRagSwitchEmbedder()),
     vscode.commands.registerCommand('Standardoc.rag.rebuild', () => commandRagRebuild(ctx)),
+    vscode.commands.registerCommand('Standardoc.showTokenSavings', () =>
+      commandShowTokenSavings(ctx),
+    ),
   );
+}
+
+interface TokenSavingsPeriodItem extends vscode.QuickPickItem {
+  readonly value: 'day' | 'week' | 'all';
+}
+
+async function commandShowTokenSavings(ctx: CommandContext): Promise<void> {
+  const items: TokenSavingsPeriodItem[] = [
+    { label: 'All time', detail: 'every logged tool call', value: 'all' },
+    { label: 'Last 7 days', value: 'week' },
+    { label: 'Last 24h', value: 'day' },
+  ];
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Standardoc token savings — scope?',
+  });
+  if (!picked) return;
+
+  let raw: string;
+  try {
+    raw = await ctx.mcp.usageStats(picked.value);
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Token savings query failed: ${describeError(e)}`);
+    return;
+  }
+  const stats = JSON.parse(raw) as UsageStatsJson;
+  void vscode.window.showInformationMessage(formatUsageStats(stats));
 }
 
 async function commandRagToggle(): Promise<void> {
@@ -284,6 +319,7 @@ async function commandStatusBarMenu(_ctx: CommandContext): Promise<void> {
       commandId: 'Standardoc.rag.switchEmbedder',
     },
     { label: '$(history) Rebuild RAG index', commandId: 'Standardoc.rag.rebuild' },
+    { label: '$(graph) Show token savings', commandId: 'Standardoc.showTokenSavings' },
   ];
   const picked = await vscode.window.showQuickPick(items, {
     placeHolder: 'Standardoc — choose an action',

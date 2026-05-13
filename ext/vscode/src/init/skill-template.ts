@@ -15,7 +15,7 @@ when_to_use: ALWAYS use Standardoc FIRST when exploring or modifying code
   → (3) raw file Read/Grep/Glob. Skip Standardoc only for pure text
   matching (strings, comments, config files unrelated to code symbols)
   or for files at a known path that you just need to read verbatim.
-allowed-tools: mcp__standardoc__find_symbol mcp__standardoc__get_context mcp__standardoc__list_symbols mcp__standardoc__find_symbols_by_pattern mcp__standardoc__find_similar_symbols mcp__standardoc__get_body mcp__standardoc__resolve_external mcp__standardoc__current_revision mcp__standardoc__check_stale mcp__standardoc__session_save mcp__standardoc__session_list mcp__standardoc__session_get mcp__standardoc__session_dump_md
+allowed-tools: mcp__standardoc__find_symbol mcp__standardoc__get_context mcp__standardoc__list_symbols mcp__standardoc__find_symbols_by_pattern mcp__standardoc__find_similar_symbols mcp__standardoc__get_body mcp__standardoc__resolve_external mcp__standardoc__current_revision mcp__standardoc__check_stale mcp__standardoc__usage_stats mcp__standardoc__session_save mcp__standardoc__session_list mcp__standardoc__session_get mcp__standardoc__session_dump_md
 ---
 
 # Standardoc — Primary Code Navigation
@@ -169,6 +169,32 @@ current \`last_modified_revision\` of each row. Returns
 
 Stateless server-side — track the \`(fqdn → revision)\` map yourself
 across turns. Call BEFORE re-reasoning on cached context.
+
+## Telemetry
+
+### usage_stats(period?)
+
+Returns the running tally of bytes the standardoc tools have returned
+vs. the raw file bytes those responses pointed at. \`period\` accepts
+\`day\`, \`week\`, \`all\` (default). Baseline is \`sum(file_sizes)\` of
+distinct source files referenced by each response — the honest "what
+an AI would have consumed reading the relevant sources raw" floor (no
+estimation multiplier). Response shape:
+
+\`\`\`
+{
+  period: "all",
+  calls: <int>,
+  bytes_out_total: <int>,       // what tools returned to the AI
+  baseline_bytes_total: <int>,  // raw file bytes that would have been read
+  bytes_saved: <int>,           // baseline - out (can be negative)
+  ratio: <float>                // bytes_out / baseline
+}
+\`\`\`
+
+A ratio of 0.14 means standardoc surfaced 14% of the raw bytes for
+the relevant source files — the rest is context the AI did not pay
+for. Only successful read-path tool calls are logged.
 
 ## Session handoffs
 

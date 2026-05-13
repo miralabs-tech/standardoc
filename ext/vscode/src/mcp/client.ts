@@ -206,6 +206,10 @@ export class McpClient implements vscode.Disposable {
     return this.callTool('fetch_chunks', { uris: [...uris] });
   }
 
+  async usageStats(period: 'day' | 'week' | 'all'): Promise<string> {
+    return this.callTool('usage_stats', { period });
+  }
+
   async stop(): Promise<void> {
     const client = this.client;
     this.client = null;

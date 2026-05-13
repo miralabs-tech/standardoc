@@ -3,9 +3,11 @@ import {
   formatNeighborGroup,
   formatSymbolContext,
   formatSymbolHeader,
+  formatUsageStats,
   parseToolResult,
   pickTopFqdn,
   targetLabel,
+  type UsageStatsJson,
 } from '../src/commands-render';
 import type {
   NeighborSymbolJson,
@@ -135,5 +137,53 @@ describe('formatSymbolContext', () => {
     const s = formatSymbolContext(ctxBare);
     expect(s).not.toContain('doc:');
     expect(s).not.toContain('enrichment:');
+  });
+});
+
+describe('formatUsageStats', () => {
+  test('zero calls — neutral message that references the period', () => {
+    const stats: UsageStatsJson = {
+      period: 'day',
+      calls: 0,
+      bytes_out_total: 0,
+      baseline_bytes_total: 0,
+      bytes_saved: 0,
+      ratio: 0,
+    };
+    const s = formatUsageStats(stats);
+    expect(s).toContain('no tool calls logged');
+    expect(s).toContain('day');
+  });
+
+  test('aggregates a non-empty period into a one-liner', () => {
+    const stats: UsageStatsJson = {
+      period: 'all',
+      calls: 12,
+      bytes_out_total: 4096,
+      baseline_bytes_total: 40_960,
+      bytes_saved: 36_864,
+      ratio: 0.1,
+    };
+    const s = formatUsageStats(stats);
+    expect(s).toContain('12 call(s)');
+    expect(s).toContain('all');
+    expect(s).toContain('4.0 KB');
+    expect(s).toContain('40.0 KB');
+    expect(s).toContain('10.0%');
+    expect(s).toContain('36.0 KB');
+  });
+
+  test('handles negative bytes_saved (response richer than raw files)', () => {
+    const stats: UsageStatsJson = {
+      period: 'week',
+      calls: 1,
+      bytes_out_total: 2048,
+      baseline_bytes_total: 1024,
+      bytes_saved: -1024,
+      ratio: 2,
+    };
+    const s = formatUsageStats(stats);
+    expect(s).toContain('-1.0 KB');
+    expect(s).toContain('200.0%');
   });
 });
