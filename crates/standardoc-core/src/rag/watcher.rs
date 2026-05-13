@@ -108,8 +108,7 @@ fn handle_event(
         };
         let skipped = filters
             .read()
-            .map(|guard| guard.is_skipped(&rel))
-            .unwrap_or(false);
+            .is_ok_and(|guard| guard.is_skipped(&rel));
         if skipped {
             continue;
         }

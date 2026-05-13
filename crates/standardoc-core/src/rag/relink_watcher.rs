@@ -131,7 +131,7 @@ mod tests {
         let stop_for_thread = Arc::clone(&stop);
         let join = std::thread::spawn(move || {
             for _ in 0..100 {
-                if !sleep_responsive(Duration::from_secs(60), &stop_for_thread) {
+                if !sleep_responsive(Duration::from_mins(1), &stop_for_thread) {
                     return;
                 }
             }

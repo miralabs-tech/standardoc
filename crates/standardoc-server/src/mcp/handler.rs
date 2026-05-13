@@ -155,13 +155,14 @@ impl StandardocMcp {
     )]
     async fn get_context(
         &self,
-        Parameters(params): Parameters<GetContextParams>,
+        Parameters(mut params): Parameters<GetContextParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
+        params.fqdn = normalize_fqdn(&params.fqdn);
 
         let depth = params.depth.unwrap_or(GET_CONTEXT_DEFAULT_DEPTH);
         let now = current_unix_seconds();
@@ -276,13 +277,14 @@ impl StandardocMcp {
     )]
     async fn find_symbol(
         &self,
-        Parameters(params): Parameters<FindSymbolParams>,
+        Parameters(mut params): Parameters<FindSymbolParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
+        params.module = params.module.map(|m| normalize_fqdn(&m));
 
         let trimmed = params.query.trim().to_owned();
         if trimmed.is_empty() {
@@ -342,13 +344,14 @@ impl StandardocMcp {
     )]
     async fn list_symbols(
         &self,
-        Parameters(params): Parameters<ListSymbolsParams>,
+        Parameters(mut params): Parameters<ListSymbolsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
+        params.module = params.module.map(|m| normalize_fqdn(&m));
 
         let filter = parse_filter(
             params.kind.as_deref(),
@@ -385,14 +388,18 @@ impl StandardocMcp {
     )]
     async fn find_symbols_by_pattern(
         &self,
-        Parameters(params): Parameters<FindSymbolsByPatternParams>,
+        Parameters(mut params): Parameters<FindSymbolsByPatternParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
-
+        // Normalise `.` → `::` on both the pattern and the module
+        // filter : the stored fqdns are always `::`-form, so OOP-style
+        // patterns like `*Type.method*` would otherwise match nothing.
+        params.module = params.module.map(|m| normalize_fqdn(&m));
+        params.pattern = normalize_fqdn(&params.pattern);
         let trimmed = params.pattern.trim().to_owned();
         if trimmed.is_empty() {
             return Ok(success_json::<Vec<RawSymbol>>(&Vec::new()));
@@ -461,13 +468,16 @@ impl StandardocMcp {
     )]
     async fn find_similar_symbols(
         &self,
-        Parameters(params): Parameters<FindSimilarSymbolsParams>,
+        Parameters(mut params): Parameters<FindSimilarSymbolsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
+        // `reference` is a name anchor, not an fqdn — leave it intact.
+        // Only the module filter is normalised since it's exact-match.
+        params.module = params.module.map(|m| normalize_fqdn(&m));
 
         let trimmed = params.reference.trim().to_owned();
         if trimmed.is_empty() {
@@ -518,13 +528,14 @@ impl StandardocMcp {
     )]
     async fn get_body(
         &self,
-        Parameters(params): Parameters<GetBodyParams>,
+        Parameters(mut params): Parameters<GetBodyParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
+        params.fqdn = normalize_fqdn(&params.fqdn);
         let handle = self.handle.clone();
         let fqdn = params.fqdn;
         let opts = query::BodyOptions {
@@ -741,13 +752,14 @@ impl StandardocMcp {
     )]
     pub async fn resolve_external(
         &self,
-        Parameters(params): Parameters<ResolveExternalParams>,
+        Parameters(mut params): Parameters<ResolveExternalParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
+        params.fqdn = normalize_fqdn(&params.fqdn);
         let fqdn = params.fqdn.clone();
         let handle = self.handle.clone();
         let provider = Arc::clone(&self.provider);
@@ -825,12 +837,15 @@ impl StandardocMcp {
     )]
     async fn check_stale(
         &self,
-        Parameters(params): Parameters<CheckStaleParams>,
+        Parameters(mut params): Parameters<CheckStaleParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
+        }
+        for entry in &mut params.fetched {
+            entry.fqdn = normalize_fqdn(&entry.fqdn);
         }
         if params.fetched.is_empty() {
             return Ok(success_json::<Vec<StaleEntryJson>>(&Vec::new()));
@@ -1434,6 +1449,23 @@ fn glob_core_text(pattern: &str) -> String {
         .to_string()
 }
 
+/// Defense-in-depth normalization for FQDN inputs reaching exact-match
+/// query paths (`get_body`, `get_context`, module filters, …).
+///
+/// LLM consumers trained on Python / JS / TS naturally emit OOP-style
+/// dotted names (`Type.method`) even though Standardoc stores every
+/// FQDN with `::` regardless of source language. Without this
+/// normalization, `get_body("StandardocMcp.find_symbol")` would miss
+/// the symbol stored as `…::StandardocMcp::find_symbol` and surface a
+/// "no symbol found" message that looks like a real absence.
+///
+/// `.` never appears inside a valid FQDN segment in any supported
+/// language (Rust / TS / Lua identifiers can't contain a dot), so the
+/// replacement is lossless and idempotent on `::`-form inputs.
+fn normalize_fqdn(raw: &str) -> String {
+    raw.replace('.', "::")
+}
+
 fn success_json<T: Serialize>(value: &T) -> CallToolResult {
     match serde_json::to_string_pretty(value) {
         Ok(json) => CallToolResult::success(vec![Content::text(json)]),
@@ -1931,6 +1963,52 @@ mod tests {
             glob_core_text("standardoc-cli::main"),
             "standardoc-cli::main"
         );
+    }
+
+    #[test]
+    fn normalize_fqdn_replaces_dot_with_double_colon() {
+        assert_eq!(
+            normalize_fqdn("StandardocMcp.find_symbol"),
+            "StandardocMcp::find_symbol"
+        );
+        assert_eq!(
+            normalize_fqdn("crate.mod.Type.method"),
+            "crate::mod::Type::method"
+        );
+    }
+
+    #[test]
+    fn normalize_fqdn_is_idempotent_on_double_colon_form() {
+        let canonical = "standardoc_core::query::search_text";
+        assert_eq!(normalize_fqdn(canonical), canonical);
+    }
+
+    #[test]
+    fn normalize_fqdn_preserves_other_separators_and_hyphens() {
+        // Hyphens (crate names like standardoc-cli) and slashes (TS
+        // package paths like @scope/pkg) must survive.
+        assert_eq!(
+            normalize_fqdn("standardoc-cli::main"),
+            "standardoc-cli::main"
+        );
+        assert_eq!(
+            normalize_fqdn("@app/web::module::foo"),
+            "@app/web::module::foo"
+        );
+    }
+
+    #[test]
+    fn normalize_fqdn_handles_empty_input() {
+        assert_eq!(normalize_fqdn(""), "");
+    }
+
+    #[test]
+    fn normalize_fqdn_collapses_consecutive_dots_into_quad_colons() {
+        // Documents the literal-replace behaviour : malformed input
+        // produces literal `::::`. We don't attempt to fix user
+        // mistakes ; the downstream exact-match query will fail with
+        // a clean "no symbol found" instead of silently passing.
+        assert_eq!(normalize_fqdn("foo..bar"), "foo::::bar");
     }
 
     #[tokio::test(flavor = "multi_thread")]
