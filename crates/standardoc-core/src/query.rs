@@ -821,7 +821,9 @@ pub fn body_for_fqdn(
     };
 
     let (taken, truncated) = match opts.max_lines {
-        Some(cap) if (cap as usize) < after_signature.len() => (&after_signature[..cap as usize], true),
+        Some(cap) if (cap as usize) < after_signature.len() => {
+            (&after_signature[..cap as usize], true)
+        }
         _ => (after_signature, false),
     };
     let compact = compact_body_indent(taken);
@@ -980,10 +982,7 @@ fn compact_body_indent(lines: &[&str]) -> CompactedBody {
 }
 
 fn leading_ws(s: &str) -> &str {
-    let end = s
-        .bytes()
-        .take_while(|b| matches!(*b, b' ' | b'\t'))
-        .count();
+    let end = s.bytes().take_while(|b| matches!(*b, b' ' | b'\t')).count();
     &s[..end]
 }
 
@@ -1362,12 +1361,7 @@ mod body_helper_tests {
 
     #[test]
     fn count_leading_noise_lines_strips_doc_then_attr_then_blank() {
-        let lines = vec![
-            "/// A function.",
-            "#[allow(dead_code)]",
-            "",
-            "fn f() {",
-        ];
+        let lines = vec!["/// A function.", "#[allow(dead_code)]", "", "fn f() {"];
         assert_eq!(count_leading_noise_lines(&lines), 3);
     }
 
@@ -1385,7 +1379,12 @@ mod body_helper_tests {
 
     #[test]
     fn count_leading_noise_lines_stops_at_first_non_noise_line() {
-        let lines = vec!["/// doc", "fn first() {", "/// doc on inner", "fn nested() {"];
+        let lines = vec![
+            "/// doc",
+            "fn first() {",
+            "/// doc on inner",
+            "fn nested() {",
+        ];
         // Only the first /// is leading noise; everything after the `fn first()`
         // is body and must be preserved.
         assert_eq!(count_leading_noise_lines(&lines), 1);
@@ -1396,11 +1395,7 @@ mod body_helper_tests {
     #[test]
     fn compact_body_indent_dedents_common_4_space_prefix_and_converts_to_tabs() {
         // A method body indented 4 spaces inside an impl block.
-        let lines = vec![
-            "    fn foo(&self) -> u32 {",
-            "        self.x + 1",
-            "    }",
-        ];
+        let lines = vec!["    fn foo(&self) -> u32 {", "        self.x + 1", "    }"];
         let out = compact_body_indent(&lines);
         assert_eq!(out.dedented_prefix_len, 4);
         assert_eq!(out.indent_unit, "\t");
@@ -1451,12 +1446,7 @@ mod body_helper_tests {
 
     #[test]
     fn compact_body_indent_blank_lines_do_not_break_dedent() {
-        let lines = vec![
-            "    fn foo() {",
-            "",
-            "        let x = 1;",
-            "    }",
-        ];
+        let lines = vec!["    fn foo() {", "", "        let x = 1;", "    }"];
         let out = compact_body_indent(&lines);
         assert_eq!(out.dedented_prefix_len, 4);
         assert_eq!(out.indent_unit, "\t");
@@ -1909,7 +1899,13 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol(&conn, "src/main.rs", "cli_entry", "standardoc_cli::cli_entry", 1);
+            seed_symbol(
+                &conn,
+                "src/main.rs",
+                "cli_entry",
+                "standardoc_cli::cli_entry",
+                1,
+            );
         }
         let results = search_text(&handle, "standardoc-cli", 10, &SymbolFilter::default()).unwrap();
         assert_eq!(results.len(), 1);

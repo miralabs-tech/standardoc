@@ -546,12 +546,7 @@ fn extract_signature(sig: &syn::Signature) -> Signature {
         syn::ReturnType::Default => None,
         syn::ReturnType::Type(_, ty) => Some(TypeRef::new(render_compact(ty))),
     };
-    let generic_params = sig
-        .generics
-        .params
-        .iter()
-        .map(render_compact)
-        .collect();
+    let generic_params = sig.generics.params.iter().map(render_compact).collect();
     let where_clause = sig.generics.where_clause.as_ref().map(|wc| {
         // `to_token_stream` includes the leading `where` keyword which we
         // strip so consumers see just the predicates.

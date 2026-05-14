@@ -29,10 +29,10 @@ pub struct TypeRef {
 
 impl TypeRef {
     /// Constructs a `TypeRef` from any `display`-bearing string and applies
-    /// the generic [`normalize_display`] pass (trim + collapse internal
+    /// the generic `normalize_display` pass (trim + collapse internal
     /// multi-whitespace into single space). Call sites that source their
     /// string from `quote::ToTokens::to_token_stream().to_string()` should
-    /// pre-process the raw text with [`compact_rust_tokens`] before passing
+    /// pre-process the raw text with `compact_rust_tokens` before passing
     /// it here — `new` alone preserves single spaces (so TypeScript unions
     /// like `string | number` survive).
     pub fn new(display: impl Into<String>) -> Self {
@@ -230,7 +230,8 @@ mod tests {
 
     #[test]
     fn compact_rust_tokens_strips_spaces_around_angle_brackets_and_double_colon() {
-        let raw = "& Arc < std :: sync :: Mutex < Option < standardoc_core :: RagWatcherHandle > > >";
+        let raw =
+            "& Arc < std :: sync :: Mutex < Option < standardoc_core :: RagWatcherHandle > > >";
         assert_eq!(
             compact_rust_tokens(raw),
             "&Arc<std::sync::Mutex<Option<standardoc_core::RagWatcherHandle>>>"
@@ -239,16 +240,28 @@ mod tests {
 
     #[test]
     fn compact_rust_tokens_keeps_space_after_dyn_impl_mut() {
-        assert_eq!(compact_rust_tokens("Arc < dyn Embedder >"), "Arc<dyn Embedder>");
-        assert_eq!(compact_rust_tokens("impl Trait + Send"), "impl Trait + Send");
+        assert_eq!(
+            compact_rust_tokens("Arc < dyn Embedder >"),
+            "Arc<dyn Embedder>"
+        );
+        assert_eq!(
+            compact_rust_tokens("impl Trait + Send"),
+            "impl Trait + Send"
+        );
         assert_eq!(compact_rust_tokens("& mut Foo"), "&mut Foo");
     }
 
     #[test]
     fn compact_rust_tokens_handles_comma_semicolon_colon() {
-        assert_eq!(compact_rust_tokens("HashMap < String , u32 >"), "HashMap<String, u32>");
+        assert_eq!(
+            compact_rust_tokens("HashMap < String , u32 >"),
+            "HashMap<String, u32>"
+        );
         assert_eq!(compact_rust_tokens("[ T ; N ]"), "[T; N]");
-        assert_eq!(compact_rust_tokens("fn ( x : u32 ) -> u32"), "fn(x: u32) -> u32");
+        assert_eq!(
+            compact_rust_tokens("fn ( x : u32 ) -> u32"),
+            "fn(x: u32) -> u32"
+        );
     }
 
     #[test]
@@ -257,7 +270,10 @@ mod tests {
         // degenerate split case where `'` and ident arrive separated.
         assert_eq!(compact_rust_tokens("& ' a Foo"), "&'a Foo");
         assert_eq!(compact_rust_tokens("& 'a str"), "&'a str");
-        assert_eq!(compact_rust_tokens("for < 'a > Fn ( & 'a u32 )"), "for<'a> Fn(&'a u32)");
+        assert_eq!(
+            compact_rust_tokens("for < 'a > Fn ( & 'a u32 )"),
+            "for<'a> Fn(&'a u32)"
+        );
     }
 
     #[test]

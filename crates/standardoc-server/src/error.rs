@@ -1,5 +1,5 @@
-use standardoc_core::{ColdStartError, SessionsError, StorageError, WatcherError};
 use standardoc_core::sessions::memory_sync::MemorySyncError;
+use standardoc_core::{ColdStartError, SessionsError, StorageError, WatcherError};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

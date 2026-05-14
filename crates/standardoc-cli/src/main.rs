@@ -209,10 +209,7 @@ enum SessionAction {
     /// Dump every session row in the workspace DB to `<slug>.md` under
     /// `dir` and (re)write `MEMORY.md` as an index. Inverse of
     /// `sync-in`. Used for cross-machine portability.
-    SyncOut {
-        workspace: PathBuf,
-        dir: PathBuf,
-    },
+    SyncOut { workspace: PathBuf, dir: PathBuf },
     /// Read a Claude Code PostToolUse hook payload from stdin, detect if a
     /// `Write`/`Edit` touched a file under the harness memory directory,
     /// and trigger `sync-in` automatically. Exits with `{"synced": false}`
@@ -398,13 +395,12 @@ fn cmd_session_hook() -> Result<(), ServerError> {
     use std::io::Read;
     let mut raw = String::new();
     io::stdin().read_to_string(&mut raw).ok();
-    let payload: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => {
-            // Malformed payload — never block the agent.
-            println!("{{\"synced\":false,\"reason\":\"invalid_json\"}}");
-            return Ok(());
-        }
+    let payload: serde_json::Value = if let Ok(v) = serde_json::from_str(&raw) {
+        v
+    } else {
+        // Malformed payload — never block the agent.
+        println!("{{\"synced\":false,\"reason\":\"invalid_json\"}}");
+        return Ok(());
     };
     let tool = payload
         .get("tool_name")
@@ -436,8 +432,7 @@ fn cmd_session_hook() -> Result<(), ServerError> {
     let workspace = PathBuf::from(cwd);
     let memory_dir = PathBuf::from(memory_dir);
     let handle = SessionsHandle::open(&workspace)?;
-    let report =
-        standardoc_core::sessions::memory_sync::import_memory_dir(&handle, &memory_dir)?;
+    let report = standardoc_core::sessions::memory_sync::import_memory_dir(&handle, &memory_dir)?;
     println!(
         "{}",
         serde_json::json!({ "synced": true, "report": report })
@@ -455,6 +450,10 @@ fn memory_dir_from_path(file_path: &str) -> Option<String> {
 /// 0-byte; only its presence/absence matters.
 const MCP_FIRST_SENTINEL: &str = "mcp_called_this_session";
 
+// Hook semantics: never abort on malformed input — the deny path is a
+// JSON decision on stdout, not a process error. The `Result` shape is
+// kept for symmetry with sibling `cmd_*` dispatch arms.
+#[allow(clippy::unnecessary_wraps)]
 fn cmd_claude_pre_tool_hook(mode: &str) -> Result<(), ServerError> {
     use std::io::Read;
     let mut raw = String::new();
@@ -468,11 +467,7 @@ fn cmd_claude_pre_tool_hook(mode: &str) -> Result<(), ServerError> {
 fn resolve_mcp_first_sentinel(raw_payload: &str) -> PathBuf {
     let cwd: PathBuf = serde_json::from_str::<serde_json::Value>(raw_payload)
         .ok()
-        .and_then(|v| {
-            v.get("cwd")
-                .and_then(|c| c.as_str())
-                .map(PathBuf::from)
-        })
+        .and_then(|v| v.get("cwd").and_then(|c| c.as_str()).map(PathBuf::from))
         .or_else(|| std::env::var("CLAUDE_PROJECT_DIR").ok().map(PathBuf::from))
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
@@ -484,8 +479,8 @@ fn resolve_mcp_first_sentinel(raw_payload: &str) -> PathBuf {
 /// sentinel path (a tempdir) and a synthetic stdin payload without
 /// touching the real filesystem under `<cwd>/.standardoc/`.
 fn pre_tool_hook_decide(mode: &str, raw_payload: &str, sentinel: &Path) -> String {
-    let payload = serde_json::from_str::<serde_json::Value>(raw_payload)
-        .unwrap_or(serde_json::Value::Null);
+    let payload =
+        serde_json::from_str::<serde_json::Value>(raw_payload).unwrap_or(serde_json::Value::Null);
     let tool = payload
         .get("tool_name")
         .and_then(|v| v.as_str())
@@ -823,11 +818,7 @@ fn cmd_purge_excluded(path: &Path, yes_flag: bool) -> Result<(), ServerError> {
     Ok(())
 }
 
-fn cmd_stdignore_preview(
-    workspace: &Path,
-    pattern: &str,
-    limit: usize,
-) -> Result<(), ServerError> {
+fn cmd_stdignore_preview(workspace: &Path, pattern: &str, limit: usize) -> Result<(), ServerError> {
     let preview = standardoc_core::preview_pattern_matches(workspace, pattern, limit)
         .map_err(|e| io::Error::other(format!("stdignore preview: {e}")))?;
     let json = serde_json::to_string(&preview)
@@ -852,7 +843,10 @@ fn cmd_reset_usage(path: &Path, period: &str, yes_flag: bool) -> Result<(), Serv
         return Ok(());
     }
     if !confirm_destructive(
-        &format!("reset {} usage_stats row(s) for period `{period}`?", preview.calls),
+        &format!(
+            "reset {} usage_stats row(s) for period `{period}`?",
+            preview.calls
+        ),
         yes_flag,
     )? {
         println!("aborted");
@@ -1125,7 +1119,7 @@ mod claude_pre_tool_hook_tests {
     fn mark_skips_when_tool_name_missing() {
         let tmp = TempDir::new().unwrap();
         let sentinel = sentinel_in(&tmp);
-        let out = pre_tool_hook_decide("mark", r#"{}"#, &sentinel);
+        let out = pre_tool_hook_decide("mark", r"{}", &sentinel);
         assert!(out.contains("not_standardoc_mcp_tool"), "out={out}");
         assert!(!sentinel.exists());
     }
@@ -1145,7 +1139,7 @@ mod claude_pre_tool_hook_tests {
     fn check_denies_when_sentinel_absent() {
         let tmp = TempDir::new().unwrap();
         let sentinel = sentinel_in(&tmp);
-        let out = pre_tool_hook_decide("check", r#"{}"#, &sentinel);
+        let out = pre_tool_hook_decide("check", r"{}", &sentinel);
         assert!(out.contains(r#""permissionDecision":"deny""#), "out={out}");
         assert!(out.contains("MCP-first"));
         assert!(out.contains("find_symbol"));
@@ -1156,7 +1150,7 @@ mod claude_pre_tool_hook_tests {
         let tmp = TempDir::new().unwrap();
         let sentinel = sentinel_in(&tmp);
         fs::write(&sentinel, b"").unwrap();
-        let out = pre_tool_hook_decide("check", r#"{}"#, &sentinel);
+        let out = pre_tool_hook_decide("check", r"{}", &sentinel);
         assert_eq!(out, "{}");
     }
 
@@ -1167,7 +1161,7 @@ mod claude_pre_tool_hook_tests {
         // ignored. Lock the wire shape.
         let tmp = TempDir::new().unwrap();
         let sentinel = sentinel_in(&tmp);
-        let out = pre_tool_hook_decide("check", r#"{}"#, &sentinel);
+        let out = pre_tool_hook_decide("check", r"{}", &sentinel);
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
             parsed
@@ -1183,7 +1177,7 @@ mod claude_pre_tool_hook_tests {
         let tmp = TempDir::new().unwrap();
         let sentinel = sentinel_in(&tmp);
         fs::write(&sentinel, b"").unwrap();
-        let out = pre_tool_hook_decide("reset", r#"{}"#, &sentinel);
+        let out = pre_tool_hook_decide("reset", r"{}", &sentinel);
         assert!(out.contains(r#""reset":true"#));
         assert!(!sentinel.exists());
     }
@@ -1192,7 +1186,7 @@ mod claude_pre_tool_hook_tests {
     fn reset_is_idempotent_when_sentinel_absent() {
         let tmp = TempDir::new().unwrap();
         let sentinel = sentinel_in(&tmp);
-        let out = pre_tool_hook_decide("reset", r#"{}"#, &sentinel);
+        let out = pre_tool_hook_decide("reset", r"{}", &sentinel);
         // Must not panic; output is the reset confirmation either way.
         assert!(out.contains(r#""reset":true"#));
     }
@@ -1218,7 +1212,7 @@ mod claude_pre_tool_hook_tests {
     fn unknown_mode_returns_safe_default() {
         let tmp = TempDir::new().unwrap();
         let sentinel = sentinel_in(&tmp);
-        let out = pre_tool_hook_decide("nope", r#"{}"#, &sentinel);
+        let out = pre_tool_hook_decide("nope", r"{}", &sentinel);
         assert!(out.contains("unknown_mode"));
         // Must not implicitly deny — clap's value_parser already
         // forbids this CLI-side, but a defence-in-depth default is
@@ -1241,7 +1235,7 @@ mod claude_pre_tool_hook_tests {
         // The fallback chain is cwd → CLAUDE_PROJECT_DIR → current_dir;
         // we only assert the chain doesn't panic and produces a path
         // ending with the sentinel name + parent `.standardoc`.
-        let sentinel = resolve_mcp_first_sentinel(r#"{}"#);
+        let sentinel = resolve_mcp_first_sentinel(r"{}");
         assert_eq!(
             sentinel.file_name().and_then(|s| s.to_str()),
             Some(MCP_FIRST_SENTINEL),

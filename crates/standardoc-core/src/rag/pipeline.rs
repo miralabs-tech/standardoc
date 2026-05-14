@@ -209,10 +209,8 @@ impl RagPipeline {
         let abs_path = workspace_root.join(source_path);
         let source_text = std::fs::read_to_string(&abs_path).ok();
         let frontmatter_raw = source_text.as_deref().and_then(extract_frontmatter_block);
-        let chunk_refs: Vec<(ChunkId, &str)> = chunks
-            .iter()
-            .map(|(id, t)| (*id, t.as_str()))
-            .collect();
+        let chunk_refs: Vec<(ChunkId, &str)> =
+            chunks.iter().map(|(id, t)| (*id, t.as_str())).collect();
         let input = LinkInput {
             source_path,
             frontmatter_raw,
@@ -401,10 +399,7 @@ mod tests {
 
         // The frontmatter directive should produce a link on the chunk
         // that carries it (the first one).
-        let refs = pipeline
-            .store()
-            .refs_for_symbol("myproj::Foo", 10)
-            .unwrap();
+        let refs = pipeline.store().refs_for_symbol("myproj::Foo", 10).unwrap();
         assert!(
             !refs.is_empty(),
             "frontmatter directive must materialise as a chunk_symbol_link",

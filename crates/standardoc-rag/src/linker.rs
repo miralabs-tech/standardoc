@@ -539,9 +539,18 @@ mod tests {
         ];
         let pairs = derive_short_names(&fqdns);
         let shorts: Vec<&str> = pairs.iter().map(|(_, s)| s.as_str()).collect();
-        assert!(!shorts.contains(&"open"), "stoplisted `open` must be excluded");
-        assert!(!shorts.contains(&"load"), "stoplisted `load` must be excluded");
-        assert!(!shorts.contains(&"path"), "stoplisted `path` must be excluded");
+        assert!(
+            !shorts.contains(&"open"),
+            "stoplisted `open` must be excluded"
+        );
+        assert!(
+            !shorts.contains(&"load"),
+            "stoplisted `load` must be excluded"
+        );
+        assert!(
+            !shorts.contains(&"path"),
+            "stoplisted `path` must be excluded"
+        );
         assert!(shorts.contains(&"charge_invoice"));
         assert!(shorts.contains(&"do_login"));
     }

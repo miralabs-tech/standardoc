@@ -333,9 +333,8 @@ impl RagStore {
         source_path: &str,
     ) -> Result<Vec<(ChunkId, String)>, RagError> {
         let guard = self.conn.lock().map_err(|_| RagError::Poisoned)?;
-        let mut stmt = guard.prepare(
-            "SELECT id, text FROM chunks WHERE source_path = ?1 ORDER BY chunk_idx ASC",
-        )?;
+        let mut stmt = guard
+            .prepare("SELECT id, text FROM chunks WHERE source_path = ?1 ORDER BY chunk_idx ASC")?;
         let rows = stmt.query_map([source_path], |r| {
             Ok((ChunkId(r.get::<_, i64>(0)?), r.get::<_, String>(1)?))
         })?;
@@ -350,9 +349,8 @@ impl RagStore {
     #[allow(clippy::significant_drop_tightening)]
     pub fn distinct_source_paths(&self) -> Result<Vec<String>, RagError> {
         let guard = self.conn.lock().map_err(|_| RagError::Poisoned)?;
-        let mut stmt = guard.prepare(
-            "SELECT DISTINCT source_path FROM chunks ORDER BY source_path ASC",
-        )?;
+        let mut stmt =
+            guard.prepare("SELECT DISTINCT source_path FROM chunks ORDER BY source_path ASC")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(out)
@@ -756,9 +754,15 @@ mod tests {
         let (_dir, store) = fresh_store();
         assert!(store.read_meta("custom_key").unwrap().is_none());
         store.write_meta("custom_key", "v1").unwrap();
-        assert_eq!(store.read_meta("custom_key").unwrap().as_deref(), Some("v1"));
+        assert_eq!(
+            store.read_meta("custom_key").unwrap().as_deref(),
+            Some("v1")
+        );
         store.write_meta("custom_key", "v2").unwrap();
-        assert_eq!(store.read_meta("custom_key").unwrap().as_deref(), Some("v2"));
+        assert_eq!(
+            store.read_meta("custom_key").unwrap().as_deref(),
+            Some("v2")
+        );
     }
 
     #[test]
@@ -809,9 +813,15 @@ mod tests {
         let vec = dummy_vector(1);
         let vecs = std::slice::from_ref(&vec);
         let pieces = std::slice::from_ref(&piece);
-        store.replace_chunks_for_source("zeta.md", pieces, vecs).unwrap();
-        store.replace_chunks_for_source("alpha.md", pieces, vecs).unwrap();
-        store.replace_chunks_for_source("mu.md", pieces, vecs).unwrap();
+        store
+            .replace_chunks_for_source("zeta.md", pieces, vecs)
+            .unwrap();
+        store
+            .replace_chunks_for_source("alpha.md", pieces, vecs)
+            .unwrap();
+        store
+            .replace_chunks_for_source("mu.md", pieces, vecs)
+            .unwrap();
         let paths = store.distinct_source_paths().unwrap();
         assert_eq!(paths, vec!["alpha.md", "mu.md", "zeta.md"]);
     }

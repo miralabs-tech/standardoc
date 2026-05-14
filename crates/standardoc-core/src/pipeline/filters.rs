@@ -513,9 +513,12 @@ mod tests {
         write(dir.path(), "target/release/bar.rs", "");
         let preview = preview_pattern_matches(dir.path(), "target/", 20).unwrap();
         assert_eq!(preview.pattern, "target/");
-        assert!(preview.matches.iter().any(|p| p == "target"
-            || p == "target/debug"
-            || p == "target/debug/foo.rs"));
+        assert!(
+            preview
+                .matches
+                .iter()
+                .any(|p| p == "target" || p == "target/debug" || p == "target/debug/foo.rs")
+        );
         // Three entries under target/ (target dir + debug + release + 2 files)
         // — count is whatever the walker enumerates, all of which match.
         assert!(preview.total_count >= 3);
@@ -545,5 +548,4 @@ mod tests {
         assert_eq!(preview.total_count, 10);
         assert!(preview.truncated);
     }
-
 }

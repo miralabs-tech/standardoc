@@ -81,9 +81,9 @@ pub fn discover_prose_sources(workspace_root: &Path, filters: &ScanFilters) -> V
 }
 
 /// A path qualifies as convention prose when EITHER:
-/// 1. its filename is in [`ROOT_DOC_FILES`] (at any depth — workspace
+/// 1. its filename is in `ROOT_DOC_FILES` (at any depth — workspace
 ///    root, sub-package root, vendored package root) ; OR
-/// 2. it lives under one of the [`PROSE_DIR_PREFIXES`] (docs/, notes/,
+/// 2. it lives under one of the `PROSE_DIR_PREFIXES` (docs/, notes/,
 ///    ...) at any depth.
 ///
 /// Comparison is case-sensitive (matches the actual on-disk path).
@@ -130,9 +130,7 @@ fn matches_root_doc_file(rel_path: &str) -> bool {
 }
 
 fn starts_with_prose_dir(rel_path: &str) -> bool {
-    PROSE_DIR_PREFIXES
-        .iter()
-        .any(|p| rel_path.starts_with(p))
+    PROSE_DIR_PREFIXES.iter().any(|p| rel_path.starts_with(p))
 }
 
 /// Reads the opening of `path` and returns the `standardoc:` directive

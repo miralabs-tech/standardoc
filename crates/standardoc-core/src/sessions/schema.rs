@@ -222,11 +222,9 @@ mod tests {
         )
         .unwrap();
         let kind: String = conn
-            .query_row(
-                "SELECT kind FROM sessions WHERE slug = 'legacy'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT kind FROM sessions WHERE slug = 'legacy'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(kind, "session");
         // Each of the 4 day-1 kinds is accepted.

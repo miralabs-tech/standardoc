@@ -106,9 +106,7 @@ fn handle_event(
         let Some(rel) = to_workspace_relative_md(path, workspace_root) else {
             continue;
         };
-        let skipped = filters
-            .read()
-            .is_ok_and(|guard| guard.is_skipped(&rel));
+        let skipped = filters.read().is_ok_and(|guard| guard.is_skipped(&rel));
         if skipped {
             continue;
         }

@@ -16,8 +16,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use standardoc_core::{
     IndexHandle, LanguageProvider, RagWatcherHandle, ResolveOutcome, ResolverRegistry,
-    RevisionRelinkHandle, ScanFilters,
-    SessionsHandle, UsagePeriod, WatcherHandle,
+    RevisionRelinkHandle, ScanFilters, SessionsHandle, UsagePeriod, WatcherHandle,
     query::{self, SymbolFilter},
     sessions::memory_sync::{export_memory_dir, import_memory_dir},
 };
@@ -303,7 +302,12 @@ impl StandardocMcp {
         let filter_for_search = filter.clone();
         let trimmed_for_search = trimmed.clone();
         let result = tokio::task::spawn_blocking(move || {
-            query::search_text(&handle, &trimmed_for_search, limit as usize, &filter_for_search)
+            query::search_text(
+                &handle,
+                &trimmed_for_search,
+                limit as usize,
+                &filter_for_search,
+            )
         })
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
@@ -743,7 +747,9 @@ impl StandardocMcp {
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(sessions_err_to_rmcp)?;
-        Ok(success_json(&serde_json::to_value(report).unwrap_or_default()))
+        Ok(success_json(
+            &serde_json::to_value(report).unwrap_or_default(),
+        ))
     }
 
     /// Dump every session row to `<slug>.md` files under `dir` and rewrite
@@ -771,7 +777,9 @@ impl StandardocMcp {
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(sessions_err_to_rmcp)?;
-        Ok(success_json(&serde_json::to_value(report).unwrap_or_default()))
+        Ok(success_json(
+            &serde_json::to_value(report).unwrap_or_default(),
+        ))
     }
 
     /// Lazy on-demand resolution of an external FQDN (Cargo crate, npm
@@ -1004,28 +1012,27 @@ impl StandardocMcp {
         };
         let fqdn_owned = fqdn.to_string();
 
-        let mut refs: Vec<ChunkRef> = if let (Some(q), Some(embedder)) =
-            (query, self.rag_embedder.clone())
-        {
-            let q_owned = q.to_string();
-            tokio::task::spawn_blocking(move || -> Result<Vec<ChunkRef>, ErrorData> {
-                let vector = embedder.embed(&q_owned).map_err(|e| {
-                    ErrorData::internal_error(format!("rag embed query: {e}"), None)
-                })?;
-                store
-                    .refs_for_symbol_with_query(&fqdn_owned, &vector, CHUNK_REFS_DEFAULT_LIMIT)
-                    .map_err(|e| ErrorData::internal_error(format!("rag re-rank: {e}"), None))
-            })
-            .await
-            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))??
-        } else {
-            tokio::task::spawn_blocking(move || {
-                store.refs_for_symbol(&fqdn_owned, CHUNK_REFS_DEFAULT_LIMIT)
-            })
-            .await
-            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-            .unwrap_or_default()
-        };
+        let mut refs: Vec<ChunkRef> =
+            if let (Some(q), Some(embedder)) = (query, self.rag_embedder.clone()) {
+                let q_owned = q.to_string();
+                tokio::task::spawn_blocking(move || -> Result<Vec<ChunkRef>, ErrorData> {
+                    let vector = embedder.embed(&q_owned).map_err(|e| {
+                        ErrorData::internal_error(format!("rag embed query: {e}"), None)
+                    })?;
+                    store
+                        .refs_for_symbol_with_query(&fqdn_owned, &vector, CHUNK_REFS_DEFAULT_LIMIT)
+                        .map_err(|e| ErrorData::internal_error(format!("rag re-rank: {e}"), None))
+                })
+                .await
+                .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))??
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    store.refs_for_symbol(&fqdn_owned, CHUNK_REFS_DEFAULT_LIMIT)
+                })
+                .await
+                .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+                .unwrap_or_default()
+            };
 
         refs.retain(|r| r.confidence >= CHUNK_REF_MIN_CONFIDENCE);
         Ok(refs)
@@ -2133,7 +2140,10 @@ mod tests {
         mcp.record_recent_depth1("crate::stale", now - 600);
         // 10 min later, the prior depth=1 is outside the 5 min window.
         let hint = mcp.compute_routing_hint("crate::stale", 2, now);
-        assert!(hint.is_some(), "stale scoping pass must not silence the hint");
+        assert!(
+            hint.is_some(),
+            "stale scoping pass must not silence the hint"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

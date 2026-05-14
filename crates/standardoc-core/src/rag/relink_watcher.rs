@@ -13,8 +13,8 @@
 //! relinking, so an active batch of AST mutations doesn't trigger a
 //! relink per intermediate state — only after the batch settles.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -54,10 +54,10 @@ impl Drop for RevisionRelinkHandle {
 }
 
 /// Spawns the revision-relink watcher thread. The thread polls
-/// `handle.revision()` every [`POLL_INTERVAL`] ; on a bump it waits one
-/// [`DEBOUNCE_INTERVAL`] to absorb burst mutations, then calls
+/// `handle.revision()` every `POLL_INTERVAL` ; on a bump it waits one
+/// `DEBOUNCE_INTERVAL` to absorb burst mutations, then calls
 /// [`RagPipeline::relink_all`]. The internal sleeps yield to the stop
-/// flag every [`STOP_CHECK_INTERVAL`] for responsive shutdown.
+/// flag every `STOP_CHECK_INTERVAL` for responsive shutdown.
 pub fn spawn_revision_relink_watcher(
     handle: IndexHandle,
     pipeline: Arc<RagPipeline>,

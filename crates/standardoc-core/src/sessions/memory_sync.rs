@@ -23,6 +23,7 @@
 //! The `MEMORY.md` index file itself is never imported as a row — it's
 //! regenerated on export from the DB contents.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use super::{
@@ -146,12 +147,11 @@ pub fn import_memory_dir(
         source: e,
     })?;
     for entry in read {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => {
-                report.errors += 1;
-                continue;
-            }
+        let entry = if let Ok(e) = entry {
+            e
+        } else {
+            report.errors += 1;
+            continue;
         };
         let path = entry.path();
         if !is_importable_memory_file(&path) {
@@ -208,11 +208,10 @@ pub fn export_memory_dir(
     Ok(report)
 }
 
-fn split_frontmatter<'a>(
-    raw: &'a str,
-    path: &Path,
-) -> Result<(&'a str, &'a str), MemorySyncError> {
-    let mut stripped = raw.strip_prefix("---\n").or_else(|| raw.strip_prefix("---\r\n"));
+fn split_frontmatter<'a>(raw: &'a str, path: &Path) -> Result<(&'a str, &'a str), MemorySyncError> {
+    let mut stripped = raw
+        .strip_prefix("---\n")
+        .or_else(|| raw.strip_prefix("---\r\n"));
     if stripped.is_none() {
         return Err(MemorySyncError::MalformedFrontmatter {
             path: path.to_path_buf(),
@@ -249,7 +248,11 @@ fn find_closing_delimiter(s: &str) -> Option<usize> {
 fn split_kv(line: &str) -> Option<(String, String)> {
     let (key, value) = line.split_once(':')?;
     let key = key.trim().to_string();
-    let value = value.trim().trim_matches('"').trim_matches('\'').to_string();
+    let value = value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string();
     if key.is_empty() {
         return None;
     }
@@ -257,19 +260,15 @@ fn split_kv(line: &str) -> Option<(String, String)> {
 }
 
 fn slug_from_path(path: &Path) -> String {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("memo");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("memo");
     stem.replace('_', "-").to_ascii_lowercase()
 }
 
 fn kind_from_type_str(s: &str) -> SessionKind {
     match s.trim().to_ascii_lowercase().as_str() {
-        "user" => SessionKind::Profile,
+        "user" | "reference" => SessionKind::Profile,
         "feedback" => SessionKind::Feedback,
         "project" => SessionKind::Lock,
-        "reference" => SessionKind::Profile,
         _ => SessionKind::Session,
     }
 }
@@ -278,7 +277,7 @@ fn status_from_str(s: &str) -> SessionStatus {
     SessionStatus::from_sql(s.trim().to_ascii_lowercase().as_str()).unwrap_or(SessionStatus::Active)
 }
 
-fn type_str_from_kind(kind: SessionKind) -> &'static str {
+const fn type_str_from_kind(kind: SessionKind) -> &'static str {
     match kind {
         SessionKind::Profile => "user",
         SessionKind::Feedback => "feedback",
@@ -304,14 +303,18 @@ fn is_importable_memory_file(path: &Path) -> bool {
 
 fn render_memo_file(row: &SessionRow) -> String {
     let mut out = String::from("---\n");
-    out.push_str(&format!("name: {}\n", row.slug));
-    out.push_str(&format!("description: exported from sessions DB ({})\n", row.kind.as_str()));
-    out.push_str(&format!("type: {}\n", type_str_from_kind(row.kind)));
-    out.push_str(&format!("status: {}\n", row.status.as_str()));
+    let _ = writeln!(out, "name: {}", row.slug);
+    let _ = writeln!(
+        out,
+        "description: exported from sessions DB ({})",
+        row.kind.as_str()
+    );
+    let _ = writeln!(out, "type: {}", type_str_from_kind(row.kind));
+    let _ = writeln!(out, "status: {}", row.status.as_str());
     if let Some(prev) = &row.supersedes {
-        out.push_str(&format!("supersedes: {prev}\n"));
+        let _ = writeln!(out, "supersedes: {prev}");
     }
-    out.push_str(&format!("created_at: {}\n", row.created_at));
+    let _ = writeln!(out, "created_at: {}", row.created_at);
     out.push_str("---\n\n");
     out.push_str(&row.body_md);
     if !row.body_md.ends_with('\n') {
@@ -326,12 +329,12 @@ fn render_index(rows: &[SessionRow]) -> String {
     );
     for row in rows {
         let summary = first_line_of_body(&row.body_md);
-        out.push_str(&format!(
-            "- [{slug}]({slug}.md) [{kind}] — {summary}\n",
+        let _ = writeln!(
+            out,
+            "- [{slug}]({slug}.md) [{kind}] — {summary}",
             slug = row.slug,
             kind = row.kind.as_str(),
-            summary = summary
-        ));
+        );
     }
     out
 }
@@ -547,7 +550,10 @@ mod tests {
         let entry = parse_memory_file(&path).unwrap();
         assert_eq!(entry.status, SessionStatus::Active);
         assert!(entry.supersedes.is_none());
-        assert!(entry.created_at > 0, "missing created_at falls back to now()");
+        assert!(
+            entry.created_at > 0,
+            "missing created_at falls back to now()"
+        );
     }
 
     #[test]

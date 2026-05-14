@@ -14,8 +14,8 @@ pub mod memory_sync;
 mod schema;
 
 pub use memory_sync::{
-    ExportReport, ImportReport, MemoryEntry, MemorySyncError, export_memory_dir,
-    import_memory_dir, parse_memory_file,
+    ExportReport, ImportReport, MemoryEntry, MemorySyncError, export_memory_dir, import_memory_dir,
+    parse_memory_file,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -218,7 +218,7 @@ impl SessionsHandle {
         self.save_with_kind(slug, body_md, supersedes, SessionKind::Session)
     }
 
-    /// Same UPSERT semantics as [`save`] but explicit about the row `kind`.
+    /// Same UPSERT semantics as [`Self::save`] but explicit about the row `kind`.
     /// Used by the memory-sync layer to land `feedback`, `profile`, and `lock`
     /// memos alongside regular `session` handoffs in one table.
     #[allow(clippy::significant_drop_tightening)]
@@ -257,7 +257,7 @@ impl SessionsHandle {
     }
 
     /// Restore a row verbatim from a serialised source (memory-sync import).
-    /// Unlike [`save_with_kind`], `status` and `created_at` come from the
+    /// Unlike [`Self::save_with_kind`], `status` and `created_at` come from the
     /// caller (frontmatter values), and the previous row referenced by
     /// `supersedes` is NOT auto-flipped to `superseded` — the source markdown
     /// is authoritative, so the supersedes chain rebuilds row-by-row as each
@@ -469,15 +469,7 @@ pub struct UsageStatsRow {
     pub ratio: f64,
 }
 
-type RawRow = (
-    i64,
-    String,
-    String,
-    Option<String>,
-    String,
-    String,
-    i64,
-);
+type RawRow = (i64, String, String, Option<String>, String, String, i64);
 
 fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<SessionRow, SessionsError>> {
     let raw: RawRow = (
@@ -744,7 +736,10 @@ mod tests {
                 .unwrap();
         }
         let deleted = handle.reset_usage(UsagePeriod::Day).unwrap();
-        assert_eq!(deleted, 1, "only the recent row falls inside the day window");
+        assert_eq!(
+            deleted, 1,
+            "only the recent row falls inside the day window"
+        );
         let all = handle.query_usage_stats(UsagePeriod::All).unwrap();
         assert_eq!(all.calls, 1, "the 8-day-old row survives a Day reset");
     }

@@ -317,4 +317,3 @@ fn reset_usage_invalid_period_fails_clap_validation() {
         .assert()
         .failure();
 }
-
