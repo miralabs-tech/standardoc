@@ -84,7 +84,7 @@ April 26, 2028** regardless.
 
 ## Why FSL-1.1-MIT and not MIT outright?
 
-[FSL-1.1-MIT](LICENSE) is permissive for any **non-competing use**. It
+[FSL-1.1-MIT](../LICENSE) is permissive for any **non-competing use**. It
 prevents direct competing offerings (the "open-and-pillage" pattern) without
 locking down the core for honest end-users. Adopted by Sentry, CodeCrafters,
 Keygen. Two years after each release, that release converts to plain MIT.
@@ -94,7 +94,7 @@ Keygen. Two years after each release, that release converts to plain MIT.
 Yes, freely, as long as you're not building a product that **substitutes for
 Standardoc itself**. Internal tooling, customer-facing apps, SaaS products —
 all fine. Reselling Standardoc as your own SaaS — not fine. Read the
-[license](LICENSE) for details.
+[license](../LICENSE) for details.
 
 ## Does it lose precision compared to LSP?
 

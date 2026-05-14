@@ -111,7 +111,7 @@ surface sémantique utile.
 ## 🔓 Posture open-core
 
 **Standardoc Core** — CLI, LSP, MCP, tous les language providers, extension
-VSCode. Source sous [FSL-1.1-MIT](LICENSE) — convertit en **MIT pur le
+VSCode. Source sous [FSL-1.1-MIT](../LICENSE) — convertit en **MIT pur le
 26 avril 2028**. Gratuit pour tout usage non-concurrent aujourd'hui,
 entièrement MIT à partir de cette date.
 

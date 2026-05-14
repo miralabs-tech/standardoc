@@ -87,7 +87,7 @@ Le Core lui-même est verrouillé pour passer de FSL-1.1-MIT à **MIT pur le
 
 ## Pourquoi FSL-1.1-MIT et pas MIT pur ?
 
-[FSL-1.1-MIT](LICENSE) est permissive pour tout **usage non-concurrent**.
+[FSL-1.1-MIT](../LICENSE) est permissive pour tout **usage non-concurrent**.
 Elle empêche les offerings concurrents directs (le pattern « open-and-pillage »)
 sans verrouiller le core pour les end-users honnêtes. Adoptée par Sentry,
 CodeCrafters, Keygen. Deux ans après chaque release, cette release convertit
@@ -98,7 +98,7 @@ en MIT pur.
 Oui, librement, tant que vous ne construisez pas un produit qui **se
 substitue à Standardoc lui-même**. Tooling interne, apps customer-facing,
 produits SaaS — tout ça OK. Revendre Standardoc comme votre propre SaaS —
-pas OK. Voir la [licence](LICENSE) pour les détails.
+pas OK. Voir la [licence](../LICENSE) pour les détails.
 
 ## Ça perd en précision par rapport à LSP ?
 

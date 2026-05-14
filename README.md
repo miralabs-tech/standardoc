@@ -7,7 +7,7 @@
 
 📖 English · [Français](README.fr.md)
 
-[About](ABOUT.md) · [Quickstart](QUICKSTART.md) · [Roadmap](TODO-LIST.md) · [Comparison](COMPARISON.md) · [FAQ](FAQ.md) · [Support](SUPPORT.md) · [Changelog](CHANGELOG.md)
+[About](.important/ABOUT.md) · [Quickstart](.important/QUICKSTART.md) · [Roadmap](.important/TODO-LIST.md) · [Comparison](.important/COMPARISON.md) · [FAQ](.important/FAQ.md) · [Support](.important/SUPPORT.md) · [Changelog](CHANGELOG.md)
 
 ---
 
@@ -54,7 +54,7 @@ Search "Standardoc" in the VSCode Extensions panel, or grab the latest VSIX from
 you get an **Initialize this workspace?** prompt — opt in to write `.mcp.json`,
 generate the AI agent skill, and start the daemon.
 
-See [QUICKSTART.md](QUICKSTART.md) for the full 5-minute walkthrough.
+See [QUICKSTART.md](.important/QUICKSTART.md) for the full 5-minute walkthrough.
 
 ---
 
@@ -96,7 +96,7 @@ Beta.1 focuses on **Rust + TypeScript** with a single binary `stdoc`, a
 file watcher, and 2 honest MCP tools. Documentation rendering (MDX/React),
 additional languages, and cross-language bridges land in later milestones.
 
-→ See [TODO-LIST.md](TODO-LIST.md) for the full per-version checkbox roadmap.
+→ See [TODO-LIST.md](.important/TODO-LIST.md) for the full per-version checkbox roadmap.
 
 ---
 
@@ -106,7 +106,7 @@ additional languages, and cross-language bridges land in later milestones.
 - Structure is derived
 - Understanding is a system
 
-[Read the long form →](ABOUT.md)
+[Read the long form →](.important/ABOUT.md)
 
 ---
 
@@ -130,7 +130,7 @@ above is locked.
 
 If Standardoc helps you rethink how software is understood :
 
-👉 [Star the repo](https://github.com/miralabs-tech/standardoc) · [OpenCollective](https://opencollective.com/standarx) · [Other ways](SUPPORT.md)
+👉 [Star the repo](https://github.com/miralabs-tech/standardoc) · [OpenCollective](https://opencollective.com/standarx) · [Other ways](.important/SUPPORT.md)
 
 ---
 

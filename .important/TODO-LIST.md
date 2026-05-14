@@ -1,7 +1,7 @@
 # Roadmap
 
 Source of truth for what's planned, what's shipping, and what's deliberately
-deferred. [`CHANGELOG.md`](CHANGELOG.md) tracks what actually shipped per
+deferred. [`CHANGELOG.md`](../CHANGELOG.md) tracks what actually shipped per
 release; this file tracks intent.
 
 Box convention: `[x]` shipped · `[ ]` planned · `~~struck~~` killed or

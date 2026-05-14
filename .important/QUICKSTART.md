@@ -146,7 +146,7 @@ removals trigger an auto re-index of the affected subtree.
 
 ## Where to next
 
-- [README.md](README.md) — full feature surface and architecture diagram
+- [README.md](../README.md) — full feature surface and architecture diagram
 - [ABOUT.md](ABOUT.md) — why Standardoc exists and how it differs from LSP /
   Sourcegraph / TypeDoc / etc.
 - [FAQ.md](FAQ.md) — common questions

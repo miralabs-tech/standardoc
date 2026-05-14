@@ -105,7 +105,7 @@ tools do, and it's why none of them give AI agents a useful semantic surface.
 ## 🔓 Open-core posture
 
 **Standardoc Core** — CLI, LSP, MCP, all language providers, VSCode
-extension. Source under [FSL-1.1-MIT](LICENSE) — converts to **plain MIT on
+extension. Source under [FSL-1.1-MIT](../LICENSE) — converts to **plain MIT on
 April 26, 2028**. Free for any non-competing use today, fully MIT after that.
 
 The focus stays on the open-source Core. As long as Standardoc has no

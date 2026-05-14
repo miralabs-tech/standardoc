@@ -151,7 +151,7 @@ sous-arbre concerné.
 
 ## La suite
 
-- [README.fr.md](README.fr.md) — surface complète des features et schéma d'architecture
+- [README.fr.md](../README.fr.md) — surface complète des features et schéma d'architecture
 - [ABOUT.fr.md](ABOUT.fr.md) — pourquoi Standardoc existe et en quoi il se
   démarque de LSP / Sourcegraph / TypeDoc / etc.
 - [FAQ.fr.md](FAQ.fr.md) — questions courantes
