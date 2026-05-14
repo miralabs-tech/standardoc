@@ -190,7 +190,7 @@ verbatim by reading the file directly at \`start_line\` if you need
 column-exact positions.
 
 \`\`\`
-get_body("crate::module::function_name", null, true, true)
+get_body("myapp::auth::verify_token", null, true, true)
 // → multi-line signature only, no docs/attrs noise.
 \`\`\`
 
@@ -427,12 +427,38 @@ new chat. Returns \`null\` when nothing matches.
 3. At end of a session that locks decisions or ships work,
    \`session_save(slug, body_md)\` so the next chat can pick up.
 
+## Language coverage
+
+The Standardoc parser layer wires one provider per language. Coverage
+status as of this workspace:
+
+| Language    | Symbols | Calls / Imports | Doc extraction | Template refs | Notes                                        |
+| ----------- | :-----: | :-------------: | :------------: | :-----------: | -------------------------------------------- |
+| **Rust**    |   ✓     |       ✓         |       ✓        |      —        | \`syn\` AST, full visit, attribute-aware     |
+| **TS / JS** |   ✓     |       ✓         |       ✓        |      ✓        | \`swc\` AST, JSX refs in CallVisitor         |
+| **Vue**     |   ✓     |       ✓         |       —        |      ✓        | SFC custom parser; \`<template>\` refs       |
+| **Svelte**  |   ✓     |       ✓         |       —        |      ✓        | SFC custom parser; template ref attributes   |
+| **Lua**     | partial |    partial      |       —        |      —        | Annotation-driven; gaps known                |
+
+Files in languages outside this table appear in the file graph (paths,
+hashes) but contribute no semantic symbols. Use
+\`list_symbols(module: "...")\` against a known file path to verify what
+the indexer captured for any given file.
+
 ## Key concepts
 
 - **FQDN** — \`<package>::<module>::<name>\` (Rust + TS unified). Stable
   identifier across the workspace.
 - **Edge kinds** — CALLS, IMPORTS, EXTENDS, IMPLEMENTS, REFERENCES,
   DEFINES, USES_TYPE, EXPOSES_API.
+- **Edge attributes** — every edge carries an optional JSON
+  \`attributes\` field with structured metadata. Today it's populated
+  for template refs in Vue / Svelte / JSX (component name, prop
+  bindings, slot kind) — consult the edge payload when an
+  \`Unresolved\` bare name in a template feels incomplete, the
+  attributes often disambiguate which component is meant. More edge
+  kinds will grow attributes over time (asyncness on CALLS, generic
+  args on USES_TYPE, etc.).
 - **Resolved vs Unresolved targets** — an edge target may be:
   - \`Resolved { fqdn }\` — known, points to an indexed symbol.
   - \`Unresolved { name }\` — name only, external or unindexed.
