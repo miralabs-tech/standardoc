@@ -1,11 +1,22 @@
 /**
- * Pure shape + merge helpers for the `.claude/settings.json` UserPromptSubmit
- * hook that nudges Claude Code agents to use Standardoc's MCP tools before
- * falling back to raw Read/Grep/Glob.
+ * Pure shape + merge helpers for the `.claude/settings.json` hooks that
+ * enforce Standardoc's MCP-first discipline and bridge the harness memory
+ * directory back into the workspace sessions DB.
  *
- * The hook is identified by a unique marker string embedded in its command;
- * `mergeClaudeHook` is idempotent against that marker so re-running the
- * workspace init never duplicates the entry.
+ * Five hooks are managed here (all idempotent — each is identified by a
+ * unique marker substring embedded in its `command`):
+ * - `UserPromptSubmit`: advisory nudge surfacing the MCP tool surface.
+ * - `PreToolUse` (mcp__standardoc__.*): marks the sentinel that proves the
+ *   agent has paid the MCP-first toll for this session.
+ * - `PreToolUse` (Bash|Read|Grep|Glob): denies the call when the sentinel
+ *   is absent — this is the actual MCP-first guardrail.
+ * - `SessionStart`: resets the sentinel so each new chat starts strict.
+ * - `PostToolUse` (Write|Edit|MultiEdit): auto-runs `session sync-in` when
+ *   the harness memory dir is touched.
+ *
+ * `mergeClaudeHook` greps for each marker in the existing settings so
+ * re-running `init` after an upgrade only appends the missing entries —
+ * pre-existing user-authored hooks are never reordered or removed.
  */
 
 export interface ClaudeHookEntry {
@@ -21,6 +32,9 @@ export interface ClaudeHookMatcherGroup {
 export interface ClaudeSettingsShape {
   hooks?: {
     UserPromptSubmit?: ClaudeHookMatcherGroup[];
+    PreToolUse?: ClaudeHookMatcherGroup[];
+    PostToolUse?: ClaudeHookMatcherGroup[];
+    SessionStart?: ClaudeHookMatcherGroup[];
     [key: string]: ClaudeHookMatcherGroup[] | undefined;
   };
   [key: string]: unknown;
@@ -36,10 +50,98 @@ export const STANDARDOC_HOOK_MESSAGE =
 /** The exact shell command shipped with the hook; the marker is grep-stable. */
 export const STANDARDOC_HOOK_COMMAND = `echo "${STANDARDOC_HOOK_MARKER}: ${STANDARDOC_HOOK_MESSAGE}"`;
 
+/**
+ * Grep-stable signature of the session-sync PostToolUse hook. The CLI
+ * sub-command name is unique to standardoc, so it doubles as the marker —
+ * `mergeClaudeHook` greps for this substring in any installed hook command
+ * to keep the merge idempotent across re-runs of `init`.
+ */
+export const STANDARDOC_SESSION_SYNC_MARKER = 'standardoc session hook';
+
+/**
+ * Exact shell command for the PostToolUse hook. The CLI reads the tool-call
+ * JSON payload from stdin, filters on file paths under the harness memory
+ * directory, and invokes a `session sync-in` pass on match. Designed to be
+ * a no-op on every other write so the hook never blocks the agent.
+ */
+export const STANDARDOC_SESSION_SYNC_COMMAND = 'standardoc session hook';
+
+/**
+ * Grep-stable signatures for the three MCP-first PreToolUse/SessionStart
+ * hooks. Each `--mode <X>` argument is unique to the standardoc binary,
+ * so the substring doubles as the marker — `mergeClaudeHook` greps for
+ * it to keep re-runs of `init` idempotent.
+ */
+export const STANDARDOC_MCP_FIRST_MARK_MARKER = 'pre-tool-hook --mode mark';
+export const STANDARDOC_MCP_FIRST_CHECK_MARKER = 'pre-tool-hook --mode check';
+export const STANDARDOC_MCP_FIRST_RESET_MARKER = 'pre-tool-hook --mode reset';
+
+/**
+ * Exact shell commands. The Rust binary is resolved via `PATH` (the same
+ * `standardoc.exe` the daemon supervisor launches), so a single string
+ * works cross-OS — no per-platform `powershell` / `bash` adaptation
+ * needed at this layer.
+ */
+export const STANDARDOC_MCP_FIRST_MARK_COMMAND = 'standardoc claude pre-tool-hook --mode mark';
+export const STANDARDOC_MCP_FIRST_CHECK_COMMAND = 'standardoc claude pre-tool-hook --mode check';
+export const STANDARDOC_MCP_FIRST_RESET_COMMAND = 'standardoc claude pre-tool-hook --mode reset';
+
 export function buildStandardocHookGroup(): ClaudeHookMatcherGroup {
   return {
     matcher: '',
     hooks: [{ type: 'command', command: STANDARDOC_HOOK_COMMAND }],
+  };
+}
+
+/**
+ * PostToolUse hook group: matches `Write`, `Edit`, and `MultiEdit` tool
+ * calls. The CLI sub-command itself filters by file path, so the matcher
+ * only narrows the trigger surface — the path filter happens in Rust.
+ */
+export function buildStandardocSessionSyncHookGroup(): ClaudeHookMatcherGroup {
+  return {
+    matcher: 'Write|Edit|MultiEdit',
+    hooks: [{ type: 'command', command: STANDARDOC_SESSION_SYNC_COMMAND }],
+  };
+}
+
+/**
+ * PreToolUse hook group fired on every standardoc MCP tool call. Touches
+ * the sentinel `<cwd>/.standardoc/mcp_called_this_session` so the check
+ * hook lets subsequent Bash/Read/Grep/Glob through for the rest of the
+ * chat. The matcher relies on Claude Code's tool-name convention:
+ * `mcp__<server>__<tool>` — only standardoc's own tools toll the marker.
+ */
+export function buildStandardocMcpFirstMarkHookGroup(): ClaudeHookMatcherGroup {
+  return {
+    matcher: 'mcp__standardoc__.*',
+    hooks: [{ type: 'command', command: STANDARDOC_MCP_FIRST_MARK_COMMAND }],
+  };
+}
+
+/**
+ * PreToolUse hook group fired on raw code-exploration tools. When the
+ * sentinel is absent for this chat, the binary emits a JSON
+ * `permissionDecision: "deny"` on stdout — Claude Code blocks the call
+ * and surfaces the reason to the agent, who is expected to switch to
+ * MCP. When the sentinel exists (i.e. the agent already used MCP this
+ * chat), the binary emits `{}` and the call proceeds.
+ */
+export function buildStandardocMcpFirstCheckHookGroup(): ClaudeHookMatcherGroup {
+  return {
+    matcher: 'Bash|Read|Grep|Glob',
+    hooks: [{ type: 'command', command: STANDARDOC_MCP_FIRST_CHECK_COMMAND }],
+  };
+}
+
+/**
+ * SessionStart hook group: removes the sentinel so every new chat starts
+ * MCP-first-strict, regardless of the previous chat's history.
+ */
+export function buildStandardocMcpFirstResetHookGroup(): ClaudeHookMatcherGroup {
+  return {
+    matcher: '',
+    hooks: [{ type: 'command', command: STANDARDOC_MCP_FIRST_RESET_COMMAND }],
   };
 }
 
@@ -70,27 +172,64 @@ export type MergeAction =
   | { kind: 'invalid'; error: string };
 
 /**
- * Merge our Standardoc hook group into a parsed `.claude/settings.json`.
+ * Merge the five Standardoc hook groups into a parsed `.claude/settings.json`:
+ * - `UserPromptSubmit` MCP nudge (advisory).
+ * - `PreToolUse` (mcp__standardoc__.*) MCP-first mark.
+ * - `PreToolUse` (Bash|Read|Grep|Glob) MCP-first check (the actual deny).
+ * - `SessionStart` MCP-first reset.
+ * - `PostToolUse` (Write|Edit|MultiEdit) session sync.
  *
- * - `absent` (file missing) → emit `create` with a freshly-minted object.
- * - Existing settings without our marker → `append` ours to `UserPromptSubmit`.
- * - Existing settings whose `UserPromptSubmit` already contains a group with
- *   our marker (any matcher) → `no-op`. We never duplicate, never overwrite
- *   user-side groups, and never re-order other groups.
+ * Behaviour:
+ * - `absent` (file missing) → `create` with all five hooks installed.
+ * - Existing settings missing some → `append` only the missing ones; never
+ *   reorder or remove pre-existing user-authored entries.
+ * - All five already present → `no-op`. Idempotent across re-runs.
+ *
+ * Detection uses each hook's grep-stable marker substring inside the
+ * command string, so any matcher value still counts.
  */
 export function mergeClaudeHook(parsed: ParseResult): MergeAction {
   if (parsed.kind === 'invalid') return { kind: 'invalid', error: parsed.error };
 
   const existing: ClaudeSettingsShape = parsed.kind === 'absent' ? {} : parsed.value;
-  const existingGroups = existing.hooks?.UserPromptSubmit ?? [];
+  const existingUserPrompt = existing.hooks?.UserPromptSubmit ?? [];
+  const existingPreTool = existing.hooks?.PreToolUse ?? [];
+  const existingPostTool = existing.hooks?.PostToolUse ?? [];
+  const existingSessionStart = existing.hooks?.SessionStart ?? [];
 
-  if (containsStandardocHook(existingGroups)) {
+  const hasMcpNudge = containsMarker(existingUserPrompt, STANDARDOC_HOOK_MARKER);
+  const hasMcpFirstMark = containsMarker(existingPreTool, STANDARDOC_MCP_FIRST_MARK_MARKER);
+  const hasMcpFirstCheck = containsMarker(existingPreTool, STANDARDOC_MCP_FIRST_CHECK_MARKER);
+  const hasMcpFirstReset = containsMarker(existingSessionStart, STANDARDOC_MCP_FIRST_RESET_MARKER);
+  const hasSessionSync = containsMarker(existingPostTool, STANDARDOC_SESSION_SYNC_MARKER);
+
+  if (hasMcpNudge && hasMcpFirstMark && hasMcpFirstCheck && hasMcpFirstReset && hasSessionSync) {
     return { kind: 'no-op' };
   }
 
-  const ourGroup = buildStandardocHookGroup();
-  const nextGroups: ClaudeHookMatcherGroup[] = [...existingGroups, ourGroup];
-  const nextHooks = { ...(existing.hooks ?? {}), UserPromptSubmit: nextGroups };
+  const nextUserPrompt = hasMcpNudge
+    ? existingUserPrompt
+    : [...existingUserPrompt, buildStandardocHookGroup()];
+
+  const nextPreTool = [...existingPreTool];
+  if (!hasMcpFirstMark) nextPreTool.push(buildStandardocMcpFirstMarkHookGroup());
+  if (!hasMcpFirstCheck) nextPreTool.push(buildStandardocMcpFirstCheckHookGroup());
+
+  const nextPostTool = hasSessionSync
+    ? existingPostTool
+    : [...existingPostTool, buildStandardocSessionSyncHookGroup()];
+
+  const nextSessionStart = hasMcpFirstReset
+    ? existingSessionStart
+    : [...existingSessionStart, buildStandardocMcpFirstResetHookGroup()];
+
+  const nextHooks = {
+    ...(existing.hooks ?? {}),
+    UserPromptSubmit: nextUserPrompt,
+    PreToolUse: nextPreTool,
+    PostToolUse: nextPostTool,
+    SessionStart: nextSessionStart,
+  };
   const result: ClaudeSettingsShape = { ...existing, hooks: nextHooks };
 
   if (parsed.kind === 'absent') {
@@ -99,11 +238,14 @@ export function mergeClaudeHook(parsed: ParseResult): MergeAction {
   return { kind: 'append', result };
 }
 
-function containsStandardocHook(groups: ReadonlyArray<ClaudeHookMatcherGroup>): boolean {
+function containsMarker(
+  groups: ReadonlyArray<ClaudeHookMatcherGroup>,
+  marker: string,
+): boolean {
   for (const g of groups) {
     for (const h of g.hooks ?? []) {
       if (h.type === 'command' && typeof h.command === 'string'
-        && h.command.includes(STANDARDOC_HOOK_MARKER)) {
+        && h.command.includes(marker)) {
         return true;
       }
     }

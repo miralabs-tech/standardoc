@@ -179,6 +179,16 @@ enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
+
+    /// Claude Code hook drivers. Each sub-command reads a JSON payload from
+    /// stdin (the hook event payload) and writes a JSON response on stdout
+    /// (the hook decision). All sub-commands exit 0 and never abort on
+    /// malformed or missing input — the only deliberate denial path is the
+    /// `pre-tool-hook --mode check` MCP-first policy.
+    Claude {
+        #[command(subcommand)]
+        action: ClaudeAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -209,6 +219,28 @@ enum SessionAction {
     /// on no-op so the hook never blocks the agent. Designed to be wired
     /// once at workspace init.
     Hook,
+}
+
+#[derive(Subcommand)]
+enum ClaudeAction {
+    /// PreToolUse / SessionStart driver enforcing the MCP-first discipline.
+    ///
+    /// * `--mode mark`  — Touch the sentinel
+    ///   `<cwd>/.standardoc/mcp_called_this_session` when the inbound tool
+    ///   is a standardoc MCP call (the agent has paid the MCP-first toll
+    ///   for this session). Wired on PreToolUse with matcher
+    ///   `mcp__standardoc__.*`.
+    /// * `--mode check` — When the sentinel for the current cwd is absent,
+    ///   emit a `deny` PreToolUse permissionDecision JSON; otherwise emit
+    ///   `{}` (allow). Wired on PreToolUse with matcher
+    ///   `Bash|Read|Grep|Glob` so code exploration is gated behind MCP.
+    /// * `--mode reset` — Remove the sentinel. Wired on SessionStart so
+    ///   each new chat starts MCP-first-strict regardless of the previous
+    ///   chat's history.
+    PreToolHook {
+        #[arg(long, value_parser = ["mark", "check", "reset"])]
+        mode: String,
+    },
 }
 
 #[derive(Args)]
@@ -329,6 +361,9 @@ fn main_inner() -> Result<(), ServerError> {
             SessionAction::SyncOut { workspace, dir } => cmd_session_sync_out(&workspace, &dir),
             SessionAction::Hook => cmd_session_hook(),
         },
+        Command::Claude { action } => match action {
+            ClaudeAction::PreToolHook { mode } => cmd_claude_pre_tool_hook(&mode),
+        },
     }
 }
 
@@ -413,6 +448,83 @@ fn cmd_session_hook() -> Result<(), ServerError> {
 fn memory_dir_from_path(file_path: &str) -> Option<String> {
     let tail_idx = file_path.find(MEMORY_PATH_TAIL)?;
     Some(file_path[..tail_idx + MEMORY_PATH_TAIL.len() - 1].to_string())
+}
+
+/// File name (under `<cwd>/.standardoc/`) used to record that the agent has
+/// called at least one standardoc MCP tool in the current chat. The file is
+/// 0-byte; only its presence/absence matters.
+const MCP_FIRST_SENTINEL: &str = "mcp_called_this_session";
+
+fn cmd_claude_pre_tool_hook(mode: &str) -> Result<(), ServerError> {
+    use std::io::Read;
+    let mut raw = String::new();
+    io::stdin().read_to_string(&mut raw).ok();
+    let sentinel = resolve_mcp_first_sentinel(&raw);
+    let output = pre_tool_hook_decide(mode, &raw, &sentinel);
+    println!("{output}");
+    Ok(())
+}
+
+fn resolve_mcp_first_sentinel(raw_payload: &str) -> PathBuf {
+    let cwd: PathBuf = serde_json::from_str::<serde_json::Value>(raw_payload)
+        .ok()
+        .and_then(|v| {
+            v.get("cwd")
+                .and_then(|c| c.as_str())
+                .map(PathBuf::from)
+        })
+        .or_else(|| std::env::var("CLAUDE_PROJECT_DIR").ok().map(PathBuf::from))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    cwd.join(".standardoc").join(MCP_FIRST_SENTINEL)
+}
+
+/// Pure-input decision function for the PreToolHook driver. Extracted from
+/// [`cmd_claude_pre_tool_hook`] so unit tests can pass a deterministic
+/// sentinel path (a tempdir) and a synthetic stdin payload without
+/// touching the real filesystem under `<cwd>/.standardoc/`.
+fn pre_tool_hook_decide(mode: &str, raw_payload: &str, sentinel: &Path) -> String {
+    let payload = serde_json::from_str::<serde_json::Value>(raw_payload)
+        .unwrap_or(serde_json::Value::Null);
+    let tool = payload
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match mode {
+        "mark" => {
+            if tool.starts_with("mcp__standardoc__") {
+                if let Some(parent) = sentinel.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(sentinel, b"");
+                r#"{"marked":true}"#.to_string()
+            } else {
+                r#"{"marked":false,"reason":"not_standardoc_mcp_tool"}"#.to_string()
+            }
+        }
+        "check" => {
+            if sentinel.exists() {
+                "{}".to_string()
+            } else {
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason":
+                            "MCP-first: call a standardoc MCP tool (find_symbol / get_context / list_symbols / find_symbols_by_pattern / get_body / current_revision / check_stale) before Bash/Read/Grep/Glob. The Standardoc index is structural and faster for code exploration.",
+                        "additionalContext":
+                            "Standardoc MCP tools: find_symbol, get_context, list_symbols, find_symbols_by_pattern, find_similar_symbols, get_body, current_revision, check_stale"
+                    }
+                })
+                .to_string()
+            }
+        }
+        "reset" => {
+            let _ = std::fs::remove_file(sentinel);
+            r#"{"reset":true}"#.to_string()
+        }
+        _ => r#"{"ok":false,"reason":"unknown_mode"}"#.to_string(),
+    }
 }
 
 fn cmd_schema_version(path: &Path) -> Result<(), ServerError> {
@@ -976,5 +1088,170 @@ mod fatal_marker_tests {
         assert!(marker.starts_with("STDOC_FATAL: "));
         assert!(marker.contains("db=42"));
         assert!(marker.contains("supported=1"));
+    }
+}
+
+#[cfg(test)]
+mod claude_pre_tool_hook_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn sentinel_in(tmp: &TempDir) -> PathBuf {
+        tmp.path().join("mcp_called_this_session")
+    }
+
+    #[test]
+    fn mark_writes_sentinel_when_tool_is_standardoc_mcp() {
+        let tmp = TempDir::new().unwrap();
+        let sentinel = sentinel_in(&tmp);
+        let payload = r#"{"tool_name":"mcp__standardoc__find_symbol","cwd":"/anywhere"}"#;
+        let out = pre_tool_hook_decide("mark", payload, &sentinel);
+        assert!(out.contains(r#""marked":true"#), "out={out}");
+        assert!(sentinel.exists(), "sentinel must be written");
+    }
+
+    #[test]
+    fn mark_skips_non_standardoc_tool() {
+        let tmp = TempDir::new().unwrap();
+        let sentinel = sentinel_in(&tmp);
+        let payload = r#"{"tool_name":"Bash"}"#;
+        let out = pre_tool_hook_decide("mark", payload, &sentinel);
+        assert!(out.contains("not_standardoc_mcp_tool"), "out={out}");
+        assert!(!sentinel.exists(), "sentinel must NOT be written");
+    }
+
+    #[test]
+    fn mark_skips_when_tool_name_missing() {
+        let tmp = TempDir::new().unwrap();
+        let sentinel = sentinel_in(&tmp);
+        let out = pre_tool_hook_decide("mark", r#"{}"#, &sentinel);
+        assert!(out.contains("not_standardoc_mcp_tool"), "out={out}");
+        assert!(!sentinel.exists());
+    }
+
+    #[test]
+    fn mark_creates_parent_dirs() {
+        let tmp = TempDir::new().unwrap();
+        let nested = tmp.path().join("deep").join(".standardoc");
+        let sentinel = nested.join("mcp_called_this_session");
+        let payload = r#"{"tool_name":"mcp__standardoc__get_context"}"#;
+        let out = pre_tool_hook_decide("mark", payload, &sentinel);
+        assert!(out.contains(r#""marked":true"#), "out={out}");
+        assert!(sentinel.exists());
+    }
+
+    #[test]
+    fn check_denies_when_sentinel_absent() {
+        let tmp = TempDir::new().unwrap();
+        let sentinel = sentinel_in(&tmp);
+        let out = pre_tool_hook_decide("check", r#"{}"#, &sentinel);
+        assert!(out.contains(r#""permissionDecision":"deny""#), "out={out}");
+        assert!(out.contains("MCP-first"));
+        assert!(out.contains("find_symbol"));
+    }
+
+    #[test]
+    fn check_allows_when_sentinel_present() {
+        let tmp = TempDir::new().unwrap();
+        let sentinel = sentinel_in(&tmp);
+        fs::write(&sentinel, b"").unwrap();
+        let out = pre_tool_hook_decide("check", r#"{}"#, &sentinel);
+        assert_eq!(out, "{}");
+    }
+
+    #[test]
+    fn check_emits_pretooluse_hook_event_name() {
+        // Claude Code requires the hookSpecificOutput.hookEventName to
+        // match the firing event, otherwise the JSON is silently
+        // ignored. Lock the wire shape.
+        let tmp = TempDir::new().unwrap();
+        let sentinel = sentinel_in(&tmp);
+        let out = pre_tool_hook_decide("check", r#"{}"#, &sentinel);
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            parsed
+                .get("hookSpecificOutput")
+                .and_then(|v| v.get("hookEventName"))
+                .and_then(|v| v.as_str()),
+            Some("PreToolUse"),
+        );
+    }
+
+    #[test]
+    fn reset_removes_sentinel() {
+        let tmp = TempDir::new().unwrap();
+        let sentinel = sentinel_in(&tmp);
+        fs::write(&sentinel, b"").unwrap();
+        let out = pre_tool_hook_decide("reset", r#"{}"#, &sentinel);
+        assert!(out.contains(r#""reset":true"#));
+        assert!(!sentinel.exists());
+    }
+
+    #[test]
+    fn reset_is_idempotent_when_sentinel_absent() {
+        let tmp = TempDir::new().unwrap();
+        let sentinel = sentinel_in(&tmp);
+        let out = pre_tool_hook_decide("reset", r#"{}"#, &sentinel);
+        // Must not panic; output is the reset confirmation either way.
+        assert!(out.contains(r#""reset":true"#));
+    }
+
+    #[test]
+    fn invalid_json_does_not_panic_in_any_mode() {
+        let tmp = TempDir::new().unwrap();
+        let sentinel = sentinel_in(&tmp);
+        // Mark with garbage payload — must not panic, must not write
+        // the sentinel (no tool name resolvable).
+        let out = pre_tool_hook_decide("mark", "not json", &sentinel);
+        assert!(out.contains("not_standardoc_mcp_tool"), "out={out}");
+        assert!(!sentinel.exists());
+        // Check with garbage payload — same as a missing sentinel.
+        let out = pre_tool_hook_decide("check", "not json", &sentinel);
+        assert!(out.contains(r#""permissionDecision":"deny""#));
+        // Reset with garbage payload — no-op (file already absent).
+        let out = pre_tool_hook_decide("reset", "not json", &sentinel);
+        assert!(out.contains(r#""reset":true"#));
+    }
+
+    #[test]
+    fn unknown_mode_returns_safe_default() {
+        let tmp = TempDir::new().unwrap();
+        let sentinel = sentinel_in(&tmp);
+        let out = pre_tool_hook_decide("nope", r#"{}"#, &sentinel);
+        assert!(out.contains("unknown_mode"));
+        // Must not implicitly deny — clap's value_parser already
+        // forbids this CLI-side, but a defence-in-depth default is
+        // "do not block the agent".
+        assert!(!out.contains(r#""permissionDecision":"deny""#));
+    }
+
+    #[test]
+    fn resolve_sentinel_uses_payload_cwd() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().to_string_lossy().replace('\\', "/");
+        let payload = format!(r#"{{"cwd":"{cwd}"}}"#);
+        let sentinel = resolve_mcp_first_sentinel(&payload);
+        let expected = tmp.path().join(".standardoc").join(MCP_FIRST_SENTINEL);
+        assert_eq!(sentinel, expected);
+    }
+
+    #[test]
+    fn resolve_sentinel_falls_back_to_current_dir_when_payload_lacks_cwd() {
+        // The fallback chain is cwd → CLAUDE_PROJECT_DIR → current_dir;
+        // we only assert the chain doesn't panic and produces a path
+        // ending with the sentinel name + parent `.standardoc`.
+        let sentinel = resolve_mcp_first_sentinel(r#"{}"#);
+        assert_eq!(
+            sentinel.file_name().and_then(|s| s.to_str()),
+            Some(MCP_FIRST_SENTINEL),
+        );
+        assert_eq!(
+            sentinel
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str()),
+            Some(".standardoc"),
+        );
     }
 }
