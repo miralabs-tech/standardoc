@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -26,6 +26,16 @@ PRAGMA busy_timeout = 5000;
 ";
 
 const POOL_MAX_SIZE: u32 = 8;
+/// Override r2d2's 30 s default. When the pool tries to create a fresh
+/// connection and the underlying SQLite open fails (e.g. `locking
+/// protocol` on a fast restart while the prior process is still releasing
+/// WAL handles), we want that failure to surface to the outer
+/// [`retry_with_backoff`] quickly so the next attempt can fire — not be
+/// swallowed by a 30 s pool wait. 2 s is comfortably above the worst
+/// observed cold-pool init on slow disks (sub-100 ms in practice) and
+/// well under the [`BACKOFF_SCHEDULE_MS`] cumulative window, so a real
+/// transient race clears within a couple of attempts.
+const POOL_CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
 const WRITER_CHANNEL_CAPACITY: usize = 64;
 
 /// Field order is load-bearing: `sender` MUST be dropped before `inner` so
@@ -407,7 +417,10 @@ fn parse_cold_start_progress(value: &str) -> Result<Option<(u64, u64)>, StorageE
 fn build_pool(db_path: &Path) -> Result<Pool<SqliteConnectionManager>, StorageError> {
     let manager = SqliteConnectionManager::file(db_path)
         .with_init(|conn| conn.execute_batch(PRAGMA_BOOT_SQL));
-    let pool = Pool::builder().max_size(POOL_MAX_SIZE).build(manager)?;
+    let pool = Pool::builder()
+        .max_size(POOL_MAX_SIZE)
+        .connection_timeout(POOL_CONNECTION_TIMEOUT)
+        .build(manager)?;
     Ok(pool)
 }
 
