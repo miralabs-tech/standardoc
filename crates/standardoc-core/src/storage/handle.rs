@@ -417,8 +417,17 @@ fn parse_cold_start_progress(value: &str) -> Result<Option<(u64, u64)>, StorageE
 fn build_pool(db_path: &Path) -> Result<Pool<SqliteConnectionManager>, StorageError> {
     let manager = SqliteConnectionManager::file(db_path)
         .with_init(|conn| conn.execute_batch(PRAGMA_BOOT_SQL));
+    // `min_idle = Some(0)` makes `build()` return without eagerly creating
+    // `max_size` connections. The default behaviour spins up
+    // [`POOL_MAX_SIZE`] connections in parallel at build time, which on
+    // slow CI runners (Windows in particular) can blow past the
+    // [`POOL_CONNECTION_TIMEOUT`] cap when each connection is doing
+    // SQLite open + WAL pragma setup. Lazy init means each `get()`
+    // creates at most one connection, and that one has the full 2 s
+    // window.
     let pool = Pool::builder()
         .max_size(POOL_MAX_SIZE)
+        .min_idle(Some(0))
         .connection_timeout(POOL_CONNECTION_TIMEOUT)
         .build(manager)?;
     Ok(pool)
