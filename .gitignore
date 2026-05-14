@@ -17,6 +17,7 @@ target-dev/
 # folders inside `examples/*/` stay tracked.
 /.standardoc/
 /.standardoc-sessions/
+ext/vscode/.standardoc/
 sessions-export/
 .claude/
 .mcp.json
