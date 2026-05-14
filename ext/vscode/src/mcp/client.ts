@@ -108,7 +108,12 @@ export class McpClient implements vscode.Disposable {
       ...ragSpawnFlags(this.ragSettings),
     ];
     this.output.appendLine(`[mcp] spawning ${binaryPath} ${args.slice(1).join(' ')}`);
-    const child = spawn(binaryPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    // stdin is piped (not 'ignore') so the daemon has a death-watch channel:
+    // when the extension host dies (force-kill, BSOD, crash), the OS closes
+    // the parent end of this pipe, the daemon reads EOF, and exits — the
+    // fs4 workspace lock is released without manual Task Manager cleanup.
+    // We never write to this pipe; it carries no protocol data.
+    const child = spawn(binaryPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     this.child = child;
     this.attachStderrScanner(child);
 

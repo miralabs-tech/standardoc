@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, IsTerminal};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 
@@ -84,9 +84,40 @@ pub async fn serve_mcp_http(
     bind_addr: &str,
     rag_pipeline: Option<Arc<RagPipeline>>,
 ) -> Result<(), ServerError> {
-    let listener = TcpListener::bind(bind_addr)
-        .await
-        .map_err(|e| ServerError::Io(io::Error::other(format!("bind {bind_addr}: {e}"))))?;
+    // When launched as a child process (VSCode extension supervisor, etc.),
+    // stdin is a pipe connected to the parent. We don't read protocol data
+    // from it — we use it as a death-watch channel: when the parent dies
+    // (force-kill, BSOD, OOM-killer, ...), the OS closes its writer end,
+    // our read returns Ok(0), and we exit cleanly. fs4 Drop runs, the
+    // workspace `.standardoc/db.lock` is released, and the next daemon can
+    // open the workspace without manual Task Manager cleanup of orphan
+    // standardoc.exe processes.
+    //
+    // Gated on `!is_terminal()` so a direct `standardoc mcp --http <port>`
+    // invocation from a TTY doesn't consume the user's keystrokes (and
+    // doesn't exit if the user happens to Ctrl-D the terminal).
+    if !io::stdin().is_terminal() {
+        spawn_parent_death_watch();
+    }
+
+    let listener = match TcpListener::bind(bind_addr).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+            eprintln!(
+                "standardoc mcp http: {bind_addr} already in use, falling back to an ephemeral port"
+            );
+            TcpListener::bind("127.0.0.1:0").await.map_err(|e| {
+                ServerError::Io(io::Error::other(format!(
+                    "bind 127.0.0.1:0 (ephemeral fallback): {e}"
+                )))
+            })?
+        }
+        Err(e) => {
+            return Err(ServerError::Io(io::Error::other(format!(
+                "bind {bind_addr}: {e}"
+            ))));
+        }
+    };
     let local_addr = listener
         .local_addr()
         .map_err(|e| ServerError::Io(io::Error::other(format!("local_addr: {e}"))))?;
@@ -118,6 +149,38 @@ pub async fn serve_mcp_http(
     axum::serve(listener, router)
         .await
         .map_err(|e| ServerError::Io(io::Error::other(format!("axum serve: {e}"))))
+}
+
+/// Spawns a background tokio task that reads from stdin until EOF, then
+/// exits the process. The supervisor pipes stdin to the child without
+/// ever writing to it, so the only way `read` returns `Ok(0)` is when
+/// the parent end of the pipe is closed — i.e. the parent process is
+/// gone. This is the portable orphan-prevention mechanism: works on
+/// Windows (where there is no `PR_SET_PDEATHSIG`) and on Unix without
+/// requiring job objects / process groups.
+fn spawn_parent_death_watch() {
+    tokio::spawn(async {
+        use tokio::io::AsyncReadExt;
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 64];
+        loop {
+            match stdin.read(&mut buf).await {
+                Ok(0) => {
+                    eprintln!("standardoc mcp http: parent stdin closed, exiting");
+                    std::process::exit(0);
+                }
+                Ok(_) => {
+                    // Unexpected data on the watch channel. The supervisor
+                    // never writes to stdin, but if a future protocol
+                    // appears here we just drain it and keep watching.
+                }
+                Err(e) => {
+                    eprintln!("standardoc mcp http: stdin read error ({e}), exiting");
+                    std::process::exit(0);
+                }
+            }
+        }
+    });
 }
 
 fn write_endpoint_file(
