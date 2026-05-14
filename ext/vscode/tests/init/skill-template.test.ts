@@ -60,7 +60,6 @@ describe('buildSkillContent', () => {
       'mcp__standardoc__session_save',
       'mcp__standardoc__session_list',
       'mcp__standardoc__session_get',
-      'mcp__standardoc__session_dump_md',
     ]) {
       expect(c).toContain(tool);
     }
@@ -81,7 +80,6 @@ describe('buildSkillContent', () => {
     expect(c).toContain('### session_save(');
     expect(c).toContain('### session_list(');
     expect(c).toContain('### session_get(');
-    expect(c).toContain('### session_dump_md(');
   });
 
   test('explains depth=1 cheap vs depth=2 rich semantics', () => {

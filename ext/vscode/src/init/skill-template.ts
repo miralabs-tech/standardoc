@@ -15,7 +15,7 @@ when_to_use: ALWAYS use Standardoc FIRST when exploring or modifying code
   → (3) raw file Read/Grep/Glob. Skip Standardoc only for pure text
   matching (strings, comments, config files unrelated to code symbols)
   or for files at a known path that you just need to read verbatim.
-allowed-tools: mcp__standardoc__find_symbol mcp__standardoc__get_context mcp__standardoc__list_symbols mcp__standardoc__find_symbols_by_pattern mcp__standardoc__find_similar_symbols mcp__standardoc__get_body mcp__standardoc__fetch_chunks mcp__standardoc__resolve_external mcp__standardoc__current_revision mcp__standardoc__check_stale mcp__standardoc__usage_stats mcp__standardoc__session_save mcp__standardoc__session_list mcp__standardoc__session_get mcp__standardoc__session_dump_md
+allowed-tools: mcp__standardoc__find_symbol mcp__standardoc__get_context mcp__standardoc__list_symbols mcp__standardoc__find_symbols_by_pattern mcp__standardoc__find_similar_symbols mcp__standardoc__get_body mcp__standardoc__fetch_chunks mcp__standardoc__resolve_external mcp__standardoc__current_revision mcp__standardoc__check_stale mcp__standardoc__usage_stats mcp__standardoc__session_save mcp__standardoc__session_list mcp__standardoc__session_get
 ---
 
 # Standardoc — Primary Code Navigation
@@ -354,12 +354,6 @@ filters out superseded entries. Returns the full \`body_md\` per row.
 Fetch one memo. Pass \`slug\` to target a specific entry; omit it to
 get the most recent active session — the natural reentry point for a
 new chat. Returns \`null\` when nothing matches.
-
-### session_dump_md(target_path)
-
-Export every session memo (active + superseded) to a single markdown
-file at \`target_path\`. Durable backup against schema migrations or
-accidental DB loss.
 
 ## Recommended workflows
 

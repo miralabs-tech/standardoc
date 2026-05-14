@@ -5,7 +5,6 @@ target-dev/
 *.swp
 *.swo
 .vscode/
-.claude/
 
 # Refacto v1.0.0-beta.1: legacy crates parked here for cherry-pick during the
 # rewrite. Local-only — never committed.
@@ -17,6 +16,10 @@ target-dev/
 # ship there. Pattern is anchored at root (`/`) so the demo `.standardoc/`
 # folders inside `examples/*/` stay tracked.
 /.standardoc/
+/.standardoc-sessions/
+sessions-export/
+.claude/
+.mcp.json
 
 # IDE / editor metadata — left to contributor preference
 .idea/

@@ -167,6 +167,48 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+
+    /// Bridge the workspace sessions DB <-> a directory of `.md` memo
+    /// files. `sync-in` imports every memo under `dir` into the sessions
+    /// DB; the extended frontmatter (status, supersedes, created_at) makes
+    /// the import fidelity-complete. `sync-out` is the inverse: dump every
+    /// row to `<slug>.md` + regenerate `MEMORY.md`. `hook` is the
+    /// claude-code PostToolUse driver that auto-runs `sync-in` whenever a
+    /// `.md` under the harness memory directory is written.
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionAction {
+    /// Bulk import every `.md` memo under `dir` into the workspace sessions
+    /// DB. Frontmatter `type:` drives the `SessionKind` (feedback, user →
+    /// profile, project → lock, reference → profile, other → session);
+    /// `status`, `supersedes`, `created_at` round-trip fidelity-complete.
+    /// `MEMORY.md` is skipped. UPSERT by slug — safe to re-run.
+    SyncIn {
+        /// Workspace root (anchors `.standardoc-sessions/sessions.db`).
+        workspace: PathBuf,
+        /// Source directory of `.md` memo files (e.g. claude-code's
+        /// `~/.claude/projects/<hash>/memory`, or a `sessions-export/`
+        /// dropped from another workspace).
+        dir: PathBuf,
+    },
+    /// Dump every session row in the workspace DB to `<slug>.md` under
+    /// `dir` and (re)write `MEMORY.md` as an index. Inverse of
+    /// `sync-in`. Used for cross-machine portability.
+    SyncOut {
+        workspace: PathBuf,
+        dir: PathBuf,
+    },
+    /// Read a Claude Code PostToolUse hook payload from stdin, detect if a
+    /// `Write`/`Edit` touched a file under the harness memory directory,
+    /// and trigger `sync-in` automatically. Exits with `{"synced": false}`
+    /// on no-op so the hook never blocks the agent. Designed to be wired
+    /// once at workspace init.
+    Hook,
 }
 
 #[derive(Args)]
@@ -282,7 +324,95 @@ fn main_inner() -> Result<(), ServerError> {
             pattern,
             limit,
         } => cmd_stdignore_preview(&path, &pattern, limit),
+        Command::Session { action } => match action {
+            SessionAction::SyncIn { workspace, dir } => cmd_session_sync_in(&workspace, &dir),
+            SessionAction::SyncOut { workspace, dir } => cmd_session_sync_out(&workspace, &dir),
+            SessionAction::Hook => cmd_session_hook(),
+        },
     }
+}
+
+fn cmd_session_sync_in(workspace: &Path, dir: &Path) -> Result<(), ServerError> {
+    let handle = SessionsHandle::open(workspace)?;
+    let report = standardoc_core::sessions::memory_sync::import_memory_dir(&handle, dir)?;
+    println!(
+        "{}",
+        serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
+    );
+    Ok(())
+}
+
+fn cmd_session_sync_out(workspace: &Path, dir: &Path) -> Result<(), ServerError> {
+    let handle = SessionsHandle::open(workspace)?;
+    let report = standardoc_core::sessions::memory_sync::export_memory_dir(&handle, dir)?;
+    println!(
+        "{}",
+        serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
+    );
+    Ok(())
+}
+
+/// Marker substring on the file_path that identifies a Claude harness memory
+/// write. Matches the Linux `~/.claude/projects/<hash>/memory/` and the
+/// Windows `C:\Users\<u>\.claude\projects\<hash>\memory\` layouts after the
+/// path is normalised with forward slashes.
+const MEMORY_PATH_MARKER: &str = "/.claude/projects/";
+const MEMORY_PATH_TAIL: &str = "/memory/";
+
+fn cmd_session_hook() -> Result<(), ServerError> {
+    use std::io::Read;
+    let mut raw = String::new();
+    io::stdin().read_to_string(&mut raw).ok();
+    let payload: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => {
+            // Malformed payload — never block the agent.
+            println!("{{\"synced\":false,\"reason\":\"invalid_json\"}}");
+            return Ok(());
+        }
+    };
+    let tool = payload
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let file_path_raw = payload
+        .get("tool_input")
+        .and_then(|v| v.get("file_path"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let cwd_raw = payload.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+    let file_path = file_path_raw.replace('\\', "/");
+    let cwd = cwd_raw.replace('\\', "/");
+    let touched_memory = matches!(tool, "Write" | "Edit" | "MultiEdit")
+        && file_path.contains(MEMORY_PATH_MARKER)
+        && file_path.contains(MEMORY_PATH_TAIL);
+    if !touched_memory {
+        println!("{{\"synced\":false,\"reason\":\"not_a_memory_write\"}}");
+        return Ok(());
+    }
+    let Some(memory_dir) = memory_dir_from_path(&file_path) else {
+        println!("{{\"synced\":false,\"reason\":\"unparsable_memory_path\"}}");
+        return Ok(());
+    };
+    if cwd.is_empty() {
+        println!("{{\"synced\":false,\"reason\":\"missing_cwd\"}}");
+        return Ok(());
+    }
+    let workspace = PathBuf::from(cwd);
+    let memory_dir = PathBuf::from(memory_dir);
+    let handle = SessionsHandle::open(&workspace)?;
+    let report =
+        standardoc_core::sessions::memory_sync::import_memory_dir(&handle, &memory_dir)?;
+    println!(
+        "{}",
+        serde_json::json!({ "synced": true, "report": report })
+    );
+    Ok(())
+}
+
+fn memory_dir_from_path(file_path: &str) -> Option<String> {
+    let tail_idx = file_path.find(MEMORY_PATH_TAIL)?;
+    Some(file_path[..tail_idx + MEMORY_PATH_TAIL.len() - 1].to_string())
 }
 
 fn cmd_schema_version(path: &Path) -> Result<(), ServerError> {

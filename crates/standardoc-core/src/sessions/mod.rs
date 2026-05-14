@@ -10,10 +10,13 @@ use std::sync::Mutex;
 
 use rusqlite::{Connection, OptionalExtension};
 
-mod markdown;
+pub mod memory_sync;
 mod schema;
 
-pub use markdown::dump_sessions_to_markdown;
+pub use memory_sync::{
+    ExportReport, ImportReport, MemoryEntry, MemorySyncError, export_memory_dir,
+    import_memory_dir, parse_memory_file,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionsError {
@@ -41,6 +44,8 @@ pub struct SessionRow {
     pub body_md: String,
     pub supersedes: Option<String>,
     pub status: SessionStatus,
+    #[serde(default)]
+    pub kind: SessionKind,
     pub created_at: i64,
 }
 
@@ -65,6 +70,56 @@ impl SessionStatus {
             "superseded" => Ok(Self::Superseded),
             other => Err(SessionsError::InvalidStoredData {
                 detail: format!("unknown session status: {other:?}"),
+            }),
+        }
+    }
+}
+
+/// Kind of memo stored in the sessions DB. Lets the memory-sync layer keep
+/// session handoffs, behavioural feedback rules, user-profile facts, and
+/// decision/lock snapshots in one table without colliding semantically.
+/// Defaults to `Session` so existing call sites that don't care about kind
+/// keep their current behaviour.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    #[default]
+    Session,
+    Feedback,
+    Profile,
+    Lock,
+}
+
+impl SessionKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Feedback => "feedback",
+            Self::Profile => "profile",
+            Self::Lock => "lock",
+        }
+    }
+
+    pub fn from_sql(s: &str) -> Result<Self, SessionsError> {
+        match s {
+            "session" => Ok(Self::Session),
+            "feedback" => Ok(Self::Feedback),
+            "profile" => Ok(Self::Profile),
+            "lock" => Ok(Self::Lock),
+            other => Err(SessionsError::InvalidStoredData {
+                detail: format!("unknown session kind: {other:?}"),
             }),
         }
     }
@@ -154,25 +209,39 @@ impl SessionsHandle {
     /// transaction commits — `tx` borrows from it. Splitting into a
     /// sub-scope to drop the guard earlier would force the `Ok(id)` to
     /// duplicate the variable across scopes for no real win.
-    #[allow(clippy::significant_drop_tightening)]
     pub fn save(
         &self,
         slug: &str,
         body_md: &str,
         supersedes: Option<&str>,
     ) -> Result<i64, SessionsError> {
+        self.save_with_kind(slug, body_md, supersedes, SessionKind::Session)
+    }
+
+    /// Same UPSERT semantics as [`save`] but explicit about the row `kind`.
+    /// Used by the memory-sync layer to land `feedback`, `profile`, and `lock`
+    /// memos alongside regular `session` handoffs in one table.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn save_with_kind(
+        &self,
+        slug: &str,
+        body_md: &str,
+        supersedes: Option<&str>,
+        kind: SessionKind,
+    ) -> Result<i64, SessionsError> {
         let mut guard = self.conn.lock().map_err(|_| SessionsError::Poisoned)?;
         let tx = guard.transaction()?;
         let now = current_unix_seconds();
         tx.execute(
-            "INSERT INTO sessions (slug, body_md, supersedes, status, created_at) \
-             VALUES (?1, ?2, ?3, 'active', ?4) \
+            "INSERT INTO sessions (slug, body_md, supersedes, status, kind, created_at) \
+             VALUES (?1, ?2, ?3, 'active', ?4, ?5) \
              ON CONFLICT(slug) DO UPDATE SET \
                 body_md     = excluded.body_md, \
                 supersedes  = excluded.supersedes, \
                 status      = 'active', \
+                kind        = excluded.kind, \
                 created_at  = excluded.created_at",
-            rusqlite::params![slug, body_md, supersedes, now],
+            rusqlite::params![slug, body_md, supersedes, kind.as_str(), now],
         )?;
         let id: i64 = tx.query_row("SELECT id FROM sessions WHERE slug = ?1", [slug], |r| {
             r.get(0)
@@ -187,15 +256,58 @@ impl SessionsHandle {
         Ok(id)
     }
 
+    /// Restore a row verbatim from a serialised source (memory-sync import).
+    /// Unlike [`save_with_kind`], `status` and `created_at` come from the
+    /// caller (frontmatter values), and the previous row referenced by
+    /// `supersedes` is NOT auto-flipped to `superseded` — the source markdown
+    /// is authoritative, so the supersedes chain rebuilds row-by-row as each
+    /// `.md` is imported with its literal status.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn save_full(
+        &self,
+        slug: &str,
+        body_md: &str,
+        supersedes: Option<&str>,
+        kind: SessionKind,
+        status: SessionStatus,
+        created_at: i64,
+    ) -> Result<i64, SessionsError> {
+        let mut guard = self.conn.lock().map_err(|_| SessionsError::Poisoned)?;
+        let tx = guard.transaction()?;
+        tx.execute(
+            "INSERT INTO sessions (slug, body_md, supersedes, status, kind, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(slug) DO UPDATE SET \
+                body_md     = excluded.body_md, \
+                supersedes  = excluded.supersedes, \
+                status      = excluded.status, \
+                kind        = excluded.kind, \
+                created_at  = excluded.created_at",
+            rusqlite::params![
+                slug,
+                body_md,
+                supersedes,
+                status.as_str(),
+                kind.as_str(),
+                created_at
+            ],
+        )?;
+        let id: i64 = tx.query_row("SELECT id FROM sessions WHERE slug = ?1", [slug], |r| {
+            r.get(0)
+        })?;
+        tx.commit()?;
+        Ok(id)
+    }
+
     /// Lists sessions newest first. `active_only` filters `status = 'active'`.
     #[allow(clippy::significant_drop_tightening)]
     pub fn list(&self, active_only: bool) -> Result<Vec<SessionRow>, SessionsError> {
         let guard = self.conn.lock().map_err(|_| SessionsError::Poisoned)?;
         let sql = if active_only {
-            "SELECT id, slug, body_md, supersedes, status, created_at FROM sessions \
+            "SELECT id, slug, body_md, supersedes, status, kind, created_at FROM sessions \
              WHERE status = 'active' ORDER BY created_at DESC, id DESC"
         } else {
-            "SELECT id, slug, body_md, supersedes, status, created_at FROM sessions \
+            "SELECT id, slug, body_md, supersedes, status, kind, created_at FROM sessions \
              ORDER BY created_at DESC, id DESC"
         };
         let mut stmt = guard.prepare(sql)?;
@@ -210,7 +322,7 @@ impl SessionsHandle {
         let guard = self.conn.lock().map_err(|_| SessionsError::Poisoned)?;
         let raw = guard
             .query_row(
-                "SELECT id, slug, body_md, supersedes, status, created_at \
+                "SELECT id, slug, body_md, supersedes, status, kind, created_at \
                  FROM sessions WHERE slug = ?1",
                 [slug],
                 read_row,
@@ -225,7 +337,7 @@ impl SessionsHandle {
         let guard = self.conn.lock().map_err(|_| SessionsError::Poisoned)?;
         let raw = guard
             .query_row(
-                "SELECT id, slug, body_md, supersedes, status, created_at \
+                "SELECT id, slug, body_md, supersedes, status, kind, created_at \
                  FROM sessions WHERE status = 'active' \
                  ORDER BY created_at DESC, id DESC LIMIT 1",
                 [],
@@ -357,7 +469,15 @@ pub struct UsageStatsRow {
     pub ratio: f64,
 }
 
-type RawRow = (i64, String, String, Option<String>, String, i64);
+type RawRow = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    i64,
+);
 
 fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<SessionRow, SessionsError>> {
     let raw: RawRow = (
@@ -367,19 +487,22 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<SessionRow, Sess
         row.get(3)?,
         row.get(4)?,
         row.get(5)?,
+        row.get(6)?,
     );
     Ok(build_session_row(raw))
 }
 
 fn build_session_row(raw: RawRow) -> Result<SessionRow, SessionsError> {
-    let (id, slug, body_md, supersedes, status_text, created_at) = raw;
+    let (id, slug, body_md, supersedes, status_text, kind_text, created_at) = raw;
     let status = SessionStatus::from_sql(&status_text)?;
+    let kind = SessionKind::from_sql(&kind_text)?;
     Ok(SessionRow {
         id,
         slug,
         body_md,
         supersedes,
         status,
+        kind,
         created_at,
     })
 }

@@ -27,7 +27,6 @@ pub use rag::{
 };
 pub use sessions::{
     SessionRow, SessionStatus, SessionsError, SessionsHandle, UsagePeriod, UsageStatsRow,
-    dump_sessions_to_markdown,
 };
 pub use storage::error::StorageError;
 pub use storage::handle::IndexHandle;

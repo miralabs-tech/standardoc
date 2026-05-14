@@ -17,8 +17,9 @@ use serde::{Deserialize, Serialize};
 use standardoc_core::{
     IndexHandle, LanguageProvider, RagWatcherHandle, ResolveOutcome, ResolverRegistry,
     RevisionRelinkHandle, ScanFilters,
-    SessionsHandle, UsagePeriod, WatcherHandle, dump_sessions_to_markdown,
+    SessionsHandle, UsagePeriod, WatcherHandle,
     query::{self, SymbolFilter},
+    sessions::memory_sync::{export_memory_dir, import_memory_dir},
 };
 use standardoc_ir::SourceOrigin;
 use standardoc_ir::{Kind, RawSymbol, Visibility};
@@ -714,26 +715,63 @@ impl StandardocMcp {
         }
     }
 
-    /// Dump every session row (active + superseded) into a single markdown
-    /// file at `target_path`. Use as a periodic backup or before risky DB ops.
-    /// Returns the count of rows written.
+    /// Bulk-import every `.md` file under `dir` into the sessions DB,
+    /// dispatching `kind` from each file's `type:` frontmatter
+    /// (`feedback` → Feedback, `user`/`reference` → Profile, `project`
+    /// → Lock, other → Session). `MEMORY.md` is skipped — the index is
+    /// regenerated on export. UPSERT by slug means re-running is safe.
+    /// The full row state (`supersedes`, `status`, `created_at`) round-trips
+    /// fidelity-complete when the source `.md` carries the extended
+    /// frontmatter written by `session_sync_out`.
     #[tool(
-        description = "Export all session memos to a single markdown file at `target_path`. Format mirrors what a future `session_import` would consume — durable backup against schema migrations / accidental DB loss. Returns the number of rows written."
+        description = "Bulk import every .md memo under `dir` into .standardoc-sessions/sessions.db. Frontmatter drives `kind` (feedback/profile/lock/session), `status`, `supersedes`, and `created_at`. MEMORY.md is skipped. UPSERT by slug — idempotent."
     )]
-    async fn session_dump_md(
+    async fn session_sync_in(
         &self,
-        Parameters(params): Parameters<SessionDumpMdParams>,
+        Parameters(params): Parameters<SessionSyncInParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let workspace = self.handle.workspace_root().to_path_buf();
-        let target = std::path::PathBuf::from(params.target_path);
-        let count = tokio::task::spawn_blocking(move || {
+        let dir = std::path::PathBuf::from(params.dir);
+        let report = tokio::task::spawn_blocking(move || {
             let h = SessionsHandle::open(&workspace).map_err(SessionsErr::from)?;
-            dump_sessions_to_markdown(&h, &target).map_err(SessionsErr::from)
+            import_memory_dir(&h, &dir).map_err(|e| {
+                SessionsErr::from(standardoc_core::SessionsError::InvalidStoredData {
+                    detail: format!("session_sync_in: {e}"),
+                })
+            })
         })
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(sessions_err_to_rmcp)?;
-        Ok(success_json(&serde_json::json!({ "count": count })))
+        Ok(success_json(&serde_json::to_value(report).unwrap_or_default()))
+    }
+
+    /// Dump every session row to `<slug>.md` files under `dir` and rewrite
+    /// `MEMORY.md` as a one-line-per-memo index. Designed for cross-machine
+    /// portability: dump on PC1, sync the directory, reimport on PC2.
+    /// The extended frontmatter (`status`, `supersedes`, `created_at`) makes
+    /// the dump losslessly re-importable via `session_sync_in`.
+    #[tool(
+        description = "Bulk export every session memo to `<slug>.md` under `dir` and (re)write MEMORY.md as an index. Inverse of `session_sync_in`. Used for cross-machine portability."
+    )]
+    async fn session_sync_out(
+        &self,
+        Parameters(params): Parameters<SessionSyncOutParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let workspace = self.handle.workspace_root().to_path_buf();
+        let dir = std::path::PathBuf::from(params.dir);
+        let report = tokio::task::spawn_blocking(move || {
+            let h = SessionsHandle::open(&workspace).map_err(SessionsErr::from)?;
+            export_memory_dir(&h, &dir).map_err(|e| {
+                SessionsErr::from(standardoc_core::SessionsError::InvalidStoredData {
+                    detail: format!("session_sync_out: {e}"),
+                })
+            })
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(sessions_err_to_rmcp)?;
+        Ok(success_json(&serde_json::to_value(report).unwrap_or_default()))
     }
 
     /// Lazy on-demand resolution of an external FQDN (Cargo crate, npm
@@ -1235,11 +1273,22 @@ pub(crate) struct SessionGetParams {
     pub slug: Option<String>,
 }
 
-/// Tool input — `session_dump_md(target_path)`. Exports every session to a
-/// markdown file at the given absolute path.
+/// Tool input — `session_sync_in(dir)`. Walks the given directory of
+/// session-memo `.md` files, classifies each by its frontmatter `type:`,
+/// and UPSERTs the full row state (status, supersedes, created_at) into
+/// the sessions table.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct SessionDumpMdParams {
-    pub target_path: String,
+pub(crate) struct SessionSyncInParams {
+    pub dir: String,
+}
+
+/// Tool input — `session_sync_out(dir)`. Dumps every session row to
+/// `<slug>.md` under `dir` with extended frontmatter (status, supersedes,
+/// created_at) and regenerates `MEMORY.md` as an index. Inverse of
+/// `session_sync_in`. Used to migrate sessions across machines.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct SessionSyncOutParams {
+    pub dir: String,
 }
 
 /// Tool output for `current_revision`. The legacy `revision` field is kept

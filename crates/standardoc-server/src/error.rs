@@ -1,4 +1,5 @@
-use standardoc_core::{ColdStartError, StorageError, WatcherError};
+use standardoc_core::{ColdStartError, SessionsError, StorageError, WatcherError};
+use standardoc_core::sessions::memory_sync::MemorySyncError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -14,4 +15,10 @@ pub enum ServerError {
 
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("sessions: {0}")]
+    Sessions(#[from] SessionsError),
+
+    #[error("memory sync: {0}")]
+    MemorySync(#[from] MemorySyncError),
 }
