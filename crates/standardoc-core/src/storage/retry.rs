@@ -87,6 +87,13 @@ fn is_transient_message(msg: &str) -> bool {
     lowered.contains("locking protocol")
         || lowered.contains("database is locked")
         || lowered.contains("database is busy")
+        // Bare r2d2 timeout — happens when the underlying connection
+        // creation never completed within `POOL_CONNECTION_TIMEOUT`.
+        // On Windows CI this can fire even on a fresh tempdir because
+        // the antivirus scan delays the first SQLite open. Treating it
+        // as transient lets the next backoff attempt try again after
+        // the scan settles instead of failing the whole open.
+        || lowered.contains("timed out waiting for connection")
 }
 
 #[cfg(test)]
@@ -161,5 +168,19 @@ mod tests {
         assert!(is_transient_message("database is busy"));
         assert!(!is_transient_message("schema mismatch"));
         assert!(!is_transient_message("disk full"));
+    }
+
+    #[test]
+    fn is_transient_message_matches_bare_r2d2_timeout() {
+        // r2d2 surfaces a plain "timed out waiting for connection" with
+        // no chained source when the underlying connection-creation
+        // task never completed within `connection_timeout`. This is the
+        // observed shape on Windows CI when Defender holds back the
+        // first SQLite open of a freshly-spawned process. We classify
+        // it as transient so the outer backoff gets another attempt.
+        assert!(is_transient_message("timed out waiting for connection"));
+        assert!(is_transient_message(
+            "connection pool error: timed out waiting for connection"
+        ));
     }
 }

@@ -26,16 +26,15 @@ PRAGMA busy_timeout = 5000;
 ";
 
 const POOL_MAX_SIZE: u32 = 8;
-/// Override r2d2's 30 s default. When the pool tries to create a fresh
-/// connection and the underlying SQLite open fails (e.g. `locking
-/// protocol` on a fast restart while the prior process is still releasing
-/// WAL handles), we want that failure to surface to the outer
-/// [`retry_with_backoff`] quickly so the next attempt can fire — not be
-/// swallowed by a 30 s pool wait. 2 s is comfortably above the worst
-/// observed cold-pool init on slow disks (sub-100 ms in practice) and
-/// well under the [`BACKOFF_SCHEDULE_MS`] cumulative window, so a real
-/// transient race clears within a couple of attempts.
-const POOL_CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
+/// Override r2d2's 30 s default to bound each `pool.get()` attempt so the
+/// outer [`retry_with_backoff`] can cycle more than once within a
+/// reasonable test runner window when a sibling process is still
+/// releasing WAL handles. 10 s is comfortably above the worst observed
+/// cold-pool init on slow Windows CI runners (Defender real-time scan
+/// of the freshly-spawned `standardoc.exe` plus the new SQLite WAL/SHM
+/// files can push the happy path to a few seconds) while keeping the
+/// 6-attempt retry ceiling at ~60 s instead of 180 s.
+const POOL_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITER_CHANNEL_CAPACITY: usize = 64;
 
 /// Field order is load-bearing: `sender` MUST be dropped before `inner` so
