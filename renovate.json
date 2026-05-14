@@ -1,15 +1,19 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
+  "baseBranches": ["dev"],
   "schedule": ["before 6am on monday"],
   "timezone": "Europe/Paris",
   "prHourlyLimit": 2,
   "prConcurrentLimit": 5,
   "rangeStrategy": "bump",
   "dependencyDashboard": true,
+  "dependencyDashboardLabels": ["dependencies"],
+  "labels": ["dependencies"],
   "ignorePaths": [
     ".old/**",
-    "ext/vscode/dist/**"
+    "ext/vscode/dist/**",
+    "ext/vscode/node_modules/**"
   ],
   "packageRules": [
     {
