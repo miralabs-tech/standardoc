@@ -255,6 +255,61 @@ or npm packages — those land in beta.3.
 - [x] `.gitignore` covers `.standardoc-sessions/`, `sessions-export/`, `.claude/`, `.mcp.json`, `ext/vscode/.standardoc/`
 - [x] README + SECURITY.md + SUPPORT.md refreshed (AST + install details, supported versions, links audit)
 
+### Remaining work
+
+- [ ] **Decouple `standardoc` binary from the VSCode extension VSIX**
+  - New ext versions ship WITHOUT a bundled `standardoc.exe`. On ext
+    upgrade, if a binary already exists from the prior ext version,
+    the supervisor's compat check flags it as "no longer compatible
+    with this extension version" and routes users through the
+    download prompt.
+  - On first activation with no binary OR on a stale binary detected:
+    surface a modal "Download standardoc binary for `<platform>`?"
+    with OK / Skip.
+  - On OK: resolve the matching artefact via the `version.json`
+    manifest at `releases/latest/download/version.json`, download,
+    SHA256-verify, write into the extension install dir's
+    `bin/<platform>/standardoc[.exe]`. Update `binary-resolver.ts`
+    to look in the new location.
+  - Compat check leverages the `protocol_version` field exposed by
+    `standardoc --version` (already part of the version.json contract).
+  - Skip path: ext stays inert (no daemon spawn), surface a status-bar
+    affordance to re-trigger the download later.
+  - Net effect: VSIX size drops by tens of MB; binary updates ride
+    independently of the ext release cadence; aligns with the beta.3
+    `self-update` plumbing (same `version.json` consumption path).
+
+- [ ] **Repo root audit + reorg into `.important/`**
+  - Move long-form docs into a top-level `.important/` directory
+    (intentionally eye-catching in the GitHub file listing so
+    newcomers notice it from the README hub).
+  - Files moving: `ABOUT(.fr).md`, `QUICKSTART(.fr).md`, `FAQ(.fr).md`,
+    `COMPARISON(.fr).md`, `SUPPORT(.fr).md`, `TODO-LIST.md`.
+  - Keep at root only what GitHub surfaces by convention:
+    `README.md`, `LICENSE`, `SECURITY.md`, `CHANGELOG.md`
+    (+ `CONTRIBUTING.md` if/when added).
+  - `README.md` gets a "Navigate" section linking to each moved doc
+    (en + fr pair per line), so the click-through path is one hop.
+  - Update inbound link references everywhere: README cross-refs,
+    `SUPPORT.md` links, ext `package.json` documentation URL,
+    release-note links, in-repo file mentions.
+  - Refresh content while moving — anything stale or pre-beta.1
+    framing gets a pass.
+
+- [ ] **Fix `renovate.json`** — currently non-functional, diagnose
+  from scratch
+  - Confirm the Renovate GitHub App is installed on
+    `miralabs-tech/standardoc` (Settings → Apps).
+  - Validate the existing `renovate.json` config via
+    `npx --package renovate -c renovate-config-validator`.
+  - Reconfigure to target `dev` (not `main` — `main` is
+    branch-protected and Renovate PRs against it would be rejected):
+    set `"baseBranches": ["dev"]`.
+  - Trigger a hosted-app dry-run via the dependency-dashboard issue;
+    inspect log for the actual reason past runs produced nothing.
+  - Verify by waiting for the next scheduled run to produce a PR
+    against `dev`.
+
 ### Release ops (pending)
 
 - [ ] `CHANGELOG.md` entry for v1.0.0-beta.2 summarising the above
