@@ -143,7 +143,131 @@ once user feedback validates the foundation.
 
 ---
 
-## v1.0.0-beta.2 — Documentation rendering layer + CLI self-management
+## v1.0.0-beta.2 — Hardening + MCP surface refinement
+
+**Theme**: prove the foundation under real agent workloads. The 2-tool day-1
+MCP surface of beta.1 grows into a 16-tool agent toolkit; HTTP/SSE transport
+lands; a RAG retrieval layer indexes prose alongside the symbol graph; a
+session handoff DB lets multi-turn agent work survive across chats; lang
+coverage triples (Lua, Vue, Svelte added; Rust + TS hardened); daemon
+resilience handles real-world process orchestration. No new public crates
+or npm packages — those land in beta.3.
+
+### Shipped
+
+#### Core data layer
+- [x] Schema v6: persisted workspace revision, secondary R/W handle, edge confidence column
+- [x] `usage_stats` table (schema v2) + `log_usage` query API
+- [x] Compact display rendering for type / attribute strings (Rust `to_token_stream`-derived plus generic neutralizer)
+
+#### MCP tool surface — expansion from 2 to 16 tools
+- [x] **Symbol discovery** — `find_symbol` (FTS5 + did_you_mean fallback), `find_symbols_by_pattern` (GLOB), `find_similar_symbols` (strsim), `list_symbols` (filter-only)
+- [x] **Context** — `get_context` with `routing_hint` nudging the 3-phase `find → context → body` protocol, depth=1|2 semantics
+- [x] **Body** — `get_body` with `max_lines`, `strip_attrs`, `signature_only` knobs and compact common-prefix-dedent + tab-indent output
+- [x] **RAG** — `fetch_chunks`, `resolve_external` for cross-language external lookups
+- [x] **Telemetry** — `usage_stats` tool (per-tool counters), read-handler logging hook
+- [x] **Capabilities & freshness** — `current_revision` exposes `{rag.enabled, rag.embedder, watcher.active, indexing.ready}`; `check_stale` for cached-fqdn invalidation
+- [x] **Sessions** — `session_save`, `session_list`, `session_get`, `session_sync_in`, `session_sync_out`
+- [x] FTS5 query sanitization (handles snake_case, camelCase, partial tokens, did_you_mean strsim fallback at threshold 0.6)
+- [x] OOP-style FQDN normalisation at MCP boundary (`Class.method` → `Class::method`)
+
+#### HTTP/SSE MCP transport
+- [x] Streamable-http transport (multi-client, decoupled from stdio child-spawn)
+- [x] `standardoc mcp --http <port>` CLI flag; `--http 0` lets kernel pick ephemeral port
+- [x] Endpoint URL written to `.standardoc/mcp.endpoint` for client discovery
+- [x] Port auto-fallback on `EADDRINUSE` (no fatal marker, warning log only)
+- [x] Parent death-watch via stdin EOF (TTY-guarded) — eliminates orphan workspace locks on supervisor crash
+- [x] Boot binary sweep (detects orphan `standardoc.exe` processes from prior runs)
+- [x] Boot lockfile invalidation sweep (recovers from stale fs4 locks)
+- [x] `STDOC_FATAL: <code> <key>=<value>` marker protocol for supervisor-side fatal-config recognition
+
+#### RAG (prose retrieval) layer
+- [x] `standardoc-rag` crate scaffold (chunker, embedder, store, linker, score)
+- [x] Convention-prose discovery (`docs/`, `notes/`, root `README.md` / `ABOUT.md` / `*.md` at sub-package roots)
+- [x] Chunk store with BLAKE3 invalidation, embedder-agnostic interface
+- [x] BGE-small-en-v1.5 embedder via Candle (lazy on-disk model, ~130 MB, `STDOC_RAG_DL_*` progress markers)
+- [x] Mock embedder for deterministic tests
+- [x] Stop-list (extended common verbs) + chunk-ref confidence floor
+- [x] Re-link chunks on graph-symbol changes (`relink_watcher`)
+- [x] LSP daemon drives RAG cold-start + watcher (single-writer model)
+- [x] Cold-start waits for first AST revision bump before initial relink
+- [x] Readonly MCP daemon no longer races LSP on RAG writes
+- [x] Windows `rag.db` unlink retry on `EBUSY` / `EPERM`
+
+#### Session handoff DB
+- [x] `.standardoc-sessions/sessions.db` — distinct from `.standardoc/` so workspace resets don't kill operator memos
+- [x] `SessionKind` discriminator (`session`, `feedback`, `profile`, `lock`); kind-aware import from frontmatter `type:`
+- [x] `SessionsHandle::open` retry on transient SQLite busy
+- [x] Bidirectional sync with `.md` memo dir: `session_sync_in` / `session_sync_out`, fidelity-complete frontmatter (`status`, `supersedes`, `created_at`)
+- [x] `standardoc session {sync-in,sync-out,hook}` CLI; `hook` is the PostToolUse auto-import driver
+
+#### MCP-first guardrail
+- [x] `standardoc claude pre-tool-hook --mode {mark,check,reset}` CLI driver
+- [x] PreToolUse hook denies `Bash|Read|Grep|Glob` until a standardoc MCP tool has been called
+- [x] SessionStart hook wipes the sentinel so each new chat starts strict
+- [x] Cross-OS via binary in PATH (no shell-script adaptation, no OS detection needed in TS layer)
+
+#### Externals (cargo / npm / luarocks)
+- [x] Lazy on-demand external resolvers — no pre-walk of vendored deps at index time
+- [x] Walk-down manifest discovery (`Cargo.toml`, `package.json`, `*.rockspec`)
+- [x] `resolve_external` MCP tool surfaces resolved metadata to agents
+- [x] E2E integration test surface
+
+#### Usage stats / token savings
+- [x] Per-tool read-handler logging into `usage_stats` table
+- [x] `usage_stats` MCP query tool
+- [x] `standardoc reset-usage --period {today|day|week|all}` CLI for baseline measurement runs
+- [x] VSCode token-savings command + status bar reporting
+- [x] Skill template generation surfaces the savings angle
+
+#### Language providers
+- [x] **Lua native provider** (`full_moon`): functions, locals, module tables (`M = {}`), `require` imports, call edges, emmylua annotation extraction
+- [x] **Vue SFC** (`.vue`): extract `<script>` / `<script setup lang="ts">` → `TsProvider`; `<template>` ref edges with attributes (component name, prop bindings, slot kind)
+- [x] **Svelte components** (`.svelte`): script-extract pipeline, template ref attributes
+- [x] **Rust hardening**: `pub use` phantoms (re-export visibility chain), impl skip on non-nominal types, `module_path` made crate-relative
+- [x] **TS visit + SFC unification**: consistent FQDN scheme across `.ts` / `.tsx` / `.vue` / `.svelte`
+- [x] Shared `utils` module across providers (FQDN helpers, common walk primitives)
+- [x] Edge `attributes` field — structured metadata for template refs
+
+#### Pipeline & storage hardening
+- [x] `IndexHandle::open` retry with exponential backoff on transient lock errors (`SQLITE_PROTOCOL`, `database is locked`, `database is busy`, bare r2d2 timeout)
+- [x] r2d2 connection pool: lazy init (`min_idle = 0`), 10 s timeout, retry helper cycles fast
+- [x] Cleanup pass for unseen files (maintains XOR CHECK constraint after `.stdignore` edits)
+
+#### VSCode extension
+- [x] Supervised LSP + MCP HTTP daemons (parallel spawn, `Promise.allSettled` rollback, backoff state machine)
+- [x] Init opt-in flow (4-button notification, per-workspace + global memento, re-prompts on `.standardoc/` deletion)
+- [x] AI agent skill generation (`.claude/skills/standardoc/SKILL.md`) with language coverage table and edge-attributes documentation
+- [x] MCP server provider for Copilot Chat / Claude Code; `.mcp.json` cross-client merge (5 actions discriminated, preserves user fields)
+- [x] `.mcp.json` rewritten to the daemon's actual URL on every `ready` transition (covers ephemeral port fallback)
+- [x] `.stdignore` language contribution + gitignore-style hover preview
+- [x] RAG commands palette + settings + status bar + endpoint race fix + DL progress markers
+- [x] Daemon restart serialised; RAG settings watcher debounced
+- [x] Fatal error handling parses `STDOC_FATAL` markers (no regex on prose error messages)
+- [x] Token savings command + status bar item
+
+#### Infra
+- [x] CI hardening: `cargo fmt --all` workspace cleanup, broken intra-doc-link fixes, `clippy::format_push_string` / `match_same_arms` fixes
+- [x] CI switched from `actions-rust-lang/setup-rust-toolchain` to `dtolnay/rust-toolchain` (macos-latest reliability)
+- [x] Code-scanning workflow permission tightening (5 auto-fix PRs merged)
+- [x] `release.yml` simplified (crates.io publish steps removed)
+- [x] Cargo `package.publisher` field fix
+- [x] `.gitignore` covers `.standardoc-sessions/`, `sessions-export/`, `.claude/`, `.mcp.json`, `ext/vscode/.standardoc/`
+- [x] README + SECURITY.md + SUPPORT.md refreshed (AST + install details, supported versions, links audit)
+
+### Release ops (pending)
+
+- [ ] `CHANGELOG.md` entry for v1.0.0-beta.2 summarising the above
+- [ ] Bump `Cargo.toml` workspace `version` → `1.0.0-beta.2`; sync member version refs in `[workspace.dependencies]`
+- [ ] Bump `ext/vscode/package.json` `version` per cadence policy
+- [ ] Tag push `v1.0.0-beta.2` → `release.yml` triggers (cross-platform binaries + `version.json` + GitHub Release)
+- [ ] Workflow_dispatch `release-ext.yml` (`version=<ext-version>`, `pre_release=true`)
+- [ ] Smoke F5 full E2E re-test post init opt-in flow + MCP-first hooks + skill gen
+- [ ] Public roadmap announcement (link this file from README + GitHub Discussions)
+
+---
+
+## v1.0.0-beta.3 — Documentation rendering layer + CLI self-management
 
 **Theme**: ship the doc-rendering replacement for the killed v0 DSL, and make `standardoc` self-sufficient for users outside VSCode.
 
@@ -169,15 +293,9 @@ source code → @doc parser → doc graph (SQLite) → framework-agnostic query 
 - [ ] `<Signature id="…" />` — code-fence signature
 - [ ] Drop-in adapters for Next.js, Nextra, Astro, Docusaurus
 
-**Future renderers** (post-beta.2, same graph, different packages):
+**Future renderers** (post-beta.3, same graph, different packages):
 - [ ] `@standardoc/vue` — same components for Vue / VitePress / Nuxt
 - [ ] `@standardoc/svelte` — for SvelteKit, plain Svelte
-
-### Language providers
-
-- [ ] **Lua native provider** (`full_moon` crate — pure-Rust Lua 5.x parser): functions, local functions, module tables (`M = {}`), `require` imports, call edges. Covers `.lua` files. Distinct from the UST+Lua post-1.0 plugin system — this is a first-class core provider like `RustProvider` / `TsProvider`.
-- [ ] **Vue single-file components** (`.vue`): extract `<script>` / `<script setup lang="ts">` block → feed to existing `TsProvider`. No new provider crate; pre-processing step in the TS walk.
-- [ ] **Svelte components** (`.svelte`): same approach — extract `<script>` block → `TsProvider`. Handle both `lang="ts"` and plain JS.
 
 ### CLI self-management (`standardoc` without VSCode)
 
@@ -205,7 +323,7 @@ the surface.
 
 ## Post-1.0 ideas (no commitment)
 
-- [ ] Additional language providers (Go, Java, Swift, C#, Kotlin, Zig) — Lua, Vue, Svelte ship in beta.2
+- [ ] Additional language providers (Go, Java, Swift, C#, Kotlin, Zig) — Lua, Vue, Svelte shipped in beta.2
 - [ ] Custom LSP methods for Standardoc-specific queries
 - [ ] Webview Preact rendering for richer in-VSCode display
 - [ ] Optional GitBook-style local doc UI (if demand emerges; lifetime license, see [SUPPORT.md](SUPPORT.md))
@@ -241,10 +359,10 @@ source code
 
 ## Deferred / killed
 
-- [x] ~~v0 DSL templating (`{{ @doc.X }}` markdown expressions)~~ — killed in favour of MDX/React layer (see beta.2)
+- [x] ~~v0 DSL templating (`{{ @doc.X }}` markdown expressions)~~ — killed in favour of MDX/React layer (see beta.3)
 - [x] ~~`materialize` command~~ (write virtual annotations back to source) — punted; may return as opt-in once virtual annotations land
 - [x] ~~`standardoc-server` separate binary~~ — consolidated into `standardoc` sub-commands
-- [x] ~~Lua / Python / tree-sitter providers in beta.1~~ — Lua native provider ships beta.2 (`full_moon`); Python + tree-sitter deferred post-1.0
+- [x] ~~Lua / Python / tree-sitter providers in beta.1~~ — Lua native provider shipped in beta.2 (`full_moon`); Python + tree-sitter deferred post-1.0
 - [x] ~~`.standardoc.json` config file~~ — replaced by `.stdignore` + `schema_meta` SQLite table
 - [x] ~~`.stdocignore`~~ — renamed to `.stdignore`
 - [x] ~~`cargo install standardoc-cli` as sole distribution channel~~ — beta.1 ships pre-built cross-platform binaries via GitHub Releases (`release.yml`); `cargo install --git` available for source builds
