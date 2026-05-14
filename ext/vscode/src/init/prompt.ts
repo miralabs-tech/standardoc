@@ -270,6 +270,55 @@ export async function regenerateSkill(deps: InitDeps): Promise<void> {
   await writeSkillFile(deps, { mode: 'force' });
 }
 
+/**
+ * Sync `.mcp.json` to point at the daemon's ACTUAL endpoint URL.
+ *
+ * The supervisor calls this after the MCP daemon transitions to `ready`,
+ * so external consumers (claude-code CLI, Copilot Chat, ...) always
+ * connect to the live port — even when the daemon fell back to an
+ * ephemeral port because the user's configured port was already bound
+ * by another VSCode window.
+ *
+ * Behaviour is intentionally quieter than the init-time write: no toast
+ * on success, only a log line. The merge layer remains idempotent — a
+ * matching `.mcp.json` short-circuits to `no-op`.
+ */
+export async function syncMcpConfigToUrl(
+  workspaceRoot: string,
+  output: vscode.OutputChannel,
+  endpointUrl: string,
+): Promise<void> {
+  const expected = buildStandardocEntry({ endpointUrl });
+  const target = path.join(workspaceRoot, MCP_CONFIG_FILE);
+  const raw = readFileOrNull(target);
+  const parsed = parseMcpConfig(raw);
+  const action = mergeMcpConfig(parsed, expected);
+
+  switch (action.kind) {
+    case 'no-op':
+      return;
+    case 'invalid':
+      output.appendLine(
+        `[mcp-sync] .mcp.json invalid (${action.error}); leaving as-is`,
+      );
+      return;
+    case 'create':
+    case 'add-first':
+    case 'overwrite-stale': {
+      try {
+        fs.writeFileSync(target, serializeMcpConfig(action.result), 'utf8');
+      } catch (e) {
+        output.appendLine(
+          `[mcp-sync] failed to write .mcp.json: ${describeError(e)}`,
+        );
+        return;
+      }
+      output.appendLine(`[mcp-sync] .mcp.json updated to ${endpointUrl}`);
+      return;
+    }
+  }
+}
+
 function readFileOrNull(p: string): string | null {
   try {
     return fs.readFileSync(p, 'utf8');

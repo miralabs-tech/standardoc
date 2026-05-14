@@ -7,7 +7,7 @@ import { McpClient } from './mcp/client';
 import { StandardocMcpServerProvider } from './mcp/serverDefinitionProvider';
 import { StatusBarController } from './statusBar';
 import { registerCommands } from './commands';
-import { maybePromptForInit } from './init/prompt';
+import { maybePromptForInit, syncMcpConfigToUrl } from './init/prompt';
 import { registerStdignoreHover } from './stdignore/hover';
 
 const MCP_PROVIDER_ID = 'standardoc.mcp';
@@ -81,6 +81,17 @@ export function activate(context: vscode.ExtensionContext): void {
         void notifyFatalConfig(supervisor, output, state);
       } else if (state.kind === 'failed') {
         void notifyFailed(supervisor, output, state);
+      } else if (state.kind === 'ready') {
+        // Sync `.mcp.json` to the daemon's actual endpoint. When the
+        // configured port is already bound (e.g. a sibling VSCode window
+        // running standardoc), the daemon falls back to an ephemeral
+        // port and writes the real URL to `.standardoc/mcp.endpoint` —
+        // external consumers (claude-code CLI, Copilot Chat, ...) must
+        // see that URL in `.mcp.json` or they'd hit the dead/wrong port.
+        const actualUrl = mcp.url();
+        if (actualUrl !== null) {
+          void syncMcpConfigToUrl(workspaceRoot, output, actualUrl);
+        }
       }
     }),
   );
