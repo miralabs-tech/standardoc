@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { resolveBinary } from './binary';
+import { BinaryNotFoundError, resolveBinary } from './binary';
 import { describeFatalConfig, type FatalConfig } from './fatal-marker';
 import { defaultExec, preflightSchemaVersion, type ExecFn } from './preflight';
 import {
@@ -59,7 +59,23 @@ export class DaemonSupervisor implements vscode.Disposable {
     this.cancelBackoff();
     this.setState({ kind: 'starting' });
     try {
-      const binary = await resolveBinary(this.context);
+      let binary;
+      try {
+        binary = await resolveBinary(this.context);
+      } catch (e) {
+        if (e instanceof BinaryNotFoundError) {
+          this.log(`binary not found — entering awaiting_binary`);
+          // No backoff/retry here: the missing binary won't appear by
+          // itself. The installer command (triggered by toast or status
+          // bar) is the only way out, and it re-calls spawn() on success.
+          this.cancelBackoff();
+          this.cancelResetCounter();
+          this.crashTimestamps = [];
+          this.setState({ kind: 'awaiting_binary' });
+          return;
+        }
+        throw e;
+      }
       this.log(`resolved binary (source=${binary.source}, path=${binary.path})`);
       const exec = this.deps.preflightExec ?? defaultExec;
       const preflight = await preflightSchemaVersion(binary.path, this.workspaceRoot, exec);
@@ -192,10 +208,11 @@ export class DaemonSupervisor implements vscode.Disposable {
 
   private handleCrash(reason: string): void {
     // If we already learned the failure is a fatal-config one (via
-    // STDOC_FATAL on stderr), keep that state — `failed` / `restarting`
-    // would mask the actionable hint and re-arm the retry machinery.
-    if (this.state.kind === 'fatal_config') {
-      this.log(`ignoring crash signal (${reason}) — already in fatal_config`);
+    // STDOC_FATAL on stderr) or that the binary is missing, keep that
+    // state — `failed` / `restarting` would mask the actionable hint
+    // and re-arm the retry machinery against an unfixable condition.
+    if (this.state.kind === 'fatal_config' || this.state.kind === 'awaiting_binary') {
+      this.log(`ignoring crash signal (${reason}) — already in ${this.state.kind}`);
       return;
     }
 

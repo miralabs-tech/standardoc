@@ -81,6 +81,8 @@ export function activate(context: vscode.ExtensionContext): void {
         void notifyFatalConfig(supervisor, output, state);
       } else if (state.kind === 'failed') {
         void notifyFailed(supervisor, output, state);
+      } else if (state.kind === 'awaiting_binary') {
+        void notifyAwaitingBinary(output);
       } else if (state.kind === 'ready') {
         // Sync `.mcp.json` to the daemon's actual endpoint. When the
         // configured port is already bound (e.g. a sibling VSCode window
@@ -191,6 +193,24 @@ async function notifyFailed(
   } else if (choice === 'Show logs') {
     output.show(true);
   }
+}
+
+async function notifyAwaitingBinary(output: vscode.OutputChannel): Promise<void> {
+  const choice = await vscode.window.showInformationMessage(
+    'Standardoc needs to download the native binary for this platform.',
+    { modal: false },
+    'Download',
+    'Later',
+    'Show logs',
+  );
+  if (choice === 'Download') {
+    await vscode.commands.executeCommand('Standardoc.downloadBinary');
+  } else if (choice === 'Show logs') {
+    output.show(true);
+  }
+  // 'Later' / dismiss: the status bar keeps a one-click affordance,
+  // so we do not pester the user again until the state transitions
+  // back into `awaiting_binary` (e.g. after a manual restart).
 }
 
 export function deactivate(): void {

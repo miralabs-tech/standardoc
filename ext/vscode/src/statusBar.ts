@@ -34,6 +34,10 @@ const renderStatus = matcher<DaemonState, StatusRender>()
     text: '$(warning) Standardoc',
     tooltip: `Standardoc daemon halted — ${describeFatalConfig(config)}`,
   }))
+  .with({ kind: 'awaiting_binary' }, () => ({
+    text: '$(cloud-download) Standardoc',
+    tooltip: 'Standardoc binary not installed — click to download',
+  }))
   .exhaustive();
 
 export class StatusBarController implements vscode.Disposable {
@@ -52,6 +56,11 @@ export class StatusBarController implements vscode.Disposable {
     this.item.tooltip = rag?.enabled
       ? `${r.tooltip}\nRAG enabled (embedder: ${rag.embedder})`
       : r.tooltip;
+    // One-click affordance when the binary is missing — bypass the
+    // menu and route straight to the installer. Every other state
+    // keeps the regular menu entrypoint.
+    this.item.command =
+      state.kind === 'awaiting_binary' ? 'Standardoc.downloadBinary' : 'Standardoc.statusBarMenu';
   }
 
   dispose(): void {

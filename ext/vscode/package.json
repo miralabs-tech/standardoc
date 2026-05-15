@@ -120,6 +120,11 @@
         "command": "Standardoc.resetTokenSavings",
         "title": "Reset token savings…",
         "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.downloadBinary",
+        "title": "Download binary",
+        "category": "Standardoc"
       }
     ],
     "configuration": {
@@ -129,7 +134,7 @@
           "type": "string",
           "default": "",
           "scope": "machine-overridable",
-          "description": "Absolute path to a custom `standardoc` binary. When set, overrides the bundled binary in `dist/bin/`."
+          "description": "Absolute path to a custom `standardoc` binary. When set, overrides the auto-downloaded binary in the extension's global storage — useful for local development (`target/debug/standardoc`) or for pinning a pre-release."
         },
         "standardoc.mcpHttpPort": {
           "type": "integer",

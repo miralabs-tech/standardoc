@@ -20,6 +20,7 @@ import {
   writeMcpConfig,
 } from './init/prompt';
 import { resolveBinary } from './daemon/binary';
+import { installBinary, InstallError, UnsupportedPlatformError } from './daemon/binary-installer';
 import {
   readRagSettings,
   writeRagEmbedder,
@@ -79,6 +80,7 @@ export function registerCommands(context: vscode.ExtensionContext, ctx: CommandC
     vscode.commands.registerCommand('Standardoc.daemon.start', () => commandDaemonStart(ctx)),
     vscode.commands.registerCommand('Standardoc.purgeExcluded', () => commandPurgeExcluded(ctx)),
     vscode.commands.registerCommand('Standardoc.statusBarMenu', () => commandStatusBarMenu(ctx)),
+    vscode.commands.registerCommand('Standardoc.downloadBinary', () => commandDownloadBinary(ctx)),
     vscode.commands.registerCommand('Standardoc.rag.toggle', () => commandRagToggle()),
     vscode.commands.registerCommand('Standardoc.rag.switchEmbedder', () => commandRagSwitchEmbedder()),
     vscode.commands.registerCommand('Standardoc.rag.rebuild', () => commandRagRebuild(ctx)),
@@ -372,6 +374,41 @@ async function commandRegenerateSkill(ctx: CommandContext): Promise<void> {
 
 interface StatusBarMenuItem extends vscode.QuickPickItem {
   readonly commandId: string;
+}
+
+async function commandDownloadBinary(ctx: CommandContext): Promise<void> {
+  try {
+    const installed = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'Standardoc: downloading binary…',
+        cancellable: false,
+      },
+      async progress => {
+        progress.report({ message: 'fetching manifest' });
+        return installBinary({
+          globalStorageDir: ctx.context.globalStorageUri.fsPath,
+          log: line => ctx.output.appendLine(`[install] ${line}`),
+        });
+      },
+    );
+    ctx.output.appendLine(
+      `[install] installed core=${installed.core_version} protocol=${installed.protocol_version} → ${installed.path}`,
+    );
+    void vscode.window.showInformationMessage(
+      `Standardoc binary installed (core ${installed.core_version}, protocol ${installed.protocol_version}).`,
+    );
+    ctx.spawnSupervisor();
+  } catch (e) {
+    const reason =
+      e instanceof UnsupportedPlatformError
+        ? e.message
+        : e instanceof InstallError
+          ? e.reason
+          : describeError(e);
+    ctx.output.appendLine(`[install] failed: ${reason}`);
+    void vscode.window.showErrorMessage(`Standardoc download failed — ${reason}`);
+  }
 }
 
 async function commandStatusBarMenu(_ctx: CommandContext): Promise<void> {
