@@ -71,7 +71,7 @@ jobs:
         run: |
           mkdir -p staging
           cp README.md CHANGELOG.md LICENSE staging/
-          cp .important/QUICKSTART.md .important/TODO-LIST.md staging/
+          cp .important/en/QUICKSTART.md .important/en/TODO-LIST.md staging/
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             cp target/${{ matrix.target }}/release/standardoc.exe staging/
           else
@@ -186,7 +186,7 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           awk "/^## \\[$version\\]/{flag=1; next} /^## /{flag=0} flag" CHANGELOG.md > release-notes.md
           if [ ! -s release-notes.md ]; then
-            echo "Release $GITHUB_REF_NAME — see CHANGELOG.md and .important/TODO-LIST.md for details." > release-notes.md
+            echo "Release $GITHUB_REF_NAME — see CHANGELOG.md and .important/en/TODO-LIST.md for details." > release-notes.md
           fi
 
       - name: Create GitHub Release

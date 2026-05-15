@@ -1,5 +1,7 @@
 # Security Policy
 
+📖 English · [Français](.important/fr/SECURITY.md)
+
 ## Supported Versions
 
 Security updates are currently provided only for the latest supported beta release.
