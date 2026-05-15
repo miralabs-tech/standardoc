@@ -32,7 +32,7 @@ tempfile    = "3"
 tokio       = { version = "1", default-features = false, features = ["sync", "rt-multi-thread", "macros", "time", "io-std", "net"] }
 tokio-util  = { version = "0.7", default-features = false }
 tower-lsp-server = "0.23"
-rmcp        = "0.16"
+rmcp        = "1.4"
 axum        = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 schemars    = "1"
 notify      = "8"
