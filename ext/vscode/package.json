@@ -1,7 +1,7 @@
 {
   "name": "standardoc",
   "displayName": "standardoc",
-  "description": "AI-readable code documentation — Rust + TypeScript indexer surfaced over LSP and MCP.",
+  "description": "Code intelligence infrastructure — canonical multi-language IR + living semantic graph, surfaced over LSP and MCP (stdio + HTTP/SSE).",
   "version": "1.1.0",
   "publisher": "miralabs-tech",
   "license": "LicenseRef-FSL-1.1-MIT",

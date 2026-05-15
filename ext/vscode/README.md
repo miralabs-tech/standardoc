@@ -1,8 +1,14 @@
 # Standardoc — VSCode extension
 
-AI-readable code documentation for **Rust, TypeScript, JavaScript, JSX/TSX, Vue, Svelte, and Lua** projects. Indexer surfaced over LSP (writer daemon) and MCP (read-only daemon, both stdio and HTTP/SSE). Local-first, no cloud, no telemetry.
-
-> Built for what breaks at scale, not for the 2-minute demo. Code understanding is a system, not a string of greps.
+> A code intelligence infrastructure, built on a canonical multi-language
+> IR and a living semantic graph. One graph, several daemons (LSP, MCP
+> stdio + HTTP/SSE), all your tools plugged into it. ~100 tokens per
+> agent query instead of 30k of grep + read. Local, derived from source
+> code, open-source.
+>
+> Built for what breaks at scale and turns unmanageable in 6 months, not
+> for the 2-minute demo. Code understanding is a system, not a string of
+> greps.
 
 ## 🆕 v1.1.0 — breaking install change
 
@@ -104,18 +110,22 @@ To use Standardoc MCP from chat clients **outside** VSCode (Claude Desktop, Curs
 }
 ```
 
-**HTTP/SSE** (already exposed by the ext on `mcpHttpPort`)
+**HTTP** (already exposed by the ext on `mcpHttpPort`, default `7700`)
 
 ```json
 {
   "mcpServers": {
     "standardoc": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:7700"
+      "type": "http",
+      "url": "http://127.0.0.1:7700/mcp"
     }
   }
 }
 ```
+
+The init flow already writes the HTTP entry to `.mcp.json` at the workspace root, so any client that picks up that file (Claude Code CLI, Copilot Chat, …) is configured automatically — the JSON above is only useful for clients that don't read project-local `.mcp.json` or for a manual override.
+
+If port `7700` was already bound (sibling VSCode window, port conflict), the daemon falls back to an ephemeral kernel-picked port and writes the actual URL to `.standardoc/mcp.endpoint` — the ext re-syncs `.mcp.json` to that URL on `ready`. Set a different `standardoc.mcpHttpPort` per workspace to avoid the fallback dance.
 
 Common config file locations: Claude Desktop → `claude_desktop_config.json`; Claude Code CLI → `~/.claude.json` or per-project `.mcp.json`; Cursor → `~/.cursor/mcp.json`.
 
