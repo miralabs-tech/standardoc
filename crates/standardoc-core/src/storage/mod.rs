@@ -16,6 +16,7 @@ pub(crate) mod handle;
 pub(crate) mod init;
 pub(crate) mod lock;
 pub(crate) mod migrate;
+pub(crate) mod retry;
 pub(crate) mod symbols;
 
 #[cfg(test)]

@@ -79,6 +79,12 @@ pub(crate) fn extract_file(
 
     walk(content, &ast, &mut ctx);
 
+    // Post-walk pass: enrich Lua signatures (typing-free at AST level) with
+    // any EmmyLua / LuaCATS annotations carried by the symbol's RawDocument.
+    // The raw doc text stays intact on the documents side; this just lifts
+    // the typed pieces into the structured Signature.
+    enrich_signatures_from_emmylua(&mut ctx.core.symbols, &ctx.core.documents);
+
     Ok(ExtractedFile {
         file: workspace_relative_path.into(),
         language: Language::Lua,
@@ -93,13 +99,33 @@ pub(crate) fn extract_file(
     })
 }
 
+/// Mutate each `RawSymbol` whose fqdn has a matching `RawDocument`, lifting
+/// `@param` / `@return` tags from the doc text into the structured
+/// `Signature`. Symbols without a signature are skipped (no place to write
+/// the typed fields into).
+fn enrich_signatures_from_emmylua(
+    symbols: &mut [RawSymbol],
+    documents: &[standardoc_ir::RawDocument],
+) {
+    use std::collections::HashMap;
+    let docs_by_fqdn: HashMap<&str, &str> = documents
+        .iter()
+        .map(|d| (d.symbol_fqdn.as_str(), d.description.as_str()))
+        .collect();
+    for sym in symbols {
+        let Some(doc_text) = docs_by_fqdn.get(sym.fqdn.as_str()) else {
+            continue;
+        };
+        let Some(sig) = sym.signature.as_mut() else {
+            continue;
+        };
+        super::emmylua::enrich_signature(sig, doc_text);
+    }
+}
+
 // --- per-stmt extractors ---------------------------------------------------
 
-pub(crate) fn extract_local_function(
-    ctx: &mut LuaWalkContext,
-    lf: &LocalFunction,
-    content: &str,
-) {
+pub(crate) fn extract_local_function(ctx: &mut LuaWalkContext, lf: &LocalFunction, content: &str) {
     let name = ident_text(lf.name()).to_string();
     if name.is_empty() {
         return;
@@ -195,12 +221,15 @@ pub(crate) fn extract_local_assignment(
         // Detect `local x = require("a.b.c")` and emit IMPORTS edge.
         if let Some(require_arg) = rhs.and_then(extract_require_arg) {
             let pos = Node::start_position(*name_token).unwrap_or_default();
+            let to = resolve_require(&require_arg);
+            let confidence = to.default_confidence();
             ctx.push_edge(RawEdge {
                 from_fqdn: ctx.core.file_module_fqdn.clone(),
                 kind: EdgeKind::Imports,
-                to: resolve_require(&require_arg),
+                to,
                 sites: vec![site_for(&ctx.core.file_path, pos)],
                 attributes: vec![],
+                confidence,
             });
         }
 
@@ -308,12 +337,15 @@ fn record_calls_in_block(
                 for expr in la.expressions() {
                     if let Some(req) = extract_require_arg(expr) {
                         let pos = Node::start_position(la.local_token()).unwrap_or_default();
+                        let to = resolve_require(&req);
+                        let confidence = to.default_confidence();
                         ctx.push_edge(RawEdge {
                             from_fqdn: caller_fqdn.to_string(),
                             kind: EdgeKind::Imports,
-                            to: resolve_require(&req),
+                            to,
                             sites: vec![site_for(&ctx.core.file_path, pos)],
                             attributes: vec![],
+                            confidence,
                         });
                     }
                 }
@@ -321,12 +353,15 @@ fn record_calls_in_block(
             Stmt::Assignment(a) => {
                 for expr in a.expressions() {
                     if let Some(req) = extract_require_arg(expr) {
+                        let to = resolve_require(&req);
+                        let confidence = to.default_confidence();
                         ctx.push_edge(RawEdge {
                             from_fqdn: caller_fqdn.to_string(),
                             kind: EdgeKind::Imports,
-                            to: resolve_require(&req),
+                            to,
                             sites: vec![],
                             attributes: vec![],
+                            confidence,
                         });
                     }
                 }
@@ -353,24 +388,30 @@ fn record_calls_in_block(
 fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &FunctionCall) {
     // Distinguish `require("x.y")` (IMPORTS) from regular calls (CALLS).
     if let Some(req) = require_arg_from_call(fc) {
+        let to = resolve_require(&req);
+        let confidence = to.default_confidence();
         ctx.push_edge(RawEdge {
             from_fqdn: from_fqdn.to_string(),
             kind: EdgeKind::Imports,
-            to: resolve_require(&req),
+            to,
             sites: vec![site_for(&ctx.core.file_path, call_start(fc))],
             attributes: vec![],
+            confidence,
         });
         return;
     }
     let Some(call_name) = call_target_name(fc) else {
         return;
     };
+    let to = ResolvedOrUnresolved::Unresolved { name: call_name };
+    let confidence = to.default_confidence();
     ctx.push_edge(RawEdge {
         from_fqdn: from_fqdn.to_string(),
         kind: EdgeKind::Calls,
-        to: ResolvedOrUnresolved::Unresolved { name: call_name },
+        to,
         sites: vec![site_for(&ctx.core.file_path, call_start(fc))],
         attributes: vec![],
+        confidence,
     });
 }
 
@@ -428,7 +469,11 @@ fn var_to_dotted_path(var: &Var) -> Option<String> {
     match var {
         Var::Name(t) => {
             let n = ident_text(t);
-            if n.is_empty() { None } else { Some(n.to_string()) }
+            if n.is_empty() {
+                None
+            } else {
+                Some(n.to_string())
+            }
         }
         Var::Expression(ve) => {
             let head = match ve.prefix() {
@@ -460,7 +505,11 @@ fn var_to_dotted_path(var: &Var) -> Option<String> {
 fn index_dot_name(idx: &full_moon::ast::Index) -> Option<String> {
     if let full_moon::ast::Index::Dot { name, .. } = idx {
         let n = ident_text(name);
-        if n.is_empty() { None } else { Some(n.to_string()) }
+        if n.is_empty() {
+            None
+        } else {
+            Some(n.to_string())
+        }
     } else {
         None
     }
@@ -680,7 +729,11 @@ mod tests {
     fn local_function_extracted_as_private() {
         let src = "local function helper(a, b) return a + b end\n";
         let r = extract(src, "main.lua", "main.lua");
-        let sym = r.symbols.iter().find(|s| s.name == "helper").expect("helper");
+        let sym = r
+            .symbols
+            .iter()
+            .find(|s| s.name == "helper")
+            .expect("helper");
         assert_eq!(sym.fqdn, "myapp::main::helper");
         assert_eq!(sym.kind, Kind::Function);
         assert_eq!(sym.visibility, Visibility::Private);
@@ -767,7 +820,11 @@ mod tests {
     fn require_with_parens_emits_imports_edge() {
         let src = "local strings = require(\"utils.strings\")\n";
         let r = extract(src, "main.lua", "main.lua");
-        let imports: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Imports).collect();
+        let imports: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Imports)
+            .collect();
         assert_eq!(imports.len(), 1);
         match &imports[0].to {
             ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "utils.strings"),
@@ -779,7 +836,11 @@ mod tests {
     fn require_with_string_arg_no_parens_emits_imports_edge() {
         let src = "local x = require \"json\"\n";
         let r = extract(src, "main.lua", "main.lua");
-        let imports: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Imports).collect();
+        let imports: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Imports)
+            .collect();
         assert_eq!(imports.len(), 1);
         match &imports[0].to {
             ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "json"),
@@ -791,7 +852,11 @@ mod tests {
     fn top_level_function_call_emits_calls_edge() {
         let src = "doStuff()\n";
         let r = extract(src, "main.lua", "main.lua");
-        let calls: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        let calls: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].from_fqdn, "myapp::main");
         match &calls[0].to {
@@ -804,7 +869,11 @@ mod tests {
     fn dotted_call_recorded_with_dotted_name() {
         let src = "M.greet(\"hi\")\n";
         let r = extract(src, "main.lua", "main.lua");
-        let calls: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        let calls: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
         assert_eq!(calls.len(), 1);
         match &calls[0].to {
             ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "M.greet"),
@@ -816,7 +885,11 @@ mod tests {
     fn method_call_recorded_with_colon_name() {
         let src = "obj:run(1)\n";
         let r = extract(src, "main.lua", "main.lua");
-        let calls: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        let calls: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
         assert_eq!(calls.len(), 1);
         match &calls[0].to {
             ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "obj:run"),
@@ -828,7 +901,11 @@ mod tests {
     fn nested_call_inside_function_body_records_call_from_caller() {
         let src = "local function caller() callee() end\n";
         let r = extract(src, "main.lua", "main.lua");
-        let calls: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        let calls: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].from_fqdn, "myapp::main::caller");
         match &calls[0].to {
@@ -910,7 +987,11 @@ mod tests {
     fn require_inside_function_body_is_recorded_against_caller() {
         let src = "local function init() local m = require(\"sys\") end\n";
         let r = extract(src, "main.lua", "main.lua");
-        let imports: Vec<_> = r.edges.iter().filter(|e| e.kind == EdgeKind::Imports).collect();
+        let imports: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Imports)
+            .collect();
         assert_eq!(imports.len(), 1);
         assert_eq!(imports[0].from_fqdn, "myapp::main::init");
     }

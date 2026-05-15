@@ -1,8 +1,8 @@
 {
   "name": "standardoc",
   "displayName": "standardoc",
-  "description": "AI-readable code documentation — Rust + TypeScript indexer surfaced over LSP and MCP.",
-  "version": "1.0.0",
+  "description": "Code intelligence infrastructure — canonical multi-language IR + living semantic graph, surfaced over LSP and MCP (stdio + HTTP/SSE).",
+  "version": "1.1.0",
   "publisher": "miralabs-tech",
   "license": "LicenseRef-FSL-1.1-MIT",
   "homepage": "https://github.com/miralabs-tech/standardoc#readme",
@@ -95,6 +95,36 @@
         "command": "Standardoc.purgeExcluded",
         "title": "Purge excluded paths",
         "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.rag.toggle",
+        "title": "Toggle RAG (prose retrieval)",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.rag.switchEmbedder",
+        "title": "Switch RAG embedder…",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.rag.rebuild",
+        "title": "Rebuild RAG index",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.showTokenSavings",
+        "title": "Show token savings",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.resetTokenSavings",
+        "title": "Reset token savings…",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.downloadBinary",
+        "title": "Download binary",
+        "category": "Standardoc"
       }
     ],
     "configuration": {
@@ -104,7 +134,32 @@
           "type": "string",
           "default": "",
           "scope": "machine-overridable",
-          "description": "Absolute path to a custom `stdoc` binary. When set, overrides the bundled binary in `dist/bin/`."
+          "description": "Absolute path to a custom `standardoc` binary. When set, overrides the auto-downloaded binary in the extension's global storage — useful for local development (`target/debug/standardoc`) or for pinning a pre-release."
+        },
+        "standardoc.mcpHttpPort": {
+          "type": "integer",
+          "default": 7700,
+          "minimum": 0,
+          "maximum": 65535,
+          "scope": "resource",
+          "description": "TCP port on `127.0.0.1` where the Standardoc MCP daemon listens for streamable HTTP / SSE connections. Set to `0` to let the kernel pick a random ephemeral port (the resolved port is then written to `.standardoc/mcp.endpoint` for client discovery). When multiple Standardoc workspaces run in parallel, give each a distinct port here."
+        },
+        "standardoc.ragEnabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Enable the RAG (prose retrieval) layer. Adds `chunk_refs` to `get_context` responses and exposes the `fetch_chunks` MCP tool. The daemon restarts automatically when this changes."
+        },
+        "standardoc.ragEmbedder": {
+          "type": "string",
+          "enum": ["mock", "candle"],
+          "default": "mock",
+          "scope": "resource",
+          "enumDescriptions": [
+            "Deterministic zero-network BLAKE3-derived stub. Use for development and to exercise the tool surface without a model download.",
+            "Local BGE-small-en-v1.5 (~130 MB). Downloaded on first use and cached at `~/.cache/standardoc/models/` (or platform equivalent). Override via STANDARDOC_MODELS_DIR."
+          ],
+          "description": "Embedder backend used when `standardoc.ragEnabled` is true. The daemon restarts automatically when this changes."
         }
       }
     },
@@ -112,6 +167,21 @@
       {
         "id": "standardoc.mcp",
         "label": "Standardoc"
+      }
+    ],
+    "languages": [
+      {
+        "id": "stdignore",
+        "aliases": ["Standardoc Ignore", "stdignore"],
+        "filenames": [".stdignore"],
+        "configuration": "./language-configuration/stdignore.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "stdignore",
+        "scopeName": "source.stdignore",
+        "path": "./syntaxes/stdignore.tmLanguage.json"
       }
     ]
   },
@@ -121,12 +191,11 @@
     "watch": "bun build ./src/extension.ts --format=cjs --target=node --external=vscode --outdir=./dist --watch --sourcemap=external",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "package": "bun run dev:bundle && bun run build:prod && vsce package",
+    "package": "bun run build:prod && vsce package",
     "vscode:prepublish": "bun run build:prod",
     "dev:daemon": "cargo build --manifest-path ../../Cargo.toml -p standardoc-cli",
     "dev:daemon:release": "cargo build --manifest-path ../../Cargo.toml -p standardoc-cli --release",
-    "dev:bundle": "bun scripts/bundle-binary.ts",
-    "dev:smoke": "bun run dev:daemon:release && bun run dev:bundle && bun run build:prod",
+    "dev:smoke": "bun run dev:daemon:release && bun run build:prod",
     "dev:install": "bun run package && bun scripts/install-vsix.ts"
   },
   "dependencies": {

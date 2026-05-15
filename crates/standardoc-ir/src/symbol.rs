@@ -13,12 +13,15 @@ pub struct RawSymbol {
     pub fqdn: String,
     pub kind: Kind,
     pub language_kind: LanguageKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     pub visibility: Visibility,
     pub location: SymbolLocation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<Signature>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_hash: Option<Blake3Hash>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attributes: Vec<RawAttribute>,
 }
 

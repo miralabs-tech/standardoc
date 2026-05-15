@@ -25,6 +25,7 @@ pub(crate) fn seed_file(conn: &Connection, path: &str) {
             byte_size: 100,
             last_scanned: 0,
             last_scan_error: None,
+            is_external: false,
         },
     )
     .expect("seed file row");
@@ -57,5 +58,6 @@ pub(crate) fn symbol_ctx(file_path: &str) -> SymbolInsertContext<'_> {
         language: Language::Rust,
         is_external: false,
         source_origin: SourceOrigin::Workspace,
+        revision: 0,
     }
 }

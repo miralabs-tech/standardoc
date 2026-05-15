@@ -10,8 +10,10 @@ describe('describeState', () => {
     expect(describeState({ kind: 'starting' })).toBe('Starting');
   });
 
-  test('ready includes pid', () => {
-    expect(describeState({ kind: 'ready', pid: 1234 })).toBe('Ready (pid 1234)');
+  test('ready is bare (no pid placeholder leak)', () => {
+    // 'ready' aggregates two children (LSP + MCP) — there is no single
+    // PID to surface. Earlier versions leaked `pid 0` here.
+    expect(describeState({ kind: 'ready' })).toBe('Ready');
   });
 
   test('restarting includes attempt', () => {

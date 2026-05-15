@@ -86,7 +86,9 @@ pub(crate) fn walk(content: &str, ast: &Ast, ctx: &mut LuaWalkContext) {
     for stmt in block.stmts() {
         match stmt {
             Stmt::LocalFunction(lf) => extract::extract_local_function(ctx, lf, content),
-            Stmt::FunctionDeclaration(fd) => extract::extract_function_declaration(ctx, fd, content),
+            Stmt::FunctionDeclaration(fd) => {
+                extract::extract_function_declaration(ctx, fd, content);
+            }
             Stmt::LocalAssignment(la) => extract::extract_local_assignment(ctx, la, content),
             Stmt::Assignment(a) => extract::extract_assignment(ctx, a, content),
             Stmt::FunctionCall(fc) => extract::record_call_edge_from_module(ctx, fc),
@@ -169,4 +171,3 @@ fn apply_module_pattern_visibility(ctx: &mut LuaWalkContext) {
         };
     }
 }
-

@@ -37,16 +37,29 @@ impl RustProvider {
         Self::default()
     }
 
-    fn resolve_crate_name(
+    /// Resolves both the crate name AND the crate root absolute path for
+    /// the file at `file_abs_path`. The crate root = parent directory of
+    /// the closest `Cargo.toml` ancestor. Used by `extract` to compute a
+    /// crate-root-relative path for module-path derivation when the
+    /// workspace_root is at or above the crate root (monorepo layout
+    /// where the user opens the parent dir in VSCode).
+    fn resolve_crate_info(
         &self,
         file_abs_path: &Path,
         workspace_relative: &str,
-    ) -> Result<String, ExtractError> {
+    ) -> Result<(String, PathBuf), ExtractError> {
         let cargo_toml =
             crate_root::find_cargo_toml(file_abs_path).ok_or_else(|| ExtractError::Parse {
                 file: workspace_relative.into(),
                 detail: "could not determine crate name (no Cargo.toml ancestor)".into(),
             })?;
+        let crate_root_abs = cargo_toml
+            .parent()
+            .ok_or_else(|| ExtractError::Parse {
+                file: workspace_relative.into(),
+                detail: "Cargo.toml ancestor has no parent directory".into(),
+            })?
+            .to_path_buf();
 
         if let Some(hit) = self
             .crate_name_cache
@@ -54,7 +67,7 @@ impl RustProvider {
             .ok()
             .and_then(|guard| guard.get(&cargo_toml).cloned())
         {
-            return Ok(hit);
+            return Ok((hit, crate_root_abs));
         }
 
         let toml_content = std::fs::read_to_string(&cargo_toml).map_err(ExtractError::Io)?;
@@ -67,7 +80,7 @@ impl RustProvider {
         if let Ok(mut guard) = self.crate_name_cache.write() {
             guard.insert(cargo_toml, crate_name.clone());
         }
-        Ok(crate_name)
+        Ok((crate_name, crate_root_abs))
     }
 }
 
@@ -79,8 +92,20 @@ impl LanguageProvider for RustProvider {
         ctx: &ExtractContext<'_>,
     ) -> Result<ExtractedFile, ExtractError> {
         let file_abs_path = ctx.workspace_root.join(path);
-        let crate_name = self.resolve_crate_name(&file_abs_path, path)?;
-        extract::extract_file(content, path, &crate_name)
+        let (crate_name, crate_root_abs) = self.resolve_crate_info(&file_abs_path, path)?;
+        // Module-path derivation must operate on the path RELATIVE to the
+        // crate root, not the workspace root. When the user opens a
+        // parent directory (monorepo layout), the workspace-relative
+        // path would otherwise leak path segments like
+        // `crates/<crate>/src/...` into the FQDN
+        // (`<crate>::crates::<crate>::...`). Symbol locations stay
+        // workspace-relative — only `module_path::compute` consumes
+        // the crate-rel path.
+        let crate_rel = file_abs_path.strip_prefix(&crate_root_abs).map_or_else(
+            |_| path.to_string(),
+            |p| p.to_string_lossy().replace('\\', "/"),
+        );
+        extract::extract_file(content, path, &crate_name, &crate_rel)
     }
 }
 

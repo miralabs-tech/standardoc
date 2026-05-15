@@ -56,11 +56,7 @@ impl SfcBlock {
     /// setup>` always concatenates after a plain `<script>`).
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_script_setup(&self) -> bool {
-        self.tag == "script"
-            && self
-                .attributes
-                .iter()
-                .any(|(k, _)| k == "setup")
+        self.tag == "script" && self.attributes.iter().any(|(k, _)| k == "setup")
     }
 }
 
@@ -123,11 +119,7 @@ pub(crate) fn extract_blocks(source: &str) -> SfcDocument {
         };
         match tag_name.as_str() {
             "script" => doc.scripts.push(block),
-            "template" => {
-                if doc.template.is_none() {
-                    doc.template = Some(block);
-                }
-            }
+            "template" if doc.template.is_none() => doc.template = Some(block),
             "style" => doc.styles.push(block),
             _ => {}
         }
@@ -206,10 +198,7 @@ pub(crate) fn read_tag_name(bytes: &[u8], from: usize) -> usize {
 /// Returns `(attrs, close_pos, self_closing)` where `close_pos` is the
 /// index of `>` (or the leading `/` for `/>`), and `self_closing` is true
 /// when the form was `... />`.
-fn parse_attributes(
-    bytes: &[u8],
-    from: usize,
-) -> (Vec<(String, Option<String>)>, usize, bool) {
+fn parse_attributes(bytes: &[u8], from: usize) -> (Vec<(String, Option<String>)>, usize, bool) {
     let mut attrs: Vec<(String, Option<String>)> = Vec::new();
     let mut i = from;
     while i < bytes.len() {
@@ -422,7 +411,10 @@ mod tests {
         let src = "<!-- <script>NOT REAL</script> --><script>real;</script>";
         let doc = extract(src);
         assert_eq!(doc.scripts.len(), 1);
-        assert_eq!(&src[doc.scripts[0].content_start..doc.scripts[0].content_end], "real;");
+        assert_eq!(
+            &src[doc.scripts[0].content_start..doc.scripts[0].content_end],
+            "real;"
+        );
     }
 
     #[test]
@@ -531,7 +523,8 @@ mod tests {
 
     #[test]
     fn block_byte_spans_round_trip_through_source_slice() {
-        let src = "<template>\n  <h1>{{ msg }}</h1>\n</template>\n<script>const msg = 'hi';</script>";
+        let src =
+            "<template>\n  <h1>{{ msg }}</h1>\n</template>\n<script>const msg = 'hi';</script>";
         let doc = extract(src);
         let template_body = &src[doc.template.as_ref().unwrap().content_start
             ..doc.template.as_ref().unwrap().content_end];

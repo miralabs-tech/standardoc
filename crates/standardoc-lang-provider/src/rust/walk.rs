@@ -5,7 +5,7 @@ use quote::ToTokens;
 use standardoc_ir::{
     EdgeKind, Kind, LanguageKind, Modifiers, Param, RawAttribute, RawAttributeArg, RawDocument,
     RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation,
-    TypeRef, Visibility,
+    TypeRef, Visibility, compact_rust_tokens,
 };
 use syn::spanned::Spanned;
 
@@ -231,7 +231,12 @@ fn process_item_p2(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
             extract_call::visit_block(ctx, &it.block, current_module, &fn_fqdn);
         }
         syn::Item::Impl(it) => {
-            let target_name = self_ty_target_name(&it.self_ty);
+            let Some(target_name) = self_ty_target_name(&it.self_ty) else {
+                // Mirror `extract_impl`: skip P2 traversal for non-nominal
+                // self-types so we never emit CALLS edges anchored on a
+                // garbage `from_fqdn` like `crate::& mut A::method`.
+                return;
+            };
             let target_fqdn = format!("{current_module}::{target_name}");
             for impl_item in &it.items {
                 if let syn::ImplItem::Fn(item_fn) = impl_item {
@@ -407,13 +412,20 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
 
 fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) {
     let path = ctx.core.file_path.clone();
-    let target_name = self_ty_target_name(&item.self_ty);
+    let Some(target_name) = self_ty_target_name(&item.self_ty) else {
+        // Non-nominal self-type (`&T`, `&mut T`, `Box<T>`, tuples, ...) —
+        // methods inside are accessed via trait dispatch, not by FQDN.
+        // Emitting them with a synthetic parent path produces garbage
+        // FQDNs like `crate::& mut A::method`. Skip the whole block.
+        return;
+    };
     let target_fqdn = format!("{parent_fqdn}::{target_name}");
 
     if let Some((_, trait_path, _)) = &item.trait_ {
         let trait_str = path_to_string(trait_path);
         let span = item.span();
         let to = ctx.resolve_path(&trait_str, parent_fqdn);
+        let confidence = to.default_confidence();
         ctx.push_edge(RawEdge {
             from_fqdn: target_fqdn.clone(),
             kind: EdgeKind::Implements,
@@ -424,6 +436,7 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
                 col: col_from_span(span),
             }],
             attributes: vec![],
+            confidence,
         });
     }
 
@@ -531,14 +544,18 @@ fn extract_signature(sig: &syn::Signature) -> Signature {
     let params = sig.inputs.iter().map(extract_param).collect();
     let returns = match &sig.output {
         syn::ReturnType::Default => None,
-        syn::ReturnType::Type(_, ty) => Some(TypeRef::new(ty.to_token_stream().to_string())),
+        syn::ReturnType::Type(_, ty) => Some(TypeRef::new(render_compact(ty))),
     };
-    let generic_params = sig
-        .generics
-        .params
-        .iter()
-        .map(|p| p.to_token_stream().to_string())
-        .collect();
+    let generic_params = sig.generics.params.iter().map(render_compact).collect();
+    let where_clause = sig.generics.where_clause.as_ref().map(|wc| {
+        // `to_token_stream` includes the leading `where` keyword which we
+        // strip so consumers see just the predicates.
+        let raw = render_compact(wc);
+        match raw.strip_prefix("where ") {
+            Some(s) => s.to_string(),
+            None => raw,
+        }
+    });
     Signature {
         params,
         returns,
@@ -546,6 +563,7 @@ fn extract_signature(sig: &syn::Signature) -> Signature {
             is_async: sig.asyncness.is_some(),
             deprecated: None,
             generic_params,
+            where_clause,
         },
         meta: SignatureMeta::default(),
     }
@@ -572,8 +590,8 @@ fn extract_param(arg: &syn::FnArg) -> Param {
             }
         }
         syn::FnArg::Typed(pat_type) => Param {
-            name: pat_type.pat.to_token_stream().to_string(),
-            ty: TypeRef::new(pat_type.ty.to_token_stream().to_string()),
+            name: render_compact(pat_type.pat.as_ref()),
+            ty: TypeRef::new(render_compact(pat_type.ty.as_ref())),
             default: None,
         },
     }
@@ -583,7 +601,7 @@ fn extract_attributes(attrs: &[syn::Attribute], path: &str) -> Vec<RawAttribute>
     attrs
         .iter()
         .map(|attr| RawAttribute {
-            name: attr.path().to_token_stream().to_string(),
+            name: render_compact(attr.path()),
             args: meta_to_args(&attr.meta),
             site: Site {
                 file: path.into(),
@@ -599,12 +617,12 @@ fn meta_to_args(meta: &syn::Meta) -> Vec<RawAttributeArg> {
         syn::Meta::Path(_) => vec![],
         syn::Meta::List(list) => vec![RawAttributeArg {
             key: None,
-            value: list.tokens.to_string(),
+            value: compact_rust_tokens(&list.tokens.to_string()),
             is_string_literal: false,
         }],
         syn::Meta::NameValue(nv) => vec![RawAttributeArg {
             key: None,
-            value: nv.value.to_token_stream().to_string(),
+            value: render_compact(&nv.value),
             is_string_literal: false,
         }],
     }
@@ -617,25 +635,37 @@ fn extract_deprecated(attrs: &[syn::Attribute]) -> Option<String> {
         }
         return Some(match &attr.meta {
             syn::Meta::Path(_) => String::new(),
-            syn::Meta::List(list) => list.tokens.to_string(),
-            syn::Meta::NameValue(nv) => nv.value.to_token_stream().to_string(),
+            syn::Meta::List(list) => compact_rust_tokens(&list.tokens.to_string()),
+            syn::Meta::NameValue(nv) => render_compact(&nv.value),
         });
     }
     None
 }
 
-fn self_ty_target_name(ty: &syn::Type) -> String {
+/// Local helper: renders a `ToTokens`-bearing AST node into the compact
+/// canonical Rust display form. The Rust provider sources every `display`
+/// / `name` string from `quote`'s pretty-printer, which inserts a space
+/// between every token tree — `compact_rust_tokens` re-collapses those
+/// spaces so the IR row payload is small.
+fn render_compact<T: ToTokens + ?Sized>(t: &T) -> String {
+    compact_rust_tokens(&t.to_token_stream().to_string())
+}
+
+/// Returns the trailing identifier of a `Type::Path` (e.g. `Foo` for
+/// `module::Foo<T>`), `None` when the self-type is not a nominal path
+/// (e.g. `&T`, `&mut T`, `Box<T>`, `(A, B)`, …). Callers MUST skip the
+/// surrounding `impl` block when this returns `None` — methods on
+/// non-nominal self-types are not addressable by FQDN graph-wise and
+/// concatenating `& mut T::method` would pollute the index with garbage
+/// FQDNs.
+fn self_ty_target_name(ty: &syn::Type) -> Option<String> {
     match ty {
-        syn::Type::Path(tp) => tp
-            .path
-            .segments
-            .last()
-            .map_or_else(|| tp.to_token_stream().to_string(), |s| s.ident.to_string()),
-        _ => ty.to_token_stream().to_string(),
+        syn::Type::Path(tp) => tp.path.segments.last().map(|s| s.ident.to_string()),
+        _ => None,
     }
 }
 
-fn span_to_location(span: Span, path: &str) -> SymbolLocation {
+pub(crate) fn span_to_location(span: Span, path: &str) -> SymbolLocation {
     let start = span.start();
     let end = span.end();
     SymbolLocation {
@@ -802,6 +832,39 @@ mod tests {
     }
 
     #[test]
+    fn impl_block_on_non_nominal_self_type_emits_nothing() {
+        // `impl<T> Iterator for &mut T` — self-type is a reference, not a
+        // Path. Methods inside are accessed via trait dispatch; concating
+        // `&mut T::method` produces garbage FQDNs.
+        let parsed = parse(
+            "impl<T> Iterator for &mut T { type Item = (); fn next(&mut self) -> Option<()> { None } }",
+        );
+        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+
+        assert!(
+            !symbols.iter().any(|s| s.fqdn.contains('&')),
+            "no symbol should reference `&` in its fqdn, got {:?}",
+            symbols.iter().map(|s| &s.fqdn).collect::<Vec<_>>()
+        );
+        let impls: Vec<_> = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Implements)
+            .collect();
+        assert!(
+            impls.is_empty(),
+            "impl on non-nominal self-type must emit no IMPLEMENTS edge"
+        );
+    }
+
+    #[test]
+    fn impl_block_on_tuple_self_type_emits_nothing() {
+        let parsed = parse("impl SomeTrait for (u32, u32) { fn run(&self) {} }");
+        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert!(symbols.is_empty(), "tuple self-type must emit no symbol");
+        assert!(edges.is_empty(), "tuple self-type must emit no edge");
+    }
+
+    #[test]
     fn trait_impl_with_use_alias_resolves_implements_target() {
         let parsed =
             parse("use crate::traits::Foo; struct Bar; impl Foo for Bar { fn run(&self) {} }");
@@ -879,7 +942,7 @@ mod tests {
         assert_eq!(symbols[0].attributes.len(), 1);
         assert_eq!(symbols[0].attributes[0].name, "derive");
         assert_eq!(symbols[0].attributes[0].args.len(), 1);
-        assert_eq!(symbols[0].attributes[0].args[0].value, "Debug , Clone");
+        assert_eq!(symbols[0].attributes[0].args[0].value, "Debug, Clone");
     }
 
     #[test]
@@ -894,6 +957,55 @@ mod tests {
             .generic_params;
         assert_eq!(g.len(), 1);
         assert_eq!(g[0], "T");
+    }
+
+    #[test]
+    fn where_clause_captured_as_text_without_leading_keyword() {
+        let parsed = parse("fn foo<T>(x: T) where T: Send + Sync {}");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let wc = symbols[0]
+            .signature
+            .as_ref()
+            .unwrap()
+            .modifiers
+            .where_clause
+            .as_deref();
+        assert!(wc.is_some(), "where clause must be captured");
+        let text = wc.unwrap();
+        assert!(
+            !text.starts_with("where"),
+            "leading `where` must be stripped: `{text}`"
+        );
+        assert!(text.contains("Send"));
+        assert!(text.contains("Sync"));
+    }
+
+    #[test]
+    fn where_clause_is_none_when_absent() {
+        let parsed = parse("fn bar() {}");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let wc = &symbols[0]
+            .signature
+            .as_ref()
+            .unwrap()
+            .modifiers
+            .where_clause;
+        assert!(wc.is_none());
+    }
+
+    #[test]
+    fn inline_generic_bounds_remain_in_generic_params() {
+        let parsed = parse("fn foo<T: Display + Clone>(x: T) {}");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let g = &symbols[0]
+            .signature
+            .as_ref()
+            .unwrap()
+            .modifiers
+            .generic_params;
+        assert_eq!(g.len(), 1);
+        assert!(g[0].contains("Display"), "got {g:?}");
+        assert!(g[0].contains("Clone"), "got {g:?}");
     }
 
     #[test]

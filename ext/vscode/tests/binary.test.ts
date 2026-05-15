@@ -8,10 +8,10 @@ import {
 
 const baseDeps = (overrides: Partial<ResolveDeps> = {}): ResolveDeps => ({
   settingsPath: undefined,
-  bundledPath: '/ext/dist/bin/stdoc',
+  globalStoragePath: '/storage/bin/x86_64-unknown-linux-gnu/standardoc',
   pathEnv: undefined,
   pathSeparator: ':',
-  exeName: 'stdoc',
+  exeName: 'standardoc',
   existsSync: () => false,
   ...overrides,
 });
@@ -20,41 +20,42 @@ describe('resolveBinaryWith', () => {
   test('returns settings path when set and existing', () => {
     const r = resolveBinaryWith(
       baseDeps({
-        settingsPath: '/custom/stdoc',
-        existsSync: p => p === '/custom/stdoc',
+        settingsPath: '/custom/standardoc',
+        existsSync: p => p === '/custom/standardoc',
       }),
     );
-    expect(r).toEqual({ path: '/custom/stdoc', source: 'settings' });
+    expect(r).toEqual({ path: '/custom/standardoc', source: 'settings' });
   });
 
   test('throws when settings path is set but does not exist', () => {
     expect(() =>
       resolveBinaryWith(
         baseDeps({
-          settingsPath: '/missing/stdoc',
+          settingsPath: '/missing/standardoc',
         }),
       ),
     ).toThrow(BinaryNotFoundError);
   });
 
-  test('falls back to bundled path when settings empty and bundled exists', () => {
+  test('falls back to globalStorage path when settings empty and storage binary exists', () => {
+    const storagePath = '/storage/bin/x86_64-unknown-linux-gnu/standardoc';
     const r = resolveBinaryWith(
       baseDeps({
         settingsPath: '',
-        bundledPath: '/ext/dist/bin/stdoc',
-        existsSync: p => p === '/ext/dist/bin/stdoc',
+        globalStoragePath: storagePath,
+        existsSync: p => p === storagePath,
       }),
     );
-    expect(r).toEqual({ path: '/ext/dist/bin/stdoc', source: 'bundled' });
+    expect(r).toEqual({ path: storagePath, source: 'globalStorage' });
   });
 
-  test('falls back to PATH lookup when settings empty and bundled missing', () => {
-    const expected = path.join('/usr/bin', 'stdoc');
+  test('falls back to PATH lookup when settings empty and globalStorage missing', () => {
+    const expected = path.join('/usr/bin', 'standardoc');
     const r = resolveBinaryWith(
       baseDeps({
         pathEnv: ['/usr/local/bin', '/usr/bin'].join(':'),
         pathSeparator: ':',
-        exeName: 'stdoc',
+        exeName: 'standardoc',
         existsSync: p => p === expected,
       }),
     );
@@ -69,5 +70,30 @@ describe('resolveBinaryWith', () => {
         }),
       ),
     ).toThrow(BinaryNotFoundError);
+  });
+
+  test('settings takes priority over globalStorage even when both exist', () => {
+    const r = resolveBinaryWith(
+      baseDeps({
+        settingsPath: '/custom/standardoc',
+        globalStoragePath: '/storage/bin/x86_64-unknown-linux-gnu/standardoc',
+        existsSync: () => true,
+      }),
+    );
+    expect(r.source).toBe('settings');
+    expect(r.path).toBe('/custom/standardoc');
+  });
+
+  test('globalStorage takes priority over PATH when both exist', () => {
+    const storagePath = '/storage/bin/x86_64-unknown-linux-gnu/standardoc';
+    const r = resolveBinaryWith(
+      baseDeps({
+        globalStoragePath: storagePath,
+        pathEnv: '/usr/bin',
+        existsSync: () => true,
+      }),
+    );
+    expect(r.source).toBe('globalStorage');
+    expect(r.path).toBe(storagePath);
   });
 });

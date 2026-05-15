@@ -24,9 +24,16 @@ describe('decidePromptOnActivate', () => {
     expect(r).toEqual({ kind: 'spawn-immediately' });
   });
 
-  test('spawn-immediately when opted-in even without .standardoc/ yet', () => {
+  test('re-prompt when opted-in but .standardoc/ has been deleted (user reset signal)', () => {
+    const r = decidePromptOnActivate(
+      baseline({ workspaceState: 'opted-in', hasCodeMarker: true }),
+    );
+    expect(r).toEqual({ kind: 'show-prompt' });
+  });
+
+  test('do-nothing when opted-in but no code marker (avoid prompting on empty dirs)', () => {
     const r = decidePromptOnActivate(baseline({ workspaceState: 'opted-in' }));
-    expect(r).toEqual({ kind: 'spawn-immediately' });
+    expect(r).toEqual({ kind: 'do-nothing' });
   });
 
   test('do-nothing when no code marker present', () => {
@@ -53,8 +60,10 @@ describe('decidePromptOnActivate', () => {
     expect(r).toEqual({ kind: 'show-prompt' });
   });
 
-  test('global never wins over local opted-in only because we already returned spawn earlier', () => {
-    // If opted-in AND globalState=never, opted-in wins (user explicitly chose this workspace).
+  test('opt-outs win over stale opted-in flag when .standardoc/ is absent', () => {
+    // Without `.standardoc/` on disk, the `opted-in` flag no longer
+    // bypasses anything — the global `never` (or workspace `opted-out`)
+    // takes effect and we stay silent.
     const r = decidePromptOnActivate(
       baseline({
         hasCodeMarker: true,
@@ -62,6 +71,6 @@ describe('decidePromptOnActivate', () => {
         globalState: 'never',
       }),
     );
-    expect(r).toEqual({ kind: 'spawn-immediately' });
+    expect(r).toEqual({ kind: 'do-nothing' });
   });
 });

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Standardoc Ignore",
+  "scopeName": "source.stdignore",
+  "fileTypes": ["stdignore"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#negation" },
+    { "include": "#anchored" },
+    { "include": "#wildcards" },
+    { "include": "#character-class" },
+    { "include": "#directory" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "^\\s*#.*$",
+      "name": "comment.line.number-sign.stdignore"
+    },
+    "negation": {
+      "match": "^\\s*\\!",
+      "name": "keyword.operator.negation.stdignore"
+    },
+    "anchored": {
+      "match": "^\\s*/",
+      "name": "punctuation.definition.anchor.stdignore"
+    },
+    "wildcards": {
+      "patterns": [
+        {
+          "match": "\\*\\*",
+          "name": "constant.character.wildcard.recursive.stdignore"
+        },
+        {
+          "match": "\\*",
+          "name": "constant.character.wildcard.glob.stdignore"
+        },
+        {
+          "match": "\\?",
+          "name": "constant.character.wildcard.single.stdignore"
+        }
+      ]
+    },
+    "character-class": {
+      "match": "\\[[^\\]]+\\]",
+      "name": "constant.character.character-class.stdignore"
+    },
+    "directory": {
+      "match": "/(?=\\s*$)",
+      "name": "punctuation.definition.directory.stdignore"
+    }
+  }
+}

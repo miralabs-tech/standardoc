@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition = "2024"
 license = "LicenseRef-FSL-1.1-MIT"
 repository = "https://github.com/miralabs-tech/standardoc"
@@ -14,11 +14,12 @@ rust-version = "1.91"
 # External deps (blake3, notify, syn, swc_*, wasmtime, ...) get pinned here as
 # each subject starts consuming them — no spec deps day-1.
 [workspace.dependencies]
-standardoc-ir            = { version = "1.0.0-beta.1", path = "crates/standardoc-ir" }
-standardoc-bridge-sdk    = { version = "1.0.0-beta.1", path = "crates/standardoc-bridge-sdk" }
-standardoc-lang-provider = { version = "1.0.0-beta.1", path = "crates/standardoc-lang-provider" }
-standardoc-core          = { version = "1.0.0-beta.1", path = "crates/standardoc-core" }
-standardoc-server        = { version = "1.0.0-beta.1", path = "crates/standardoc-server" }
+standardoc-ir            = { version = "1.0.0-beta.2", path = "crates/standardoc-ir" }
+standardoc-bridge-sdk    = { version = "1.0.0-beta.2", path = "crates/standardoc-bridge-sdk" }
+standardoc-lang-provider = { version = "1.0.0-beta.2", path = "crates/standardoc-lang-provider" }
+standardoc-core          = { version = "1.0.0-beta.2", path = "crates/standardoc-core" }
+standardoc-rag           = { version = "1.0.0-beta.2", path = "crates/standardoc-rag" }
+standardoc-server        = { version = "1.0.0-beta.2", path = "crates/standardoc-server" }
 
 serde       = { version = "1.0", features = ["derive"] }
 serde_json  = "1.0"
@@ -28,9 +29,11 @@ r2d2        = "0.8"
 r2d2_sqlite = "0.33"
 fs4         = "1"
 tempfile    = "3"
-tokio       = { version = "1", default-features = false, features = ["sync", "rt-multi-thread", "macros", "time", "io-std"] }
+tokio       = { version = "1", default-features = false, features = ["sync", "rt-multi-thread", "macros", "time", "io-std", "net"] }
+tokio-util  = { version = "0.7", default-features = false }
 tower-lsp-server = "0.23"
 rmcp        = "0.16"
+axum        = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 schemars    = "1"
 notify      = "8"
 notify-debouncer-full = { version = "0.7", default-features = false, features = ["macos_fsevent"] }
@@ -46,6 +49,11 @@ clap        = { version = "4", features = ["derive"] }
 ctrlc       = "3"
 ignore      = "0.4"
 strsim      = "0.11"
+candle-core         = { version = "0.9", default-features = false }
+candle-nn           = { version = "0.9", default-features = false }
+candle-transformers = { version = "0.9", default-features = false }
+tokenizers          = { version = "0.21", default-features = false, features = ["onig"] }
+hf-hub              = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"] }
 
 [profile.release]
 opt-level = 3

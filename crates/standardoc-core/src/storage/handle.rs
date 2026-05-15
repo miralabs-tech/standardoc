@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use tokio::sync::mpsc::{self, Sender, error::SendError, error::TrySendError};
 
 use crate::commands::IngestCommand;
@@ -14,6 +14,7 @@ use crate::pipeline::{ScanFilters, WriterContext, ensure_stdignore_seed_at, writ
 use crate::storage::error::StorageError;
 use crate::storage::lock::WorkspaceLock;
 use crate::storage::migrate::ensure_schema;
+use crate::storage::retry::retry_with_backoff;
 
 const PRAGMA_BOOT_SQL: &str = "
 PRAGMA journal_mode = WAL;
@@ -25,6 +26,15 @@ PRAGMA busy_timeout = 5000;
 ";
 
 const POOL_MAX_SIZE: u32 = 8;
+/// Override r2d2's 30 s default to bound each `pool.get()` attempt so the
+/// outer [`retry_with_backoff`] can cycle more than once within a
+/// reasonable test runner window when a sibling process is still
+/// releasing WAL handles. 10 s is comfortably above the worst observed
+/// cold-pool init on slow Windows CI runners (Defender real-time scan
+/// of the freshly-spawned `standardoc.exe` plus the new SQLite WAL/SHM
+/// files can push the happy path to a few seconds) while keeping the
+/// 6-attempt retry ceiling at ~60 s instead of 180 s.
+const POOL_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITER_CHANNEL_CAPACITY: usize = 64;
 
 /// Field order is load-bearing: `sender` MUST be dropped before `inner` so
@@ -43,16 +53,23 @@ type SharedPool = Arc<RwLock<Option<Pool<SqliteConnectionManager>>>>;
 struct IndexHandleInner {
     pool: SharedPool,
     workspace_root: PathBuf,
-    revision: Arc<AtomicU64>,
     /// Transient runtime flag. When `true`, `cold_start::run` aborts at the
     /// next chunk boundary and the watcher dispatch loop no-ops events. Not
     /// persisted across reboots — caller resumes by clearing the flag.
     paused: Arc<AtomicBool>,
     writer_handle: Mutex<Option<JoinHandle<()>>>,
-    /// `Some` for read-write opens; `None` for read-only opens that do not
-    /// take the fs4 exclusive lock so they can run alongside a primary
-    /// writer (e.g. MCP `--readonly` next to an LSP daemon, lock 31a).
-    /// The handle reads `Option::is_none` to decide whether it is read-only.
+    /// `Some` for primary opens that own the fs4 exclusive lock (LSP
+    /// daemon, `standardoc watch`, `standardoc index`). `None` for
+    /// SECONDARY opens that coexist with a primary writer (MCP daemon
+    /// spawned alongside the LSP, CLI flag `--readonly`).
+    ///
+    /// Despite the historical name (`open_readonly`, `--readonly`),
+    /// secondary handles are R/W under SQLite WAL — they CAN write
+    /// (`submit*`, `resolve_external`-driven external ingestion, …).
+    /// SQLite serialises concurrent writers from both daemons; the
+    /// revision counter persisted in `schema_meta` keeps them in sync.
+    /// The `is_none()` check is still meaningful: it tells server code
+    /// to skip cold-start + watcher boot (the primary owns those).
     lock: Option<WorkspaceLock>,
 }
 
@@ -75,61 +92,46 @@ impl IndexHandle {
         std::fs::create_dir_all(&standardoc_dir)?;
 
         let lock_path = standardoc_dir.join("db.lock");
-        let lock = WorkspaceLock::acquire(&lock_path)?;
-
-        ensure_stdignore_seed_at(&workspace_root)?;
-
         let db_path = standardoc_dir.join("index.db");
-        let pool = build_pool(&db_path)?;
-        {
+
+        // The fs4 lock, the SQLite pool open and the first connection are
+        // all retried as a unit: on a fast restart any of them can hit a
+        // transient race against the prior process still releasing its
+        // handles. `retry_with_backoff` only loops on transient kinds
+        // (`LockHeld`, `locking protocol`, busy, …) — permanent errors
+        // (schema too new, IO, …) propagate immediately.
+        let (lock, pool) = retry_with_backoff(|| {
+            let lock = WorkspaceLock::acquire(&lock_path)?;
+            let pool = build_pool(&db_path)?;
             let conn = pool.get()?;
             ensure_schema(&conn)?;
             seed_runtime_metadata(&conn, &workspace_root)?;
-        }
+            drop(conn);
+            Ok::<_, StorageError>((lock, pool))
+        })?;
 
-        let pool: SharedPool = Arc::new(RwLock::new(Some(pool)));
-        let revision = Arc::new(AtomicU64::new(0));
-        let paused = Arc::new(AtomicBool::new(false));
-        let (sender, receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        ensure_stdignore_seed_at(&workspace_root)?;
 
-        let writer_pool = Arc::clone(&pool);
-        let writer_revision = Arc::clone(&revision);
-        let writer_handle = std::thread::Builder::new()
-            .name("standardoc-writer".into())
-            .spawn(move || {
-                writer_loop(
-                    receiver,
-                    &WriterContext {
-                        pool: writer_pool,
-                        revision: writer_revision,
-                    },
-                );
-            })
-            .map_err(StorageError::Io)?;
-
-        Ok(Self {
-            inner: Arc::new(IndexHandleInner {
-                pool,
-                workspace_root,
-                revision,
-                paused,
-                writer_handle: Mutex::new(Some(writer_handle)),
-                lock: Some(lock),
-            }),
-            sender,
-        })
+        Self::wire_handle(pool, workspace_root, Some(lock), "standardoc-writer")
     }
 
-    /// Opens an existing workspace index in read-only mode. Skips the fs4
-    /// exclusive lock so a read-only handle can coexist with an active
-    /// writer (LSP daemon, `standardoc watch`, etc.). The SQLite pool is
-    /// configured with `SQLITE_OPEN_READ_ONLY`; any caller-issued write
-    /// (`submit*`, `rescan_from_scratch`, ...) will fail at the SQLite layer
-    /// or the closed writer channel respectively.
+    /// Opens an existing workspace index as a SECONDARY daemon: skips the
+    /// fs4 exclusive lock (so it coexists with a primary writer such as
+    /// the LSP daemon) but still opens the SQLite pool R/W and spawns a
+    /// writer thread. SQLite WAL serialises concurrent writers across
+    /// both daemons; the revision counter persisted in `schema_meta`
+    /// (v6+) lets the secondary observe the primary's writes.
+    ///
+    /// The name `open_readonly` (and the CLI flag `--readonly`) is kept
+    /// for backward compatibility but the actual semantics are
+    /// "secondary" — useful for the MCP daemon spawned alongside the
+    /// LSP daemon, which needs to write external content discovered via
+    /// `resolve_external` without owning the workspace lock.
     ///
     /// Errors with [`StorageError::ReadOnlyMissingDatabase`] when the
-    /// workspace has never been indexed (no `.standardoc/index.db`). Callers
-    /// that race a primary writer should poll on disk before calling this.
+    /// workspace has never been indexed (no `.standardoc/index.db`).
+    /// Callers that race a primary writer should poll on disk before
+    /// calling this.
     pub fn open_readonly<P: AsRef<Path>>(workspace_root: P) -> Result<Self, StorageError> {
         let workspace_root = workspace_root.as_ref().canonicalize()?;
         let db_path = workspace_root.join(".standardoc").join("index.db");
@@ -137,34 +139,59 @@ impl IndexHandle {
             return Err(StorageError::ReadOnlyMissingDatabase { path: db_path });
         }
 
-        let pool = build_readonly_pool(&db_path)?;
-        let pool: SharedPool = Arc::new(RwLock::new(Some(pool)));
-        let revision = Arc::new(AtomicU64::new(0));
-        let paused = Arc::new(AtomicBool::new(false));
+        // Secondary daemons race the primary's WAL handle release on fast
+        // restarts (LSP exits → MCP --readonly spawns instantly). Retry
+        // the pool build + first connection probe on transient errors.
+        let pool = retry_with_backoff(|| {
+            let pool = build_pool(&db_path)?;
+            // Force the lazy first connection so any `locking protocol`
+            // surfaces here and routes through the retry loop instead of
+            // bubbling up to the daemon's first real query.
+            let _probe = pool.get()?;
+            Ok::<_, StorageError>(pool)
+        })?;
+        Self::wire_handle(pool, workspace_root, None, "standardoc-writer-secondary")
+    }
 
-        // Closed channel: any `submit*` returns SendError immediately, so
-        // attempts to write through a read-only handle fail loudly without
-        // an extra `mode` field on the public API.
-        let (sender, receiver) = mpsc::channel::<IngestCommand>(1);
-        drop(receiver);
+    /// Builds the inner state (pool, writer thread, sender) shared by
+    /// both [`open`] (primary, holds fs4 lock) and [`open_readonly`]
+    /// (secondary, no fs4 lock but still R/W under SQLite WAL).
+    fn wire_handle(
+        pool: Pool<SqliteConnectionManager>,
+        workspace_root: PathBuf,
+        lock: Option<WorkspaceLock>,
+        writer_thread_name: &str,
+    ) -> Result<Self, StorageError> {
+        let pool: SharedPool = Arc::new(RwLock::new(Some(pool)));
+        let paused = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+
+        let writer_pool = Arc::clone(&pool);
+        let writer_handle = std::thread::Builder::new()
+            .name(writer_thread_name.to_string())
+            .spawn(move || {
+                writer_loop(receiver, &WriterContext { pool: writer_pool });
+            })
+            .map_err(StorageError::Io)?;
 
         Ok(Self {
             inner: Arc::new(IndexHandleInner {
                 pool,
                 workspace_root,
-                revision,
                 paused,
-                writer_handle: Mutex::new(None),
-                lock: None,
+                writer_handle: Mutex::new(Some(writer_handle)),
+                lock,
             }),
             sender,
         })
     }
 
-    /// Returns `true` when this handle was opened via [`IndexHandle::open_readonly`] and
-    /// therefore does not own the workspace's fs4 lock or a writer thread.
-    /// Servers (`serve_mcp`, ...) inspect this to skip cold-start and
-    /// watcher boot when running alongside a primary writer.
+    /// Returns `true` when this handle was opened via
+    /// [`IndexHandle::open_readonly`] and therefore does not own the
+    /// workspace's fs4 lock (secondary mode). Servers (`serve_mcp`, …)
+    /// inspect this to skip cold-start + watcher boot when running
+    /// alongside a primary writer. The name is preserved for back-compat
+    /// but the handle is NOT read-only at the SQLite layer (v6+).
     pub fn is_readonly(&self) -> bool {
         self.inner.lock.is_none()
     }
@@ -212,12 +239,50 @@ impl IndexHandle {
         self.sender.send(cmd).await
     }
 
+    /// Reads the persisted workspace revision counter from
+    /// `schema_meta`. Returns `0` when the DB is inaccessible (rescan in
+    /// progress, missing row) — these are transient states and the
+    /// caller treats them as "no observable writes yet". Persisted in
+    /// schema v6+; see migration `v5_to_v6.sql`.
     pub fn revision(&self) -> u64 {
-        self.inner.revision.load(Ordering::Acquire)
+        let pool = match self.pool() {
+            Ok(p) => p,
+            Err(_) => return 0,
+        };
+        let conn = match pool.get() {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        conn.query_row(
+            "SELECT value FROM schema_meta WHERE key = 'revision'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(0)
     }
 
+    /// Atomically increments the persisted revision counter. Used by
+    /// non-writer-thread callers (`purge_externals_by_origin`,
+    /// `delete_paths`, cold-start cleanup) that perform direct SQL
+    /// writes outside the writer-loop's own transaction-bound bump.
+    /// SQLite WAL serialises concurrent increments from both LSP and
+    /// MCP daemons.
     pub(crate) fn bump_revision(&self) {
-        self.inner.revision.fetch_add(1, Ordering::Release);
+        let pool = match self.pool() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let conn = match pool.get() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _ = conn.execute(
+            "UPDATE schema_meta SET value = CAST((CAST(value AS INTEGER) + 1) AS TEXT) \
+             WHERE key = 'revision'",
+            [],
+        );
     }
 
     /// Sets the paused flag. `cold_start::run` aborts at the next chunk
@@ -351,23 +416,19 @@ fn parse_cold_start_progress(value: &str) -> Result<Option<(u64, u64)>, StorageE
 fn build_pool(db_path: &Path) -> Result<Pool<SqliteConnectionManager>, StorageError> {
     let manager = SqliteConnectionManager::file(db_path)
         .with_init(|conn| conn.execute_batch(PRAGMA_BOOT_SQL));
-    let pool = Pool::builder().max_size(POOL_MAX_SIZE).build(manager)?;
-    Ok(pool)
-}
-
-const PRAGMA_READONLY_BOOT_SQL: &str = "
-PRAGMA foreign_keys = ON;
-PRAGMA temp_store = MEMORY;
-PRAGMA mmap_size = 268435456;
-PRAGMA busy_timeout = 5000;
-";
-
-fn build_readonly_pool(db_path: &Path) -> Result<Pool<SqliteConnectionManager>, StorageError> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
-    let manager = SqliteConnectionManager::file(db_path)
-        .with_flags(flags)
-        .with_init(|conn| conn.execute_batch(PRAGMA_READONLY_BOOT_SQL));
-    let pool = Pool::builder().max_size(POOL_MAX_SIZE).build(manager)?;
+    // `min_idle = Some(0)` makes `build()` return without eagerly creating
+    // `max_size` connections. The default behaviour spins up
+    // [`POOL_MAX_SIZE`] connections in parallel at build time, which on
+    // slow CI runners (Windows in particular) can blow past the
+    // [`POOL_CONNECTION_TIMEOUT`] cap when each connection is doing
+    // SQLite open + WAL pragma setup. Lazy init means each `get()`
+    // creates at most one connection, and that one has the full 2 s
+    // window.
+    let pool = Pool::builder()
+        .max_size(POOL_MAX_SIZE)
+        .min_idle(Some(0))
+        .connection_timeout(POOL_CONNECTION_TIMEOUT)
+        .build(manager)?;
     Ok(pool)
 }
 
@@ -971,14 +1032,60 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 1, "readonly handle must see writer-committed data");
+        assert_eq!(count, 1, "secondary handle must see writer-committed data");
+    }
 
-        let submit_err = reader
+    #[test]
+    fn secondary_handle_can_write_alongside_primary() {
+        // v6+ semantic shift: "readonly" handles are R/W under WAL,
+        // they just don't own the fs4 lock. Both primary + secondary
+        // can submit; SQLite serialises and the persisted revision
+        // counter keeps them in sync.
+        let dir = tempdir().unwrap();
+        let primary = IndexHandle::open(dir.path()).unwrap();
+        primary
+            .submit_blocking(IngestCommand::UpsertFile {
+                path: "src/main.rs".into(),
+                extracted: sample_extracted("src/main.rs", "crate::primary_sym"),
+            })
+            .unwrap();
+        wait_revision_at_least(&primary, 1, Duration::from_secs(2));
+
+        let secondary = IndexHandle::open_readonly(dir.path()).unwrap();
+        secondary
             .submit_blocking(IngestCommand::UpsertFile {
                 path: "src/other.rs".into(),
-                extracted: sample_extracted("src/other.rs", "crate::ro_blocked"),
+                extracted: sample_extracted("src/other.rs", "crate::secondary_sym"),
             })
-            .unwrap_err();
-        let _ = submit_err;
+            .expect("secondary handle must accept writes (v6+ WAL semantic)");
+        wait_revision_at_least(&secondary, 2, Duration::from_secs(2));
+
+        // Both handles observe the persisted revision after both writes.
+        let conn = primary.pool().unwrap().get().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(primary.revision(), secondary.revision());
+    }
+
+    #[test]
+    fn revision_persists_across_handle_drop_and_reopen() {
+        let dir = tempdir().unwrap();
+        {
+            let handle = IndexHandle::open(dir.path()).unwrap();
+            handle
+                .submit_blocking(IngestCommand::UpsertFile {
+                    path: "src/main.rs".into(),
+                    extracted: sample_extracted("src/main.rs", "crate::persistent"),
+                })
+                .unwrap();
+            wait_revision_at_least(&handle, 1, Duration::from_secs(2));
+        }
+        let reopened = IndexHandle::open(dir.path()).unwrap();
+        assert!(
+            reopened.revision() >= 1,
+            "revision must survive process restart (v6+ SQL-persisted)"
+        );
     }
 }

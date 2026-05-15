@@ -4,6 +4,7 @@ target-dev/
 .DS_Store
 *.swp
 *.swo
+.vscode/
 
 # Refacto v1.0.0-beta.1: legacy crates parked here for cherry-pick during the
 # rewrite. Local-only — never committed.
@@ -15,6 +16,11 @@ target-dev/
 # ship there. Pattern is anchored at root (`/`) so the demo `.standardoc/`
 # folders inside `examples/*/` stay tracked.
 /.standardoc/
+/.standardoc-sessions/
+ext/vscode/.standardoc/
+sessions-export/
+.claude/
+.mcp.json
 
 # IDE / editor metadata — left to contributor preference
 .idea/
@@ -24,6 +30,7 @@ target-dev/
 # OSS builds skip `web/` entirely. Pro builds require it populated from
 # the private `standardoc-pro` repo before `cargo build --features ...`.
 web/
+.sbuild-cache
 
 # Rendered docs — outputs of `scripts/render-docs.sh`. Source of truth lives
 # in `docs-src/`. CI re-renders on push to main and force-commits the result

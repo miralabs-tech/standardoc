@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: '1.91'
@@ -16,11 +19,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          prefix-key: "v1-rust"
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -28,11 +34,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          prefix-key: "v1-rust"
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
@@ -44,10 +53,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          prefix-key: "v1-rust"
       - run: cargo test --workspace -- --test-threads=1
 
   docs:
@@ -57,10 +69,13 @@ jobs:
       RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          prefix-key: "v1-rust"
       - run: cargo doc --workspace --no-deps
 
   ext:

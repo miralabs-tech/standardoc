@@ -12,10 +12,13 @@ description = "Standardoc daemon orchestration — open_workspace, watcher lifec
 [dependencies]
 standardoc-core  = { workspace = true }
 standardoc-ir    = { workspace = true }
+standardoc-rag   = { workspace = true }
 thiserror        = { workspace = true }
 tokio            = { workspace = true }
+tokio-util       = { workspace = true }
 tower-lsp-server = { workspace = true }
-rmcp             = { workspace = true, features = ["server", "transport-io", "macros"] }
+rmcp             = { workspace = true, features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
+axum             = { workspace = true }
 schemars         = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }

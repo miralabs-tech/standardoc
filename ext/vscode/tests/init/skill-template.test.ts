@@ -52,6 +52,14 @@ describe('buildSkillContent', () => {
       'mcp__standardoc__list_symbols',
       'mcp__standardoc__find_symbols_by_pattern',
       'mcp__standardoc__find_similar_symbols',
+      'mcp__standardoc__get_body',
+      'mcp__standardoc__resolve_external',
+      'mcp__standardoc__current_revision',
+      'mcp__standardoc__check_stale',
+      'mcp__standardoc__usage_stats',
+      'mcp__standardoc__session_save',
+      'mcp__standardoc__session_list',
+      'mcp__standardoc__session_get',
     ]) {
       expect(c).toContain(tool);
     }
@@ -64,6 +72,14 @@ describe('buildSkillContent', () => {
     expect(c).toContain('### list_symbols(');
     expect(c).toContain('### find_symbols_by_pattern(');
     expect(c).toContain('### find_similar_symbols(');
+    expect(c).toContain('### get_body(');
+    expect(c).toContain('### resolve_external(');
+    expect(c).toContain('### current_revision()');
+    expect(c).toContain('### check_stale(');
+    expect(c).toContain('### usage_stats(');
+    expect(c).toContain('### session_save(');
+    expect(c).toContain('### session_list(');
+    expect(c).toContain('### session_get(');
   });
 
   test('explains depth=1 cheap vs depth=2 rich semantics', () => {
@@ -105,6 +121,31 @@ describe('buildSkillContent', () => {
     expect(c).toContain('Is symbol X used anywhere');
     expect(c).toContain("I'm starting a feature involving area Z");
     expect(c).toContain('Detect templated/duplicate names across modules');
+    expect(c).toContain('A neighbor is Unresolved and looks like an external dependency');
+    expect(c).toContain('Detect what changed since last fetch');
+    expect(c).toContain('Resume / save a session handoff');
+  });
+
+  test('documents resolve_external envelope statuses', () => {
+    const c = buildSkillContent();
+    expect(c).toContain('"resolved"');
+    expect(c).toContain('"not_found"');
+    expect(c).toContain('"missing_binary"');
+    expect(c).toContain('"lockfile_not_found"');
+  });
+
+  test('documents check_stale stateless contract + status set', () => {
+    const c = buildSkillContent();
+    expect(c).toContain('Stateless server-side');
+    expect(c).toContain('"stale"');
+    expect(c).toContain('"fresh"');
+    expect(c).toContain('"missing"');
+  });
+
+  test('documents session_save UPSERT semantic + supersedes chain', () => {
+    const c = buildSkillContent();
+    expect(c).toContain('UPSERT by `slug`');
+    expect(c).toContain('supersedes');
   });
 
   test('documents key concepts (FQDN, edge kinds, Resolved/Unresolved)', () => {

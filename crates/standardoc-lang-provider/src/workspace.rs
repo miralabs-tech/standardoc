@@ -1,9 +1,7 @@
 use std::path::Path;
 
 use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
-use standardoc_ir::{
-    EdgeKind, ExtractedFile, Language, RawEdge, ResolvedOrUnresolved, Site,
-};
+use standardoc_ir::{EdgeKind, ExtractedFile, Language, RawEdge, ResolvedOrUnresolved, Site};
 use swc_core::ecma::parser::{EsSyntax, Syntax, TsSyntax};
 
 use crate::lua::LuaProvider;
@@ -53,7 +51,9 @@ impl WorkspaceProvider {
             .unwrap_or_default();
         let template_refs = collect_template_refs(content, &doc, framework);
         for r in template_refs {
-            extracted.edges.push(template_ref_to_edge(r, content, path, &module_fqdn));
+            extracted
+                .edges
+                .push(template_ref_to_edge(r, content, path, &module_fqdn));
         }
         Ok(extracted)
     }
@@ -216,7 +216,12 @@ fn svelte_template_regions(content: &str, doc: &SfcDocument) -> Vec<(usize, usiz
         .scripts
         .iter()
         .chain(doc.styles.iter())
-        .map(|b| (block_outer_start(content, b.content_start), block_outer_end(content, b.content_end)))
+        .map(|b| {
+            (
+                block_outer_start(content, b.content_start),
+                block_outer_end(content, b.content_end),
+            )
+        })
         .collect();
     blocked.sort_by_key(|&(s, _)| s);
     let mut regions = Vec::new();
@@ -268,32 +273,27 @@ fn block_outer_end(content: &str, content_end: usize) -> usize {
 /// `promote_unresolved_batch` pass will lift the edge if any symbol's
 /// fqdn happens to match the bare name (rare). Resolution against the
 /// SFC's import alias table is a beta.2 follow-up.
-fn template_ref_to_edge(
-    r: TemplateRef,
-    content: &str,
-    path: &str,
-    module_fqdn: &str,
-) -> RawEdge {
+fn template_ref_to_edge(r: TemplateRef, content: &str, path: &str, module_fqdn: &str) -> RawEdge {
     let (line, col) = byte_offset_to_line_col(content, r.byte_offset);
+    let to = ResolvedOrUnresolved::Unresolved { name: r.name };
+    let confidence = to.default_confidence();
     RawEdge {
         from_fqdn: module_fqdn.to_string(),
         kind: EdgeKind::References,
-        to: ResolvedOrUnresolved::Unresolved {
-            name: r.name,
-        },
+        to,
         sites: vec![Site {
             file: path.to_string(),
             line,
             col,
         }],
         attributes: vec![template_attr_to_slug(r.attribute).to_string()],
+        confidence,
     }
 }
 
 const fn template_attr_to_slug(attr: TemplateAttribute) -> &'static str {
     attr.as_str()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -335,10 +335,7 @@ mod tests {
 
     #[test]
     fn dispatch_svelte_extension() {
-        assert_eq!(
-            dispatch("src/routes/+page.svelte"),
-            Some(Dispatch::Svelte)
-        );
+        assert_eq!(dispatch("src/routes/+page.svelte"), Some(Dispatch::Svelte));
         assert_eq!(dispatch("Counter.svelte"), Some(Dispatch::Svelte));
     }
 

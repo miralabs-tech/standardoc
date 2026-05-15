@@ -17,6 +17,7 @@ use crate::storage::symbols::{
 pub(crate) fn apply_upsert_file(
     conn: &Connection,
     extracted: &ExtractedFile,
+    revision: u64,
 ) -> Result<(), StorageError> {
     let path = extracted.file.as_str();
     upsert_file_row(conn, extracted)?;
@@ -27,10 +28,11 @@ pub(crate) fn apply_upsert_file(
         language: extracted.language,
         is_external: extracted.is_external,
         source_origin: extracted.source_origin,
+        revision,
     };
 
     apply_deletes(conn, &plan)?;
-    apply_position_updates(conn, &plan)?;
+    apply_position_updates(conn, &plan, revision)?;
     let new_or_modified_ids = apply_inserts_and_modifications(conn, &plan, ctx)?;
     apply_edges(conn, &plan, &extracted.edges)?;
     promote_unresolved_batch(conn, &new_or_modified_ids)?;
@@ -69,6 +71,7 @@ pub(crate) fn record_parse_error(
             byte_size: 0,
             last_scanned: now,
             last_scan_error: Some(detail.into()),
+            is_external: false,
         },
     };
     upsert_file(conn, &file)
@@ -81,9 +84,13 @@ fn apply_deletes(conn: &Connection, plan: &DiffPlan<'_>) -> Result<(), StorageEr
     Ok(())
 }
 
-fn apply_position_updates(conn: &Connection, plan: &DiffPlan<'_>) -> Result<(), StorageError> {
+fn apply_position_updates(
+    conn: &Connection,
+    plan: &DiffPlan<'_>,
+    revision: u64,
+) -> Result<(), StorageError> {
     for (id, sym) in &plan.position_updates {
-        update_symbol_positions(conn, *id, &sym.location)?;
+        update_symbol_positions(conn, *id, &sym.location, revision)?;
     }
     Ok(())
 }
@@ -215,6 +222,7 @@ fn upsert_file_row(conn: &Connection, extracted: &ExtractedFile) -> Result<(), S
         byte_size: extracted.byte_size,
         last_scanned,
         last_scan_error: None,
+        is_external: extracted.is_external,
     };
     upsert_file(conn, &file)
 }
@@ -236,8 +244,9 @@ mod tests {
     use crate::storage::files::get_file;
     use crate::storage::test_utils::fresh_conn;
     use standardoc_ir::{
-        Blake3Hash, EdgeKind, ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawEdge,
-        RawSymbol, ResolvedOrUnresolved, Site, SourceOrigin, SymbolLocation, Visibility,
+        Blake3Hash, EdgeConfidence, EdgeKind, ExtractedFile, Kind, Language, LanguageKind,
+        RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved, Site, SourceOrigin, SymbolLocation,
+        Visibility,
     };
 
     fn sym(name: &str, fqdn: &str, hash_byte: u8, line: u32) -> RawSymbol {
@@ -291,7 +300,7 @@ mod tests {
             ],
             vec![],
         );
-        apply_upsert_file(&conn, &ef).unwrap();
+        apply_upsert_file(&conn, &ef, 0).unwrap();
 
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM symbols"), 2);
         let f = get_file(&conn, "src/main.rs").unwrap().unwrap();
@@ -307,14 +316,14 @@ mod tests {
             vec![sym("foo", "crate::foo", 0x01, 1)],
             vec![],
         );
-        apply_upsert_file(&conn, &ef1).unwrap();
+        apply_upsert_file(&conn, &ef1, 0).unwrap();
 
         let ef2 = extracted(
             "src/main.rs",
             vec![sym("foo", "crate::foo", 0x01, 100)],
             vec![],
         );
-        apply_upsert_file(&conn, &ef2).unwrap();
+        apply_upsert_file(&conn, &ef2, 0).unwrap();
 
         let (start_line, name): (i64, String) = conn
             .query_row(
@@ -342,13 +351,14 @@ mod tests {
                 col: 4,
             }],
             attributes: vec![],
+            confidence: EdgeConfidence::Ambiguous,
         };
         let ef1 = extracted(
             "src/main.rs",
             vec![sym("foo", "crate::foo", 0x01, 1)],
             vec![edge],
         );
-        apply_upsert_file(&conn, &ef1).unwrap();
+        apply_upsert_file(&conn, &ef1, 0).unwrap();
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM edges"), 1);
 
         let new_edge = RawEdge {
@@ -359,13 +369,14 @@ mod tests {
             },
             sites: vec![],
             attributes: vec![],
+            confidence: EdgeConfidence::Ambiguous,
         };
         let ef2 = extracted(
             "src/main.rs",
             vec![sym("foo", "crate::foo", 0xee, 1)],
             vec![new_edge],
         );
-        apply_upsert_file(&conn, &ef2).unwrap();
+        apply_upsert_file(&conn, &ef2, 0).unwrap();
 
         let to_unresolved: String = conn
             .query_row("SELECT to_unresolved FROM edges", [], |r| r.get(0))
@@ -385,14 +396,14 @@ mod tests {
             ],
             vec![],
         );
-        apply_upsert_file(&conn, &ef1).unwrap();
+        apply_upsert_file(&conn, &ef1, 0).unwrap();
 
         let ef2 = extracted(
             "src/main.rs",
             vec![sym("foo", "crate::foo", 0x01, 1)],
             vec![],
         );
-        apply_upsert_file(&conn, &ef2).unwrap();
+        apply_upsert_file(&conn, &ef2, 0).unwrap();
 
         let count_remaining = count(&conn, "SELECT COUNT(*) FROM symbols");
         assert_eq!(count_remaining, 1);
@@ -413,6 +424,7 @@ mod tests {
             },
             sites: vec![],
             attributes: vec![],
+            confidence: EdgeConfidence::Extracted,
         };
         let ef = extracted(
             "src/main.rs",
@@ -422,7 +434,7 @@ mod tests {
             ],
             vec![edge],
         );
-        apply_upsert_file(&conn, &ef).unwrap();
+        apply_upsert_file(&conn, &ef, 0).unwrap();
 
         let (to_id, to_unresolved): (Option<i64>, Option<String>) = conn
             .query_row("SELECT to_symbol_id, to_unresolved FROM edges", [], |r| {
@@ -444,13 +456,14 @@ mod tests {
             },
             sites: vec![],
             attributes: vec![],
+            confidence: EdgeConfidence::Ambiguous,
         };
         let ef1 = extracted(
             "src/main.rs",
             vec![sym("foo", "crate::foo", 0x01, 1)],
             vec![edge.clone()],
         );
-        apply_upsert_file(&conn, &ef1).unwrap();
+        apply_upsert_file(&conn, &ef1, 0).unwrap();
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM edges"), 1);
 
         let ef2 = extracted(
@@ -458,7 +471,7 @@ mod tests {
             vec![sym("foo", "crate::foo", 0x01, 50)],
             vec![edge],
         );
-        apply_upsert_file(&conn, &ef2).unwrap();
+        apply_upsert_file(&conn, &ef2, 0).unwrap();
         assert_eq!(
             count(&conn, "SELECT COUNT(*) FROM edges"),
             1,
@@ -480,6 +493,7 @@ mod tests {
                 },
                 sites: vec![],
                 attributes: vec![],
+                confidence: EdgeConfidence::Extracted,
             }],
         );
         let ef_target = extracted(
@@ -487,8 +501,8 @@ mod tests {
             vec![sym("target", "crate::target", 0x02, 1)],
             vec![],
         );
-        apply_upsert_file(&conn, &ef_target).unwrap();
-        apply_upsert_file(&conn, &ef_caller).unwrap();
+        apply_upsert_file(&conn, &ef_target, 0).unwrap();
+        apply_upsert_file(&conn, &ef_caller, 0).unwrap();
 
         apply_delete_file(&conn, "src/target.rs").unwrap();
 
@@ -522,10 +536,11 @@ mod tests {
                     col: 4,
                 }],
                 attributes: vec![],
+                confidence: EdgeConfidence::Extracted,
             }],
         );
-        apply_upsert_file(&conn, &ef_target).unwrap();
-        apply_upsert_file(&conn, &ef_caller).unwrap();
+        apply_upsert_file(&conn, &ef_target, 0).unwrap();
+        apply_upsert_file(&conn, &ef_caller, 0).unwrap();
 
         apply_delete_file(&conn, "src/main.rs").unwrap();
 
@@ -547,7 +562,7 @@ mod tests {
             vec![sym("foo", "crate::foo", 0x01, 1)],
             vec![],
         );
-        apply_upsert_file(&conn, &ef).unwrap();
+        apply_upsert_file(&conn, &ef, 0).unwrap();
 
         record_parse_error(&conn, "src/main.rs", Language::Rust, "unexpected token").unwrap();
 
@@ -597,7 +612,7 @@ mod tests {
             vec![],
         );
         ef.documents = vec![doc_for("crate::foo", "Top-level helper.")];
-        apply_upsert_file(&conn, &ef).unwrap();
+        apply_upsert_file(&conn, &ef, 0).unwrap();
 
         let desc = fetch_doc_description(&conn, "crate::foo");
         assert_eq!(desc.as_deref(), Some("Top-level helper."));
@@ -612,7 +627,7 @@ mod tests {
             vec![],
         );
         ef1.documents = vec![doc_for("crate::foo", "v1 description.")];
-        apply_upsert_file(&conn, &ef1).unwrap();
+        apply_upsert_file(&conn, &ef1, 0).unwrap();
 
         let mut ef2 = extracted(
             "src/main.rs",
@@ -620,7 +635,7 @@ mod tests {
             vec![],
         );
         ef2.documents = vec![doc_for("crate::foo", "v2 description.")];
-        apply_upsert_file(&conn, &ef2).unwrap();
+        apply_upsert_file(&conn, &ef2, 0).unwrap();
 
         assert_eq!(
             fetch_doc_description(&conn, "crate::foo").as_deref(),
@@ -637,7 +652,7 @@ mod tests {
             vec![],
         );
         ef1.documents = vec![doc_for("crate::foo", "Original.")];
-        apply_upsert_file(&conn, &ef1).unwrap();
+        apply_upsert_file(&conn, &ef1, 0).unwrap();
         assert!(fetch_doc_description(&conn, "crate::foo").is_some());
 
         // Body modified (different hash) AND no RawDocument provided → wipe the row.
@@ -646,7 +661,7 @@ mod tests {
             vec![sym("foo", "crate::foo", 0xee, 1)],
             vec![],
         );
-        apply_upsert_file(&conn, &ef2).unwrap();
+        apply_upsert_file(&conn, &ef2, 0).unwrap();
         assert!(fetch_doc_description(&conn, "crate::foo").is_none());
     }
 
@@ -659,7 +674,7 @@ mod tests {
             vec![],
         );
         ef.documents = vec![doc_for("crate::foo", "Doc.")];
-        apply_upsert_file(&conn, &ef).unwrap();
+        apply_upsert_file(&conn, &ef, 0).unwrap();
         assert!(fetch_doc_description(&conn, "crate::foo").is_some());
 
         apply_delete_file(&conn, "src/main.rs").unwrap();
@@ -681,7 +696,7 @@ mod tests {
             vec![sym("foo", "crate::foo", 0x01, 1)],
             vec![],
         );
-        apply_upsert_file(&conn, &ef).unwrap();
+        apply_upsert_file(&conn, &ef, 0).unwrap();
 
         let f2 = get_file(&conn, "src/main.rs").unwrap().unwrap();
         assert_eq!(f2.last_scan_error, None);

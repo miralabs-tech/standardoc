@@ -2,11 +2,11 @@ import * as path from 'node:path';
 
 export interface ResolvedBinary {
   readonly path: string;
-  readonly source: 'settings' | 'bundled' | 'path';
+  readonly source: 'settings' | 'globalStorage' | 'path';
 }
 
 const DEFAULT_NOT_FOUND_MESSAGE =
-  'Standardoc binary not found. Set `standardoc.binaryPath`, bundle a binary into `dist/bin/`, or place `stdoc` on PATH.';
+  'Standardoc binary not found. Run the "Standardoc: Download binary" command, set `standardoc.binaryPath`, or place `standardoc` on PATH.';
 
 export class BinaryNotFoundError extends Error {
   constructor(message?: string) {
@@ -15,11 +15,11 @@ export class BinaryNotFoundError extends Error {
   }
 }
 
-export const STDOC_EXE = process.platform === 'win32' ? 'stdoc.exe' : 'stdoc';
+export const STANDARDOC_EXE = process.platform === 'win32' ? 'standardoc.exe' : 'standardoc';
 
 export interface ResolveDeps {
   readonly settingsPath: string | undefined;
-  readonly bundledPath: string;
+  readonly globalStoragePath: string;
   readonly pathEnv: string | undefined;
   readonly pathSeparator: string;
   readonly exeName: string;
@@ -36,8 +36,8 @@ export function resolveBinaryWith(deps: ResolveDeps): ResolvedBinary {
       `Standardoc binary path \`${settings}\` (from \`standardoc.binaryPath\` setting) does not exist.`,
     );
   }
-  if (deps.existsSync(deps.bundledPath)) {
-    return { path: deps.bundledPath, source: 'bundled' };
+  if (deps.existsSync(deps.globalStoragePath)) {
+    return { path: deps.globalStoragePath, source: 'globalStorage' };
   }
   const fromPath = lookupOnPath(deps);
   if (fromPath) {

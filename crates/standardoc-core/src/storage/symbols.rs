@@ -13,6 +13,7 @@ pub(crate) struct SymbolInsertContext<'a> {
     pub language: Language,
     pub is_external: bool,
     pub source_origin: SourceOrigin,
+    pub revision: u64,
 }
 
 pub(crate) fn insert_symbol(
@@ -29,30 +30,33 @@ pub(crate) fn insert_symbol(
         .body_hash
         .as_ref()
         .map(standardoc_ir::Blake3Hash::to_hex);
+    let revision_i64 = i64::try_from(ctx.revision).unwrap_or(i64::MAX);
 
     let id = conn
         .query_row(
             "INSERT INTO symbols (\
                 fqdn, name, kind, language_kind, language, module, visibility, \
                 file_path, start_line, end_line, start_col, end_col, \
-                signature_json, body_hash, is_external, source_origin\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
+                signature_json, body_hash, is_external, source_origin, \
+                last_modified_revision\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
              ON CONFLICT(fqdn) DO UPDATE SET \
-                name           = excluded.name, \
-                kind           = excluded.kind, \
-                language_kind  = excluded.language_kind, \
-                language       = excluded.language, \
-                module         = excluded.module, \
-                visibility     = excluded.visibility, \
-                file_path      = excluded.file_path, \
-                start_line     = excluded.start_line, \
-                end_line       = excluded.end_line, \
-                start_col      = excluded.start_col, \
-                end_col        = excluded.end_col, \
-                signature_json = excluded.signature_json, \
-                body_hash      = excluded.body_hash, \
-                is_external    = excluded.is_external, \
-                source_origin  = excluded.source_origin \
+                name                    = excluded.name, \
+                kind                    = excluded.kind, \
+                language_kind           = excluded.language_kind, \
+                language                = excluded.language, \
+                module                  = excluded.module, \
+                visibility              = excluded.visibility, \
+                file_path               = excluded.file_path, \
+                start_line              = excluded.start_line, \
+                end_line                = excluded.end_line, \
+                start_col               = excluded.start_col, \
+                end_col                 = excluded.end_col, \
+                signature_json          = excluded.signature_json, \
+                body_hash               = excluded.body_hash, \
+                is_external             = excluded.is_external, \
+                source_origin           = excluded.source_origin, \
+                last_modified_revision  = excluded.last_modified_revision \
              RETURNING id",
             rusqlite::params![
                 symbol.fqdn,
@@ -71,6 +75,7 @@ pub(crate) fn insert_symbol(
                 body_hash_hex,
                 ctx.is_external,
                 source_origin_to_sql_text(ctx.source_origin),
+                revision_i64,
             ],
             |row| row.get::<_, i64>(0),
         )
@@ -82,16 +87,23 @@ pub(crate) fn update_symbol_positions(
     conn: &Connection,
     id: i64,
     location: &SymbolLocation,
+    revision: u64,
 ) -> Result<(), StorageError> {
+    let revision_i64 = i64::try_from(revision).unwrap_or(i64::MAX);
     conn.execute(
         "UPDATE symbols SET \
-            start_line = ?1, end_line = ?2, start_col = ?3, end_col = ?4 \
-         WHERE id = ?5",
+            start_line              = ?1, \
+            end_line                = ?2, \
+            start_col               = ?3, \
+            end_col                 = ?4, \
+            last_modified_revision  = ?5 \
+         WHERE id = ?6",
         rusqlite::params![
             location.start_line,
             location.end_line,
             location.start_col,
             location.end_col,
+            revision_i64,
             id,
         ],
     )?;
@@ -242,7 +254,7 @@ mod tests {
             start_col: 4,
             end_col: 8,
         };
-        update_symbol_positions(&conn, id, &new_loc).unwrap();
+        update_symbol_positions(&conn, id, &new_loc, 0).unwrap();
 
         let (name, start, end_line, body_hash): (String, i64, i64, Option<String>) = conn
             .query_row(

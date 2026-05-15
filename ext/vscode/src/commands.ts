@@ -1,11 +1,18 @@
 import * as vscode from 'vscode';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import type { DaemonSupervisor } from './daemon/supervisor';
 import type { LspClient } from './lsp/client';
 import type { McpClient } from './mcp/client';
 import type { RawSymbolJson, SymbolContextWithNeighborsJson } from './mcp/types';
-import { formatSymbolContext, parseToolResult, pickTopFqdn } from './commands-render';
+import {
+  formatSymbolContext,
+  formatUsageStats,
+  parseToolResult,
+  pickTopFqdn,
+  type UsageStatsJson,
+} from './commands-render';
 import {
   clearGlobalInitState,
   initializeWorkspace,
@@ -13,6 +20,13 @@ import {
   writeMcpConfig,
 } from './init/prompt';
 import { resolveBinary } from './daemon/binary';
+import { installBinary, InstallError, UnsupportedPlatformError } from './daemon/binary-installer';
+import {
+  readRagSettings,
+  writeRagEmbedder,
+  writeRagEnabled,
+  type RagEmbedder,
+} from './daemon/rag-settings';
 
 export interface CommandContext {
   readonly context: vscode.ExtensionContext;
@@ -22,6 +36,29 @@ export interface CommandContext {
   readonly output: vscode.OutputChannel;
   readonly workspaceRoot: string;
   readonly spawnSupervisor: () => void;
+}
+
+type UnlinkResult = 'deleted' | 'missing' | { kind: 'failed'; message: string };
+
+const UNLINK_RETRY_DELAYS_MS: readonly number[] = [0, 300, 600, 1200, 2000];
+
+async function unlinkWithRetry(target: string): Promise<UnlinkResult> {
+  let lastError: unknown;
+  for (const delay of UNLINK_RETRY_DELAYS_MS) {
+    if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+    try {
+      await fs.promises.unlink(target);
+      return 'deleted';
+    } catch (e: unknown) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return 'missing';
+      if (code !== 'EBUSY' && code !== 'EPERM') {
+        return { kind: 'failed', message: describeError(e) };
+      }
+      lastError = e;
+    }
+  }
+  return { kind: 'failed', message: describeError(lastError) };
 }
 
 export function registerCommands(context: vscode.ExtensionContext, ctx: CommandContext): void {
@@ -43,7 +80,171 @@ export function registerCommands(context: vscode.ExtensionContext, ctx: CommandC
     vscode.commands.registerCommand('Standardoc.daemon.start', () => commandDaemonStart(ctx)),
     vscode.commands.registerCommand('Standardoc.purgeExcluded', () => commandPurgeExcluded(ctx)),
     vscode.commands.registerCommand('Standardoc.statusBarMenu', () => commandStatusBarMenu(ctx)),
+    vscode.commands.registerCommand('Standardoc.downloadBinary', () => commandDownloadBinary(ctx)),
+    vscode.commands.registerCommand('Standardoc.rag.toggle', () => commandRagToggle()),
+    vscode.commands.registerCommand('Standardoc.rag.switchEmbedder', () => commandRagSwitchEmbedder()),
+    vscode.commands.registerCommand('Standardoc.rag.rebuild', () => commandRagRebuild(ctx)),
+    vscode.commands.registerCommand('Standardoc.showTokenSavings', () =>
+      commandShowTokenSavings(ctx),
+    ),
+    vscode.commands.registerCommand('Standardoc.resetTokenSavings', () =>
+      commandResetTokenSavings(ctx),
+    ),
   );
+}
+
+interface TokenSavingsPeriodItem extends vscode.QuickPickItem {
+  readonly value: 'day' | 'week' | 'all';
+}
+
+async function commandShowTokenSavings(ctx: CommandContext): Promise<void> {
+  const items: TokenSavingsPeriodItem[] = [
+    { label: 'All time', detail: 'every logged tool call', value: 'all' },
+    { label: 'Last 7 days', value: 'week' },
+    { label: 'Last 24h', value: 'day' },
+  ];
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Standardoc token savings — scope?',
+  });
+  if (!picked) return;
+
+  let raw: string;
+  try {
+    raw = await ctx.mcp.usageStats(picked.value);
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Token savings query failed: ${describeError(e)}`);
+    return;
+  }
+  const stats = JSON.parse(raw) as UsageStatsJson;
+  void vscode.window.showInformationMessage(formatUsageStats(stats));
+}
+
+async function commandResetTokenSavings(ctx: CommandContext): Promise<void> {
+  const items: TokenSavingsPeriodItem[] = [
+    { label: 'All time', detail: 'wipe every logged tool call', value: 'all' },
+    { label: 'Last 7 days', value: 'week' },
+    { label: 'Last 24h', value: 'day' },
+  ];
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Standardoc reset token savings — scope?',
+  });
+  if (!picked) return;
+
+  const confirm = await vscode.window.showWarningMessage(
+    `Wipe usage_stats rows for ${picked.label.toLowerCase()}?\n\n` +
+      'This is destructive — used to baseline before a measurement run.\n' +
+      'The daemon stays up; only the telemetry table is touched.',
+    { modal: true },
+    'Reset',
+  );
+  if (confirm !== 'Reset') return;
+
+  let binaryPath: string;
+  try {
+    const resolved = await resolveBinary(ctx.context);
+    binaryPath = resolved.path;
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Cannot resolve standardoc binary: ${describeError(e)}`);
+    return;
+  }
+
+  ctx.output.show(true);
+  ctx.output.appendLine(`[reset-usage] running standardoc reset-usage --period ${picked.value}…`);
+  const exitCode = await runChildToOutput(
+    binaryPath,
+    ['reset-usage', ctx.workspaceRoot, '--period', picked.value, '--yes'],
+    ctx.output,
+  );
+
+  if (exitCode === 0) {
+    void vscode.window.showInformationMessage(
+      `Standardoc: token savings reset (${picked.label.toLowerCase()})`,
+    );
+  } else {
+    void vscode.window.showErrorMessage(
+      `Reset failed (exit ${exitCode}). See Standardoc output for details.`,
+    );
+  }
+}
+
+async function commandRagToggle(): Promise<void> {
+  const current = readRagSettings();
+  await writeRagEnabled(!current.enabled);
+  void vscode.window.showInformationMessage(
+    current.enabled
+      ? 'Standardoc RAG disabled — daemon will restart without prose retrieval'
+      : `Standardoc RAG enabled (${current.embedder}) — daemon will restart with prose retrieval`,
+  );
+}
+
+interface RagEmbedderItem extends vscode.QuickPickItem {
+  readonly value: RagEmbedder;
+}
+
+async function commandRagSwitchEmbedder(): Promise<void> {
+  const current = readRagSettings();
+  const items: RagEmbedderItem[] = [
+    {
+      label: 'Mock',
+      description: 'Deterministic, zero network — for development',
+      value: 'mock',
+      picked: current.embedder === 'mock',
+    },
+    {
+      label: 'Candle (BGE-small)',
+      description: 'Local 384-dim BERT — first run downloads ~130 MB',
+      detail: 'Cached at ~/.cache/standardoc/models/ (override via STANDARDOC_MODELS_DIR)',
+      value: 'candle',
+      picked: current.embedder === 'candle',
+    },
+  ];
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: `Embedder backend — currently: ${current.embedder}`,
+  });
+  if (!picked || picked.value === current.embedder) return;
+  await writeRagEmbedder(picked.value);
+  if (!current.enabled) {
+    void vscode.window.showInformationMessage(
+      `Embedder set to ${picked.value}. Enable RAG via "Standardoc: Toggle RAG" to activate.`,
+    );
+  }
+}
+
+async function commandRagRebuild(ctx: CommandContext): Promise<void> {
+  const confirm = await vscode.window.showWarningMessage(
+    'Rebuild RAG index?\n\n' +
+      'This will stop the Standardoc daemon, delete `.standardoc/rag.db`, then restart.\n' +
+      'All chunks are re-embedded on the next cold start.',
+    { modal: true },
+    'Rebuild',
+  );
+  if (confirm !== 'Rebuild') return;
+
+  ctx.output.show(true);
+  ctx.output.appendLine('[rag-rebuild] stopping daemon to release rag.db handle…');
+  await ctx.supervisor.stop();
+
+  const ragDb = path.join(ctx.workspaceRoot, '.standardoc', 'rag.db');
+  const ragWal = `${ragDb}-wal`;
+  const ragShm = `${ragDb}-shm`;
+  let deleted = 0;
+  for (const target of [ragDb, ragWal, ragShm]) {
+    const result = await unlinkWithRetry(target);
+    if (result === 'deleted') {
+      deleted += 1;
+      ctx.output.appendLine(`[rag-rebuild] deleted ${target}`);
+    } else if (typeof result === 'object') {
+      ctx.output.appendLine(`[rag-rebuild] could not delete ${target}: ${result.message}`);
+    }
+  }
+  ctx.output.appendLine(`[rag-rebuild] removed ${deleted} file(s), restarting daemon…`);
+  // Note: the daemon's `IndexHandle::open` now retries with exponential
+  // backoff (~1.5 s) on `locking protocol` / `LockHeld`, so no extra
+  // wait is required here even on Windows.
+  void vscode.window.showInformationMessage(
+    `Standardoc: RAG index cleared (${deleted} file(s) removed). Daemon restarting — cold start will rebuild.`,
+  );
+  ctx.spawnSupervisor();
 }
 
 async function commandDaemonStop(ctx: CommandContext): Promise<void> {
@@ -72,7 +273,7 @@ async function commandDaemonStart(ctx: CommandContext): Promise<void> {
 async function commandPurgeExcluded(ctx: CommandContext): Promise<void> {
   const confirm = await vscode.window.showWarningMessage(
     'Purge symbols matching .stdignore from the index?\n\n' +
-      'This will stop the Standardoc daemon, run `stdoc purge-excluded`, then restart.',
+      'This will stop the Standardoc daemon, run `standardoc purge-excluded`, then restart.',
     { modal: true },
     'Purge',
   );
@@ -175,12 +376,62 @@ interface StatusBarMenuItem extends vscode.QuickPickItem {
   readonly commandId: string;
 }
 
+async function commandDownloadBinary(ctx: CommandContext): Promise<void> {
+  try {
+    const installed = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'Standardoc: downloading binary…',
+        cancellable: false,
+      },
+      async progress => {
+        progress.report({ message: 'fetching manifest' });
+        return installBinary({
+          globalStorageDir: ctx.context.globalStorageUri.fsPath,
+          log: line => ctx.output.appendLine(`[install] ${line}`),
+        });
+      },
+    );
+    ctx.output.appendLine(
+      `[install] installed core=${installed.core_version} protocol=${installed.protocol_version} → ${installed.path}`,
+    );
+    void vscode.window.showInformationMessage(
+      `Standardoc binary installed (core ${installed.core_version}, protocol ${installed.protocol_version}).`,
+    );
+    ctx.spawnSupervisor();
+  } catch (e) {
+    const reason =
+      e instanceof UnsupportedPlatformError
+        ? e.message
+        : e instanceof InstallError
+          ? e.reason
+          : describeError(e);
+    ctx.output.appendLine(`[install] failed: ${reason}`);
+    void vscode.window.showErrorMessage(`Standardoc download failed — ${reason}`);
+  }
+}
+
 async function commandStatusBarMenu(_ctx: CommandContext): Promise<void> {
+  const rag = readRagSettings();
+  const toggleLabel = rag.enabled
+    ? '$(circle-slash) Disable RAG'
+    : '$(symbol-event) Enable RAG';
   const items: StatusBarMenuItem[] = [
     { label: '$(play) Start daemon', commandId: 'Standardoc.daemon.start' },
     { label: '$(debug-stop) Stop daemon', commandId: 'Standardoc.daemon.stop' },
     { label: '$(refresh) Restart daemon', commandId: 'Standardoc.daemon.restart' },
     { label: '$(trash) Purge excluded paths', commandId: 'Standardoc.purgeExcluded' },
+    { label: toggleLabel, commandId: 'Standardoc.rag.toggle' },
+    {
+      label: '$(symbol-misc) Switch RAG embedder…',
+      commandId: 'Standardoc.rag.switchEmbedder',
+    },
+    { label: '$(history) Rebuild RAG index', commandId: 'Standardoc.rag.rebuild' },
+    { label: '$(graph) Show token savings', commandId: 'Standardoc.showTokenSavings' },
+    {
+      label: '$(clear-all) Reset token savings…',
+      commandId: 'Standardoc.resetTokenSavings',
+    },
   ];
   const picked = await vscode.window.showQuickPick(items, {
     placeHolder: 'Standardoc — choose an action',

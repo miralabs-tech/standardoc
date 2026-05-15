@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
-import { resolveBinary } from './binary';
+import { BinaryNotFoundError, resolveBinary } from './binary';
 import { describeFatalConfig, type FatalConfig } from './fatal-marker';
+import { defaultExec, preflightSchemaVersion, type ExecFn } from './preflight';
 import {
   BACKOFF_MS,
   CRASH_WINDOW_MS,
@@ -16,6 +17,11 @@ export { describeState, type DaemonState } from './supervisor-state';
 export interface SupervisorDeps {
   readonly lsp: LspClient;
   readonly mcp: McpClient;
+  /**
+   * Override the schema-version pre-flight invocation. Useful for tests; if
+   * omitted, the supervisor shells out to `<binary> schema-version <root>`.
+   */
+  readonly preflightExec?: ExecFn;
 }
 
 export class DaemonSupervisor implements vscode.Disposable {
@@ -34,6 +40,7 @@ export class DaemonSupervisor implements vscode.Disposable {
     private readonly context: vscode.ExtensionContext,
     private readonly output: vscode.OutputChannel,
     private readonly deps: SupervisorDeps,
+    private readonly workspaceRoot: string,
   ) {
     this.lspStateSub = deps.lsp.onStateChange(state => this.onLspStateChange(state));
     this.mcpFatalSub = deps.mcp.onFatalConfig(config => this.onFatalConfig(config));
@@ -52,10 +59,43 @@ export class DaemonSupervisor implements vscode.Disposable {
     this.cancelBackoff();
     this.setState({ kind: 'starting' });
     try {
-      const binary = await resolveBinary(this.context);
+      let binary;
+      try {
+        binary = await resolveBinary(this.context);
+      } catch (e) {
+        if (e instanceof BinaryNotFoundError) {
+          this.log(`binary not found — entering awaiting_binary`);
+          // No backoff/retry here: the missing binary won't appear by
+          // itself. The installer command (triggered by toast or status
+          // bar) is the only way out, and it re-calls spawn() on success.
+          this.cancelBackoff();
+          this.cancelResetCounter();
+          this.crashTimestamps = [];
+          this.setState({ kind: 'awaiting_binary' });
+          return;
+        }
+        throw e;
+      }
       this.log(`resolved binary (source=${binary.source}, path=${binary.path})`);
+      const exec = this.deps.preflightExec ?? defaultExec;
+      const preflight = await preflightSchemaVersion(binary.path, this.workspaceRoot, exec);
+      if (!preflight.ok) {
+        this.log(`pre-flight schema check failed: ${preflight.reason}`);
+        // Mirror the in-process STDOC_FATAL signal: if the binary itself would
+        // refuse the DB, surface it through the same `fatal_config` channel
+        // so the existing toast/status-bar pipeline picks it up.
+        const config: FatalConfig =
+          typeof preflight.db === 'number' && typeof preflight.supported === 'number'
+            ? { kind: 'schema_too_new', db: preflight.db, supported: preflight.supported }
+            : { kind: 'unknown', code: 'preflight_failed', raw: preflight.reason };
+        this.setState({ kind: 'fatal_config', config });
+        return;
+      }
+      this.log(
+        `pre-flight ok (db=${preflight.db ?? 'none'}, supported=${preflight.supported})`,
+      );
       await this.startClientsParallel(binary.path);
-      this.setState({ kind: 'ready', pid: 0 });
+      this.setState({ kind: 'ready' });
       this.scheduleResetCounter();
     } catch (e) {
       const reason = describeError(e);
@@ -81,7 +121,33 @@ export class DaemonSupervisor implements vscode.Disposable {
     throw new Error(`${which} start failed: ${describeError(failure)}`);
   }
 
+  /**
+   * Stops the daemon then spawns it again. Concurrent calls are
+   * serialised via an internal Promise chain : if a restart is already
+   * in flight when a second call arrives, the second one queues behind
+   * it. Each tail reads the LATEST `ragSettings` snapshot at spawn
+   * time, so the daemon always boots with the most-recent settings
+   * regardless of how many restart calls overlap.
+   *
+   * Rationale (T-C) : the `watchRagSettings` callback can fire twice in
+   * rapid succession when the user toggles two settings near-
+   * simultaneously (e.g. editing settings.json with both lines saved
+   * at once, or QuickPick double-fire). Without sequencing,
+   * `stop()` on the second call could race against the first call's
+   * `spawn()` and leave clients dangling.
+   */
   async restart(): Promise<void> {
+    const next = this.restartChain.then(() => this.doRestart());
+    // Swallow the rejection on the chain itself so subsequent restarts
+    // stay sequential ; the returned promise still surfaces the error
+    // to the immediate caller.
+    this.restartChain = next.catch(() => {});
+    return next;
+  }
+
+  private restartChain: Promise<void> = Promise.resolve();
+
+  private async doRestart(): Promise<void> {
     await this.stop();
     await this.spawn();
   }
@@ -142,10 +208,11 @@ export class DaemonSupervisor implements vscode.Disposable {
 
   private handleCrash(reason: string): void {
     // If we already learned the failure is a fatal-config one (via
-    // STDOC_FATAL on stderr), keep that state — `failed` / `restarting`
-    // would mask the actionable hint and re-arm the retry machinery.
-    if (this.state.kind === 'fatal_config') {
-      this.log(`ignoring crash signal (${reason}) — already in fatal_config`);
+    // STDOC_FATAL on stderr) or that the binary is missing, keep that
+    // state — `failed` / `restarting` would mask the actionable hint
+    // and re-arm the retry machinery against an unfixable condition.
+    if (this.state.kind === 'fatal_config' || this.state.kind === 'awaiting_binary') {
+      this.log(`ignoring crash signal (${reason}) — already in ${this.state.kind}`);
       return;
     }
 

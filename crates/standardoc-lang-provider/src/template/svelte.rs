@@ -34,11 +34,7 @@ use crate::utils::find_top_level_keyword;
 /// expected to ignore plain text and only recognise the
 /// `{...}` / `{#...}` / `{@...}` Svelte syntax forms plus tag
 /// attributes.
-pub(crate) fn parse(
-    template_src: &str,
-    base_offset: usize,
-    sink: &mut dyn TemplateRefSink,
-) {
+pub(crate) fn parse(template_src: &str, base_offset: usize, sink: &mut dyn TemplateRefSink) {
     let bytes = template_src.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -133,7 +129,11 @@ pub(crate) fn split_each_clause(each_clause: &str) -> (String, Vec<String>) {
         .split(',')
         .filter_map(|p| {
             let n = p.trim();
-            if n.is_empty() { None } else { Some(n.to_string()) }
+            if n.is_empty() {
+                None
+            } else {
+                Some(n.to_string())
+            }
         })
         .collect();
     (iterable, locals)
@@ -142,9 +142,7 @@ pub(crate) fn split_each_clause(each_clause: &str) -> (String, Vec<String>) {
 // --- helpers --------------------------------------------------------------
 
 fn is_component_ref_tag(name: &str) -> bool {
-    name.chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_uppercase())
+    name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
 }
 
 fn walk_attributes(
@@ -185,12 +183,7 @@ fn walk_attributes(
         if let Some((value, value_start, was_brace)) = value_span {
             let attribute = classify_attribute(&attr_name, was_brace);
             if let (Some(attr), true) = (attribute, was_brace) {
-                extract_identifiers_from_expression(
-                    &value,
-                    base_offset + value_start,
-                    attr,
-                    sink,
-                );
+                extract_identifiers_from_expression(&value, base_offset + value_start, attr, sink);
             }
         }
     }
@@ -515,37 +508,55 @@ mod tests {
     #[test]
     fn single_brace_interpolation() {
         let refs = collect("<p>{msg}</p>");
-        assert_eq!(names_with_attr(&refs, TemplateAttribute::Interpolation), vec!["msg"]);
+        assert_eq!(
+            names_with_attr(&refs, TemplateAttribute::Interpolation),
+            vec!["msg"]
+        );
     }
 
     #[test]
     fn member_access_emits_root_only() {
         let refs = collect("<p>{user.name}</p>");
-        assert_eq!(names_with_attr(&refs, TemplateAttribute::Interpolation), vec!["user"]);
+        assert_eq!(
+            names_with_attr(&refs, TemplateAttribute::Interpolation),
+            vec!["user"]
+        );
     }
 
     #[test]
     fn on_event_handler_svelte4() {
         let refs = collect(r"<button on:click={handleClick}>x</button>");
-        assert_eq!(names_with_attr(&refs, TemplateAttribute::Event), vec!["handleClick"]);
+        assert_eq!(
+            names_with_attr(&refs, TemplateAttribute::Event),
+            vec!["handleClick"]
+        );
     }
 
     #[test]
     fn on_event_with_modifiers() {
         let refs = collect(r"<button on:click|preventDefault={handle}>x</button>");
-        assert_eq!(names_with_attr(&refs, TemplateAttribute::Event), vec!["handle"]);
+        assert_eq!(
+            names_with_attr(&refs, TemplateAttribute::Event),
+            vec!["handle"]
+        );
     }
 
     #[test]
     fn onevent_svelte5() {
         let refs = collect(r"<button onclick={handle}>x</button>");
-        assert_eq!(names_with_attr(&refs, TemplateAttribute::Event), vec!["handle"]);
+        assert_eq!(
+            names_with_attr(&refs, TemplateAttribute::Event),
+            vec!["handle"]
+        );
     }
 
     #[test]
     fn bind_prop() {
         let refs = collect(r"<input bind:value={text} />");
-        assert_eq!(names_with_attr(&refs, TemplateAttribute::Bind), vec!["text"]);
+        assert_eq!(
+            names_with_attr(&refs, TemplateAttribute::Bind),
+            vec!["text"]
+        );
     }
 
     #[test]
@@ -558,7 +569,10 @@ mod tests {
     #[test]
     fn if_block_directive() {
         let refs = collect("{#if visible}<p>x</p>{/if}");
-        assert_eq!(names_with_attr(&refs, TemplateAttribute::Directive), vec!["visible"]);
+        assert_eq!(
+            names_with_attr(&refs, TemplateAttribute::Directive),
+            vec!["visible"]
+        );
     }
 
     #[test]
@@ -593,7 +607,10 @@ mod tests {
     #[test]
     fn at_html_extracts_inner_idents() {
         let refs = collect("{@html rendered}");
-        assert_eq!(names_with_attr(&refs, TemplateAttribute::Interpolation), vec!["rendered"]);
+        assert_eq!(
+            names_with_attr(&refs, TemplateAttribute::Interpolation),
+            vec!["rendered"]
+        );
     }
 
     #[test]
@@ -705,8 +722,10 @@ mod tests {
     #[test]
     fn multiple_attrs_each_kind() {
         let refs = collect(r"<button on:click={onClick} disabled={loading}>x</button>");
-        let by_attr: std::collections::HashMap<&str, TemplateAttribute> =
-            refs.iter().map(|r| (r.name.as_str(), r.attribute)).collect();
+        let by_attr: std::collections::HashMap<&str, TemplateAttribute> = refs
+            .iter()
+            .map(|r| (r.name.as_str(), r.attribute))
+            .collect();
         assert_eq!(by_attr["onClick"], TemplateAttribute::Event);
         assert_eq!(by_attr["loading"], TemplateAttribute::Bind);
     }

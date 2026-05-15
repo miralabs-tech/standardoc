@@ -18,8 +18,8 @@ use standardoc_ir::{
 };
 
 use crate::storage::conv::{
-    edge_kind_from_sql_text, json_to_signature, kind_from_sql_text, kind_to_sql_text,
-    language_from_sql_text, visibility_from_sql_text, visibility_to_sql_text,
+    edge_confidence_from_sql_text, edge_kind_from_sql_text, json_to_signature, kind_from_sql_text,
+    kind_to_sql_text, language_from_sql_text, visibility_from_sql_text, visibility_to_sql_text,
 };
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
@@ -61,7 +61,7 @@ pub struct NeighborSymbol {
 }
 
 /// Composite shape consumed by the MCP `get_context` tool. Wraps the LSP-side
-/// [`SymbolContext`] (signature + descriptions) with four pre-grouped neighbor
+/// [`SymbolContext`] (signature + descriptions) with six pre-grouped neighbor
 /// vectors selected for LLM consumption (cf. VISION.md L251-262 "chunk parfait
 /// pour LLM"):
 ///
@@ -69,11 +69,13 @@ pub struct NeighborSymbol {
 /// - `callees`     — `edges_from(fqdn)` filtered to [`EdgeKind::Calls`]
 /// - `imports`     — `edges_from(fqdn)` filtered to [`EdgeKind::Imports`]
 /// - `imported_by` — `edges_to(fqdn)`   filtered to [`EdgeKind::Imports`]
-///
-/// Other [`EdgeKind`] variants (Implements / Extends / References / UsesType
-/// / Defines / ExposesApi) are intentionally skipped day-1 (VISION L97 — fewer
-/// fields = clearer LLM contract). They can be added additively post-beta.1
-/// without breaking callers.
+/// - `dependents`  — `edges_to(fqdn)`   for all OTHER kinds (Extends,
+///   Implements, References, UsesType, Defines, ExposesApi).
+///   "Anything that breaks if this symbol changes shape".
+/// - `tests`       — subset of `callers ∪ dependents` whose source FQDN
+///   matches a test naming convention (contains `::tests::`, `::test::`,
+///   or ends in `_test` / `_tests`). Coarse heuristic; treats false
+///   positives as acceptable noise.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolContextWithNeighbors {
     pub context: SymbolContext,
@@ -81,6 +83,10 @@ pub struct SymbolContextWithNeighbors {
     pub callees: Vec<NeighborSymbol>,
     pub imports: Vec<NeighborSymbol>,
     pub imported_by: Vec<NeighborSymbol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependents: Vec<NeighborSymbol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tests: Vec<NeighborSymbol>,
 }
 
 const SYMBOL_COLUMNS: &str = "fqdn, name, kind, language_kind, module, visibility, \
@@ -149,7 +155,7 @@ pub fn edges_from(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Stor
         };
         let rows = collect_edge_rows(
             conn,
-            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved, attributes \
+            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved, attributes, confidence \
              FROM edges WHERE from_symbol_id = ?1 ORDER BY id ASC",
             rusqlite::params![id],
         )?;
@@ -164,7 +170,7 @@ pub fn edges_to(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Storag
         let target_id = lookup_id_by_fqdn(conn, fqdn)?;
         let rows = collect_edge_rows(
             conn,
-            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved, attributes \
+            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved, attributes, confidence \
              FROM edges \
              WHERE (?1 IS NOT NULL AND to_symbol_id = ?1) \
                 OR to_unresolved = ?2 \
@@ -187,16 +193,35 @@ pub fn edges_to(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Storag
     })
 }
 
-/// Symbol-shape filters reused by `search_text`, `list_symbols` and
-/// `find_by_pattern`. Every field is optional; `None` means "no
-/// constraint on that column". `module` is matched exactly against
-/// `symbols.module` — pattern-style module matching belongs to
-/// `find_by_pattern` via wildcards in the pattern argument itself.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Symbol-shape filters reused by `search_text`, `list_symbols`,
+/// `find_by_pattern` and `find_similar`. Every field is optional;
+/// `None` means "no constraint on that column". `module` is matched
+/// exactly against `symbols.module` — pattern-style module matching
+/// belongs to `find_by_pattern` via wildcards in the pattern argument
+/// itself.
+///
+/// `include_external` toggles whether `symbols.is_external = 1` rows
+/// participate in the result. Defaults to `true` so external symbols
+/// (Cargo crates, npm `.d.ts`, luarocks) show up alongside workspace
+/// symbols by default — set to `false` to scope a query to the
+/// workspace-only namespace ("find every public fn I authored").
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolFilter {
     pub kind: Option<Kind>,
     pub visibility: Option<Visibility>,
     pub module: Option<String>,
+    pub include_external: bool,
+}
+
+impl Default for SymbolFilter {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            visibility: None,
+            module: None,
+            include_external: true,
+        }
+    }
 }
 
 pub fn search_text(
@@ -205,10 +230,15 @@ pub fn search_text(
     limit: usize,
     filter: &SymbolFilter,
 ) -> Result<Vec<RawSymbol>, StorageError> {
+    let sanitized = sanitize_fts5_query(query);
+    if sanitized.is_empty() {
+        return Ok(Vec::new());
+    }
     let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
     let kind_text = filter.kind.map(kind_to_sql_text);
     let vis_text = filter.visibility.map(visibility_to_sql_text);
     let module = filter.module.as_deref();
+    let include_external = filter.include_external;
     with_conn(handle, |conn| {
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
@@ -220,17 +250,51 @@ pub fn search_text(
                AND (?2 IS NULL OR s.kind       = ?2) \
                AND (?3 IS NULL OR s.visibility = ?3) \
                AND (?4 IS NULL OR s.module     = ?4) \
+               AND (?5 = 1 OR s.is_external = 0) \
              ORDER BY rank \
-             LIMIT ?5",
+             LIMIT ?6",
         )?;
         let rows = stmt
             .query_map(
-                rusqlite::params![query, kind_text, vis_text, module, limit_i64],
+                rusqlite::params![
+                    sanitized,
+                    kind_text,
+                    vis_text,
+                    module,
+                    include_external,
+                    limit_i64
+                ],
                 read_symbol_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter().map(build_symbol).collect()
     })
+}
+
+/// Strips FTS5 syntactic chars (`-` NOT prefix, `"` phrase quoting,
+/// `*` prefix wildcard, `:` column filter, `^` initial-token op, `()`
+/// grouping, `+` NEAR/B etween) from the user's query and replaces them
+/// with spaces. Multiple resulting tokens become an implicit-AND match.
+///
+/// Required because `find_symbol("standardoc-cli")` would otherwise be
+/// parsed by FTS5 as `standardoc NOT cli` — excluding the very thing
+/// the caller asked for. Standardoc's `find_symbol` is a high-level
+/// search API, not an FTS5 console ; users expect "match all tokens".
+fn sanitize_fts5_query(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut last_was_space = true;
+    for c in raw.chars() {
+        let keep = c.is_alphanumeric() || c == '_';
+        if keep {
+            out.push(c);
+            last_was_space = false;
+        } else if !last_was_space {
+            out.push(' ');
+            last_was_space = true;
+        }
+    }
+    out.truncate(out.trim_end().len());
+    out
 }
 
 /// Returns symbols matching `filter` ordered by canonical fqdn. No
@@ -245,6 +309,7 @@ pub fn list_symbols(
     let kind_text = filter.kind.map(kind_to_sql_text);
     let vis_text = filter.visibility.map(visibility_to_sql_text);
     let module = filter.module.as_deref();
+    let include_external = filter.include_external;
     with_conn(handle, |conn| {
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
@@ -254,12 +319,13 @@ pub fn list_symbols(
              WHERE (?1 IS NULL OR s.kind       = ?1) \
                AND (?2 IS NULL OR s.visibility = ?2) \
                AND (?3 IS NULL OR s.module     = ?3) \
+               AND (?4 = 1 OR s.is_external = 0) \
              ORDER BY s.fqdn \
-             LIMIT ?4",
+             LIMIT ?5",
         )?;
         let rows = stmt
             .query_map(
-                rusqlite::params![kind_text, vis_text, module, limit_i64],
+                rusqlite::params![kind_text, vis_text, module, include_external, limit_i64],
                 read_symbol_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -285,6 +351,7 @@ pub fn find_by_pattern(
     let kind_text = filter.kind.map(kind_to_sql_text);
     let vis_text = filter.visibility.map(visibility_to_sql_text);
     let module = filter.module.as_deref();
+    let include_external = filter.include_external;
     with_conn(handle, |conn| {
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
@@ -295,12 +362,20 @@ pub fn find_by_pattern(
                AND (?2 IS NULL OR s.kind       = ?2) \
                AND (?3 IS NULL OR s.visibility = ?3) \
                AND (?4 IS NULL OR s.module     = ?4) \
+               AND (?5 = 1 OR s.is_external = 0) \
              ORDER BY s.fqdn \
-             LIMIT ?5",
+             LIMIT ?6",
         )?;
         let rows = stmt
             .query_map(
-                rusqlite::params![pattern, kind_text, vis_text, module, limit_i64],
+                rusqlite::params![
+                    pattern,
+                    kind_text,
+                    vis_text,
+                    module,
+                    include_external,
+                    limit_i64
+                ],
                 read_symbol_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -338,6 +413,7 @@ pub fn find_similar(
     let kind_text = filter.kind.map(kind_to_sql_text);
     let vis_text = filter.visibility.map(visibility_to_sql_text);
     let module = filter.module.as_deref();
+    let include_external = filter.include_external;
     with_conn(handle, |conn| {
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
@@ -346,11 +422,12 @@ pub fn find_similar(
              FROM symbols s \
              WHERE (?1 IS NULL OR s.kind       = ?1) \
                AND (?2 IS NULL OR s.visibility = ?2) \
-               AND (?3 IS NULL OR s.module     = ?3)",
+               AND (?3 IS NULL OR s.module     = ?3) \
+               AND (?4 = 1 OR s.is_external = 0)",
         )?;
         let rows = stmt
             .query_map(
-                rusqlite::params![kind_text, vis_text, module],
+                rusqlite::params![kind_text, vis_text, module, include_external],
                 read_symbol_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -492,13 +569,26 @@ pub fn context_for_symbol_with_neighbors(
 
     let mut callers = Vec::new();
     let mut imported_by = Vec::new();
+    let mut dependents = Vec::new();
     for edge in edges_to(handle, fqdn)? {
         match edge.kind {
             EdgeKind::Calls => callers.push(neighbor_inbound(handle, edge, depth)?),
             EdgeKind::Imports => imported_by.push(neighbor_inbound(handle, edge, depth)?),
-            _ => {}
+            EdgeKind::Extends
+            | EdgeKind::Implements
+            | EdgeKind::References
+            | EdgeKind::UsesType
+            | EdgeKind::Defines
+            | EdgeKind::ExposesApi => dependents.push(neighbor_inbound(handle, edge, depth)?),
         }
     }
+
+    let tests: Vec<NeighborSymbol> = callers
+        .iter()
+        .chain(dependents.iter())
+        .filter(|n| neighbor_looks_like_test(n))
+        .cloned()
+        .collect();
 
     Ok(Some(SymbolContextWithNeighbors {
         context,
@@ -506,7 +596,34 @@ pub fn context_for_symbol_with_neighbors(
         callees,
         imports,
         imported_by,
+        dependents,
+        tests,
     }))
+}
+
+/// Coarse, fqdn-based detection of test sites for the blast-radius view.
+/// Captures Rust's `mod tests { ... }` / `#[cfg(test)]` convention, TS's
+/// `*.test.ts` / `*.spec.ts` patterns when surfaced as a `::test` /
+/// `::tests` module segment, and trailing `_test` / `_tests` names.
+/// False positives are accepted — the field is a hint, not a contract.
+fn neighbor_looks_like_test(n: &NeighborSymbol) -> bool {
+    let from = match &n.target {
+        ResolvedOrUnresolved::Resolved { fqdn } => fqdn.as_str(),
+        ResolvedOrUnresolved::Unresolved { name }
+        | ResolvedOrUnresolved::UnresolvedBridge { name, .. } => name.as_str(),
+    };
+    // `.test` and `.spec` are part of an FQDN convention (the symbol's
+    // module fqdn includes the trailing `.test`/`.spec` segment carried
+    // from the source filename), not a file extension. The
+    // `case_sensitive_file_extension_comparisons` lint targets path
+    // comparisons; here the input is workspace-canonical text.
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    let ext_match = from.ends_with(".test") || from.ends_with(".spec");
+    from.contains("::tests::")
+        || from.contains("::test::")
+        || from.ends_with("_test")
+        || from.ends_with("_tests")
+        || ext_match
 }
 
 fn neighbor_outbound(
@@ -581,6 +698,432 @@ pub fn file_info(handle: &IndexHandle, path: &str) -> Result<Option<FileInfo>, S
             byte_size,
             last_scan_error,
         }))
+    })
+}
+
+/// Aggregated result of [`body_for_fqdn`]: the raw source slice covering a
+/// symbol's declared `start_line..=end_line` plus enough metadata for the
+/// caller to know what was returned and whether a `max_lines` cap or any of
+/// the noise-stripping options kicked in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BodySlice {
+    pub fqdn: String,
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub body: String,
+    pub truncated: bool,
+    pub total_body_lines: u32,
+    /// Number of leading "noise" lines (doc comments, attributes, blank
+    /// lines between them) dropped by `BodyOptions::strip_attrs`. Zero
+    /// when stripping is disabled or the body had no leading noise.
+    #[serde(default)]
+    pub stripped_lines: u32,
+    /// `true` when `BodyOptions::signature_only` truncated the body at
+    /// the first line containing `{`. Independent of `truncated` (which
+    /// only reflects the `max_lines` cap).
+    #[serde(default)]
+    pub signature_only: bool,
+    /// Number of leading-whitespace bytes shared by every non-blank line
+    /// of the returned slice that were stripped to dedent the body. Zero
+    /// when the body had no common indent (or only one non-blank line at
+    /// column 0). Pure compaction signal — the original column positions
+    /// can be recovered by re-reading the file at `start_line`.
+    #[serde(default)]
+    pub dedented_prefix_len: u32,
+    /// What one indent level in the returned `body` looks like. `"\t"`
+    /// when leading 4-space (or 2-space) runs were converted to tabs OR
+    /// the source already used tabs. Empty when the body has no indented
+    /// line, or when the residual indent is too irregular to canonicalize
+    /// (mixed tabs+spaces, non-power-of-2 widths) — in that case the
+    /// body is returned verbatim post-dedent.
+    #[serde(default)]
+    pub indent_unit: String,
+}
+
+/// Knobs controlling the slice returned by [`body_for_fqdn`]. Defaults give
+/// the legacy "verbatim slice" behavior.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BodyOptions {
+    /// Cap on the number of returned lines. When the slice exceeds this
+    /// count, the response is truncated and `BodySlice.truncated = true`.
+    pub max_lines: Option<u32>,
+    /// Drop leading doc comments (`///`, `//!`, `//`, `/* … */`, `/** … */`)
+    /// AND attribute lines (`#[…]`, `#![…]` — including their multi-line
+    /// continuations) AND any blank lines interleaved between them.
+    /// Stops at the first line that is neither comment, attribute, nor
+    /// blank. Massive shrink for handlers buried under verbose
+    /// `#[tool(description = "…")]` blocks.
+    pub strip_attrs: bool,
+    /// Truncate the body just after the first line containing `{` (the
+    /// opening brace of the function block). For Rust / TS / JS / C-like
+    /// targets this returns the full multi-line signature without the
+    /// implementation. Combine with `strip_attrs` to get the cleanest
+    /// signature view. No-op for languages without `{` (Python, Lua —
+    /// punted to a future per-language handler).
+    pub signature_only: bool,
+}
+
+/// Returns the raw source text of the symbol at `fqdn`, sliced from the file
+/// on disk between its `start_line` and `end_line`. Returns `None` when no
+/// symbol matches the FQDN. See [`BodyOptions`] for the ways the slice can
+/// be trimmed.
+///
+/// File I/O is anchored at `IndexHandle::workspace_root()`; the indexed
+/// `location.file` is assumed workspace-relative (the IR contract).
+pub fn body_for_fqdn(
+    handle: &IndexHandle,
+    fqdn: &str,
+    opts: &BodyOptions,
+) -> Result<Option<BodySlice>, StorageError> {
+    let Some(symbol) = symbol_by_fqdn(handle, fqdn)? else {
+        return Ok(None);
+    };
+    let workspace_root = handle.workspace_root();
+    let file_abs = workspace_root.join(&symbol.location.file);
+    let content = std::fs::read_to_string(&file_abs)?;
+    let all_lines: Vec<&str> = content.lines().collect();
+
+    let start_zero = symbol.location.start_line.saturating_sub(1) as usize;
+    let end_inclusive = (symbol.location.end_line as usize).min(all_lines.len());
+    if start_zero >= end_inclusive {
+        return Ok(Some(BodySlice {
+            fqdn: symbol.fqdn.clone(),
+            file: symbol.location.file.clone(),
+            start_line: symbol.location.start_line,
+            end_line: symbol.location.end_line,
+            body: String::new(),
+            truncated: false,
+            total_body_lines: 0,
+            stripped_lines: 0,
+            signature_only: false,
+            dedented_prefix_len: 0,
+            indent_unit: String::new(),
+        }));
+    }
+    let raw_slice: &[&str] = &all_lines[start_zero..end_inclusive];
+    let total = u32::try_from(raw_slice.len()).unwrap_or(u32::MAX);
+
+    let stripped_count = if opts.strip_attrs {
+        count_leading_noise_lines(raw_slice)
+    } else {
+        0
+    };
+    let after_strip: &[&str] = &raw_slice[stripped_count..];
+
+    let (after_signature, signature_truncated) = if opts.signature_only {
+        match after_strip.iter().position(|l| l.contains('{')) {
+            Some(i) => (&after_strip[..=i], true),
+            None => (after_strip, false),
+        }
+    } else {
+        (after_strip, false)
+    };
+
+    let (taken, truncated) = match opts.max_lines {
+        Some(cap) if (cap as usize) < after_signature.len() => {
+            (&after_signature[..cap as usize], true)
+        }
+        _ => (after_signature, false),
+    };
+    let compact = compact_body_indent(taken);
+    Ok(Some(BodySlice {
+        fqdn: symbol.fqdn.clone(),
+        file: symbol.location.file.clone(),
+        start_line: symbol.location.start_line,
+        end_line: symbol.location.end_line,
+        body: compact.body,
+        truncated,
+        total_body_lines: total,
+        stripped_lines: u32::try_from(stripped_count).unwrap_or(u32::MAX),
+        signature_only: signature_truncated,
+        dedented_prefix_len: compact.dedented_prefix_len,
+        indent_unit: compact.indent_unit,
+    }))
+}
+
+/// Counts how many leading lines of `slice` look like noise:
+/// `///` / `//!` / `//` doc comments, `/* … */` block comments, `#[…]` /
+/// `#![…]` attributes (with multi-line continuations balanced via paren
+/// depth), and blank lines interleaved between them. Stops at the first
+/// non-noise line. Pure function — easy to test in isolation.
+fn count_leading_noise_lines(slice: &[&str]) -> usize {
+    let mut i = 0usize;
+    let mut paren_depth: i32 = 0;
+    let mut in_block_comment = false;
+    while i < slice.len() {
+        let raw = slice[i];
+        let line = raw.trim_start();
+        if in_block_comment {
+            if line.contains("*/") {
+                in_block_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        if paren_depth > 0 {
+            paren_depth += paren_depth_delta(raw);
+            i += 1;
+            continue;
+        }
+        if line.is_empty() {
+            i += 1;
+            continue;
+        }
+        if line.starts_with("///") || line.starts_with("//!") || line.starts_with("//") {
+            i += 1;
+            continue;
+        }
+        if line.starts_with("/**") || line.starts_with("/*") {
+            if !line.contains("*/") {
+                in_block_comment = true;
+            }
+            i += 1;
+            continue;
+        }
+        if line.starts_with("#[") || line.starts_with("#![") {
+            paren_depth += paren_depth_delta(raw);
+            i += 1;
+            continue;
+        }
+        // `*` continuation of a `/* …` block comment we missed by starting
+        // mid-block (shouldn't happen with well-formed slices, but cheap
+        // to handle).
+        if line.starts_with('*') && !line.starts_with("*/") {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    i
+}
+
+#[inline]
+fn paren_depth_delta(line: &str) -> i32 {
+    let mut d: i32 = 0;
+    for c in line.chars() {
+        match c {
+            '(' | '[' => d += 1,
+            ')' | ']' => d -= 1,
+            _ => {}
+        }
+    }
+    d
+}
+
+/// Output of [`compact_body_indent`]: a body string ready to serialize
+/// plus enough metadata for the caller (and downstream tools) to know
+/// what was done.
+struct CompactedBody {
+    body: String,
+    dedented_prefix_len: u32,
+    indent_unit: String,
+}
+
+/// Compacts the indentation of a body slice for over-the-wire transport.
+///
+/// Two passes:
+///   1. **Dedent common prefix.** Find the longest leading-whitespace
+///      sequence shared by every non-blank line and strip it. A method
+///      body indented at 8 spaces inside an impl block becomes flush-left
+///      — multi-KB savings on long bodies.
+///   2. **Tab-convert residual leading runs.** If every remaining
+///      non-blank line is indented with a uniform-width space run (every
+///      width a multiple of 4, or every width a multiple of 2), each
+///      such run is converted to `\t`. Sources that already use tabs
+///      pass through unchanged.
+///
+/// Mixed or irregular indent (tabs + spaces in the same line, or
+/// non-power-of-2 widths) skips pass 2 and returns the dedented body
+/// verbatim with `indent_unit = ""`. The line *content* is never altered
+/// beyond leading whitespace — `taken.join("\n")` semantics are preserved
+/// when no compaction is applicable.
+fn compact_body_indent(lines: &[&str]) -> CompactedBody {
+    if lines.is_empty() {
+        return CompactedBody {
+            body: String::new(),
+            dedented_prefix_len: 0,
+            indent_unit: String::new(),
+        };
+    }
+
+    let common = longest_common_leading_ws(lines);
+    let prefix_len = common.len();
+
+    let stripped: Vec<String> = lines
+        .iter()
+        .map(|l| {
+            if l.starts_with(common) {
+                l[prefix_len..].to_string()
+            } else {
+                String::new()
+            }
+        })
+        .collect();
+
+    let unit = detect_indent_unit(&stripped);
+    let (final_lines, indent_unit) = match unit {
+        Some(width) if width > 0 => {
+            let converted: Vec<String> = stripped
+                .iter()
+                .map(|l| convert_leading_spaces_to_tabs(l, width))
+                .collect();
+            (converted, "\t".to_string())
+        }
+        Some(_) => (stripped, String::new()),
+        None => (stripped, "\t".to_string()),
+    };
+
+    CompactedBody {
+        body: final_lines.join("\n"),
+        dedented_prefix_len: u32::try_from(prefix_len).unwrap_or(u32::MAX),
+        indent_unit,
+    }
+}
+
+fn leading_ws(s: &str) -> &str {
+    let end = s.bytes().take_while(|b| matches!(*b, b' ' | b'\t')).count();
+    &s[..end]
+}
+
+fn longest_common_leading_ws<'a>(lines: &[&'a str]) -> &'a str {
+    let mut iter = lines.iter().filter(|l| !l.trim().is_empty());
+    let Some(first) = iter.next() else {
+        return "";
+    };
+    let mut prefix = leading_ws(first);
+    for line in iter {
+        let lw = leading_ws(line);
+        let n = prefix
+            .bytes()
+            .zip(lw.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        prefix = &prefix[..n];
+        if prefix.is_empty() {
+            break;
+        }
+    }
+    prefix
+}
+
+/// Returns:
+/// - `None` when leading whitespace is already entirely tabs — no
+///   conversion is necessary; the output uses tabs natively.
+/// - `Some(width)` with `width > 0` when every non-blank line's leading
+///   whitespace is a multiple of `width` spaces (try 4 first, fall back
+///   to 2) — conversion is applicable.
+/// - `Some(0)` when the residual is irregular (mixed tabs+spaces on the
+///   same line, or non-multiple widths) — leave the body verbatim and
+///   report `indent_unit = ""`.
+fn detect_indent_unit(lines: &[String]) -> Option<usize> {
+    let mut has_tab_only = false;
+    let mut space_widths: Vec<usize> = Vec::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let lw = leading_ws(line);
+        if lw.is_empty() {
+            continue;
+        }
+        let has_tab = lw.bytes().any(|b| b == b'\t');
+        let has_space = lw.bytes().any(|b| b == b' ');
+        if has_tab && has_space {
+            return Some(0);
+        }
+        if has_tab {
+            has_tab_only = true;
+        } else {
+            space_widths.push(lw.len());
+        }
+    }
+    if has_tab_only && space_widths.is_empty() {
+        return None;
+    }
+    if has_tab_only {
+        return Some(0);
+    }
+    if space_widths.is_empty() {
+        return Some(0);
+    }
+    if space_widths.iter().all(|n| *n % 4 == 0) {
+        return Some(4);
+    }
+    if space_widths.iter().all(|n| *n % 2 == 0) {
+        return Some(2);
+    }
+    Some(0)
+}
+
+fn convert_leading_spaces_to_tabs(line: &str, width: usize) -> String {
+    let bytes = line.as_bytes();
+    let mut tabs = 0;
+    let mut i = 0;
+    while i + width <= bytes.len() && bytes[i..i + width].iter().all(|b| *b == b' ') {
+        tabs += 1;
+        i += width;
+    }
+    if tabs == 0 {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(tabs + bytes.len() - i);
+    for _ in 0..tabs {
+        out.push('\t');
+    }
+    out.push_str(&line[i..]);
+    out
+}
+
+/// Reads `schema_meta.schema_version` from the connected workspace index.
+/// Useful for the CLI pre-flight schema check: a client can compare the on-disk
+/// version against `SUPPORTED_SCHEMA_VERSION` before spawning daemons.
+pub fn schema_version(handle: &IndexHandle) -> Result<u32, StorageError> {
+    with_conn(handle, |conn| {
+        let raw: String = conn.query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )?;
+        raw.parse::<u32>()
+            .map_err(|_| StorageError::InvalidStoredData {
+                detail: format!("schema_meta.schema_version is not a u32: {raw}"),
+            })
+    })
+}
+
+/// Bulk-lookup the `last_modified_revision` for each FQDN. Missing FQDNs are
+/// simply absent from the returned map — the MCP staleness check treats that
+/// as "symbol no longer indexed", which the agent surfaces back to the user.
+/// Empty input returns an empty map without touching the database.
+pub fn last_modified_revisions_for_fqdns(
+    handle: &IndexHandle,
+    fqdns: &[&str],
+) -> Result<std::collections::HashMap<String, u64>, StorageError> {
+    if fqdns.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    with_conn(handle, |conn| {
+        let placeholders = (1..=fqdns.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT fqdn, last_modified_revision FROM symbols WHERE fqdn IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(fqdns.iter()), |row| {
+            let fqdn: String = row.get(0)?;
+            let rev: i64 = row.get(1)?;
+            #[allow(clippy::cast_sign_loss)]
+            Ok((fqdn, rev.max(0) as u64))
+        })?;
+        let mut map = std::collections::HashMap::with_capacity(fqdns.len());
+        for r in rows {
+            let (fqdn, rev) = r?;
+            map.insert(fqdn, rev);
+        }
+        Ok(map)
     })
 }
 
@@ -668,6 +1211,7 @@ struct EdgeRowRaw {
     to_symbol_id: Option<i64>,
     to_unresolved: Option<String>,
     attributes_json: String,
+    confidence_text: String,
 }
 
 fn read_edge_row(row: &Row<'_>) -> rusqlite::Result<EdgeRowRaw> {
@@ -678,6 +1222,7 @@ fn read_edge_row(row: &Row<'_>) -> rusqlite::Result<EdgeRowRaw> {
         to_symbol_id: row.get(3)?,
         to_unresolved: row.get(4)?,
         attributes_json: row.get(5)?,
+        confidence_text: row.get(6)?,
     })
 }
 
@@ -718,19 +1263,19 @@ fn build_edge(
         }
     };
     let sites = load_edge_sites(conn, raw.id)?;
-    let attributes: Vec<String> =
-        serde_json::from_str(&raw.attributes_json).map_err(|e| StorageError::InvalidStoredData {
-            detail: format!(
-                "edges.id={} has malformed attributes JSON: {e}",
-                raw.id
-            ),
-        })?;
+    let attributes: Vec<String> = serde_json::from_str(&raw.attributes_json).map_err(|e| {
+        StorageError::InvalidStoredData {
+            detail: format!("edges.id={} has malformed attributes JSON: {e}", raw.id),
+        }
+    })?;
+    let confidence = edge_confidence_from_sql_text(&raw.confidence_text)?;
     Ok(RawEdge {
         from_fqdn,
         kind,
         to,
         sites,
         attributes,
+        confidence,
     })
 }
 
@@ -778,6 +1323,169 @@ fn load_edge_sites(conn: &Connection, edge_id: i64) -> Result<Vec<Site>, Storage
 }
 
 #[cfg(test)]
+mod body_helper_tests {
+    use super::count_leading_noise_lines;
+
+    #[test]
+    fn count_leading_noise_lines_returns_zero_when_first_line_is_code() {
+        let lines = vec!["pub fn foo() {", "    do_thing();", "}"];
+        assert_eq!(count_leading_noise_lines(&lines), 0);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_strips_doc_comments() {
+        let lines = vec![
+            "/// This is the doc.",
+            "/// Second doc line.",
+            "pub fn foo() {",
+        ];
+        assert_eq!(count_leading_noise_lines(&lines), 2);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_strips_simple_attribute() {
+        let lines = vec!["#[inline]", "pub fn foo() {"];
+        assert_eq!(count_leading_noise_lines(&lines), 1);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_strips_multi_line_attribute_via_paren_depth() {
+        let lines = vec![
+            "#[tool(",
+            "    description = \"long\"",
+            ")]",
+            "async fn handler() {",
+        ];
+        assert_eq!(count_leading_noise_lines(&lines), 3);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_strips_doc_then_attr_then_blank() {
+        let lines = vec!["/// A function.", "#[allow(dead_code)]", "", "fn f() {"];
+        assert_eq!(count_leading_noise_lines(&lines), 3);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_strips_block_comment_spanning_lines() {
+        let lines = vec!["/*", " * Multi-line block.", " */", "fn f() {"];
+        assert_eq!(count_leading_noise_lines(&lines), 3);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_handles_indented_attributes() {
+        let lines = vec!["    /// indented doc", "    #[inline]", "    fn inner() {"];
+        assert_eq!(count_leading_noise_lines(&lines), 2);
+    }
+
+    #[test]
+    fn count_leading_noise_lines_stops_at_first_non_noise_line() {
+        let lines = vec![
+            "/// doc",
+            "fn first() {",
+            "/// doc on inner",
+            "fn nested() {",
+        ];
+        // Only the first /// is leading noise; everything after the `fn first()`
+        // is body and must be preserved.
+        assert_eq!(count_leading_noise_lines(&lines), 1);
+    }
+
+    use super::compact_body_indent;
+
+    #[test]
+    fn compact_body_indent_dedents_common_4_space_prefix_and_converts_to_tabs() {
+        // A method body indented 4 spaces inside an impl block.
+        let lines = vec!["    fn foo(&self) -> u32 {", "        self.x + 1", "    }"];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 4);
+        assert_eq!(out.indent_unit, "\t");
+        assert_eq!(out.body, "fn foo(&self) -> u32 {\n\tself.x + 1\n}");
+    }
+
+    #[test]
+    fn compact_body_indent_dedents_8_space_then_tab_compacts_residual() {
+        let lines = vec![
+            "        fn deep() {",
+            "            inner();",
+            "                more();",
+            "        }",
+        ];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 8);
+        assert_eq!(out.indent_unit, "\t");
+        assert_eq!(out.body, "fn deep() {\n\tinner();\n\t\tmore();\n}");
+    }
+
+    #[test]
+    fn compact_body_indent_preserves_tab_source_verbatim() {
+        let lines = vec!["fn foo() {", "\tinner();", "\t\tnested();", "}"];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 0);
+        assert_eq!(out.indent_unit, "\t");
+        assert_eq!(out.body, "fn foo() {\n\tinner();\n\t\tnested();\n}");
+    }
+
+    #[test]
+    fn compact_body_indent_converts_2_space_indent_to_tabs() {
+        // TypeScript-style 2-space indent.
+        let lines = vec![
+            "export function foo() {",
+            "  if (x) {",
+            "    bar();",
+            "  }",
+            "}",
+        ];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 0);
+        assert_eq!(out.indent_unit, "\t");
+        assert_eq!(
+            out.body,
+            "export function foo() {\n\tif (x) {\n\t\tbar();\n\t}\n}"
+        );
+    }
+
+    #[test]
+    fn compact_body_indent_blank_lines_do_not_break_dedent() {
+        let lines = vec!["    fn foo() {", "", "        let x = 1;", "    }"];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 4);
+        assert_eq!(out.indent_unit, "\t");
+        // Blank line stays empty (its leading-ws was shorter than common prefix).
+        assert_eq!(out.body, "fn foo() {\n\n\tlet x = 1;\n}");
+    }
+
+    #[test]
+    fn compact_body_indent_skips_conversion_on_mixed_indent() {
+        // One line uses tabs, another uses 3 spaces — non-uniform residual.
+        let lines = vec!["fn foo() {", "\tinner();", "   weird();", "}"];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 0);
+        // Tabs present but spaces are non-multiple-of-2 / 4 → unit empty,
+        // body returned verbatim post-(no-op) dedent.
+        assert_eq!(out.indent_unit, "");
+        assert_eq!(out.body, "fn foo() {\n\tinner();\n   weird();\n}");
+    }
+
+    #[test]
+    fn compact_body_indent_empty_input_returns_empty() {
+        let lines: Vec<&str> = vec![];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 0);
+        assert_eq!(out.indent_unit, "");
+        assert_eq!(out.body, "");
+    }
+
+    #[test]
+    fn compact_body_indent_single_line_no_indent_no_op() {
+        let lines = vec!["fn foo() {}"];
+        let out = compact_body_indent(&lines);
+        assert_eq!(out.dedented_prefix_len, 0);
+        assert_eq!(out.indent_unit, "");
+        assert_eq!(out.body, "fn foo() {}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::IngestCommand;
@@ -787,8 +1495,8 @@ mod tests {
     use crate::storage::symbols::{SymbolInsertContext, insert_symbol};
     use rusqlite::Connection;
     use standardoc_ir::{
-        Blake3Hash, EdgeKind, ExtractedFile, Kind, LanguageKind, Modifiers, Param, RawEdge,
-        RawSymbol, Signature, Site, SourceOrigin, SymbolLocation, TypeRef, Visibility,
+        Blake3Hash, EdgeConfidence, EdgeKind, ExtractedFile, Kind, LanguageKind, Modifiers, Param,
+        RawEdge, RawSymbol, Signature, Site, SourceOrigin, SymbolLocation, TypeRef, Visibility,
     };
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
@@ -821,6 +1529,7 @@ mod tests {
                 byte_size: 100,
                 last_scanned: 1_700_000_000_000,
                 last_scan_error: None,
+                is_external: false,
             },
         )
         .unwrap();
@@ -859,6 +1568,7 @@ mod tests {
                 language: Language::Rust,
                 is_external: false,
                 source_origin: SourceOrigin::Workspace,
+                revision: 0,
             },
         )
         .unwrap();
@@ -931,6 +1641,7 @@ mod tests {
                     language: Language::Rust,
                     is_external: false,
                     source_origin: SourceOrigin::Workspace,
+                    revision: 0,
                 },
             )
             .unwrap();
@@ -1006,6 +1717,7 @@ mod tests {
                     },
                     sites: vec![],
                     attributes: vec![],
+                    confidence: EdgeConfidence::default(),
                 },
             )
             .unwrap();
@@ -1020,6 +1732,7 @@ mod tests {
                     },
                     sites: vec![],
                     attributes: vec![],
+                    confidence: EdgeConfidence::default(),
                 },
             )
             .unwrap();
@@ -1062,6 +1775,7 @@ mod tests {
                     },
                     sites: vec![],
                     attributes: vec![],
+                    confidence: EdgeConfidence::default(),
                 },
             )
             .unwrap();
@@ -1110,6 +1824,7 @@ mod tests {
                     },
                     sites: vec![],
                     attributes: vec![],
+                    confidence: EdgeConfidence::default(),
                 },
             )
             .unwrap();
@@ -1141,6 +1856,7 @@ mod tests {
                     },
                     sites: vec![],
                     attributes: vec![],
+                    confidence: EdgeConfidence::default(),
                 },
             )
             .unwrap();
@@ -1148,6 +1864,59 @@ mod tests {
         let edges = edges_to(&handle, "external::thing").unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].from_fqdn, "crate::caller");
+    }
+
+    #[test]
+    fn sanitize_fts5_query_strips_hyphen_and_joins_with_space() {
+        assert_eq!(sanitize_fts5_query("standardoc-cli"), "standardoc cli");
+    }
+
+    #[test]
+    fn sanitize_fts5_query_replaces_double_colon_with_space() {
+        assert_eq!(sanitize_fts5_query("Type::method"), "Type method");
+    }
+
+    #[test]
+    fn sanitize_fts5_query_collapses_consecutive_specials() {
+        assert_eq!(sanitize_fts5_query("foo---bar::baz"), "foo bar baz");
+    }
+
+    #[test]
+    fn sanitize_fts5_query_preserves_alphanumeric_and_underscore_unchanged() {
+        assert_eq!(sanitize_fts5_query("my_func2"), "my_func2");
+    }
+
+    #[test]
+    fn sanitize_fts5_query_empty_for_only_special_chars() {
+        assert_eq!(sanitize_fts5_query("---"), "");
+        assert_eq!(sanitize_fts5_query(""), "");
+        assert_eq!(sanitize_fts5_query("   "), "");
+    }
+
+    #[test]
+    fn search_text_matches_hyphenated_query() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol(
+                &conn,
+                "src/main.rs",
+                "cli_entry",
+                "standardoc_cli::cli_entry",
+                1,
+            );
+        }
+        let results = search_text(&handle, "standardoc-cli", 10, &SymbolFilter::default()).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fqdn, "standardoc_cli::cli_entry");
+    }
+
+    #[test]
+    fn search_text_returns_empty_for_only_special_chars_query() {
+        let (_dir, handle) = open_handle();
+        let results = search_text(&handle, "---", 10, &SymbolFilter::default()).unwrap();
+        assert!(results.is_empty());
     }
 
     #[test]
@@ -1186,7 +1955,8 @@ mod tests {
             seed_symbol(&conn, "src/main.rs", "tick_one", "crate::tick_one", 1);
             seed_symbol(&conn, "src/main.rs", "tick_two", "crate::tick_two", 2);
         }
-        let got = search_text(&handle, "tick_one OR tick_two", 1, &SymbolFilter::default()).unwrap();
+        let got =
+            search_text(&handle, "tick_one OR tick_two", 1, &SymbolFilter::default()).unwrap();
         assert_eq!(got.len(), 1);
     }
 
@@ -1225,6 +1995,7 @@ mod tests {
                 language: Language::Rust,
                 is_external: false,
                 source_origin: SourceOrigin::Workspace,
+                revision: 0,
             },
         )
         .unwrap()
@@ -1237,12 +2008,22 @@ mod tests {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
             seed_symbol_full(
-                &conn, "src/main.rs", "marker", "crate::marker_fn",
-                Kind::Function, Visibility::Public, None,
+                &conn,
+                "src/main.rs",
+                "marker",
+                "crate::marker_fn",
+                Kind::Function,
+                Visibility::Public,
+                None,
             );
             seed_symbol_full(
-                &conn, "src/main.rs", "marker", "crate::marker_ty",
-                Kind::Type, Visibility::Public, None,
+                &conn,
+                "src/main.rs",
+                "marker",
+                "crate::marker_ty",
+                Kind::Type,
+                Visibility::Public,
+                None,
             );
         }
         let only_types = SymbolFilter {
@@ -1261,12 +2042,22 @@ mod tests {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
             seed_symbol_full(
-                &conn, "src/main.rs", "thing", "crate::thing_pub",
-                Kind::Function, Visibility::Public, None,
+                &conn,
+                "src/main.rs",
+                "thing",
+                "crate::thing_pub",
+                Kind::Function,
+                Visibility::Public,
+                None,
             );
             seed_symbol_full(
-                &conn, "src/main.rs", "thing", "crate::thing_priv",
-                Kind::Function, Visibility::Private, None,
+                &conn,
+                "src/main.rs",
+                "thing",
+                "crate::thing_priv",
+                Kind::Function,
+                Visibility::Private,
+                None,
             );
         }
         let only_private = SymbolFilter {
@@ -1284,10 +2075,24 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "a", "crate::a",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs", "b", "crate::b",
-                Kind::Type, Visibility::Private, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "a",
+                "crate::a",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "b",
+                "crate::b",
+                Kind::Type,
+                Visibility::Private,
+                None,
+            );
         }
         let got = list_symbols(&handle, &SymbolFilter::default(), 50).unwrap();
         assert_eq!(got.len(), 2);
@@ -1302,12 +2107,33 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "pub_one", "crate::pub_one",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs", "priv_one", "crate::priv_one",
-                Kind::Function, Visibility::Private, None);
-            seed_symbol_full(&conn, "src/main.rs", "priv_two", "crate::priv_two",
-                Kind::Function, Visibility::Private, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "pub_one",
+                "crate::pub_one",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "priv_one",
+                "crate::priv_one",
+                Kind::Function,
+                Visibility::Private,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "priv_two",
+                "crate::priv_two",
+                Kind::Function,
+                Visibility::Private,
+                None,
+            );
         }
         let filter = SymbolFilter {
             visibility: Some(Visibility::Private),
@@ -1324,10 +2150,24 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "f1", "crate::a::f1",
-                Kind::Function, Visibility::Public, Some("crate::a"));
-            seed_symbol_full(&conn, "src/main.rs", "f2", "crate::b::f2",
-                Kind::Function, Visibility::Public, Some("crate::b"));
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "f1",
+                "crate::a::f1",
+                Kind::Function,
+                Visibility::Public,
+                Some("crate::a"),
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "f2",
+                "crate::b::f2",
+                Kind::Function,
+                Visibility::Public,
+                Some("crate::b"),
+            );
         }
         let filter = SymbolFilter {
             module: Some("crate::a".into()),
@@ -1345,9 +2185,15 @@ mod tests {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
             for i in 0..5 {
-                seed_symbol_full(&conn, "src/main.rs",
-                    &format!("f{i}"), &format!("crate::f{i}"),
-                    Kind::Function, Visibility::Public, None);
+                seed_symbol_full(
+                    &conn,
+                    "src/main.rs",
+                    &format!("f{i}"),
+                    &format!("crate::f{i}"),
+                    Kind::Function,
+                    Visibility::Public,
+                    None,
+                );
             }
         }
         let got = list_symbols(&handle, &SymbolFilter::default(), 3).unwrap();
@@ -1360,20 +2206,36 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "strip_rs_extension", "crate::a::strip_rs_extension",
-                Kind::Function, Visibility::Private, None);
-            seed_symbol_full(&conn, "src/main.rs", "strip_ts_extension", "crate::b::strip_ts_extension",
-                Kind::Function, Visibility::Private, None);
-            seed_symbol_full(&conn, "src/main.rs", "compute_path", "crate::c::compute_path",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_rs_extension",
+                "crate::a::strip_rs_extension",
+                Kind::Function,
+                Visibility::Private,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_ts_extension",
+                "crate::b::strip_ts_extension",
+                Kind::Function,
+                Visibility::Private,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "compute_path",
+                "crate::c::compute_path",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
-        let got = find_by_pattern(
-            &handle,
-            "strip_*_extension",
-            &SymbolFilter::default(),
-            50,
-        )
-        .unwrap();
+        let got =
+            find_by_pattern(&handle, "strip_*_extension", &SymbolFilter::default(), 50).unwrap();
         let names: Vec<&str> = got.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["strip_rs_extension", "strip_ts_extension"]);
     }
@@ -1384,20 +2246,36 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "do_a", "myapp::utils::do_a",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs", "do_b", "myapp::utils::do_b",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs", "do_c", "other::do_c",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "do_a",
+                "myapp::utils::do_a",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "do_b",
+                "myapp::utils::do_b",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "do_c",
+                "other::do_c",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
-        let got = find_by_pattern(
-            &handle,
-            "myapp::utils::*",
-            &SymbolFilter::default(),
-            50,
-        )
-        .unwrap();
+        let got =
+            find_by_pattern(&handle, "myapp::utils::*", &SymbolFilter::default(), 50).unwrap();
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|s| s.fqdn.starts_with("myapp::utils::")));
     }
@@ -1408,10 +2286,24 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "helper_one", "crate::helper_one",
-                Kind::Function, Visibility::Private, None);
-            seed_symbol_full(&conn, "src/main.rs", "helper_two", "crate::helper_two",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "helper_one",
+                "crate::helper_one",
+                Kind::Function,
+                Visibility::Private,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "helper_two",
+                "crate::helper_two",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
         let filter = SymbolFilter {
             visibility: Some(Visibility::Private),
@@ -1428,8 +2320,15 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs", "foo", "crate::foo",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "foo",
+                "crate::foo",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
         let got = find_by_pattern(&handle, "nope_*", &SymbolFilter::default(), 50).unwrap();
         assert!(got.is_empty());
@@ -1441,18 +2340,42 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_rs_extension", "crate::a::strip_rs_extension",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_ts_extension", "crate::b::strip_ts_extension",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_lua_extension", "crate::c::strip_lua_extension",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs",
-                "render_widget", "crate::d::render_widget",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_rs_extension",
+                "crate::a::strip_rs_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_ts_extension",
+                "crate::b::strip_ts_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_lua_extension",
+                "crate::c::strip_lua_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "render_widget",
+                "crate::d::render_widget",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
         let got = find_similar(
             &handle,
@@ -1464,8 +2387,7 @@ mod tests {
         .unwrap();
         let names: Vec<&str> = got.iter().map(|(s, _)| s.name.as_str()).collect();
         assert!(
-            names.contains(&"strip_ts_extension")
-                && names.contains(&"strip_lua_extension"),
+            names.contains(&"strip_ts_extension") && names.contains(&"strip_lua_extension"),
             "expected templated family in result, got {names:?}"
         );
         assert!(
@@ -1480,15 +2402,33 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_rs_extension", "crate::a::strip_rs_extension",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_rs_extension", "crate::b::strip_rs_extension",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_ts_extension", "crate::c::strip_ts_extension",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_rs_extension",
+                "crate::a::strip_rs_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_rs_extension",
+                "crate::b::strip_rs_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_ts_extension",
+                "crate::c::strip_ts_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
         let got = find_similar(
             &handle,
@@ -1511,13 +2451,25 @@ mod tests {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
             // Closest cousin: 1-char-diff
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_ts_extension", "crate::a::strip_ts_extension",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_ts_extension",
+                "crate::a::strip_ts_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
             // Slightly weaker cousin: 3-chars-diff
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_lua_extension", "crate::b::strip_lua_extension",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_lua_extension",
+                "crate::b::strip_lua_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
         let got = find_similar(
             &handle,
@@ -1528,10 +2480,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got.len(), 2);
-        assert!(
-            got[0].1 >= got[1].1,
-            "results must be sorted by score desc"
-        );
+        assert!(got[0].1 >= got[1].1, "results must be sorted by score desc");
         assert_eq!(got[0].0.name, "strip_ts_extension");
         assert_eq!(got[1].0.name, "strip_lua_extension");
     }
@@ -1542,18 +2491,18 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs",
-                "buy_apple", "crate::a::buy_apple",
-                Kind::Function, Visibility::Public, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "buy_apple",
+                "crate::a::buy_apple",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
         }
-        let got = find_similar(
-            &handle,
-            "render_widget",
-            0.95,
-            &SymbolFilter::default(),
-            50,
-        )
-        .unwrap();
+        let got =
+            find_similar(&handle, "render_widget", 0.95, &SymbolFilter::default(), 50).unwrap();
         assert!(got.is_empty(), "high threshold must drop unrelated names");
     }
 
@@ -1563,12 +2512,24 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_ts_extension", "crate::a::strip_ts_extension",
-                Kind::Function, Visibility::Public, None);
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_lua_extension", "crate::b::strip_lua_extension",
-                Kind::Function, Visibility::Private, None);
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_ts_extension",
+                "crate::a::strip_ts_extension",
+                Kind::Function,
+                Visibility::Public,
+                None,
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_lua_extension",
+                "crate::b::strip_lua_extension",
+                Kind::Function,
+                Visibility::Private,
+                None,
+            );
         }
         let filter = SymbolFilter {
             visibility: Some(Visibility::Public),
@@ -1588,8 +2549,15 @@ mod tests {
             for label in ["ts", "lua", "py", "go", "js"] {
                 let name = format!("strip_{label}_extension");
                 let fqdn = format!("crate::{label}::strip_{label}_extension");
-                seed_symbol_full(&conn, "src/main.rs", &name, &fqdn,
-                    Kind::Function, Visibility::Public, None);
+                seed_symbol_full(
+                    &conn,
+                    "src/main.rs",
+                    &name,
+                    &fqdn,
+                    Kind::Function,
+                    Visibility::Public,
+                    None,
+                );
             }
         }
         let got = find_similar(
@@ -1606,14 +2574,7 @@ mod tests {
     #[test]
     fn find_similar_empty_index_returns_empty() {
         let (_dir, handle) = open_handle();
-        let got = find_similar(
-            &handle,
-            "anything",
-            0.5,
-            &SymbolFilter::default(),
-            50,
-        )
-        .unwrap();
+        let got = find_similar(&handle, "anything", 0.5, &SymbolFilter::default(), 50).unwrap();
         assert!(got.is_empty());
     }
 
@@ -1623,12 +2584,24 @@ mod tests {
         {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_ts_extension", "crate::a::strip_ts_extension",
-                Kind::Function, Visibility::Public, Some("crate::a"));
-            seed_symbol_full(&conn, "src/main.rs",
-                "strip_lua_extension", "crate::b::strip_lua_extension",
-                Kind::Function, Visibility::Public, Some("crate::b"));
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_ts_extension",
+                "crate::a::strip_ts_extension",
+                Kind::Function,
+                Visibility::Public,
+                Some("crate::a"),
+            );
+            seed_symbol_full(
+                &conn,
+                "src/main.rs",
+                "strip_lua_extension",
+                "crate::b::strip_lua_extension",
+                Kind::Function,
+                Visibility::Public,
+                Some("crate::b"),
+            );
         }
         let filter = SymbolFilter {
             module: Some("crate::a".into()),
@@ -1654,6 +2627,7 @@ mod tests {
                     byte_size: 4096,
                     last_scanned: 1_700_000_000_000,
                     last_scan_error: Some("boom".into()),
+                    is_external: false,
                 },
             )
             .unwrap();
@@ -1755,6 +2729,7 @@ mod tests {
                 language: Language::Rust,
                 is_external: false,
                 source_origin: SourceOrigin::Workspace,
+                revision: 0,
             },
         )
         .unwrap();
@@ -1903,6 +2878,7 @@ mod tests {
                 to,
                 sites: vec![],
                 attributes: vec![],
+                confidence: EdgeConfidence::default(),
             },
         )
         .unwrap();
@@ -1923,6 +2899,7 @@ mod tests {
                 to,
                 sites: vec![],
                 attributes: vec![],
+                confidence: EdgeConfidence::default(),
             },
         )
         .unwrap();
@@ -2126,6 +3103,7 @@ mod tests {
                     },
                     sites: vec![],
                     attributes: vec![],
+                    confidence: EdgeConfidence::default(),
                 },
             )
             .unwrap();

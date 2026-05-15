@@ -47,9 +47,7 @@ fn collect_block_for<'a>(trivia: impl Iterator<Item = &'a Token>) -> Option<Stri
     for tok in trivia {
         match tok.token_type() {
             TokenType::SingleLineComment { .. } | TokenType::MultiLineComment { .. } => {
-                if newlines_since_last_comment >= 2
-                    && !blocks.last().is_some_and(Vec::is_empty)
-                {
+                if newlines_since_last_comment >= 2 && !blocks.last().is_some_and(Vec::is_empty) {
                     blocks.push(Vec::new());
                 }
                 if let Some(last) = blocks.last_mut() {
@@ -120,11 +118,7 @@ mod tests {
 
     fn first_stmt_token(content: &str) -> TokenReference {
         let ast = full_moon::parse(content).expect("parse");
-        let first = ast
-            .nodes()
-            .stmts()
-            .next()
-            .expect("at least one stmt");
+        let first = ast.nodes().stmts().next().expect("at least one stmt");
         // Reach into the first stmt's first token. We use Display-equivalent
         // reconstruction via Node::tokens — but for tests we cheat by using
         // a known shape: LocalAssignment has local_token().
@@ -132,7 +126,9 @@ mod tests {
             full_moon::ast::Stmt::LocalAssignment(la) => la.local_token().clone(),
             full_moon::ast::Stmt::LocalFunction(lf) => lf.local_token().clone(),
             full_moon::ast::Stmt::FunctionDeclaration(fd) => fd.function_token().clone(),
-            other => panic!("test fixture must use LocalAssignment / LocalFunction / FunctionDeclaration, got {other:?}"),
+            other => panic!(
+                "test fixture must use LocalAssignment / LocalFunction / FunctionDeclaration, got {other:?}"
+            ),
         }
     }
 

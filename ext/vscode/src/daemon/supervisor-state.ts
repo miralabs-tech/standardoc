@@ -4,7 +4,7 @@ import { describeFatalConfig, type FatalConfig } from './fatal-marker';
 export type DaemonState =
   | { kind: 'stopped' }
   | { kind: 'starting' }
-  | { kind: 'ready'; pid: number }
+  | { kind: 'ready' }
   | { kind: 'restarting'; attempt: number }
   | { kind: 'failed'; reason: string }
   /**
@@ -14,15 +14,26 @@ export type DaemonState =
    * binary after a schema bump). Distinct from `failed` so the UI can
    * surface an actionable hint and the backoff machinery stays put.
    */
-  | { kind: 'fatal_config'; config: FatalConfig };
+  | { kind: 'fatal_config'; config: FatalConfig }
+  /**
+   * No standardoc binary was resolved (no `standardoc.binaryPath`
+   * setting, no binary in globalStorage, none on PATH). Distinct from
+   * `failed` so the status bar can offer a one-click download
+   * affordance and the backoff machinery stays put — retrying spawn()
+   * would just hit the same wall.
+   */
+  | { kind: 'awaiting_binary' };
 
 export const describeState = matcher<DaemonState, string>()
   .with({ kind: 'stopped' }, () => 'Stopped')
   .with({ kind: 'starting' }, () => 'Starting')
-  .with({ kind: 'ready' }, ({ pid }) => `Ready (pid ${pid})`)
+  // 'ready' carries no PID — the supervisor aggregates two separate
+  // children (LSP + MCP). Displaying `pid 0` was a placeholder leak.
+  .with({ kind: 'ready' }, () => 'Ready')
   .with({ kind: 'restarting' }, ({ attempt }) => `Restarting (attempt ${attempt})`)
   .with({ kind: 'failed' }, ({ reason }) => `Failed: ${reason}`)
   .with({ kind: 'fatal_config' }, ({ config }) => `Fatal config: ${describeFatalConfig(config)}`)
+  .with({ kind: 'awaiting_binary' }, () => 'Awaiting binary download')
   .exhaustive();
 
 export const BACKOFF_MS: ReadonlyArray<number> = [0, 2000, 8000];

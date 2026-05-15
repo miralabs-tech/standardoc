@@ -18,12 +18,18 @@ fn write(root: &Path, rel: &str, content: &str) {
 fn extract_with_rockspec_uses_rockspec_package_name_in_fqdn() {
     let dir = tempdir().unwrap();
     let root = dir.path();
-    write(root, "mylib-1.0-1.rockspec", "package = \"mylib\"\nversion = \"1.0-1\"\n");
+    write(
+        root,
+        "mylib-1.0-1.rockspec",
+        "package = \"mylib\"\nversion = \"1.0-1\"\n",
+    );
     let src = "local function helper() end\n";
     write(root, "src/util.lua", src);
 
     let provider = LuaProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider
         .extract(src, "src/util.lua", &ctx)
         .expect("extract ok");
@@ -49,10 +55,10 @@ fn extract_without_rockspec_falls_back_to_workspace_dir_name() {
     write(&root, "main.lua", src);
 
     let provider = LuaProvider::new();
-    let ctx = ExtractContext { workspace_root: &root };
-    let extracted = provider
-        .extract(src, "main.lua", &ctx)
-        .expect("extract ok");
+    let ctx = ExtractContext {
+        workspace_root: &root,
+    };
+    let extracted = provider.extract(src, "main.lua", &ctx).expect("extract ok");
 
     let module = &extracted.symbols[0];
     assert_eq!(module.fqdn, "myapp::main");
@@ -67,7 +73,9 @@ fn rockspec_is_cached_across_files() {
     write(root, "b.lua", "local function b() end\n");
 
     let provider = LuaProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
 
     let _ = provider
         .extract("local function a() end\n", "a.lua", &ctx)
@@ -108,7 +116,9 @@ return M
     write(root, "src/strings.lua", src);
 
     let provider = LuaProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(src, "src/strings.lua", &ctx).unwrap();
 
     let trim = extracted
@@ -154,7 +164,9 @@ fn require_imports_emits_unresolved_edge_for_dotted_path() {
     write(root, "main.lua", src);
 
     let provider = LuaProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(src, "main.lua", &ctx).unwrap();
 
     let imports: Vec<_> = extracted
@@ -183,7 +195,9 @@ fn unparseable_rockspec_falls_back_to_workspace_dir() {
     write(&root, "main.lua", src);
 
     let provider = LuaProvider::new();
-    let ctx = ExtractContext { workspace_root: &root };
+    let ctx = ExtractContext {
+        workspace_root: &root,
+    };
     let extracted = provider.extract(src, "main.lua", &ctx).unwrap();
     assert_eq!(extracted.symbols[0].fqdn, "project::main");
 }
@@ -205,7 +219,9 @@ return N
     write(root, "lib.lua", src);
 
     let provider = LuaProvider::new();
-    let ctx = ExtractContext { workspace_root: root };
+    let ctx = ExtractContext {
+        workspace_root: root,
+    };
     let extracted = provider.extract(src, "lib.lua", &ctx).unwrap();
 
     let foo = extracted.symbols.iter().find(|s| s.name == "foo").unwrap();
@@ -223,7 +239,9 @@ fn nested_table_methods_get_full_fqdn_chain() {
     write(&root, "lib.lua", src);
 
     let provider = LuaProvider::new();
-    let ctx = ExtractContext { workspace_root: &root };
+    let ctx = ExtractContext {
+        workspace_root: &root,
+    };
     let extracted = provider.extract(src, "lib.lua", &ctx).unwrap();
 
     let m = extracted

@@ -19,7 +19,7 @@ fn write_sample_workspace(root: &Path) {
 }
 
 fn standardoc() -> Command {
-    Command::cargo_bin("stdoc").expect("stdoc binary must build")
+    Command::cargo_bin("standardoc").expect("standardoc binary must build")
 }
 
 #[test]
@@ -289,4 +289,31 @@ fn purge_excluded_requires_yes_in_non_interactive_shell() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("non-interactive"));
+}
+
+#[test]
+fn reset_usage_no_op_on_fresh_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    write_sample_workspace(dir.path());
+
+    standardoc()
+        .arg("reset-usage")
+        .arg(dir.path())
+        .args(["--period", "all", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to reset"));
+}
+
+#[test]
+fn reset_usage_invalid_period_fails_clap_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    write_sample_workspace(dir.path());
+
+    standardoc()
+        .arg("reset-usage")
+        .arg(dir.path())
+        .args(["--period", "yesterday", "--yes"])
+        .assert()
+        .failure();
 }

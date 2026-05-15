@@ -77,16 +77,14 @@ mod tests {
 
     #[test]
     fn skips_keyword_inside_braces() {
-        let (pos, len) =
-            find_top_level_keyword("{a in b} in items", " in ").unwrap();
+        let (pos, len) = find_top_level_keyword("{a in b} in items", " in ").unwrap();
         let after = &"{a in b} in items"[pos + len..];
         assert_eq!(after, "items");
     }
 
     #[test]
     fn skips_keyword_inside_string_literal() {
-        let (pos, len) =
-            find_top_level_keyword("\"a in b\" in items", " in ").unwrap();
+        let (pos, len) = find_top_level_keyword("\"a in b\" in items", " in ").unwrap();
         let after = &"\"a in b\" in items"[pos + len..];
         assert_eq!(after, "items");
     }

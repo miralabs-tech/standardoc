@@ -12,6 +12,11 @@ pub(crate) struct FileInput {
     pub(crate) byte_size: u64,
     pub(crate) last_scanned: i64,
     pub(crate) last_scan_error: Option<String>,
+    /// `true` for rows produced by external resolvers (S3-G lazy
+    /// on-demand). The flag is read by `cold_start::cleanup_unseen`
+    /// to skip purging external rows that the workspace walk never
+    /// re-visits. Defaults to `false` for workspace files.
+    pub(crate) is_external: bool,
 }
 
 pub(crate) fn upsert_file(conn: &Connection, file: &FileInput) -> Result<(), StorageError> {
@@ -20,14 +25,15 @@ pub(crate) fn upsert_file(conn: &Connection, file: &FileInput) -> Result<(), Sto
             detail: format!("byte_size {} exceeds i64::MAX", file.byte_size),
         })?;
     conn.execute(
-        "INSERT INTO files (path, content_hash, language, last_scanned, byte_size, last_scan_error) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+        "INSERT INTO files (path, content_hash, language, last_scanned, byte_size, last_scan_error, is_external) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
          ON CONFLICT(path) DO UPDATE SET \
             content_hash    = excluded.content_hash, \
             language        = excluded.language, \
             last_scanned    = excluded.last_scanned, \
             byte_size       = excluded.byte_size, \
-            last_scan_error = excluded.last_scan_error",
+            last_scan_error = excluded.last_scan_error, \
+            is_external     = excluded.is_external",
         rusqlite::params![
             file.path,
             file.content_hash.to_hex(),
@@ -35,6 +41,7 @@ pub(crate) fn upsert_file(conn: &Connection, file: &FileInput) -> Result<(), Sto
             file.last_scanned,
             byte_size_i64,
             file.last_scan_error,
+            file.is_external,
         ],
     )?;
     Ok(())
@@ -43,7 +50,7 @@ pub(crate) fn upsert_file(conn: &Connection, file: &FileInput) -> Result<(), Sto
 pub(crate) fn get_file(conn: &Connection, path: &str) -> Result<Option<FileInput>, StorageError> {
     let raw = conn
         .query_row(
-            "SELECT path, content_hash, language, last_scanned, byte_size, last_scan_error \
+            "SELECT path, content_hash, language, last_scanned, byte_size, last_scan_error, is_external \
              FROM files WHERE path = ?1",
             [path],
             from_row,
@@ -64,6 +71,7 @@ struct RawFileRow {
     last_scanned: i64,
     byte_size_i64: i64,
     last_scan_error: Option<String>,
+    is_external: i64,
 }
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<RawFileRow> {
@@ -74,6 +82,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<RawFileRow> {
         last_scanned: row.get(3)?,
         byte_size_i64: row.get(4)?,
         last_scan_error: row.get(5)?,
+        is_external: row.get(6)?,
     })
 }
 
@@ -95,6 +104,7 @@ fn build_file_input(raw: RawFileRow) -> Result<FileInput, StorageError> {
         byte_size,
         last_scanned: raw.last_scanned,
         last_scan_error: raw.last_scan_error,
+        is_external: raw.is_external != 0,
     })
 }
 
@@ -111,6 +121,7 @@ mod tests {
             byte_size: 1234,
             last_scanned: 1_700_000_000_000,
             last_scan_error: None,
+            is_external: false,
         }
     }
 

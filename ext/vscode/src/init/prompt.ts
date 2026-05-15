@@ -9,6 +9,11 @@ import {
   serializeMcpConfig,
 } from './mcp-config';
 import {
+  mergeClaudeHook,
+  parseClaudeSettings,
+  serializeClaudeSettings,
+} from './claude-hook';
+import {
   decidePromptOnActivate,
   type GlobalInitState,
   type WorkspaceInitState,
@@ -25,6 +30,8 @@ const GLOBAL_STATE_KEY = 'standardoc.initStateGlobal';
 const CODE_MARKERS = ['Cargo.toml', 'package.json', 'pyproject.toml'];
 const STANDARDOC_DIR = '.standardoc';
 const MCP_CONFIG_FILE = '.mcp.json';
+const CLAUDE_DIR = '.claude';
+const CLAUDE_SETTINGS_FILE = path.join('.claude', 'settings.json');
 
 export interface InitDeps {
   readonly context: vscode.ExtensionContext;
@@ -100,14 +107,62 @@ export async function initializeWorkspace(deps: InitDeps): Promise<void> {
   await deps.context.workspaceState.update(WORKSPACE_STATE_KEY, 'opted-in');
   await writeMcpConfig(deps);
   await writeSkillFile(deps, { mode: 'init' });
+  await writeClaudeHook(deps);
   deps.onOptedIn();
 }
 
+/**
+ * Merge a Standardoc UserPromptSubmit hook into `.claude/settings.json`.
+ * Idempotent (marker-based) — re-running init never duplicates the entry.
+ * Other users' hooks are preserved as-is.
+ */
+export async function writeClaudeHook(deps: InitDeps): Promise<void> {
+  const target = path.join(deps.workspaceRoot, CLAUDE_SETTINGS_FILE);
+  const raw = readFileOrNull(target);
+  const action = mergeClaudeHook(parseClaudeSettings(raw));
+
+  switch (action.kind) {
+    case 'no-op':
+      deps.output.appendLine('[init] .claude/settings.json already wires the MCP-first hook');
+      return;
+    case 'invalid':
+      deps.output.appendLine(
+        `[init] .claude/settings.json could not be parsed (${action.error}); skipping hook install`,
+      );
+      void vscode.window.showWarningMessage(
+        `Standardoc: .claude/settings.json could not be parsed (${action.error}). ` +
+          `Please add the UserPromptSubmit hook manually.`,
+      );
+      return;
+    case 'create':
+    case 'append': {
+      try {
+        fs.mkdirSync(path.join(deps.workspaceRoot, CLAUDE_DIR), { recursive: true });
+        fs.writeFileSync(target, serializeClaudeSettings(action.result), 'utf8');
+      } catch (e) {
+        deps.output.appendLine(
+          `[init] failed to write .claude/settings.json: ${describeError(e)}`,
+        );
+        void vscode.window.showErrorMessage(
+          `Standardoc: could not write .claude/settings.json (${describeError(e)})`,
+        );
+        return;
+      }
+      const verb = action.kind === 'create' ? 'created' : 'appended Standardoc hook to';
+      deps.output.appendLine(`[init] ${verb} .claude/settings.json`);
+      return;
+    }
+  }
+}
+
 export async function writeMcpConfig(deps: InitDeps): Promise<void> {
-  let binaryPath: string;
+  // We no longer need the binary path for the .mcp.json entry — the
+  // canonical Standardoc MCP server is the HTTP/SSE endpoint supervised
+  // by the VSCode extension. We still try to resolve the binary first so
+  // a user without it installed gets a clear error before we write a
+  // dangling .mcp.json.
   try {
-    const resolved = await resolveBinary(deps.context);
-    binaryPath = resolved.path;
+    await resolveBinary(deps.context);
   } catch (e) {
     deps.output.appendLine(
       `[init] cannot resolve binary for .mcp.json: ${describeError(e)}`,
@@ -115,10 +170,11 @@ export async function writeMcpConfig(deps: InitDeps): Promise<void> {
     return;
   }
 
-  const expected = buildStandardocEntry({
-    binaryPath,
-    workspaceRoot: deps.workspaceRoot,
-  });
+  const port = vscode.workspace
+    .getConfiguration('standardoc')
+    .get<number>('mcpHttpPort', 7700);
+  const endpointUrl = `http://127.0.0.1:${port}/mcp`;
+  const expected = buildStandardocEntry({ endpointUrl });
   const target = path.join(deps.workspaceRoot, MCP_CONFIG_FILE);
   const raw = readFileOrNull(target);
   const parsed = parseMcpConfig(raw);
@@ -212,6 +268,55 @@ export async function writeSkillFile(
 
 export async function regenerateSkill(deps: InitDeps): Promise<void> {
   await writeSkillFile(deps, { mode: 'force' });
+}
+
+/**
+ * Sync `.mcp.json` to point at the daemon's ACTUAL endpoint URL.
+ *
+ * The supervisor calls this after the MCP daemon transitions to `ready`,
+ * so external consumers (claude-code CLI, Copilot Chat, ...) always
+ * connect to the live port — even when the daemon fell back to an
+ * ephemeral port because the user's configured port was already bound
+ * by another VSCode window.
+ *
+ * Behaviour is intentionally quieter than the init-time write: no toast
+ * on success, only a log line. The merge layer remains idempotent — a
+ * matching `.mcp.json` short-circuits to `no-op`.
+ */
+export async function syncMcpConfigToUrl(
+  workspaceRoot: string,
+  output: vscode.OutputChannel,
+  endpointUrl: string,
+): Promise<void> {
+  const expected = buildStandardocEntry({ endpointUrl });
+  const target = path.join(workspaceRoot, MCP_CONFIG_FILE);
+  const raw = readFileOrNull(target);
+  const parsed = parseMcpConfig(raw);
+  const action = mergeMcpConfig(parsed, expected);
+
+  switch (action.kind) {
+    case 'no-op':
+      return;
+    case 'invalid':
+      output.appendLine(
+        `[mcp-sync] .mcp.json invalid (${action.error}); leaving as-is`,
+      );
+      return;
+    case 'create':
+    case 'add-first':
+    case 'overwrite-stale': {
+      try {
+        fs.writeFileSync(target, serializeMcpConfig(action.result), 'utf8');
+      } catch (e) {
+        output.appendLine(
+          `[mcp-sync] failed to write .mcp.json: ${describeError(e)}`,
+        );
+        return;
+      }
+      output.appendLine(`[mcp-sync] .mcp.json updated to ${endpointUrl}`);
+      return;
+    }
+  }
 }
 
 function readFileOrNull(p: string): string | null {

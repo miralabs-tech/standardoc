@@ -39,10 +39,7 @@ mod tests {
     fn first_match_wins_when_multiple_extensions_listed() {
         // `.d.ts` declared before `.ts` — declaration files keep their
         // double-extension semantics.
-        assert_eq!(
-            strip_extension("foo.d.ts", &[".d.ts", ".ts"]),
-            "foo"
-        );
+        assert_eq!(strip_extension("foo.d.ts", &[".d.ts", ".ts"]), "foo");
     }
 
     #[test]
