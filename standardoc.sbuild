@@ -1,91 +1,46 @@
-// Auto-generated from c:\Users\SUP2Ak\Desktop\Mira\stdoc\standardoc by `standarbuild init`.
+// Auto-generated from {WorkspaceFolder} by `standarbuild init`.
 // Edit freely — re-running init will not overwrite without --force.
 
 version = "0.1.0"
 
-project "standardoc" {
-  path = "."
-  name = "standardoc"
-  type = "rust"
-
-  task "version" { cmd = "cargo --version" }
-  task "check" { cmd = "cargo check --all-targets" depends_on = [task.version] }
-  task "test" { cmd = "cargo test --quiet" depends_on = [task.check] }
-  task "build" { cmd = "cargo build --release" depends_on = [task.check] }
-}
-
-project "standardoc-bridge-sdk" {
-  path = "./crates/standardoc-bridge-sdk"
-  name = "standardoc-bridge-sdk"
-  type = "rust"
-
-  task "version" { cmd = "cargo --version" }
-  task "check" { cmd = "cargo check --all-targets" depends_on = [task.version] }
-  task "test" { cmd = "cargo test --quiet" depends_on = [task.check] }
-  task "build" { cmd = "cargo build --release" depends_on = [task.check] }
-}
-
-project "standardoc-cli" {
-  path = "./crates/standardoc-cli"
-  name = "standardoc-cli"
-  type = "rust"
-
-  task "version" { cmd = "cargo --version" }
-  task "check" { cmd = "cargo check --all-targets" depends_on = [task.version] }
-  task "test" { cmd = "cargo test --quiet" depends_on = [task.check] }
-  task "build" { cmd = "cargo build --release" depends_on = [task.check] }
-}
-
-project "standardoc-core" {
-  path = "./crates/standardoc-core"
-  name = "standardoc-core"
-  type = "rust"
-
-  task "version" { cmd = "cargo --version" }
-  task "check" { cmd = "cargo check --all-targets" depends_on = [task.version] }
-  task "test" { cmd = "cargo test --quiet" depends_on = [task.check] }
-  task "build" { cmd = "cargo build --release" depends_on = [task.check] }
-}
-
-project "standardoc-ir" {
-  path = "./crates/standardoc-ir"
-  name = "standardoc-ir"
-  type = "rust"
-
-  task "version" { cmd = "cargo --version" }
-  task "check" { cmd = "cargo check --all-targets" depends_on = [task.version] }
-  task "test" { cmd = "cargo test --quiet" depends_on = [task.check] }
-  task "build" { cmd = "cargo build --release" depends_on = [task.check] }
-}
-
-project "standardoc-lang-provider" {
-  path = "./crates/standardoc-lang-provider"
-  name = "standardoc-lang-provider"
-  type = "rust"
-
-  task "version" { cmd = "cargo --version" }
-  task "check" { cmd = "cargo check --all-targets" depends_on = [task.version] }
-  task "test" { cmd = "cargo test --quiet" depends_on = [task.check] }
-  task "build" { cmd = "cargo build --release" depends_on = [task.check] }
-}
-
-project "standardoc-server" {
-  path = "./crates/standardoc-server"
-  name = "standardoc-server"
-  type = "rust"
-
-  task "version" { cmd = "cargo --version" }
-  task "check" { cmd = "cargo check --all-targets" depends_on = [task.version] }
-  task "test" { cmd = "cargo test --quiet" depends_on = [task.check] }
-  task "build" { cmd = "cargo build --release" depends_on = [task.check] }
-}
-
-project "vscode" {
+project "ext-vscode" {
   path = "./ext/vscode"
-  name = "vscode"
+  name = "ext-vscode"
   type = "bun"
+
+  metadata = {
+    env_keys = ["VSCE_PAT", "OVSX_PAT"]
+  }
+
+  defaults {
+    env = {
+      VSCE_PAT = "${env.VSCE_PAT}",
+      OVSX_PAT = "${env.OVSX_PAT}"
+    }
+    transforms = [{ file = "package.json", type = "json_merge", data = { name = "standardoc" }, restore = true }]
+  }
 
   task "version" { cmd = "bun --version" }
   task "install" { cmd = "bun install" depends_on = [task.version] }
+  task "build" { cmd = "bun run build" }
+  task "build:prod" { cmd = "bun run build:prod" }
+  task "dev:daemon" { cmd = "bun run dev:daemon" }
+  task "dev:daemon:release" { cmd = "bun run dev:daemon:release" }
+  task "dev:install" { cmd = "bun run dev:install" }
+  task "dev:smoke" { cmd = "bun run dev:smoke" }
+  task "package" { cmd = "bun run package" }
+  task "test" { cmd = "bun run test" }
+  task "typecheck" { cmd = "bun run typecheck" }
+  task "vscode:prepublish" { cmd = "bun run vscode:prepublish" }
+  task "watch" { cmd = "bun run watch" }
+  task "package:vsce" {
+    cmd = "vsce package --out dist/vsce/standardoc.vsix"
+    transforms = [{ file = "package.json", type = "json_merge",  data = { name = "standardoc-vscode", displayName = "Standardoc by miralabs.tech" }, restore = true }]
+    depends_on = [task.build]
+  }
+  task "package:ovsx" {
+    cmd = "npx ovsx publish --pat ${env.OVSX_PAT}"
+    transforms = [{ file = "package.json", type = "json_merge", data = { name = "standardoc" }, restore = true }]
+    depends_on = [task.build]
+  }
 }
-
