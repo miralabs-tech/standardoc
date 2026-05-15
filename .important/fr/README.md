@@ -1,14 +1,16 @@
 # Standardoc
 
-![status](https://img.shields.io/badge/status-beta-yellow)
-![ci](https://img.shields.io/github/actions/workflow/status/miralabs-tech/standardoc/ci.yml?branch=main&label=ci)
-![core](https://img.shields.io/badge/core-canonical%20IR%20%2B%20live%20graph-blueviolet)
-![surfaces](https://img.shields.io/badge/surfaces-LSP%20·%20MCP%20·%20RAG-blue)
-![license](https://img.shields.io/badge/license-FSL--1.1--MIT%20→%20MIT%202028-green)
-![stars](https://img.shields.io/github/stars/miralabs-tech/standardoc?label=stars&color=informational)
-![release downloads](https://img.shields.io/github/downloads/miralabs-tech/standardoc/total?label=release%20downloads)
-![vscode installs](https://img.shields.io/visual-studio-marketplace/i/miralabs-tech.standardoc?label=vscode%20installs)
-![ovsx downloads](https://img.shields.io/open-vsx/dt/miralabs-tech/standardoc?label=ovsx%20downloads)
+<p align="center">
+  <a href="https://github.com/miralabs-tech/standardoc/releases"><img src="https://img.shields.io/badge/status-beta-yellow?style=flat-square" alt="Status: beta"></a>
+  <a href="https://github.com/miralabs-tech/standardoc/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/miralabs-tech/standardoc/ci.yml?branch=main&label=ci&style=flat-square" alt="CI"></a>
+  <a href="ABOUT.md"><img src="https://img.shields.io/badge/core-canonical%20IR%20%2B%20live%20graph-blueviolet?style=flat-square" alt="Core: canonical IR + live graph"></a>
+  <a href="QUICKSTART.md"><img src="https://img.shields.io/badge/surfaces-LSP%20·%20MCP%20·%20RAG-blue?style=flat-square" alt="Surfaces: LSP · MCP · RAG"></a>
+  <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--MIT%20→%20MIT%202028-green?style=flat-square" alt="License: FSL-1.1-MIT → MIT 2028"></a>
+  <a href="https://github.com/miralabs-tech/standardoc/stargazers"><img src="https://img.shields.io/github/stars/miralabs-tech/standardoc?label=stars&style=flat-square" alt="Stars"></a>
+  <a href="https://github.com/miralabs-tech/standardoc/releases"><img src="https://img.shields.io/github/downloads/miralabs-tech/standardoc/total?label=release%20downloads&style=flat-square" alt="Release downloads"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=miralabs-tech.standardoc"><img src="https://img.shields.io/visual-studio-marketplace/i/miralabs-tech.standardoc-vscode?label=vscode%20installs&style=flat-square" alt="VSCode installs"></a>
+  <a href="https://open-vsx.org/extension/miralabs-tech/standardoc"><img src="https://img.shields.io/open-vsx/dt/miralabs-tech/standardoc?label=ovsx%20downloads&style=flat-square" alt="OpenVSX downloads"></a>
+</p>
 
 > Une infrastructure d'intelligence de code, bâtie sur un IR canonique
 > multi-langues et un graphe sémantique vivant. Un graphe, plusieurs
