@@ -259,24 +259,35 @@ or npm packages — those land in beta.3.
 
 ### Remaining work
 
-- [ ] **Decouple `standardoc` binary from the VSCode extension VSIX**
-  - New ext versions ship WITHOUT a bundled `standardoc.exe`. On ext
-    upgrade, if a binary already exists from the prior ext version,
-    the supervisor's compat check flags it as "no longer compatible
-    with this extension version" and routes users through the
-    download prompt.
-  - On first activation with no binary OR on a stale binary detected:
-    surface a modal "Download standardoc binary for `<platform>`?"
-    with OK / Skip.
-  - On OK: resolve the matching artefact via the `version.json`
-    manifest at `releases/latest/download/version.json`, download,
-    SHA256-verify, write into the extension install dir's
-    `bin/<platform>/standardoc[.exe]`. Update `binary-resolver.ts`
-    to look in the new location.
-  - Compat check leverages the `protocol_version` field in the
-    `version.json` manifest (already part of the version.json contract).
-  - Skip path: ext stays inert (no daemon spawn), surface a status-bar
-    affordance to re-trigger the download later.
+- [x] **Decouple `standardoc` binary from the VSCode extension VSIX**
+  - VSIX ships without `standardoc[.exe]`. On first activation with no
+    binary resolvable, the supervisor transitions into a new
+    `awaiting_binary` state (distinct from `failed` so retry/backoff
+    stays put).
+  - Toast surfaces `Standardoc needs to download the native binary for
+    this platform.` with `Download` / `Later` / `Show logs`. The status
+    bar shows a `$(cloud-download) Standardoc` affordance that bypasses
+    the regular menu and routes one click straight to the download
+    command.
+  - On `Download`: the installer fetches
+    `releases/download/v<BINARY_VERSION>/version.json` (pinned via the
+    ext's `binary-version.ts`, not `latest`), picks the asset for the
+    current `process.platform + process.arch` mapped to the Rust
+    target triple, downloads the archive, verifies SHA256, extracts
+    via the system `tar`, and writes the binary under
+    `<globalStorageUri>/bin/<rust-target-triple>/standardoc[.exe]`.
+  - `binary-resolver.ts` ordering is `settings → globalStorage → PATH
+    → throw`. `standardoc.binaryPath` remains the documented escape
+    hatch for local dev (`target/debug/standardoc`) and pre-release
+    pinning.
+  - The `bundle-binary.ts` script and the `dev:bundle` / `package`
+    chain that copied `target/release/standardoc[.exe]` into the VSIX
+    are removed.
+  - `protocol_version` compat verification rides on the SHA256: a
+    matching SHA proves the binary published under the pinned tag,
+    which proves the protocol contract. Surfacing
+    `protocol_version` via `standardoc --version --json` as a runtime
+    cross-check stays a post-1.0 item.
   - Net effect: VSIX size drops by tens of MB; binary updates ride
     independently of the ext release cadence; aligns with the beta.3
     `self-update` plumbing (same `version.json` consumption path).

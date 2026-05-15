@@ -26,22 +26,22 @@ code --install-extension standardoc-X.Y.Z.vsix
 
 ## 2. Télécharger le binaire `standardoc`
 
-> **À partir de beta.2** — ce flux arrive avec le découplage binaire ↔
-> extension (item *Travail restant* de la [TODO-LIST](TODO-LIST.md)).
-> Tant qu'il n'a pas shippé, l'extension embarque le binaire et tu peux
-> sauter directement à [§3](#3-initialiser-un-workspace).
+À la première activation, l'extension passe en `awaiting_binary` et
+fait apparaître un toast :
 
-À la première activation, un modal te propose :
+> **Standardoc needs to download the native binary for this platform.**
+> &nbsp; [Download] &nbsp; [Later] &nbsp; [Show logs]
 
-> **Download `standardoc` binary for `<platform>` ?** &nbsp; [OK] &nbsp; [Skip]
-
-- **OK** → l'extension fetch `version.json` depuis
-  `releases/latest/download/version.json`, télécharge l'archive
-  matching ta plateforme, vérifie le SHA256, et l'installe dans
-  le dossier d'extension (`bin/<platform>/standardoc[.exe]`).
-- **Skip** → l'extension reste inerte (pas de daemon spawn). Une
-  affordance dans la status bar te permet de relancer le download
-  plus tard.
+- **Download** → l'extension fetch `version.json` depuis
+  `releases/download/v<BINARY_VERSION>/version.json` (épinglé sur la
+  release que ce build d'ext attend, pas `latest`), télécharge
+  l'archive plateforme (`.tar.gz` sur Linux/macOS, `.zip` sur
+  Windows), vérifie le SHA256, extrait via le `tar` système, et
+  installe le binaire dans
+  `<globalStorageUri>/bin/<rust-target-triple>/standardoc[.exe]`.
+- **Later** → le daemon reste en `awaiting_binary`. La status bar
+  affiche une affordance `$(cloud-download) Standardoc` ; un clic
+  relance le download.
 
 > *Pourquoi pas de binaire bundlé ?* Le VSIX serait gros
 > (plusieurs dizaines de MB × N plateformes), et le binaire évolue
@@ -55,6 +55,14 @@ gère les redémarrages (parallel spawn, rollback
 `Promise.allSettled`, backoff state machine), et enregistre
 Standardoc comme MCP server pour Copilot Chat / Claude Code dans
 VSCode.
+
+### Pour les devs / testeurs pre-release
+
+Mets `standardoc.binaryPath` sur un chemin absolu. Le setting prend
+toujours la priorité sur le binaire auto-téléchargé, donc tu peux
+pointer sur `target/debug/standardoc` pendant que tu itères en local,
+ou sur un binaire pre-release spécifique pour le tester contre l'ext
+courante.
 
 ---
 

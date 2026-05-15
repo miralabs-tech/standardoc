@@ -1,6 +1,7 @@
 .old/**
 src/**
 scripts/**
+dist/bin/**
 node_modules/**
 .vscode/**
 .github/**

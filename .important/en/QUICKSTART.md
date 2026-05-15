@@ -26,22 +26,22 @@ code --install-extension standardoc-X.Y.Z.vsix
 
 ## 2. Download the `standardoc` binary
 
-> **Starting from beta.2** — this flow ships with the binary ↔
-> extension decoupling (the *Remaining work* item of the
-> [TODO-LIST](TODO-LIST.md)). Until it ships, the extension embeds the
-> binary and you can skip directly to
-> [§3](#3-initialize-a-workspace).
+On first activation the extension enters `awaiting_binary` and
+surfaces a toast:
 
-On first activation, a modal offers:
+> **Standardoc needs to download the native binary for this platform.**
+> &nbsp; [Download] &nbsp; [Later] &nbsp; [Show logs]
 
-> **Download `standardoc` binary for `<platform>` ?** &nbsp; [OK] &nbsp; [Skip]
-
-- **OK** → the extension fetches `version.json` from
-  `releases/latest/download/version.json`, downloads the archive
-  matching your platform, verifies the SHA256, and installs it in the
-  extension folder (`bin/<platform>/standardoc[.exe]`).
-- **Skip** → the extension stays inert (no daemon spawn). A status-bar
-  affordance lets you re-trigger the download later.
+- **Download** → the extension fetches `version.json` from
+  `releases/download/v<BINARY_VERSION>/version.json` (pinned to the
+  release this ext build expects, not `latest`), downloads the
+  platform archive (`.tar.gz` on Linux/macOS, `.zip` on Windows),
+  verifies the SHA256, extracts it with the system `tar`, and installs
+  the binary under
+  `<globalStorageUri>/bin/<rust-target-triple>/standardoc[.exe]`.
+- **Later** → the daemon stays in `awaiting_binary`. The status bar
+  shows a `$(cloud-download) Standardoc` affordance; one click
+  re-triggers the download.
 
 > *Why no bundled binary?* The VSIX would be heavy (tens of MB × N
 > platforms), and the binary evolves at a pace independent of the ext
@@ -53,6 +53,13 @@ Once the binary is in place, the extension supervises the daemon,
 handles restarts (parallel spawn, `Promise.allSettled` rollback, backoff
 state machine), and registers Standardoc as an MCP server for Copilot
 Chat / Claude Code in VSCode.
+
+### For developers / pre-release testers
+
+Set `standardoc.binaryPath` to an absolute path. The setting always
+takes priority over the auto-downloaded binary, so you can point at
+`target/debug/standardoc` while iterating locally, or at a specific
+pre-release binary to test it against the current ext.
 
 ---
 
