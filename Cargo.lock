@@ -3440,9 +3440,9 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "standarbuild-detect"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "449cae94ab51a73a3b698c00d7cd8f42a1dad66b40e9084696522eca2da1cbbe"
+checksum = "5e6add5f16dc3d34401d5ce8cd1fe9b7f323266d304705aea63199bfefc1bccc"
 dependencies = [
  "serde",
  "serde_json",

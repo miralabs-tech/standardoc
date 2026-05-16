@@ -1,35 +1,50 @@
 //! Stage 3d-2 — workspace project discovery + persistence.
 //!
-//! Wraps `standarbuild_detect::discover()` with the IR mapping +
-//! storage upsert. Called once at cold-start to seed the `projects`
-//! table; later refreshed by the watcher when a manifest file changes.
+//! Wraps `standarbuild_detect::discover_with()` against a
+//! [`DetectorRegistry`] with the IR mapping + storage upsert. Called
+//! once at cold-start to seed the `projects` table; later refreshed
+//! by the watcher when a manifest file changes.
 //!
 //! The file→project_id resolution happens via a single batch SQL
 //! UPDATE at the end of cold-start (see [`reconcile_files_project_id`])
 //! — cheaper than threading project lookup through the walker's hot
 //! path, and naturally handles re-runs after manifest churn.
+//!
+//! ## Extensibility
+//!
+//! [`discover_and_persist_projects_with`] takes an explicit
+//! [`DetectorRegistry`] so future providers (WGSL, Move, Solidity, …)
+//! can register custom kinds without touching this crate. The
+//! [`discover_and_persist_projects`] shortcut wires the built-in
+//! registry (Rust/Node/Bun/Deno/Python/Lua/C/Cpp).
 
 use std::path::Path;
 
 use rusqlite::Connection;
+use standarbuild_detect::{DetectorRegistry, KindId};
 use standardoc_ir::{ProjectInfo, ProjectKind};
 
 use crate::storage::error::StorageError;
 use crate::storage::projects;
 
-/// Convert a `standarbuild_detect::ProjectKind` to the IR variant.
-fn from_detect_kind(kind: standarbuild_detect::ProjectKind) -> ProjectKind {
-    use standarbuild_detect::ProjectKind as D;
-    match kind {
-        D::Rust => ProjectKind::Rust,
-        D::Node => ProjectKind::Node,
-        D::Bun => ProjectKind::Bun,
-        D::Deno => ProjectKind::Deno,
-        D::Python => ProjectKind::Python,
-        D::Lua => ProjectKind::Lua,
-        D::C => ProjectKind::C,
-        D::Cpp => ProjectKind::Cpp,
-        D::Unknown => ProjectKind::Unknown,
+pub use standarbuild_detect::{Detector, DetectorRegistry as ProjectDetectorRegistry};
+
+/// Convert the detector's opaque [`KindId`] to the IR's `ProjectKind`.
+/// Built-in slugs map to their named variants; anything else becomes
+/// [`ProjectKind::Custom`] so user-registered detectors (e.g. a future
+/// WGSL detector) round-trip cleanly.
+fn from_kind_id(id: &KindId) -> ProjectKind {
+    match id.as_str() {
+        "rust" => ProjectKind::Rust,
+        "node" => ProjectKind::Node,
+        "bun" => ProjectKind::Bun,
+        "deno" => ProjectKind::Deno,
+        "python" => ProjectKind::Python,
+        "lua" => ProjectKind::Lua,
+        "c" => ProjectKind::C,
+        "cpp" => ProjectKind::Cpp,
+        "unknown" => ProjectKind::Unknown,
+        other => ProjectKind::Custom(other.to_string()),
     }
 }
 
@@ -50,24 +65,40 @@ fn normalise_rel_path(rel: &str) -> String {
 ///
 /// Idempotent: re-running picks up new projects + updates label/kind
 /// drift on existing roots without losing project_id continuity.
+/// Run discovery with the built-in detector registry (Rust / Node /
+/// Bun / Deno / Python / Lua / C / Cpp). Shortcut for
+/// [`discover_and_persist_projects_with`].
 pub fn discover_and_persist_projects(
     conn: &Connection,
     workspace_root: &Path,
 ) -> Result<Vec<ProjectInfo>, StorageError> {
+    discover_and_persist_projects_with(conn, workspace_root, &DetectorRegistry::with_builtins())
+}
+
+/// Run discovery against a custom [`DetectorRegistry`], UPSERTing every
+/// detected project into `projects`. Use this to extend the detection
+/// space with user-registered detectors (e.g. a WGSL detector that
+/// matches on `shaders/` directories with `priority() > 100` to
+/// override built-ins).
+pub fn discover_and_persist_projects_with(
+    conn: &Connection,
+    workspace_root: &Path,
+    registry: &DetectorRegistry,
+) -> Result<Vec<ProjectInfo>, StorageError> {
     let opts = standarbuild_detect::DiscoverOptions::default();
-    let detected = standarbuild_detect::discover(workspace_root, &opts);
+    let detected = standarbuild_detect::discover_with(workspace_root, &opts, registry);
     let mut out = Vec::with_capacity(detected.len());
     for d in detected {
-        // Filter out `Unknown` — these are surfaced by the detector's
-        // `include_unknown_at_depth_one` default for UI bootstrap
-        // contexts (`standarbuild init`) but they pollute our
-        // deepest-match `files.project_id` resolution. A nested
-        // `src/` Unknown shadowing the workspace-root Rust project
-        // would mis-attribute every file under it.
-        if matches!(d.kind, standarbuild_detect::ProjectKind::Unknown) {
+        // Filter out the `Unknown` sentinel — the detector's
+        // `include_unknown_at_depth_one` default surfaces depth-1
+        // dirs as Unknown for UI bootstrap contexts, but we'd
+        // mis-attribute every file under a Unknown `src/` if we
+        // persisted them (deepest-match would prefer it over the
+        // workspace-root Rust project).
+        if d.kind == KindId::UNKNOWN {
             continue;
         }
-        let kind = from_detect_kind(d.kind);
+        let kind = from_kind_id(&d.kind);
         let root_path = d.absolute_path.to_string_lossy().into_owned();
         let rel_path = normalise_rel_path(&d.rel_path);
         let project_id =
@@ -247,6 +278,65 @@ mod tests {
         assert_eq!(core_pid, Some(i64::from(root_id)));
         assert_eq!(ext_ts_pid, Some(i64::from(ext_id)));
         assert_eq!(ext_pkg_pid, Some(i64::from(ext_id)));
+    }
+
+    /// Custom detector that matches a directory containing a
+    /// `shaders/` subfolder. Mirrors the WGSL example in the
+    /// `standarbuild-detect` 0.2 docstrings.
+    struct ShadersDetector;
+    impl standarbuild_detect::Detector for ShadersDetector {
+        fn kind(&self) -> KindId {
+            KindId::custom("wgsl")
+        }
+        fn priority(&self) -> i32 {
+            120 // beats every built-in (max is Rust=100)
+        }
+        fn detect(
+            &self,
+            dir: &std::path::Path,
+        ) -> Option<standarbuild_detect::DetectMatch> {
+            dir.join("shaders")
+                .is_dir()
+                .then(|| standarbuild_detect::DetectMatch {
+                    kind: KindId::custom("wgsl"),
+                    signals: vec!["shaders/".into()],
+                })
+        }
+    }
+
+    #[test]
+    fn discover_with_custom_registry_persists_custom_kind() {
+        let dir = tempdir().unwrap();
+        // Mark the workspace root as a Rust crate so the built-in
+        // detector also matches; the WGSL detector's higher priority
+        // must win.
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"rs+wgsl\"\nversion = \"0.0.1\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir(dir.path().join("shaders")).unwrap();
+
+        let mut registry = DetectorRegistry::with_builtins();
+        registry.add(ShadersDetector);
+
+        let conn = fresh_db();
+        let projects =
+            discover_and_persist_projects_with(&conn, dir.path(), &registry).unwrap();
+        let kinds: Vec<&ProjectKind> = projects.iter().map(|p| &p.kind).collect();
+        assert!(
+            kinds.contains(&&ProjectKind::Custom("wgsl".into())),
+            "expected the custom WGSL kind to win on priority, got {kinds:?}"
+        );
+        // Round-trip through storage: re-read by root_path should also
+        // carry the Custom variant.
+        let row = projects::find_by_root_path(
+            &conn,
+            &dir.path().to_string_lossy(),
+        )
+        .unwrap()
+        .expect("row present");
+        assert_eq!(row.kind, ProjectKind::Custom("wgsl".into()));
     }
 
     #[test]
