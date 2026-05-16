@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod conv;
+pub(crate) mod cross_workspace;
 pub(crate) mod documents;
 pub(crate) mod edge_sites;
 pub(crate) mod edges;
