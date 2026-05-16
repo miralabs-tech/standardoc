@@ -1,7 +1,9 @@
+use proc_macro2::Span;
 use standardoc_ir::{
 	BindingSource, IdentResolution, ImportRecord, Language, LocalDeclKind, ModuleLookup,
 	ScopeKind, ScopeRange,
 };
+use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{
 	File, FnArg, GenericParam, ImplItem, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMacro,
@@ -23,6 +25,18 @@ use syn::{
 /// Imports flatten into `ModuleLookup.imports` for Stage 3b cross-
 /// workspace SQL resolution. `use a::{B, C as D}` expands to two
 /// records.
+/// Derives the `(u32, u32)` span key used as the `ModuleLookup.span_to_scope`
+/// HashMap key. Packs `(start.line, start.column)` because two distinct
+/// scopes can't begin at the same source position. The walker uses the
+/// same helper so query/recording stay symmetric.
+pub(crate) fn scope_span_key(span: Span) -> (u32, u32) {
+	let start = span.start();
+	(
+		u32::try_from(start.line).unwrap_or(u32::MAX),
+		u32::try_from(start.column).unwrap_or(u32::MAX),
+	)
+}
+
 pub(crate) fn build_rust_lookup(file: &File, module_fqdn: &str) -> ModuleLookup {
 	let mut lookup = ModuleLookup::new(module_fqdn.to_string(), Language::Rust);
 	let mut builder = LookupBuilder {
@@ -44,14 +58,19 @@ impl<'a> LookupBuilder<'a> {
 		*self.scope_stack.last().unwrap_or(&ModuleLookup::ROOT_SCOPE)
 	}
 
-	fn push_scope(&mut self, kind: ScopeKind) {
+	fn push_scope(&mut self, kind: ScopeKind, span: Span) {
 		let parent = Some(self.current_scope());
-		let idx = self.lookup.push_scope(ScopeRange {
-			start_line: 0,
-			end_line: u32::MAX,
-			parent,
-			kind,
-		});
+		let (lo, hi) = scope_span_key(span);
+		let idx = self.lookup.push_scope_with_span(
+			ScopeRange {
+				start_line: u32::try_from(span.start().line).unwrap_or(u32::MAX),
+				end_line: u32::try_from(span.end().line).unwrap_or(u32::MAX),
+				parent,
+				kind,
+			},
+			lo,
+			hi,
+		);
 		self.scope_stack.push(idx);
 	}
 
@@ -301,7 +320,7 @@ impl<'a> LookupBuilder<'a> {
 
 impl<'ast> Visit<'ast> for LookupBuilder<'_> {
 	fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-		self.push_scope(ScopeKind::Function);
+		self.push_scope(ScopeKind::Function, node.span());
 		self.bind_generic_params(&node.sig.generics);
 		self.bind_fn_params(&node.sig.inputs);
 		syn::visit::visit_item_fn(self, node);
@@ -309,14 +328,14 @@ impl<'ast> Visit<'ast> for LookupBuilder<'_> {
 	}
 
 	fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
-		self.push_scope(ScopeKind::TypeContainer);
+		self.push_scope(ScopeKind::TypeContainer, node.span());
 		self.bind_generic_params(&node.generics);
 		syn::visit::visit_item_struct(self, node);
 		self.pop_scope();
 	}
 
 	fn visit_item_enum(&mut self, node: &'ast ItemEnum) {
-		self.push_scope(ScopeKind::TypeContainer);
+		self.push_scope(ScopeKind::TypeContainer, node.span());
 		self.bind_generic_params(&node.generics);
 		for variant in &node.variants {
 			self.add_binding(
@@ -332,28 +351,28 @@ impl<'ast> Visit<'ast> for LookupBuilder<'_> {
 	}
 
 	fn visit_item_trait(&mut self, node: &'ast ItemTrait) {
-		self.push_scope(ScopeKind::TypeContainer);
+		self.push_scope(ScopeKind::TypeContainer, node.span());
 		self.bind_generic_params(&node.generics);
 		syn::visit::visit_item_trait(self, node);
 		self.pop_scope();
 	}
 
 	fn visit_item_type(&mut self, node: &'ast ItemType) {
-		self.push_scope(ScopeKind::TypeContainer);
+		self.push_scope(ScopeKind::TypeContainer, node.span());
 		self.bind_generic_params(&node.generics);
 		syn::visit::visit_item_type(self, node);
 		self.pop_scope();
 	}
 
 	fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
-		self.push_scope(ScopeKind::TypeContainer);
+		self.push_scope(ScopeKind::TypeContainer, node.span());
 		self.bind_generic_params(&node.generics);
 		syn::visit::visit_item_impl(self, node);
 		self.pop_scope();
 	}
 
 	fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-		self.push_scope(ScopeKind::Function);
+		self.push_scope(ScopeKind::Function, node.span());
 		self.bind_generic_params(&node.sig.generics);
 		self.bind_fn_params(&node.sig.inputs);
 		syn::visit::visit_impl_item_fn(self, node);
@@ -361,7 +380,7 @@ impl<'ast> Visit<'ast> for LookupBuilder<'_> {
 	}
 
 	fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
-		self.push_scope(ScopeKind::Function);
+		self.push_scope(ScopeKind::Function, node.span());
 		self.bind_generic_params(&node.sig.generics);
 		self.bind_fn_params(&node.sig.inputs);
 		syn::visit::visit_trait_item_fn(self, node);
@@ -369,7 +388,7 @@ impl<'ast> Visit<'ast> for LookupBuilder<'_> {
 	}
 
 	fn visit_item_mod(&mut self, node: &'ast ItemMod) {
-		self.push_scope(ScopeKind::Module);
+		self.push_scope(ScopeKind::Module, node.span());
 		if let Some((_, items)) = &node.content {
 			self.hoist_items(items);
 		}
@@ -378,7 +397,7 @@ impl<'ast> Visit<'ast> for LookupBuilder<'_> {
 	}
 
 	fn visit_block(&mut self, node: &'ast syn::Block) {
-		self.push_scope(ScopeKind::Block);
+		self.push_scope(ScopeKind::Block, node.span());
 		syn::visit::visit_block(self, node);
 		self.pop_scope();
 	}
@@ -395,7 +414,7 @@ impl<'ast> Visit<'ast> for LookupBuilder<'_> {
 	}
 
 	fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
-		self.push_scope(ScopeKind::Function);
+		self.push_scope(ScopeKind::Function, node.span());
 		for input in &node.inputs {
 			self.bind_pat(input, BindingSource::Param, vec![]);
 		}

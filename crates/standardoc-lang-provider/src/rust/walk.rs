@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use proc_macro2::Span;
 use quote::ToTokens;
 use standardoc_ir::{
-    EdgeKind, Kind, Language, LanguageKind, Modifiers, Param, RawAttribute, RawAttributeArg,
-    RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site,
-    SymbolLocation, TypeRef, Visibility, compact_rust_tokens,
+    EdgeKind, Kind, Language, LanguageKind, Modifiers, ModuleLookup, Param, RawAttribute,
+    RawAttributeArg, RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature,
+    SignatureMeta, Site, SymbolLocation, TypeRef, Visibility, compact_rust_tokens,
 };
 use syn::spanned::Spanned;
 
@@ -16,7 +16,21 @@ use super::extract_call;
 use super::extract_doc;
 use super::extract_type;
 use super::extract_use;
+use super::lookup as rust_lookup;
 use super::visibility;
+
+/// Recover the `ModuleLookup` scope_idx for the AST node spanning `span`.
+/// Falls back to `ROOT_SCOPE` when the pre-pass didn't register the
+/// span — the caller still gets a sensible enclosing scope for
+/// `resolve_local` queries (module-level generics + imports stay
+/// reachable).
+pub(crate) fn lookup_scope_for(ctx: &WalkContext, span: Span) -> u32 {
+    let (lo, hi) = rust_lookup::scope_span_key(span);
+    ctx.core
+        .lookup
+        .scope_idx_for_span(lo, hi)
+        .unwrap_or(ModuleLookup::ROOT_SCOPE)
+}
 
 pub(crate) struct WalkContext {
     pub(crate) core: WalkContextCore,
@@ -175,10 +189,11 @@ fn process_item_p1(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
             let fn_fqdn = format!("{current_module}::{}", it.sig.ident);
             ctx.push_symbol_with_doc(extract_fn(it, current_module, &path), &it.attrs);
             // Bug C-3: walk the signature for UsesType edges. Fn-level
-            // generic params bind as locals automatically inside
-            // `visit_signature`. No outer locals at module scope.
-            let outer = std::collections::HashSet::new();
-            extract_type::visit_signature(ctx, &it.sig, current_module, &fn_fqdn, &outer);
+            // Stage 3a-8c — fn-level + module-level generics are
+            // reachable via the lookup's parent chain from the fn's
+            // own scope_idx.
+            let scope_idx = lookup_scope_for(ctx, it.span());
+            extract_type::visit_signature(ctx, &it.sig, current_module, &fn_fqdn, scope_idx);
         }
         syn::Item::Struct(it) => {
             extract_struct(ctx, it, current_module);
@@ -191,7 +206,7 @@ fn process_item_p1(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
             let union_fqdn = format!("{current_module}::{}", it.ident);
             ctx.push_symbol_with_doc(extract_union(it, current_module, &path), &it.attrs);
             // Bug C-3: walk each union field's type for UsesType edges.
-            let locals = extract_type::collect_generic_param_idents(&it.generics);
+            let scope_idx = lookup_scope_for(ctx, it.span());
             for field in &it.fields.named {
                 extract_type::visit_type(
                     ctx,
@@ -199,10 +214,10 @@ fn process_item_p1(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
                     current_module,
                     &union_fqdn,
                     extract_type::TYPE_CTX_ANNOTATION,
-                    &locals,
+                    scope_idx,
                 );
             }
-            extract_type::visit_generics(ctx, &it.generics, current_module, &union_fqdn, &locals);
+            extract_type::visit_generics(ctx, &it.generics, current_module, &union_fqdn, scope_idx);
         }
         syn::Item::Trait(it) => extract_trait(ctx, it, current_module),
         syn::Item::Impl(it) => extract_impl(ctx, it, current_module),
@@ -212,45 +227,44 @@ fn process_item_p1(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
             ctx.push_symbol_with_doc(extract_type_alias(it, current_module, &path), &it.attrs);
             // Bug C-3: walk the alias RHS body for UsesType edges
             // (`type X<T> = Vec<Foo<T>>` → edge to Foo from X with
-            // type-alias-body context; `T` is in locals → skipped).
-            let locals = extract_type::collect_generic_param_idents(&it.generics);
+            // type-alias-body context; `T` is filtered via the lookup).
+            let scope_idx = lookup_scope_for(ctx, it.span());
             extract_type::visit_type(
                 ctx,
                 &it.ty,
                 current_module,
                 &alias_fqdn,
                 extract_type::TYPE_CTX_ALIAS_BODY,
-                &locals,
+                scope_idx,
             );
-            extract_type::visit_generics(ctx, &it.generics, current_module, &alias_fqdn, &locals);
+            extract_type::visit_generics(ctx, &it.generics, current_module, &alias_fqdn, scope_idx);
         }
         syn::Item::Const(it) => {
             let path = ctx.core.file_path.clone();
             let const_fqdn = format!("{current_module}::{}", it.ident);
             ctx.push_symbol_with_doc(extract_const(it, current_module, &path), &it.attrs);
             // Bug C-3: walk const's type annotation (`const X: Foo = …`).
-            let empty = std::collections::HashSet::new();
+            // Consts have no generics — module scope is the right anchor.
             extract_type::visit_type(
                 ctx,
                 &it.ty,
                 current_module,
                 &const_fqdn,
                 extract_type::TYPE_CTX_ANNOTATION,
-                &empty,
+                ModuleLookup::ROOT_SCOPE,
             );
         }
         syn::Item::Static(it) => {
             let path = ctx.core.file_path.clone();
             let static_fqdn = format!("{current_module}::{}", it.ident);
             ctx.push_symbol_with_doc(extract_static(it, current_module, &path), &it.attrs);
-            let empty = std::collections::HashSet::new();
             extract_type::visit_type(
                 ctx,
                 &it.ty,
                 current_module,
                 &static_fqdn,
                 extract_type::TYPE_CTX_ANNOTATION,
-                &empty,
+                ModuleLookup::ROOT_SCOPE,
             );
         }
         syn::Item::Macro(it) => {
@@ -364,12 +378,12 @@ fn extract_struct(ctx: &mut WalkContext, item: &syn::ItemStruct, parent_fqdn: &s
         &item.attrs,
     );
     ctx.push_symbol_with_doc(parent_sym, &item.attrs);
-    // Bug C-3: bind struct-level generic type params as locals so they
-    // don't leak as phantom UsesType edges from field types
-    // (`struct S<T> { f: T }` → `T` skipped).
-    let locals = extract_type::collect_generic_param_idents(&item.generics);
-    push_struct_fields(ctx, &item.fields, &struct_fqdn, &path, parent_fqdn, &locals);
-    extract_type::visit_generics(ctx, &item.generics, parent_fqdn, &struct_fqdn, &locals);
+    // Bug C-3 / Stage 3a-8c — struct-level generics live at the
+    // struct's lookup scope. resolve_local filters `T` in `<T: …>`
+    // body refs naturally.
+    let scope_idx = lookup_scope_for(ctx, item.span());
+    push_struct_fields(ctx, &item.fields, &struct_fqdn, &path, parent_fqdn, scope_idx);
+    extract_type::visit_generics(ctx, &item.generics, parent_fqdn, &struct_fqdn, scope_idx);
 }
 
 /// Bug C-2 — push the enum symbol AND one `RawSymbol` per variant.
@@ -391,9 +405,9 @@ fn extract_enum(ctx: &mut WalkContext, item: &syn::ItemEnum, parent_fqdn: &str) 
         &item.attrs,
     );
     ctx.push_symbol_with_doc(parent_sym, &item.attrs);
-    // Bug C-3: bind enum-level generic type params as locals visible
-    // to variant field types.
-    let locals = extract_type::collect_generic_param_idents(&item.generics);
+    // Bug C-3 / Stage 3a-8c — enum-level generics live at the enum's
+    // lookup scope.
+    let scope_idx = lookup_scope_for(ctx, item.span());
     for variant in &item.variants {
         let variant_name = variant.ident.to_string();
         let variant_fqdn = format!("{enum_fqdn}::{variant_name}");
@@ -427,7 +441,7 @@ fn extract_enum(ctx: &mut WalkContext, item: &syn::ItemEnum, parent_fqdn: &str) 
                         parent_fqdn,
                         &variant_fqdn,
                         extract_type::TYPE_CTX_ANNOTATION,
-                        &locals,
+                        scope_idx,
                     );
                 }
             }
@@ -439,30 +453,29 @@ fn extract_enum(ctx: &mut WalkContext, item: &syn::ItemEnum, parent_fqdn: &str) 
                         parent_fqdn,
                         &variant_fqdn,
                         extract_type::TYPE_CTX_ANNOTATION,
-                        &locals,
+                        scope_idx,
                     );
                 }
             }
             syn::Fields::Unit => {}
         }
     }
-    extract_type::visit_generics(ctx, &item.generics, parent_fqdn, &enum_fqdn, &locals);
+    extract_type::visit_generics(ctx, &item.generics, parent_fqdn, &enum_fqdn, scope_idx);
 }
 
 /// Shared between `extract_struct` and (later) struct-variant
 /// decomposition: walk a `syn::Fields` enum and push a sub-symbol per
 /// named/tuple field. Unit fields produce nothing.
 ///
-/// `current_module` is needed for `UsesType` resolution; `locals` is the
-/// set of generic type-param names visible to the field's type
-/// annotation (struct/enum-level generics).
+/// `scope_idx` anchors `UsesType` emission against the lookup so
+/// struct/enum-level generics are filtered via the parent chain.
 fn push_struct_fields(
     ctx: &mut WalkContext,
     fields: &syn::Fields,
     parent_fqdn: &str,
     path: &str,
     current_module: &str,
-    locals: &std::collections::HashSet<String>,
+    scope_idx: u32,
 ) {
     match fields {
         syn::Fields::Named(named) => {
@@ -476,7 +489,7 @@ fn push_struct_fields(
                     path,
                     "field",
                     current_module,
-                    locals,
+                    scope_idx,
                 );
             }
         }
@@ -490,7 +503,7 @@ fn push_struct_fields(
                     path,
                     "tuple_field",
                     current_module,
-                    locals,
+                    scope_idx,
                 );
             }
         }
@@ -506,7 +519,7 @@ fn push_field(
     path: &str,
     language_kind: &str,
     current_module: &str,
-    locals: &std::collections::HashSet<String>,
+    scope_idx: u32,
 ) {
     let field_fqdn = format!("{parent_fqdn}::{name}");
     let ty_str = compact_rust_tokens(&field.ty.to_token_stream().to_string());
@@ -539,7 +552,7 @@ fn push_field(
         current_module,
         &field_fqdn,
         extract_type::TYPE_CTX_ANNOTATION,
-        locals,
+        scope_idx,
     );
 }
 
@@ -617,9 +630,9 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
         &item.attrs,
     );
 
-    // Bug C-3: bind trait-level generic params as locals so methods'
-    // signatures see them.
-    let trait_locals = extract_type::collect_generic_param_idents(&item.generics);
+    // Bug C-3 / Stage 3a-8c — trait-level generics live at the trait's
+    // lookup scope; trait method scopes inherit via the parent chain.
+    let trait_scope = lookup_scope_for(ctx, item.span());
     // Walk supertrait bounds (`trait T: Foo + Bar`) with type-extends.
     for bound in &item.supertraits {
         extract_type::visit_type_param_bound(
@@ -628,10 +641,10 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
             parent_fqdn,
             &trait_fqdn,
             extract_type::TYPE_CTX_EXTENDS,
-            &trait_locals,
+            trait_scope,
         );
     }
-    extract_type::visit_generics(ctx, &item.generics, parent_fqdn, &trait_fqdn, &trait_locals);
+    extract_type::visit_generics(ctx, &item.generics, parent_fqdn, &trait_fqdn, trait_scope);
 
     for trait_item in &item.items {
         if let syn::TraitItem::Fn(item_fn) = trait_item {
@@ -654,15 +667,16 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
                 },
                 &item_fn.attrs,
             );
-            // Bug C-3: walk the trait method's signature. Pass the
-            // trait's generics as outer_locals so a method using `T`
-            // declared at the trait level doesn't emit on `T`.
+            // The method's own scope_idx has the trait scope as parent;
+            // resolve_local from the method scope sees both fn-level
+            // and trait-level generics naturally.
+            let fn_scope = lookup_scope_for(ctx, item_fn.span());
             extract_type::visit_signature(
                 ctx,
                 &item_fn.sig,
                 parent_fqdn,
                 &fn_fqdn,
-                &trait_locals,
+                fn_scope,
             );
         }
     }
@@ -698,12 +712,10 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
         });
     }
 
-    // Bug C-3: bind impl-level generic params + walk impl-level
-    // constraints. Then walk the self type's generic args
-    // (`impl<T> Foo<Bar> for Baz<T>` → UsesType{Bar} from Baz, plus
-    // any constraint edges) under type-implements context.
-    let impl_locals = extract_type::collect_generic_param_idents(&item.generics);
-    extract_type::visit_generics(ctx, &item.generics, parent_fqdn, &target_fqdn, &impl_locals);
+    // Bug C-3 / Stage 3a-8c — impl-level generics live at the impl's
+    // lookup scope; impl method scopes inherit via the parent chain.
+    let impl_scope = lookup_scope_for(ctx, item.span());
+    extract_type::visit_generics(ctx, &item.generics, parent_fqdn, &target_fqdn, impl_scope);
     if let Some((_, trait_path, _)) = &item.trait_ {
         // Walk the trait path's generic args (`impl Trait<Foo> for X`
         // → UsesType{Foo} with type-implements). The trait path
@@ -719,7 +731,7 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
                             parent_fqdn,
                             &target_fqdn,
                             extract_type::TYPE_CTX_IMPLEMENTS,
-                            &impl_locals,
+                            impl_scope,
                         );
                     }
                 }
@@ -748,14 +760,15 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
                 },
                 &item_fn.attrs,
             );
-            // Bug C-3: walk the impl method's signature with the
-            // impl block's generics as outer_locals.
+            // Same as trait method: fn's own scope_idx has impl scope
+            // as parent, so resolve_local sees both layers' generics.
+            let fn_scope = lookup_scope_for(ctx, item_fn.span());
             extract_type::visit_signature(
                 ctx,
                 &item_fn.sig,
                 parent_fqdn,
                 &fn_fqdn,
-                &impl_locals,
+                fn_scope,
             );
         }
     }

@@ -15,10 +15,10 @@
 //! const/static types, type alias RHS, trait/impl block contents,
 //! union fields.
 
-use std::collections::HashSet;
-
 use proc_macro2::Span;
-use standardoc_ir::{BuiltinTag, EdgeKind, Language, RawEdge, ResolvedOrUnresolved, Site};
+use standardoc_ir::{
+    BindingSource, BuiltinTag, EdgeKind, Language, RawEdge, ResolvedOrUnresolved, Site,
+};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
@@ -175,14 +175,14 @@ pub(crate) fn visit_type(
     current_module: &str,
     enclosing_fqdn: &str,
     emission_context: &'static str,
-    locals: &HashSet<String>,
+    scope_idx: u32,
 ) {
     let mut visitor = TypeRefVisitor {
         ctx,
         current_module: current_module.to_string(),
         enclosing_fqdn: enclosing_fqdn.to_string(),
         emission_context,
-        locals,
+        scope_idx,
     };
     visitor.visit_type(ty);
 }
@@ -197,33 +197,30 @@ pub(crate) fn visit_type_param_bound(
     current_module: &str,
     enclosing_fqdn: &str,
     emission_context: &'static str,
-    locals: &HashSet<String>,
+    scope_idx: u32,
 ) {
     let mut visitor = TypeRefVisitor {
         ctx,
         current_module: current_module.to_string(),
         enclosing_fqdn: enclosing_fqdn.to_string(),
         emission_context,
-        locals,
+        scope_idx,
     };
     visitor.visit_type_param_bound(bound);
 }
 
 /// Convenience: walk a full `syn::Signature` and emit `UsesType` edges
 /// for every type position inside (param types, return type, generic
-/// param bounds, where-clause predicates). Generic param names declared
-/// by the signature itself are collected as `locals` automatically and
-/// merged with `outer_locals` (e.g. struct-level generics for a method).
+/// param bounds, where-clause predicates). The fn's own generics and
+/// any outer (impl/trait) generics are reachable through `scope_idx`'s
+/// parent chain in the lookup — no separate `outer_locals` plumbing.
 pub(crate) fn visit_signature(
     ctx: &mut WalkContext,
     sig: &syn::Signature,
     current_module: &str,
     enclosing_fqdn: &str,
-    outer_locals: &HashSet<String>,
+    scope_idx: u32,
 ) {
-    let mut locals = outer_locals.clone();
-    locals.extend(collect_generic_param_idents(&sig.generics));
-
     for input in &sig.inputs {
         if let syn::FnArg::Typed(pat) = input {
             visit_type(
@@ -232,7 +229,7 @@ pub(crate) fn visit_signature(
                 current_module,
                 enclosing_fqdn,
                 TYPE_CTX_ANNOTATION,
-                &locals,
+                scope_idx,
             );
         }
     }
@@ -243,28 +240,22 @@ pub(crate) fn visit_signature(
             current_module,
             enclosing_fqdn,
             TYPE_CTX_ANNOTATION,
-            &locals,
+            scope_idx,
         );
     }
-    visit_generics(
-        ctx,
-        &sig.generics,
-        current_module,
-        enclosing_fqdn,
-        &locals,
-    );
+    visit_generics(ctx, &sig.generics, current_module, enclosing_fqdn, scope_idx);
 }
 
 /// Walk a `syn::Generics`' bounds + where-clause predicates and emit
 /// `UsesType` edges under `type-constraint`. The generic param decls
-/// themselves are already bound into `locals` by the caller (we don't
-/// want `T` in `<T: Foo>` to emit, only `Foo`).
+/// themselves resolve to `BindingSource::TypeParam` in the lookup so
+/// `T` in `<T: Foo>` is filtered out automatically; only `Foo` emits.
 pub(crate) fn visit_generics(
     ctx: &mut WalkContext,
     generics: &syn::Generics,
     current_module: &str,
     enclosing_fqdn: &str,
-    locals: &HashSet<String>,
+    scope_idx: u32,
 ) {
     for param in &generics.params {
         if let syn::GenericParam::Type(tp) = param {
@@ -275,7 +266,7 @@ pub(crate) fn visit_generics(
                     current_module,
                     enclosing_fqdn,
                     TYPE_CTX_CONSTRAINT,
-                    locals,
+                    scope_idx,
                 );
             }
         }
@@ -289,7 +280,7 @@ pub(crate) fn visit_generics(
                     current_module,
                     enclosing_fqdn,
                     TYPE_CTX_CONSTRAINT,
-                    locals,
+                    scope_idx,
                 );
                 for bound in &pt.bounds {
                     visit_type_param_bound(
@@ -298,7 +289,7 @@ pub(crate) fn visit_generics(
                         current_module,
                         enclosing_fqdn,
                         TYPE_CTX_CONSTRAINT,
-                        locals,
+                        scope_idx,
                     );
                 }
             }
@@ -306,30 +297,20 @@ pub(crate) fn visit_generics(
     }
 }
 
-/// Helper exposed for callers that need to bind item-level generic
-/// param idents (`struct S<T> { … }` → `T` is a local visible to all
-/// field types). Returns just the `TypeParam` idents — `LifetimeParam`
-/// and `ConstParam` don't influence UsesType emission.
-pub(crate) fn collect_generic_param_idents(generics: &syn::Generics) -> HashSet<String> {
-    generics
-        .params
-        .iter()
-        .filter_map(|p| match p {
-            syn::GenericParam::Type(t) => Some(t.ident.to_string()),
-            _ => None,
-        })
-        .collect()
-}
-
-struct TypeRefVisitor<'a, 'l> {
+struct TypeRefVisitor<'a> {
     ctx: &'a mut WalkContext,
     current_module: String,
     enclosing_fqdn: String,
     emission_context: &'static str,
-    locals: &'l HashSet<String>,
+    /// Stage 3a-8c — scope_idx into `ctx.core.lookup.scopes` where this
+    /// visitor was launched. `resolve_local` walks the parent chain
+    /// from here, so generic params bound at the enclosing
+    /// fn/impl/trait/struct/enum scope are reachable without separate
+    /// `&HashSet<String>` plumbing.
+    scope_idx: u32,
 }
 
-impl<'a, 'l, 'ast> Visit<'ast> for TypeRefVisitor<'a, 'l> {
+impl<'a, 'ast> Visit<'ast> for TypeRefVisitor<'a> {
     fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
         let path_str = path_to_string(&node.path);
         emit_uses_type_path(
@@ -338,7 +319,7 @@ impl<'a, 'l, 'ast> Visit<'ast> for TypeRefVisitor<'a, 'l> {
             &self.current_module,
             &self.enclosing_fqdn,
             self.emission_context,
-            self.locals,
+            self.scope_idx,
             node.span(),
         );
         // Recurse into generic args so `Vec<Foo>` emits on Foo even
@@ -354,7 +335,7 @@ impl<'a, 'l, 'ast> Visit<'ast> for TypeRefVisitor<'a, 'l> {
             &self.current_module,
             &self.enclosing_fqdn,
             self.emission_context,
-            self.locals,
+            self.scope_idx,
             node.span(),
         );
         syn::visit::visit_trait_bound(self, node);
@@ -367,7 +348,7 @@ fn emit_uses_type_path(
     current_module: &str,
     enclosing_fqdn: &str,
     emission_context: &'static str,
-    locals: &HashSet<String>,
+    scope_idx: u32,
     span: Span,
 ) {
     let leftmost = path_str.split("::").next().unwrap_or("");
@@ -377,7 +358,17 @@ fn emit_uses_type_path(
     if SKIP_MARKERS.contains(&leftmost) {
         return;
     }
-    if locals.contains(leftmost) {
+    // Stage 3a-8c — lookup-based local check. Generic params
+    // (TypeParam) bound at `scope_idx` OR any ancestor scope filter
+    // the emission; the parent-chain walk handles impl-level /
+    // trait-level outer generics that the old `&HashSet<String>`
+    // approach plumbed manually.
+    if ctx
+        .core
+        .lookup
+        .resolve_local(leftmost, scope_idx)
+        .is_some_and(|r| matches!(r.source, BindingSource::TypeParam))
+    {
         return;
     }
     if let Some(entry) = global_builtin_registry().lookup(leftmost, Language::Rust) {
