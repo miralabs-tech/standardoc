@@ -1871,4 +1871,96 @@ mod tests {
             "expected no sub-symbols for computed-key interface, got {dyn_children:?}",
         );
     }
+
+    // --- Stage 3c: class/interface-level generics propagate to inner
+    // method/member signatures through the lookup's parent-chain walk.
+    // Pre-3a-6c, the visitor's hand-maintained scope stack handled the
+    // simple cases but the visitor only added type-params it knew about
+    // — a class-level `<T>` reachable from a method's signature relied
+    // on the lookup pre-pass having seeded both the class scope AND the
+    // method scope's parent chain. Stage 3a-6c made resolve_local walk
+    // the chain so the propagation is now structural rather than
+    // duplicated.
+
+    #[test]
+    fn stage3c_class_method_filters_class_level_generic() {
+        let (_, edges) = run(
+            "class Box<T> { take(x: T): T { return x; } }",
+        );
+        let refs = uses_type_with_attrs(&edges, &["via-type", "type-annotation"]);
+        let leaked: Vec<&RawEdge> = refs
+            .iter()
+            .copied()
+            .filter(|e| {
+                match &e.to {
+                    ResolvedOrUnresolved::Resolved { fqdn } => fqdn.ends_with("::T"),
+                    ResolvedOrUnresolved::Unresolved { name } => name.ends_with("::T"),
+                    _ => false,
+                }
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "class-level T leaked into Box's method signature: {leaked:?}",
+        );
+    }
+
+    #[test]
+    fn stage3c_class_method_inner_generic_combined_with_outer() {
+        let (_, edges) = run(
+            "class Box<T> { take<U>(x: T, y: U): T { return x; } }",
+        );
+        let refs = uses_type_with_attrs(&edges, &["via-type", "type-annotation"]);
+        let leaked: Vec<String> = refs
+            .iter()
+            .filter_map(|e| match &e.to {
+                ResolvedOrUnresolved::Resolved { fqdn }
+                    if fqdn.ends_with("::T") || fqdn.ends_with("::U") =>
+                {
+                    Some(fqdn.clone())
+                }
+                ResolvedOrUnresolved::Unresolved { name }
+                    if name.ends_with("::T") || name.ends_with("::U") =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "neither outer T nor inner U should leak: got {leaked:?}",
+        );
+    }
+
+    #[test]
+    fn stage3c_interface_method_inner_generic_combined_with_outer() {
+        let (_, edges) = run(
+            "interface Box<T> { take<U>(x: T, y: U): T; }",
+        );
+        let refs = uses_type_with_attrs(
+            &edges,
+            &["via-type", "type-interface-member"],
+        );
+        let leaked: Vec<String> = refs
+            .iter()
+            .filter_map(|e| match &e.to {
+                ResolvedOrUnresolved::Resolved { fqdn }
+                    if fqdn.ends_with("::T") || fqdn.ends_with("::U") =>
+                {
+                    Some(fqdn.clone())
+                }
+                ResolvedOrUnresolved::Unresolved { name }
+                    if name.ends_with("::T") || name.ends_with("::U") =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "interface-level T + method-level U must both be local: {leaked:?}",
+        );
+    }
 }

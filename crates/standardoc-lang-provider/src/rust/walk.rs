@@ -1724,4 +1724,109 @@ mod tests {
             "expected variant V → Foo, Bar (got {targets:?})",
         );
     }
+
+    // --- Stage 3c: class/struct/trait/impl-level generics propagate to
+    // inner method bodies through the lookup's parent-chain walk. The
+    // pre-3a-8c `outer_locals` HashSet plumbing handled the simple cases
+    // but missed scenarios where an impl/trait-level generic was used
+    // inside an inner method's signature without being explicitly
+    // re-collected. These tests pin the now-automatic behaviour.
+
+    #[test]
+    fn stage3c_impl_method_filters_impl_level_generic() {
+        let parsed = parse(
+            "pub struct S<T>(T); impl<T> S<T> { pub fn m(&self) -> T { unimplemented!() } }",
+        );
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let leaked: Vec<&RawEdge> = uses_type_edges(&edges)
+            .into_iter()
+            .filter(|e| {
+                e.from_fqdn == "c::S::m"
+                    && match &e.to {
+                        ResolvedOrUnresolved::Resolved { fqdn } => fqdn == "c::T",
+                        ResolvedOrUnresolved::Unresolved { name } => name == "c::T",
+                        _ => false,
+                    }
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "impl-level generic T leaked into S::m's signature: {leaked:?}",
+        );
+    }
+
+    #[test]
+    fn stage3c_trait_method_filters_trait_level_generic() {
+        let parsed = parse("pub trait Tr<T> { fn m(&self) -> T; }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let leaked: Vec<&RawEdge> = uses_type_edges(&edges)
+            .into_iter()
+            .filter(|e| {
+                e.from_fqdn == "c::Tr::m"
+                    && match &e.to {
+                        ResolvedOrUnresolved::Resolved { fqdn } => fqdn == "c::T",
+                        ResolvedOrUnresolved::Unresolved { name } => name == "c::T",
+                        _ => false,
+                    }
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "trait-level generic T leaked into Tr::m: {leaked:?}",
+        );
+    }
+
+    #[test]
+    fn stage3c_impl_method_inner_generic_combined_with_outer_generic() {
+        let parsed = parse(
+            "pub struct S<T>(T); impl<T> S<T> { pub fn m<U>(_x: T, _y: U) {} }",
+        );
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let m_refs: Vec<&RawEdge> = uses_type_edges(&edges)
+            .into_iter()
+            .filter(|e| e.from_fqdn == "c::S::m")
+            .collect();
+        let leaked_names: Vec<String> = m_refs
+            .iter()
+            .filter_map(|e| match &e.to {
+                ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "c::T" || fqdn == "c::U" => {
+                    Some(fqdn.clone())
+                }
+                ResolvedOrUnresolved::Unresolved { name }
+                    if name == "c::T" || name == "c::U" =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            leaked_names.is_empty(),
+            "neither outer T nor inner U should leak as a UsesType: got {leaked_names:?}",
+        );
+    }
+
+    #[test]
+    fn stage3c_trait_method_inner_generic_shadows_trait_generic() {
+        // Inner `<T>` shadows the trait-level `<T>`. Either way the
+        // resolution lands on `BindingSource::TypeParam` so no phantom
+        // `c::T` UsesType edge fires.
+        let parsed = parse("pub trait Tr<T> { fn m<T>(_x: T); }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let leaked: Vec<&RawEdge> = uses_type_edges(&edges)
+            .into_iter()
+            .filter(|e| {
+                e.from_fqdn == "c::Tr::m"
+                    && match &e.to {
+                        ResolvedOrUnresolved::Resolved { fqdn } => fqdn == "c::T",
+                        ResolvedOrUnresolved::Unresolved { name } => name == "c::T",
+                        _ => false,
+                    }
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "shadowed T should still be a local TypeParam: {leaked:?}",
+        );
+    }
 }
