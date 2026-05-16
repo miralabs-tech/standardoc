@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use proc_macro2::Span;
 use quote::ToTokens;
 use standardoc_ir::{
-    EdgeKind, Kind, LanguageKind, Modifiers, Param, RawAttribute, RawAttributeArg, RawDocument,
-    RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation,
-    TypeRef, Visibility, compact_rust_tokens,
+    EdgeKind, Kind, Language, LanguageKind, Modifiers, Param, RawAttribute, RawAttributeArg,
+    RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site,
+    SymbolLocation, TypeRef, Visibility, compact_rust_tokens,
 };
 use syn::spanned::Spanned;
 
@@ -27,7 +27,7 @@ pub(crate) struct WalkContext {
 impl WalkContext {
     pub(crate) fn new(file_path: &str, crate_name: &str, file_module_fqdn: String) -> Self {
         Self {
-            core: WalkContextCore::new(file_path.to_string(), file_module_fqdn),
+            core: WalkContextCore::new(file_path.to_string(), file_module_fqdn, Language::Rust),
             crate_name: crate_name.to_string(),
             alias_table: HashMap::new(),
         }

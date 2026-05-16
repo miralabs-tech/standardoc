@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use full_moon::ast::{Ast, Expression, LastStmt, Stmt, Var};
-use standardoc_ir::{RawDocument, RawEdge, RawSymbol};
+use standardoc_ir::{Language, RawDocument, RawEdge, RawSymbol};
 
 use crate::walk_core::WalkContextCore;
 
@@ -46,7 +46,7 @@ impl LuaWalkContext {
         package_root: PathBuf,
     ) -> Self {
         Self {
-            core: WalkContextCore::new(file_path, file_module_fqdn),
+            core: WalkContextCore::new(file_path, file_module_fqdn, Language::Lua),
             package_name,
             from_file_abs_path,
             package_root,

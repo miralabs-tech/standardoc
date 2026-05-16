@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use standardoc_ir::{RawDocument, RawEdge, RawSymbol};
+use standardoc_ir::{Language, ModuleLookup, RawDocument, RawEdge, RawSymbol};
 
 #[derive(Debug)]
 pub(crate) struct WalkContextCore {
@@ -10,10 +10,12 @@ pub(crate) struct WalkContextCore {
     pub(crate) edges: Vec<RawEdge>,
     pub(crate) documents: Vec<RawDocument>,
     pub(crate) defined_fqdns: HashSet<String>,
+    pub(crate) lookup: ModuleLookup,
 }
 
 impl WalkContextCore {
-    pub(crate) fn new(file_path: String, file_module_fqdn: String) -> Self {
+    pub(crate) fn new(file_path: String, file_module_fqdn: String, language: Language) -> Self {
+        let lookup = ModuleLookup::new(file_module_fqdn.clone(), language);
         Self {
             file_path,
             file_module_fqdn,
@@ -21,6 +23,7 @@ impl WalkContextCore {
             edges: Vec::new(),
             documents: Vec::new(),
             defined_fqdns: HashSet::new(),
+            lookup,
         }
     }
 

@@ -1,3 +1,4 @@
+mod builtins;
 mod lua;
 mod rust;
 mod sfc;
@@ -7,6 +8,7 @@ mod utils;
 mod walk_core;
 mod workspace;
 
+pub use builtins::{global as global_builtin_registry, standard as standard_builtin_registry};
 pub use lua::LuaProvider;
 pub use rust::RustProvider;
 pub use ts::TsProvider;

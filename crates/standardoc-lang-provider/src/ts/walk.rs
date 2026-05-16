@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use standardoc_ir::{
-    Blake3Hash, EdgeKind, Kind, LanguageKind, Modifiers, Param, RawDocument, RawEdge, RawSymbol,
-    ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation, TypeRef, Visibility,
+    Blake3Hash, EdgeKind, Kind, Language, LanguageKind, Modifiers, Param, RawDocument, RawEdge,
+    RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation, TypeRef,
+    Visibility,
 };
 use swc_core::common::BytePos;
 use swc_core::common::comments::SingleThreadedComments;
@@ -52,7 +53,7 @@ impl<'a> TsWalkContext<'a> {
         comments: &'a SingleThreadedComments,
     ) -> Self {
         Self {
-            core: WalkContextCore::new(file_path, file_module_fqdn),
+            core: WalkContextCore::new(file_path, file_module_fqdn, Language::TypeScript),
             package_name,
             import_aliases: HashMap::new(),
             cm,
