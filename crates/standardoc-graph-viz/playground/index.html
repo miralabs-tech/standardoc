@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>standardoc-graph-viz — playground</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <standardoc-toolbar
+      id="toolbar"
+      mode="canvas2d"
+      status-kind="booting"
+      status-text="booting…"
+    ></standardoc-toolbar>
+    <main>
+      <standardoc-graph id="graph"></standardoc-graph>
+      <standardoc-hud id="hud"></standardoc-hud>
+      <aside id="detail" class="detail">
+        <h3>Pick a symbol</h3>
+        <p class="empty">Hover a chip in the canvas to inspect its edges; click to log its FQDN.</p>
+      </aside>
+    </main>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>

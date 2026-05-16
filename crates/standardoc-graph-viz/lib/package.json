@@ -1,0 +1,27 @@
+{
+  "name": "@standarx/standardoc-viz",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Embeddable graph-viz UI components for the standardoc workspace index.",
+  "type": "module",
+  "sideEffects": [
+    "./src/components/**/*.element.ts"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./components/toolbar": "./src/components/toolbar/index.ts",
+    "./components/hud": "./src/components/hud/index.ts",
+    "./components/graph": "./src/components/graph/index.ts",
+    "./profiler": "./src/profiler/index.ts",
+    "./styles/tokens": "./src/styles/_tokens.scss",
+    "./styles/mixins": "./src/styles/_mixins.scss"
+  },
+  "peerDependencies": {
+    "classigo": "^2",
+    "matchigo": "^1"
+  },
+  "devDependencies": {
+    "sass": "^1.83.0",
+    "typescript": "^5.6.0"
+  }
+}

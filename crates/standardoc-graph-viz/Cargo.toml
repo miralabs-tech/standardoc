@@ -1,0 +1,53 @@
+[package]
+name = "standardoc-graph-viz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "WASM graph viewer for the standardoc semantic IR. 2D canvas renderer with cluster-pack layout; ThreeJS layer optional."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+standardoc-ir = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+serde-wasm-bindgen = { workspace = true }
+wasm-bindgen  = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys        = { workspace = true }
+console_error_panic_hook = { workspace = true }
+wgpu          = { workspace = true }
+bytemuck      = { workspace = true }
+glam          = { workspace = true }
+
+[dependencies.web-sys]
+workspace = true
+features = [
+    "Window",
+    "Document",
+    "HtmlElement",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "CssStyleDeclaration",
+    "TextMetrics",
+    "DomRect",
+    "MouseEvent",
+    "WheelEvent",
+    "Performance",
+    "Navigator",
+    "Gpu",
+    "GpuCanvasContext",
+    "console",
+]
+
+# wasm-bindgen-test target is in dev-dependencies to keep release wasm minimal.
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[lints]
+workspace = true

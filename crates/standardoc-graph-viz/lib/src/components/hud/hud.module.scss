@@ -1,0 +1,215 @@
+@use '../../styles/mixins' as *;
+
+.hud {
+	position: absolute;
+	top: 10px;
+	left: 10px;
+	z-index: 5;
+	background: rgba(20, 20, 22, 0.85);
+	backdrop-filter: blur(6px);
+	-webkit-backdrop-filter: blur(6px);
+	border: 1px solid var(--sd-border, #454545);
+	border-radius: var(--sd-radius-md, 6px);
+	padding: 8px 12px;
+	font-family: ui-monospace, SFMono-Regular, monospace;
+	font-size: 11px;
+	color: var(--sd-fg, #cccccc);
+	min-width: 192px;
+	pointer-events: none;
+	user-select: none;
+	transition: opacity 120ms ease;
+
+	&--hidden {
+		opacity: 0;
+	}
+
+	&__header {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 8px;
+		margin-bottom: 6px;
+		color: var(--sd-accent, #3794ff);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		font-size: 10px;
+	}
+
+	&__title {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 6px;
+	}
+
+	&__hint {
+		color: var(--sd-fg-muted, #9d9d9d);
+		font-size: 9px;
+		text-transform: none;
+		letter-spacing: normal;
+	}
+
+	&__section {
+		display: grid;
+		grid-template-columns: 56px 1fr;
+		gap: 2px 8px;
+		margin: 0;
+
+		& + & {
+			margin-top: 6px;
+			padding-top: 6px;
+			border-top: 1px dashed var(--sd-border, #454545);
+		}
+
+		&[hidden] {
+			display: none;
+		}
+	}
+
+	&__term {
+		color: var(--sd-fg-muted, #9d9d9d);
+	}
+
+	&__value {
+		margin: 0;
+		text-align: right;
+		font-variant-numeric: tabular-nums;
+
+		&--warn {
+			color: var(--sd-status-err, #f48771);
+		}
+	}
+
+	&__muted {
+		color: var(--sd-fg-muted, #9d9d9d);
+		font-size: 10px;
+	}
+
+	&__range {
+		color: var(--sd-fg-muted, #9d9d9d);
+		font-size: 10px;
+		font-variant-numeric: tabular-nums;
+
+		&--spike {
+			color: var(--sd-status-err, #f48771);
+		}
+	}
+
+	&__pct {
+		color: var(--sd-fg-muted, #9d9d9d);
+		font-size: 10px;
+		font-variant-numeric: tabular-nums;
+		margin-left: 4px;
+
+		&--warn {
+			color: var(--sd-status-err, #f48771);
+		}
+	}
+
+	&__empty_hint {
+		color: var(--sd-fg-muted, #9d9d9d);
+		font-size: 10px;
+		font-style: italic;
+
+		&[hidden] {
+			display: none;
+		}
+	}
+
+	&__chip {
+		display: inline-block;
+		padding: 1px 5px;
+		border-radius: 2px;
+		background: var(--sd-hover, #2a2d2e);
+		color: var(--sd-accent, #3794ff);
+		font-size: 9px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+
+		&--gpu {
+			background: color-mix(in srgb, var(--sd-accent, #3794ff) 20%, transparent);
+			color: var(--sd-accent, #3794ff);
+		}
+	}
+
+	&__actions {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		margin-top: 8px;
+		padding-top: 6px;
+		border-top: 1px dashed var(--sd-border, #454545);
+		pointer-events: auto;
+		user-select: auto;
+	}
+
+	&__mode {
+		background: var(--sd-bg, #1e1e1e);
+		color: var(--sd-fg-muted, #9d9d9d);
+		border: 1px solid var(--sd-border, #454545);
+		border-radius: 2px;
+		font: inherit;
+		font-size: 10px;
+		padding: 1px 4px;
+		cursor: pointer;
+
+		&:hover:not(:disabled) {
+			color: var(--sd-fg, #cccccc);
+			border-color: var(--sd-accent, #3794ff);
+		}
+
+		&:disabled {
+			opacity: 0.5;
+			cursor: not-allowed;
+		}
+	}
+
+	&__action {
+		background: transparent;
+		color: var(--sd-fg-muted, #9d9d9d);
+		border: 1px solid var(--sd-border, #454545);
+		border-radius: 2px;
+		font: inherit;
+		font-size: 11px;
+		line-height: 1;
+		padding: 2px 6px;
+		cursor: pointer;
+		transition: color 120ms ease, border-color 120ms ease;
+
+		&:hover {
+			color: var(--sd-fg, #cccccc);
+			border-color: var(--sd-accent, #3794ff);
+		}
+
+		&--recording {
+			color: var(--sd-status-err, #f48771);
+			border-color: var(--sd-status-err, #f48771);
+			animation: hud-pulse 1s ease-in-out infinite;
+		}
+
+		&--flash {
+			color: var(--sd-status-ok, #89d185);
+			border-color: var(--sd-status-ok, #89d185);
+		}
+	}
+
+	&__rec_info {
+		font-size: 10px;
+		font-variant-numeric: tabular-nums;
+		color: var(--sd-status-err, #f48771);
+		margin-left: auto;
+
+		&[hidden] {
+			display: none;
+		}
+	}
+}
+
+@keyframes hud-pulse {
+	0%, 100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.45;
+	}
+}

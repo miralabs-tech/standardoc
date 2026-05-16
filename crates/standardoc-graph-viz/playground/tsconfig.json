@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["bun-types"],
+    "paths": {
+      "@standarx/standardoc-viz": ["../lib/src/index.ts"],
+      "@standarx/standardoc-viz/*": ["../lib/src/*"]
+    }
+  },
+  "include": ["./**/*.ts", "../pkg/*.d.ts", "../lib/src/**/*.ts", "../lib/src/**/*.d.ts"]
+}

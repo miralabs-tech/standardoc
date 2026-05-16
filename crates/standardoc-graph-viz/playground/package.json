@@ -1,0 +1,20 @@
+{
+  "name": "standardoc-graph-viz-playground",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot server.ts",
+    "dev:full": "pwsh -NoProfile -File ./dev.ps1",
+    "build:wasm": "wasm-pack build .. --target web --out-dir pkg --dev"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "classigo": "^2.0.0",
+    "matchigo": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "sass": "^1.83.0",
+    "typescript": "^5.6.0"
+  }
+}

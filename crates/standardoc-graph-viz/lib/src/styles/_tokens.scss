@@ -1,0 +1,25 @@
+// Design tokens consumed by every lib component. Defaults mirror the
+// VSCode dark theme so the lib is usable out-of-the-box; override the
+// `--sd-*` custom properties at the host level (playground :root, or
+// VSCode webview wrapper) to retheme without touching the SCSS source.
+//
+// The fallback chain in every component is `var(--sd-foo, <hardcoded>)`
+// so the lib has zero requirement that the host inject this file — but
+// importing `@standarx/standardoc-viz/styles/tokens` once does set the
+// canonical values cleanly.
+
+:root {
+	--sd-bg: #1e1e1e;
+	--sd-bg-elevated: #252526;
+	--sd-fg: #cccccc;
+	--sd-fg-muted: #9d9d9d;
+	--sd-border: #454545;
+	--sd-accent: #3794ff;
+	--sd-hover: #2a2d2e;
+	--sd-status-ok: #89d185;
+	--sd-status-warn: #cca700;
+	--sd-status-err: #f48771;
+	--sd-radius-sm: 3px;
+	--sd-radius-md: 6px;
+	--sd-radius-pill: 10px;
+}
