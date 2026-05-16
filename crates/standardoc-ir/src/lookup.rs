@@ -172,6 +172,14 @@ pub struct ModuleLookup {
 	pub bindings: HashMap<String, Vec<IdentResolution>>,
 	pub imports: Vec<ImportRecord>,
 	pub built_at_epoch_ms: u64,
+	/// Byte-span → scope_idx map populated by the pre-pass so the
+	/// Stage 3a-6c/8c visitors can look up "which scope_idx covers this
+	/// AST node?" without replaying the scope DFS themselves. NOT
+	/// persisted — the span keys are walk-local artefacts; cross-
+	/// workspace consumers (Stage 3b) only need root-scope bindings and
+	/// re-derive nothing from this map.
+	#[serde(skip)]
+	pub span_to_scope: HashMap<(u32, u32), u32>,
 }
 
 impl ModuleLookup {
@@ -192,6 +200,7 @@ impl ModuleLookup {
 			bindings: HashMap::new(),
 			imports: Vec::new(),
 			built_at_epoch_ms: epoch_ms_now(),
+			span_to_scope: HashMap::new(),
 		}
 	}
 
@@ -200,6 +209,31 @@ impl ModuleLookup {
 		let idx = self.scopes.len() as u32;
 		self.scopes.push(range);
 		idx
+	}
+
+	/// Push a new scope AND record its byte span in `span_to_scope`. The
+	/// visitor consults this map at each scope-introducing AST node to
+	/// recover the corresponding scope_idx without replaying the DFS.
+	/// Spans must be unique per scope; duplicate keys would only happen
+	/// if two distinct scopes shared the same byte range (impossible for
+	/// well-formed source).
+	pub fn push_scope_with_span(
+		&mut self,
+		range: ScopeRange,
+		byte_lo: u32,
+		byte_hi: u32,
+	) -> u32 {
+		let idx = self.push_scope(range);
+		self.span_to_scope.insert((byte_lo, byte_hi), idx);
+		idx
+	}
+
+	/// Recover the scope_idx assigned to the AST node spanning
+	/// `[byte_lo, byte_hi)`. Returns `None` when the pre-pass did not
+	/// record this span (caller should fall back to the current scope_idx
+	/// so resolution still works for non-scope-introducing nodes).
+	pub fn scope_idx_for_span(&self, byte_lo: u32, byte_hi: u32) -> Option<u32> {
+		self.span_to_scope.get(&(byte_lo, byte_hi)).copied()
 	}
 
 	/// Insert a binding. Multiple inserts under the same name model

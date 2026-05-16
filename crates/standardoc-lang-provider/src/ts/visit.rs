@@ -1,12 +1,11 @@
-use standardoc_ir::{EdgeKind, RawEdge, ResolvedOrUnresolved};
-use std::collections::{HashMap, HashSet};
+use standardoc_ir::{AliasMutability, EdgeKind, ModuleLookup, RawEdge, ResolvedOrUnresolved};
 use swc_core::common::Span;
 use swc_core::ecma::ast::{
-    ArrowExpr, BlockStmt, BlockStmtOrExpr, CallExpr, Callee, CatchClause, Decl, Expr, ForHead,
+    ArrowExpr, BlockStmt, BlockStmtOrExpr, CallExpr, Callee, CatchClause, Expr,
     ForInStmt, ForOfStmt, ForStmt, Function, Ident, JSXAttrOrSpread, JSXAttrValue, JSXElement,
-    JSXElementChild, JSXElementName, JSXExpr, MemberProp, NewExpr, ObjectPatProp, OptChainBase,
-    OptChainExpr, Pat, Stmt, TsAsExpr, TsEntityName, TsTypeAnn, TsTypeAssertion, TsTypeParamInstantiation,
-    TsTypeRef, VarDecl, VarDeclKind, VarDeclOrExpr, VarDeclarator,
+    JSXElementChild, JSXElementName, JSXExpr, MemberProp, NewExpr, OptChainBase,
+    OptChainExpr, Pat, TsAsExpr, TsEntityName, TsTypeAnn, TsTypeAssertion,
+    TsTypeParamInstantiation, TsTypeRef,
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
 
@@ -195,52 +194,29 @@ impl JsxAttribute {
 /// happened between the declaration and the read. Bug B Stage 2 does
 /// NOT track reassignments (no SSA, no dataflow) — that's a Stage 3
 /// concern once the per-module AOT lookup table is in place.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AliasMutability {
-    Const,
-    Mutable,
-}
-
-impl AliasMutability {
-    const fn as_slug(self) -> &'static str {
-        match self {
-            Self::Const => "via-alias",
-            Self::Mutable => "via-alias-mutable",
-        }
-    }
-
-    fn from_var_decl_kind(kind: VarDeclKind) -> Self {
-        match kind {
-            VarDeclKind::Const => Self::Const,
-            VarDeclKind::Let | VarDeclKind::Var => Self::Mutable,
-        }
+/// Visitor-side attribute slug for an `AliasMutability` propagated edge.
+/// `via-alias` for const aliases, `via-alias-mutable` for let/var (where
+/// the binding can be reassigned between alias-seeding and the read,
+/// invalidating the propagation — the slug lets consumers discount these).
+const fn alias_mut_slug(m: AliasMutability) -> &'static str {
+    match m {
+        AliasMutability::Const => "via-alias",
+        AliasMutability::Mutable => "via-alias-mutable",
     }
 }
 
-/// One frame on the lexical scope stack. Pushed/popped at function /
-/// arrow / block / for-loop / catch boundaries by the matching `visit_*`
-/// overrides. Module top-level is NOT a `Scope` — it terminates the
-/// stack walk and falls through to [`TsWalkContext::resolve_call`]
-/// (import-alias table → `<module>::<name>` against `defined_fqdns`).
-/// "Global" doesn't exist as a separate notion in JS/TS modules; the
-/// [`JS_GLOBALS`] const acts as the early-skip proxy for runtime
-/// builtins (`Math`, `JSON`, `console`, …).
-#[derive(Debug, Default)]
-struct Scope {
-    bindings: HashSet<String>,
-    aliases: HashMap<String, (ResolvedOrUnresolved, AliasMutability)>,
-}
-
-/// Result of walking the scope stack top-down for a single name.
+/// Result of resolving a name against the AOT `ModuleLookup` plus the
+/// `resolve_call` fall-through chain. Internal output type — callers
+/// pattern-match on the two variants to decide between emitting an edge
+/// (Target) or skipping (Local for nested-scope bindings without alias).
 enum NameResolution {
-    /// Either a scope-alias hit (Some(mutability)) or a module-level
-    /// resolution (None) — both carry the propagated target so the
-    /// caller can decide between emitting `Calls` / `References` etc.
+    /// Either an alias propagation (Some(mutability)) or a module-level
+    /// resolution (None) — both carry the canonical target so the caller
+    /// can emit `Calls` / `References` / `UsesType` accordingly.
     Target(ResolvedOrUnresolved, Option<AliasMutability>),
-    /// Pure local binding (param, let/const/var/fn/class decl) without
+    /// Nested-scope local binding (param, let/const/var/fn-expr) without
     /// an alias. Callers skip emission — locals aren't surfaced in the
-    /// module graph by design (scope tracking is the mechanism, not
-    /// the output).
+    /// module graph by design.
     Local,
 }
 
@@ -251,15 +227,17 @@ struct CallVisitor<'a, 'b> {
     /// `Some(slug)` while walking the inside of a JSX expression slot.
     /// `None` everywhere else — keeps non-JSX TS extraction unchanged.
     jsx_context: Option<JsxAttribute>,
-    /// Bug B Stage 2 — lexical scope stack. Empty at top-level entry;
-    /// pushed by `visit_function` / `visit_arrow_expr` / `visit_block_stmt`
-    /// / `visit_for_*_stmt` / `visit_catch_clause`. Walked top-down for
-    /// name resolution before falling through to `resolve_call`.
-    scopes: Vec<Scope>,
-    /// Mutability of the enclosing `VarDecl` while its declarators are
-    /// being walked. `Some(Const)` inside `const`, `Some(Mutable)` inside
-    /// `let`/`var`, `None` elsewhere. Used to tag aliases at seed time.
-    pending_var_mutability: Option<AliasMutability>,
+    /// Stage 3a-6c — scope_idx into `ctx.core.lookup.scopes` for the
+    /// AST node currently being visited. Threaded by
+    /// `enter_scope_at` / `exit_scope` at function / arrow / block /
+    /// for-loop / catch boundaries. `ModuleLookup::ROOT_SCOPE` when
+    /// the visitor is at module-top-level (matches the lookup's
+    /// implicit root, where hoisted module-level decls + imports live).
+    current_scope_idx: u32,
+    /// Parent-scope stack mirroring nested `enter_scope_at` calls —
+    /// `exit_scope` pops back to the parent. Replaces the old
+    /// `Vec<Scope>` book-keeping; binding state lives in the lookup.
+    scope_stack: Vec<u32>,
     /// Bug B Stage 2b — sub-tag attached to every `UsesType` edge emitted
     /// while this is `Some(_)`. Set/restored around the specific sub-tree
     /// walks (return type, type params, casts, instantiations, etc.) so a
@@ -276,150 +254,68 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
             current_module: current_module.to_string(),
             enclosing_fqdn: enclosing_fqdn.to_string(),
             jsx_context: None,
-            scopes: Vec::with_capacity(8),
-            pending_var_mutability: None,
+            current_scope_idx: ModuleLookup::ROOT_SCOPE,
+            scope_stack: Vec::with_capacity(8),
             type_emission_context: None,
         }
     }
 
-    // --- Bug B Stage 2: scope plumbing ---
+    // --- Stage 3a-6c: scope_idx threading against the AOT lookup ---
 
-    fn push_scope(&mut self) {
-        self.scopes.push(Scope::default());
+    /// Switch `current_scope_idx` to the lookup-side scope covering
+    /// `[byte_lo, byte_hi)`. Falls back to the current scope when the
+    /// pre-pass didn't record this span (the visitor entered a node the
+    /// builder didn't treat as scope-introducing — resolution still
+    /// works, just against the enclosing scope).
+    fn enter_scope_at(&mut self, byte_lo: u32, byte_hi: u32) {
+        let parent = self.current_scope_idx;
+        self.scope_stack.push(parent);
+        self.current_scope_idx = self
+            .ctx
+            .core
+            .lookup
+            .scope_idx_for_span(byte_lo, byte_hi)
+            .unwrap_or(parent);
     }
 
-    fn pop_scope(&mut self) {
-        self.scopes.pop();
+    fn exit_scope(&mut self) {
+        self.current_scope_idx = self
+            .scope_stack
+            .pop()
+            .unwrap_or(ModuleLookup::ROOT_SCOPE);
     }
 
-    fn current_scope_mut(&mut self) -> &mut Scope {
-        self.scopes
-            .last_mut()
-            .expect("scope stack non-empty during walk")
-    }
-
-    fn add_binding(&mut self, name: String) {
-        self.current_scope_mut().bindings.insert(name);
-    }
-
-    fn add_alias(
-        &mut self,
-        name: String,
-        target: ResolvedOrUnresolved,
-        mutability: AliasMutability,
-    ) {
-        let scope = self.current_scope_mut();
-        scope.bindings.insert(name.clone());
-        scope.aliases.insert(name, (target, mutability));
-    }
-
-    /// Walk the scope stack top-down for `name`. Alias hit → propagate
-    /// the alias target + mutability. Plain binding hit → return
-    /// [`NameResolution::Local`] (caller skips emission). Miss → fall
-    /// through to `resolve_call` (import-alias table → `<module>::<name>`
-    /// → Unresolved canonical).
+    /// Resolve `name` against the AOT lookup, then fall through to
+    /// [`TsWalkContext::resolve_call`] for module-level resolution.
+    ///
+    /// Behaviour mirrors the pre-3a-6c scope-walk:
+    /// - Lookup miss → fall through to `resolve_call` (alias_table →
+    ///   defined_fqdns → builtin → unresolved canonical).
+    /// - Lookup hit at `ROOT_SCOPE` (hoisted decl or import) → fall
+    ///   through to `resolve_call` so the canonical FQDN is produced
+    ///   exactly as before. The lookup's root-scope tracking is
+    ///   informational here; `resolve_call` already owns the
+    ///   alias_table for imports and `defined_fqdns` for hoisted decls.
+    /// - Lookup hit at nested scope with `aliases_to` + `mutability` →
+    ///   propagated alias — resolve the leftmost-base through
+    ///   `resolve_call` and tag with the mutability slug.
+    /// - Lookup hit at nested scope without alias → [`NameResolution::Local`].
     fn resolve_name(&self, name: &str) -> NameResolution {
-        for scope in self.scopes.iter().rev() {
-            if let Some((target, m)) = scope.aliases.get(name) {
-                return NameResolution::Target(target.clone(), Some(*m));
+        let lookup = &self.ctx.core.lookup;
+        if let Some(res) = lookup.resolve_local(name, self.current_scope_idx) {
+            if res.scope_idx == ModuleLookup::ROOT_SCOPE {
+                return NameResolution::Target(
+                    self.ctx.resolve_call(name, &self.current_module),
+                    None,
+                );
             }
-            if scope.bindings.contains(name) {
-                return NameResolution::Local;
+            if let (Some(alias_str), Some(m)) = (res.aliases_to.as_deref(), res.mutability) {
+                let target = self.ctx.resolve_call(alias_str, &self.current_module);
+                return NameResolution::Target(target, Some(m));
             }
+            return NameResolution::Local;
         }
         NameResolution::Target(self.ctx.resolve_call(name, &self.current_module), None)
-    }
-
-    /// For `const x = <init>`, walk `init` down to its leftmost ident
-    /// base and return the resolved target if it's non-local. Used by
-    /// `visit_var_declarator` to seed scope aliases.
-    ///
-    /// Patterns recognised:
-    /// - `const x = FOO` → alias on `FOO`'s resolution.
-    /// - `const x = FOO.bar.baz` → alias on `FOO`'s resolution (leftmost).
-    /// - `const x = FOO?.bar` → same.
-    ///
-    /// Returns `None` when the leftmost base is a local binding, when
-    /// the RHS isn't an ident/member chain (calls, ternaries, awaits,
-    /// object literals, …), or when the resolution would point at the
-    /// local scope itself.
-    fn resolve_alias_rhs(&self, expr: &Expr) -> Option<ResolvedOrUnresolved> {
-        let mut cur = expr;
-        loop {
-            match cur {
-                Expr::Ident(id) => {
-                    return match self.resolve_name(id.sym.as_ref()) {
-                        NameResolution::Target(t, _) => Some(t),
-                        NameResolution::Local => None,
-                    };
-                }
-                Expr::Member(m) => cur = m.obj.as_ref(),
-                Expr::OptChain(opt) => match opt.base.as_ref() {
-                    OptChainBase::Member(m) => cur = m.obj.as_ref(),
-                    _ => return None,
-                },
-                _ => return None,
-            }
-        }
-    }
-
-    /// Pre-pass over a block's statements: seed every name introduced
-    /// by a declaration into the current scope's binding set BEFORE
-    /// walking the statements proper. Captures function/class
-    /// hoisting AND lax forward-references for `let`/`const` (TDZ
-    /// semantics are not enforced — scripting-idiom forward refs are
-    /// the intended behavior).
-    fn pre_pass_collect_bindings(&mut self, stmts: &[Stmt]) {
-        for stmt in stmts {
-            if let Stmt::Decl(decl) = stmt {
-                self.collect_decl_bindings(decl);
-            }
-        }
-    }
-
-    fn collect_decl_bindings(&mut self, decl: &Decl) {
-        match decl {
-            Decl::Fn(f) => self.add_binding(f.ident.sym.to_string()),
-            Decl::Class(c) => self.add_binding(c.ident.sym.to_string()),
-            Decl::Var(v) => {
-                for d in &v.decls {
-                    self.collect_pat_bindings(&d.name);
-                }
-            }
-            Decl::Using(u) => {
-                for d in &u.decls {
-                    self.collect_pat_bindings(&d.name);
-                }
-            }
-            Decl::TsEnum(e) => self.add_binding(e.id.sym.to_string()),
-            // Type-only declarations don't introduce value bindings.
-            Decl::TsInterface(_) | Decl::TsTypeAlias(_) | Decl::TsModule(_) => {}
-        }
-    }
-
-    fn collect_pat_bindings(&mut self, pat: &Pat) {
-        match pat {
-            Pat::Ident(b) => self.add_binding(b.id.sym.to_string()),
-            Pat::Array(a) => {
-                for elem in &a.elems {
-                    if let Some(p) = elem {
-                        self.collect_pat_bindings(p);
-                    }
-                }
-            }
-            Pat::Object(o) => {
-                for prop in &o.props {
-                    match prop {
-                        ObjectPatProp::KeyValue(kv) => self.collect_pat_bindings(&kv.value),
-                        ObjectPatProp::Assign(a) => self.add_binding(a.key.sym.to_string()),
-                        ObjectPatProp::Rest(r) => self.collect_pat_bindings(&r.arg),
-                    }
-                }
-            }
-            Pat::Rest(r) => self.collect_pat_bindings(&r.arg),
-            Pat::Assign(a) => self.collect_pat_bindings(&a.left),
-            Pat::Expr(_) | Pat::Invalid(_) => {}
-        }
     }
 
     fn emit_call(&mut self, to: ResolvedOrUnresolved, span: Span) {
@@ -436,7 +332,7 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
         span: Span,
         mutability: AliasMutability,
     ) {
-        self.emit_call_inner(to, span, &[mutability.as_slug()]);
+        self.emit_call_inner(to, span, &[alias_mut_slug(mutability)]);
     }
 
     fn emit_call_inner(&mut self, to: ResolvedOrUnresolved, span: Span, extra_attrs: &[&str]) {
@@ -470,7 +366,7 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
         let site = self.ctx.span_site(span);
         let mut attributes = vec![attribute.to_string()];
         if let Some(m) = alias_mut {
-            attributes.push(m.as_slug().to_string());
+            attributes.push(alias_mut_slug(m).to_string());
         }
         self.ctx.push_edge(RawEdge {
             from_fqdn: self.enclosing_fqdn.clone(),
@@ -520,7 +416,7 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
         let site = self.ctx.span_site(span);
         let mut attributes = vec!["value-read".to_string()];
         if let Some(m) = alias_mut {
-            attributes.push(m.as_slug().to_string());
+            attributes.push(alias_mut_slug(m).to_string());
         }
         self.ctx.push_edge(RawEdge {
             from_fqdn: self.enclosing_fqdn.clone(),
@@ -886,24 +782,14 @@ impl Visit for CallVisitor<'_, '_> {
     /// function scope and its body block don't double-push — in JS
     /// semantics the function body IS the function scope.
     fn visit_function(&mut self, node: &Function) {
-        self.push_scope();
-        // Stage 2b: bind generic type params into the function scope so
-        // a body reference to `T` resolves as `Local` (no UsesType edge
-        // back to a phantom `src::T`).
+        self.enter_scope_at(node.span.lo.0, node.span.hi.0);
+        // Type params: bindings live in the lookup; walk only to emit
+        // `UsesType` edges (Stage 2b) under the right type context.
         if let Some(type_params) = &node.type_params {
-            for p in &type_params.params {
-                self.add_binding(p.name.sym.to_string());
-            }
             let prev = self.set_type_context(TYPE_CTX_CONSTRAINT);
             type_params.visit_with(self);
             self.restore_type_context(prev);
         }
-        for param in &node.params {
-            self.collect_pat_bindings(&param.pat);
-        }
-        // Walk each param node so default-value expressions and type
-        // annotations emit their own value-reads / type-edges under
-        // the newly-seeded scope.
         for param in &node.params {
             param.visit_with(self);
         }
@@ -912,30 +798,26 @@ impl Visit for CallVisitor<'_, '_> {
             rt.visit_with(self);
             self.restore_type_context(prev);
         }
+        // Body delegates to `visit_block_stmt` which enters the Block
+        // scope (where the lookup pre-pass records body-local bindings
+        // like `const fn = FOO`). Walking `body.stmts` directly would
+        // leave `current_scope_idx` at the function scope and miss
+        // those bindings when resolving inner idents.
         if let Some(body) = &node.body {
-            self.pre_pass_collect_bindings(&body.stmts);
-            for stmt in &body.stmts {
-                stmt.visit_with(self);
-            }
+            body.visit_with(self);
         }
-        self.pop_scope();
+        self.exit_scope();
     }
 
     /// Arrow expression — same pattern as `visit_function` but params
     /// are bare `Pat`s (no `Param` wrapper) and the body is either a
     /// block or a single expression.
     fn visit_arrow_expr(&mut self, node: &ArrowExpr) {
-        self.push_scope();
+        self.enter_scope_at(node.span.lo.0, node.span.hi.0);
         if let Some(type_params) = &node.type_params {
-            for p in &type_params.params {
-                self.add_binding(p.name.sym.to_string());
-            }
             let prev = self.set_type_context(TYPE_CTX_CONSTRAINT);
             type_params.visit_with(self);
             self.restore_type_context(prev);
-        }
-        for param in &node.params {
-            self.collect_pat_bindings(param);
         }
         for param in &node.params {
             param.visit_with(self);
@@ -947,14 +829,13 @@ impl Visit for CallVisitor<'_, '_> {
         }
         match node.body.as_ref() {
             BlockStmtOrExpr::BlockStmt(b) => {
-                self.pre_pass_collect_bindings(&b.stmts);
-                for stmt in &b.stmts {
-                    stmt.visit_with(self);
-                }
+                // Same rationale as `visit_function`: delegate to
+                // `visit_block_stmt` so the Block scope is entered.
+                b.visit_with(self);
             }
             BlockStmtOrExpr::Expr(e) => e.visit_with(self),
         }
-        self.pop_scope();
+        self.exit_scope();
     }
 
     /// Standalone block (`{ … }` inside an `if`, `else`, `try`, or
@@ -962,81 +843,33 @@ impl Visit for CallVisitor<'_, '_> {
     /// `visit_function` / `visit_arrow_expr`, bypassing this method,
     /// so the function and body don't both push a frame.
     fn visit_block_stmt(&mut self, node: &BlockStmt) {
-        self.push_scope();
-        self.pre_pass_collect_bindings(&node.stmts);
+        self.enter_scope_at(node.span.lo.0, node.span.hi.0);
         node.visit_children_with(self);
-        self.pop_scope();
+        self.exit_scope();
     }
 
     fn visit_for_stmt(&mut self, node: &ForStmt) {
-        self.push_scope();
-        if let Some(VarDeclOrExpr::VarDecl(v)) = &node.init {
-            for d in &v.decls {
-                self.collect_pat_bindings(&d.name);
-            }
-        }
+        self.enter_scope_at(node.span.lo.0, node.span.hi.0);
         node.visit_children_with(self);
-        self.pop_scope();
+        self.exit_scope();
     }
 
     fn visit_for_in_stmt(&mut self, node: &ForInStmt) {
-        self.push_scope();
-        if let ForHead::VarDecl(v) = &node.left {
-            for d in &v.decls {
-                self.collect_pat_bindings(&d.name);
-            }
-        }
+        self.enter_scope_at(node.span.lo.0, node.span.hi.0);
         node.visit_children_with(self);
-        self.pop_scope();
+        self.exit_scope();
     }
 
     fn visit_for_of_stmt(&mut self, node: &ForOfStmt) {
-        self.push_scope();
-        if let ForHead::VarDecl(v) = &node.left {
-            for d in &v.decls {
-                self.collect_pat_bindings(&d.name);
-            }
-        }
+        self.enter_scope_at(node.span.lo.0, node.span.hi.0);
         node.visit_children_with(self);
-        self.pop_scope();
+        self.exit_scope();
     }
 
     fn visit_catch_clause(&mut self, node: &CatchClause) {
-        self.push_scope();
-        if let Some(p) = &node.param {
-            self.collect_pat_bindings(p);
-        }
+        self.enter_scope_at(node.span.lo.0, node.span.hi.0);
         node.visit_children_with(self);
-        self.pop_scope();
-    }
-
-    /// Capture the enclosing `VarDecl`'s mutability so each contained
-    /// declarator can tag its alias accordingly.
-    fn visit_var_decl(&mut self, node: &VarDecl) {
-        let prev = self.pending_var_mutability;
-        self.pending_var_mutability = Some(AliasMutability::from_var_decl_kind(node.kind));
-        node.visit_children_with(self);
-        self.pending_var_mutability = prev;
-    }
-
-    /// Bug B Stage 2 — alias seeding. After walking the init (which
-    /// fires value-read emission on the RHS naturally), inspect the
-    /// `(pattern, init)` shape: if it's `Pat::Ident` paired with an
-    /// init that resolves through `resolve_alias_rhs`, record the
-    /// alias mapping in the current scope. Destructuring patterns and
-    /// non-trivial RHS shapes (calls, ternaries, …) are skipped —
-    /// Stage 3's AOT lookup table will handle them.
-    fn visit_var_declarator(&mut self, node: &VarDeclarator) {
-        node.visit_children_with(self);
-        if let Some(init) = &node.init
-            && let Pat::Ident(b) = &node.name
-            && let Some(target) = self.resolve_alias_rhs(init)
-        {
-            let mutability = self
-                .pending_var_mutability
-                .unwrap_or(AliasMutability::Const);
-            self.add_alias(b.id.sym.to_string(), target, mutability);
-        }
+        self.exit_scope();
     }
 
     // --- Bug B Stage 2b: type-position overrides ---

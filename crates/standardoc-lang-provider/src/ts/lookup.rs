@@ -49,12 +49,16 @@ impl<'a> LookupBuilder<'a> {
 
 	fn push_scope(&mut self, kind: ScopeKind, lo: BytePos, hi: BytePos) {
 		let parent = Some(self.current_scope());
-		let idx = self.lookup.push_scope(ScopeRange {
-			start_line: lo.0,
-			end_line: hi.0,
-			parent,
-			kind,
-		});
+		let idx = self.lookup.push_scope_with_span(
+			ScopeRange {
+				start_line: lo.0,
+				end_line: hi.0,
+				parent,
+				kind,
+			},
+			lo.0,
+			hi.0,
+		);
 		self.scope_stack.push(idx);
 	}
 
