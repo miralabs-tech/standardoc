@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use standardoc_core::{
     IndexHandle, LanguageProvider, RagWatcherHandle, ResolveOutcome, ResolverRegistry,
     RevisionRelinkHandle, ScanFilters, SessionsHandle, UsagePeriod, WatcherHandle,
-    query::{self, SymbolFilter, workspace as workspace_query},
+    query::{self, SymbolFilter, projects as projects_query, workspace as workspace_query},
     sessions::memory_sync::{export_memory_dir, import_memory_dir},
 };
 use standardoc_ir::SourceOrigin;
@@ -1056,6 +1056,44 @@ impl StandardocMcp {
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
         Ok(success_json(&serde_json::json!({ "providers": providers })))
     }
+
+    /// Enumerate every project detected at cold-start (Rust crates,
+    /// Bun/Node/Deno apps, Python packages, …). One row per project;
+    /// the order is by `rel_path` so nested projects sort under their
+    /// parent in the response.
+    #[tool(
+        description = "List every project detected in the workspace at cold-start. Each entry surfaces project_id, label, kind (rust/node/bun/deno/python/lua/c/cpp/custom:tag), absolute root_path, and POSIX-style rel_path to the workspace root. Empty list = no manifests found (workspace treated as a single anonymous project)."
+    )]
+    async fn list_projects(&self) -> Result<CallToolResult, ErrorData> {
+        let handle = self.handle.clone();
+        let rows = tokio::task::spawn_blocking(move || projects_query::list_projects(&handle))
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+            .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        Ok(success_json(&serde_json::json!({ "projects": rows })))
+    }
+
+    /// Resolve the project owning a given absolute file path by walking
+    /// up the registered project tree for the deepest ancestor match.
+    /// Returns `null` when the path isn't under any registered project.
+    #[tool(
+        description = "Resolve the project owning a file by absolute path. Walks up the registered project tree (Stage 3d cold-start detection) and returns the deepest ancestor's metadata. `null` when the path is outside every registered project root."
+    )]
+    async fn project_for_file(
+        &self,
+        Parameters(params): Parameters<ProjectForFileParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.handle.clone();
+        let path = params.path;
+        let result = tokio::task::spawn_blocking(move || projects_query::project_for_file(&handle, &path))
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+            .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        match result {
+            Some(info) => Ok(success_json(&info)),
+            None => Ok(success_json(&serde_json::Value::Null)),
+        }
+    }
 }
 
 #[tool_handler]
@@ -1552,6 +1590,14 @@ pub(crate) struct LinkWorkspaceJson {
     pub workspace_id: String,
     pub root_path: String,
     pub direction: String,
+}
+
+/// Tool input — `project_for_file(path)`. Path is matched as an
+/// absolute string against the registered `projects.root_path` rows
+/// (cold-start detection stores canonicalised absolutes).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct ProjectForFileParams {
+    pub path: String,
 }
 
 const fn source_origin_label(origin: SourceOrigin) -> &'static str {
@@ -2691,5 +2737,53 @@ mod tests {
             .expect("resolve_cross_workspace ok");
         let body = body_text(&result);
         assert!(body.contains("\"providers\": []"), "got `{body}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_projects_returns_empty_array_on_fresh_index() {
+        let (_dir, mcp) = fixture();
+        let result = mcp
+            .list_projects()
+            .await
+            .expect("list_projects ok");
+        let body = body_text(&result);
+        assert!(body.contains("\"projects\""), "got `{body}`");
+        assert!(body.contains("\"projects\": []"), "got `{body}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_projects_surfaces_detected_projects_after_cold_start() {
+        let (dir, mcp) = fixture();
+        // Seed the fixture as a Rust project. cold_start runs
+        // `discover_and_persist_projects` which picks up the manifest.
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        cold_start_workspace(&mcp, dir.path());
+
+        let result = mcp
+            .list_projects()
+            .await
+            .expect("list_projects ok");
+        let body = body_text(&result);
+        assert!(
+            body.contains("\"kind\": \"rust\""),
+            "expected the fixture Rust project to appear, got `{body}`"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn project_for_file_returns_null_when_path_unregistered() {
+        let (_dir, mcp) = fixture();
+        let result = mcp
+            .project_for_file(Parameters(ProjectForFileParams {
+                path: "/no/such/file.rs".into(),
+            }))
+            .await
+            .expect("project_for_file ok");
+        let body = body_text(&result);
+        assert_eq!(body.trim(), "null");
     }
 }
