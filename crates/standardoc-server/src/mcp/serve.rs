@@ -135,14 +135,32 @@ pub async fn serve_mcp_http(
     );
     kick_off_indexing(&template, handle, provider, filters, rag_pipeline);
 
+    // rmcp 1.7 stateless + json_response: stateful mode keeps per-
+    // session state server-side AND streams responses over SSE.
+    // That combination is what produced the "Session not found"
+    // failures we observed when the playground (`bun run dev`) tapped
+    // the same daemon as Claude Code — Chrome's strict
+    // ERR_INCOMPLETE_CHUNKED_ENCODING handling on SSE caused a
+    // reconnect storm that evicted live sessions, and CC's next
+    // request landed on a session ID the daemon no longer knew.
+    //
+    // Standardoc's MCP tools are all simple request → response
+    // (no server-pushed notifications), so we disable both knobs:
+    // each request is fully self-contained, the response is a plain
+    // `application/json` body, and there is no session table to lose.
+    // Multi-client setups (CC + playground browser) become safe by
+    // construction.
+    //
+    // `StreamableHttpServerConfig` is `#[non_exhaustive]` since rmcp
+    // 1.0 — build via Default then override the fields we care about.
+    let mut http_cfg = StreamableHttpServerConfig::default();
+    http_cfg.stateful_mode = false;
+    http_cfg.json_response = true;
+    http_cfg.cancellation_token = CancellationToken::new();
     let service = StreamableHttpService::new(
         move || Ok(template.clone()),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig {
-            stateful_mode: true,
-            cancellation_token: CancellationToken::new(),
-            ..Default::default()
-        },
+        http_cfg,
     );
 
     let router = axum::Router::new().route_service("/mcp", service);
