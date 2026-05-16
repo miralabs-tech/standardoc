@@ -113,6 +113,10 @@ pub struct StandardocMcp {
     /// same FQDN gets a hint nudging the 3-phase explore→cible→drill
     /// protocol. Transient — resets on daemon restart, no persistence.
     recent_depth1: Arc<Mutex<HashMap<String, i64>>>,
+    // Populated by the `#[tool_router]` macro; the macro's emitted
+    // `ServerHandler` impl reads it back, but the indirection is
+    // invisible to rustc's dead-code analyser.
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
@@ -343,9 +347,11 @@ impl StandardocMcp {
     /// every symbol matching the provided filters, ordered by canonical
     /// fqdn for stable output. Designed for cross-cutting audits like
     /// "list every private function in module X" or "list every type
-    /// with visibility=crate".
+    /// with visibility=crate". Pagination is cursor-based: when the
+    /// page fills, `next_cursor` carries the last fqdn returned; pass
+    /// it back in `cursor` to fetch the next slice. `null` means done.
     #[tool(
-        description = "Filter-only listing of symbols. No query string, no pattern — returns every symbol matching the provided filters, ordered by fqdn. Use this for audits and inventories like 'all private functions' or 'all types in module X'. At least one filter SHOULD be provided to keep the result set bounded; passing no filters returns the first `limit` symbols sorted by fqdn. Filters: `kind`, `visibility`, `module` (all optional, all match exactly)."
+        description = "Filter-only listing of symbols. No query string, no pattern — returns every symbol matching the provided filters, ordered by fqdn. Response shape: `{items: [...], next_cursor: string | null}`. Walk the full set by re-calling with `cursor = next_cursor` until it returns `null`. Use this for audits and inventories like 'all private functions' or 'all types in module X'. At least one filter SHOULD be provided to keep the result set bounded. Filters: `kind`, `visibility`, `module` (all optional, all match exactly)."
     )]
     async fn list_symbols(
         &self,
@@ -365,17 +371,22 @@ impl StandardocMcp {
             params.include_external,
         )?;
         let limit = clamp_limit(params.limit);
+        let cursor = params.cursor;
         let handle = self.handle.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            query::list_symbols(&handle, &filter, limit as usize)
+        let page = tokio::task::spawn_blocking(move || {
+            query::list_symbols(&handle, &filter, limit as usize, cursor.as_deref())
         })
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
-        let files = files_from_symbols(&result);
+        let files = files_from_symbols(&page.items);
+        let envelope = serde_json::json!({
+            "items": page.items,
+            "next_cursor": page.next_cursor,
+        });
         Ok(success_json_with_usage(
-            &result,
+            &envelope,
             self.handle.workspace_root(),
             "list_symbols",
             None,
@@ -1274,9 +1285,11 @@ pub(crate) struct FindSymbolParams {
     pub include_external: Option<bool>,
 }
 
-/// Tool input — `list_symbols(kind?, visibility?, module?, limit?)`.
-/// Forwarded to `query::list_symbols`. No FTS, no glob — pure server-side
-/// filter listing ordered by fqdn.
+/// Tool input — `list_symbols(kind?, visibility?, module?, limit?,
+/// include_external?, cursor?)`. Forwarded to `query::list_symbols`.
+/// No FTS, no glob — pure server-side filter listing ordered by fqdn.
+/// `cursor` enables walking past the per-page limit; pass the value
+/// of `next_cursor` from the previous response to fetch the next slice.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct ListSymbolsParams {
     /// Optional filter — `function`, `type`, `value`, `module`, `macro`.
@@ -1285,13 +1298,18 @@ pub(crate) struct ListSymbolsParams {
     pub visibility: Option<String>,
     /// Optional filter — exact match on the symbol's `module` fqdn.
     pub module: Option<String>,
-    /// Maximum results to return. Defaults to 20, capped at 100.
+    /// Maximum results to return per page. Defaults to 20, capped at 100.
     pub limit: Option<u8>,
     /// Optional — include `is_external = 1` symbols (Cargo crates, npm
     /// `.d.ts`, luarocks) in the result. Defaults to `true`. Set to
     /// `false` to scope a query to workspace-only symbols.
     #[serde(default)]
     pub include_external: Option<bool>,
+    /// Optional pagination anchor — pass the `next_cursor` value from
+    /// the previous page to continue the walk. Server-side this is a
+    /// strict `fqdn > cursor` filter; ordering is always by `fqdn`.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 /// Tool input — `find_symbols_by_pattern(pattern, kind?, visibility?,
@@ -1971,10 +1989,70 @@ mod tests {
                 module: None,
                 limit: None,
                 include_external: None,
+                cursor: None,
             }))
             .await
             .expect("tool returns Ok with friendly degradation");
         assert!(body_text(&result).contains("Workspace indexing in progress"));
+    }
+
+    /// Envelope-shape check: an empty workspace must still return
+    /// `{"items": [...], "next_cursor": ...}`, not a bare array. This
+    /// is the contract the playground + ext rely on to walk pages.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_symbols_returns_page_envelope_when_empty() {
+        let (dir, mcp) = fixture();
+        cold_start_workspace(&mcp, dir.path());
+        let result = mcp
+            .list_symbols(Parameters(ListSymbolsParams {
+                kind: None,
+                visibility: None,
+                module: None,
+                limit: None,
+                include_external: Some(false),
+                cursor: None,
+            }))
+            .await
+            .unwrap();
+        let text = body_text(&result);
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("envelope must be valid JSON, got `{text}`: {e}"));
+        assert!(
+            json.get("items").is_some_and(|v| v.is_array()),
+            "envelope must carry an `items` array, got `{text}`"
+        );
+        assert!(
+            json.get("next_cursor").is_some(),
+            "envelope must carry a `next_cursor` field (null when no more pages), got `{text}`"
+        );
+        // Empty workspace → empty items + null cursor.
+        assert_eq!(json["items"].as_array().unwrap().len(), 0);
+        assert!(json["next_cursor"].is_null());
+    }
+
+    /// The `cursor` param must be plumbed through the JsonSchema and
+    /// not rejected as an unknown parameter. We don't seed real
+    /// symbols here — just verify the daemon accepts the cursor and
+    /// returns a well-formed envelope (the core layer is exhaustively
+    /// tested in `standardoc-core::query::tests::list_symbols_cursor_*`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_symbols_accepts_cursor_param() {
+        let (dir, mcp) = fixture();
+        cold_start_workspace(&mcp, dir.path());
+        let result = mcp
+            .list_symbols(Parameters(ListSymbolsParams {
+                kind: None,
+                visibility: None,
+                module: None,
+                limit: Some(2),
+                include_external: Some(false),
+                cursor: Some("crate::anchor".into()),
+            }))
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body_text(&result)).unwrap();
+        assert!(json["items"].is_array());
+        assert!(json["next_cursor"].is_null());
     }
 
     #[tokio::test(flavor = "multi_thread")]

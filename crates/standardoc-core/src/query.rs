@@ -299,20 +299,38 @@ fn sanitize_fts5_query(raw: &str) -> String {
     out
 }
 
+/// One page of [`list_symbols`] output. `next_cursor` carries the
+/// last fqdn returned when the page filled to `limit` — clients call
+/// back with `cursor = Some(next_cursor)` to fetch the next slice.
+/// When the page is short (or empty), `next_cursor` is `None` and
+/// the walk is done. Cursor format is intentionally transparent (the
+/// fqdn itself) since results are always ordered by `s.fqdn`; if we
+/// ever change the ordering we'll bump it to an opaque token.
+#[derive(Debug, Clone)]
+pub struct ListSymbolsPage {
+    pub items: Vec<RawSymbol>,
+    pub next_cursor: Option<String>,
+}
+
 /// Returns symbols matching `filter` ordered by canonical fqdn. No
 /// query string, no pattern — pure server-side filter listing useful
-/// for audits like "list every private function in module X".
+/// for audits like "list every private function in module X". Pass
+/// `cursor = Some(last_fqdn_from_previous_page)` to walk past the
+/// `limit` cap and stream the full result set without server-side
+/// state.
 pub fn list_symbols(
     handle: &IndexHandle,
     filter: &SymbolFilter,
     limit: usize,
-) -> Result<Vec<RawSymbol>, StorageError> {
+    cursor: Option<&str>,
+) -> Result<ListSymbolsPage, StorageError> {
     let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
     let kind_text = filter.kind.map(kind_to_sql_text);
     let vis_text = filter.visibility.map(visibility_to_sql_text);
     let module = filter.module.as_deref();
     let include_external = filter.include_external;
-    with_conn(handle, |conn| {
+    let cursor_param = cursor;
+    let items: Vec<RawSymbol> = with_conn(handle, |conn| {
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
@@ -322,17 +340,36 @@ pub fn list_symbols(
                AND (?2 IS NULL OR s.visibility = ?2) \
                AND (?3 IS NULL OR s.module     = ?3) \
                AND (?4 = 1 OR s.is_external = 0) \
+               AND (?5 IS NULL OR s.fqdn       > ?5) \
              ORDER BY s.fqdn \
-             LIMIT ?5",
+             LIMIT ?6",
         )?;
         let rows = stmt
             .query_map(
-                rusqlite::params![kind_text, vis_text, module, include_external, limit_i64],
+                rusqlite::params![
+                    kind_text,
+                    vis_text,
+                    module,
+                    include_external,
+                    cursor_param,
+                    limit_i64
+                ],
                 read_symbol_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter().map(build_symbol).collect()
-    })
+    })?;
+
+    // A short page proves we hit the end. A full page MAY have more
+    // — we emit the last fqdn as the cursor and let the client decide
+    // whether to fetch again. Empty page (cursor went past the last
+    // matching fqdn) also terminates the walk.
+    let next_cursor = if items.len() == limit && !items.is_empty() {
+        items.last().map(|s| s.fqdn.clone())
+    } else {
+        None
+    };
+    Ok(ListSymbolsPage { items, next_cursor })
 }
 
 /// Glob-pattern search over `symbols.name` and `symbols.fqdn`. Uses
@@ -2096,11 +2133,13 @@ mod tests {
                 None,
             );
         }
-        let got = list_symbols(&handle, &SymbolFilter::default(), 50).unwrap();
-        assert_eq!(got.len(), 2);
+        let got = list_symbols(&handle, &SymbolFilter::default(), 50, None).unwrap();
+        assert_eq!(got.items.len(), 2);
         // Ordered by fqdn for stability.
-        assert_eq!(got[0].fqdn, "crate::a");
-        assert_eq!(got[1].fqdn, "crate::b");
+        assert_eq!(got.items[0].fqdn, "crate::a");
+        assert_eq!(got.items[1].fqdn, "crate::b");
+        // Page wasn't full → no more pages.
+        assert!(got.next_cursor.is_none());
     }
 
     #[test]
@@ -2141,9 +2180,10 @@ mod tests {
             visibility: Some(Visibility::Private),
             ..Default::default()
         };
-        let got = list_symbols(&handle, &filter, 50).unwrap();
-        assert_eq!(got.len(), 2);
-        assert!(got.iter().all(|s| s.visibility == Visibility::Private));
+        let got = list_symbols(&handle, &filter, 50, None).unwrap();
+        assert_eq!(got.items.len(), 2);
+        assert!(got.items.iter().all(|s| s.visibility == Visibility::Private));
+        assert!(got.next_cursor.is_none());
     }
 
     #[test]
@@ -2175,9 +2215,10 @@ mod tests {
             module: Some("crate::a".into()),
             ..Default::default()
         };
-        let got = list_symbols(&handle, &filter, 50).unwrap();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].fqdn, "crate::a::f1");
+        let got = list_symbols(&handle, &filter, 50, None).unwrap();
+        assert_eq!(got.items.len(), 1);
+        assert_eq!(got.items[0].fqdn, "crate::a::f1");
+        assert!(got.next_cursor.is_none());
     }
 
     #[test]
@@ -2198,8 +2239,89 @@ mod tests {
                 );
             }
         }
-        let got = list_symbols(&handle, &SymbolFilter::default(), 3).unwrap();
-        assert_eq!(got.len(), 3);
+        let got = list_symbols(&handle, &SymbolFilter::default(), 3, None).unwrap();
+        assert_eq!(got.items.len(), 3);
+        // Full page → cursor points at the last item, signalling more.
+        assert_eq!(got.next_cursor.as_deref(), Some("crate::f2"));
+    }
+
+    #[test]
+    fn list_symbols_cursor_walks_full_set() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            for i in 0..5 {
+                seed_symbol_full(
+                    &conn,
+                    "src/main.rs",
+                    &format!("f{i}"),
+                    &format!("crate::f{i}"),
+                    Kind::Function,
+                    Visibility::Public,
+                    None,
+                );
+            }
+        }
+        // Walk every page until the cursor is exhausted, collecting
+        // each fqdn exactly once.
+        let mut cursor: Option<String> = None;
+        let mut seen: Vec<String> = Vec::new();
+        let mut iterations = 0_usize;
+        loop {
+            iterations += 1;
+            assert!(iterations < 100, "pagination loop did not terminate");
+            let page = list_symbols(
+                &handle,
+                &SymbolFilter::default(),
+                2,
+                cursor.as_deref(),
+            )
+            .unwrap();
+            for s in page.items {
+                seen.push(s.fqdn);
+            }
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(
+            seen,
+            vec!["crate::f0", "crate::f1", "crate::f2", "crate::f3", "crate::f4"],
+        );
+    }
+
+    #[test]
+    fn list_symbols_cursor_skips_already_seen() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            for i in 0..4 {
+                seed_symbol_full(
+                    &conn,
+                    "src/main.rs",
+                    &format!("f{i}"),
+                    &format!("crate::f{i}"),
+                    Kind::Function,
+                    Visibility::Public,
+                    None,
+                );
+            }
+        }
+        // Start past the second item — cursor uses strict `>` so the
+        // anchor fqdn itself is NOT included in the next page.
+        let page = list_symbols(
+            &handle,
+            &SymbolFilter::default(),
+            10,
+            Some("crate::f1"),
+        )
+        .unwrap();
+        let fqdns: Vec<&str> = page.items.iter().map(|s| s.fqdn.as_str()).collect();
+        assert_eq!(fqdns, vec!["crate::f2", "crate::f3"]);
+        assert!(page.next_cursor.is_none());
     }
 
     #[test]
