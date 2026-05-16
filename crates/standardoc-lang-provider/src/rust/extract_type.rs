@@ -18,11 +18,12 @@
 use std::collections::HashSet;
 
 use proc_macro2::Span;
-use standardoc_ir::{EdgeKind, RawEdge, ResolvedOrUnresolved, Site};
+use standardoc_ir::{BuiltinTag, EdgeKind, Language, RawEdge, ResolvedOrUnresolved, Site};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 use super::walk::{WalkContext, col_from_span, line_from_span, path_to_string};
+use crate::builtins::global as global_builtin_registry;
 
 pub(crate) const TYPE_CTX_ANNOTATION: &str = "type-annotation";
 pub(crate) const TYPE_CTX_CONSTRAINT: &str = "type-constraint";
@@ -38,6 +39,32 @@ const TYPE_TAG_UNRESOLVED: &str = "unresolved-type";
 /// Also includes the primitive types parsed as `Type::Path` (e.g. `u8`,
 /// `str`, `bool`), the `Self` keyword (not a real symbol — refers back
 /// to the enclosing impl block), and `_` (placeholder).
+/// Reserved markers that are syntactic placeholders, not real symbols —
+/// `Self` refers back to the enclosing impl block, `self` is the receiver
+/// keyword, `_` is the inferred-type placeholder. None should ever emit
+/// a UsesType edge.
+const SKIP_MARKERS: &[&str] = &["Self", "self", "_"];
+
+fn builtin_tag_slug(tag: &BuiltinTag) -> String {
+    match tag {
+        BuiltinTag::Net => "net".into(),
+        BuiltinTag::Decode => "decode".into(),
+        BuiltinTag::Encode => "encode".into(),
+        BuiltinTag::Console => "console".into(),
+        BuiltinTag::FileSystem => "fs".into(),
+        BuiltinTag::Process => "process".into(),
+        BuiltinTag::Math => "math".into(),
+        BuiltinTag::Time => "time".into(),
+        BuiltinTag::Memory => "memory".into(),
+        BuiltinTag::Reflection => "reflection".into(),
+        BuiltinTag::Async => "async".into(),
+        BuiltinTag::Iter => "iter".into(),
+        BuiltinTag::Format => "format".into(),
+        BuiltinTag::Custom { tag } => tag.clone(),
+    }
+}
+
+#[allow(dead_code)]
 const RUST_BUILTIN_TYPES: &[&str] = &[
     // Reserved / non-symbol markers
     "Self",
@@ -347,10 +374,36 @@ fn emit_uses_type_path(
     if leftmost.is_empty() {
         return;
     }
-    if RUST_BUILTIN_TYPES.contains(&leftmost) {
+    if SKIP_MARKERS.contains(&leftmost) {
         return;
     }
     if locals.contains(leftmost) {
+        return;
+    }
+    if let Some(entry) = global_builtin_registry().lookup(leftmost, Language::Rust) {
+        let to = ResolvedOrUnresolved::Resolved {
+            fqdn: entry.synthetic_fqdn.clone(),
+        };
+        let confidence = to.default_confidence();
+        let file_path = ctx.core.file_path.clone();
+        let attributes = vec![
+            "via-type".to_string(),
+            emission_context.to_string(),
+            "via-builtin".to_string(),
+            format!("builtin-{}", builtin_tag_slug(&entry.tag)),
+        ];
+        ctx.push_edge(RawEdge {
+            from_fqdn: enclosing_fqdn.to_string(),
+            kind: EdgeKind::UsesType,
+            to,
+            sites: vec![Site {
+                file: file_path,
+                line: line_from_span(span),
+                col: col_from_span(span),
+            }],
+            attributes,
+            confidence,
+        });
         return;
     }
     let to = ctx.resolve_path(path_str, current_module);

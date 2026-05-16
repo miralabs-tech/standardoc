@@ -1653,15 +1653,16 @@ mod tests {
 
     #[test]
     fn bug_c3_inner_generic_arg_emits_inside_builtin_wrapper() {
-        // `Vec<Foo>` — outer Vec filtered (builtin), inner Foo emits.
+        // `Vec<Foo>` — Stage 3a-8b: Vec now emits as a builtin synthetic
+        // fqdn (<builtin>::rust::Vec) with a via-builtin attribute;
+        // inner Foo still emits normally as a resolved local type.
         let parsed = parse("pub struct Foo; pub fn collect() -> Vec<Foo> { vec![] }");
         let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
         let targets = resolved_targets(&refs);
         assert!(
-            !targets.contains(&"c::Vec".to_string())
-                && !targets.iter().any(|t| t.ends_with("::Vec")),
-            "expected Vec filtered as builtin, got {targets:?}",
+            targets.contains(&"<builtin>::rust::Vec".to_string()),
+            "expected Vec emitted as builtin synthetic, got {targets:?}",
         );
         assert!(
             targets.contains(&"c::Foo".to_string()),

@@ -7,13 +7,10 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
 		}
 	};
 
-	// Reserved markers — `Self`, `self`, `_` aren't really symbols.
-	add(
-		reg,
-		&["Self", "self", "_"],
-		Kind::Type,
-		BuiltinTag::Reflection,
-	);
+	// Reserved markers `Self` / `self` / `_` are intentionally NOT in the
+	// registry — they're syntactic placeholders, not real symbols.
+	// Consumers handle them via a local SKIP_MARKERS const in the
+	// extraction layer.
 
 	// Primitive scalars.
 	add(
