@@ -9,6 +9,7 @@ use swc_core::ecma::parser::Syntax;
 mod extract;
 mod extract_doc;
 mod helpers;
+mod lookup;
 mod resolver;
 mod visit;
 mod walk;
