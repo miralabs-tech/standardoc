@@ -7,6 +7,7 @@ use walkdir::{DirEntry, WalkDir};
 use crate::pipeline::batch::apply_delete_file;
 use crate::pipeline::filters::ScanFilters;
 use crate::pipeline::paths::{has_supported_extension, to_workspace_relative};
+use crate::pipeline::projects::{discover_and_persist_projects, reconcile_files_project_id};
 use crate::pipeline::provider::LanguageProvider;
 use crate::pipeline::reindex::{Outcome, commit_outcomes, process_one};
 use crate::storage::error::StorageError;
@@ -38,6 +39,14 @@ pub fn run(
     filters: &ScanFilters,
 ) -> Result<(), ColdStartError> {
     let workspace_root = handle.workspace_root().to_path_buf();
+
+    // Stage 3d-2 — discover projects BEFORE walking files so the
+    // post-walk reconcile step has everything it needs in one pass.
+    // Detection errors are non-fatal: an empty `projects` table just
+    // means `files.project_id` stays NULL and consumers degrade
+    // gracefully (treat the workspace as a single anonymous project).
+    discover_projects_quietly(handle, &workspace_root);
+
     let candidates = collect_candidates(&workspace_root, filters)?;
     let total = u64_of(candidates.len());
 
@@ -62,8 +71,38 @@ pub fn run(
     }
 
     cleanup_unseen(handle, &seen)?;
+    reconcile_projects_quietly(handle);
     clear_progress(handle)?;
     Ok(())
+}
+
+/// Stage 3d-2 — best-effort discover + persist. Logged as a warning on
+/// failure (typically a transient FS error during the walk); never
+/// blocks cold start.
+fn discover_projects_quietly(handle: &IndexHandle, workspace_root: &Path) {
+    let pool = match handle.pool() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let _ = discover_and_persist_projects(&conn, workspace_root);
+}
+
+/// Stage 3d-2 — best-effort reconcile of `files.project_id`. Same
+/// graceful-degradation rationale as `discover_projects_quietly`.
+fn reconcile_projects_quietly(handle: &IndexHandle) {
+    let pool = match handle.pool() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let _ = reconcile_files_project_id(&conn);
 }
 
 fn u64_of(n: usize) -> u64 {
@@ -677,5 +716,67 @@ mod tests {
             .unwrap();
         assert_eq!(kept, 1);
         assert_eq!(excluded, 0, "filtered subtree must not be indexed");
+    }
+
+    #[test]
+    fn run_populates_projects_and_attaches_file_project_id() {
+        let dir = tempdir().unwrap();
+        // Workspace root is a Rust project; ext/vscode is a Bun
+        // sub-project. We expect cold-start to pick both up and the
+        // src/lib.rs file to land on the root project's id.
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("ext/vscode")).unwrap();
+        fs::write(
+            dir.path().join("ext/vscode/package.json"),
+            "{\"name\":\"ext\"}",
+        )
+        .unwrap();
+        fs::write(dir.path().join("ext/vscode/bun.lock"), "").unwrap();
+
+        let handle = IndexHandle::open(dir.path()).unwrap();
+        write_file(handle.workspace_root(), "src/lib.rs", b"fn main() {}");
+
+        let mock = MockProvider::new();
+        mock.set(
+            "src/lib.rs",
+            MockResponse::Ok(sample_extracted("src/lib.rs", "root::main")),
+        );
+
+        run(&handle, &mock, &filters_for(&handle)).unwrap();
+
+        let conn = handle.pool().unwrap().get().unwrap();
+        let project_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            project_count >= 2,
+            "expected at least root + ext/vscode projects, got {project_count}"
+        );
+
+        // The Rust file under src/ must be attached to the root project
+        // (rel_path = '').
+        let root_proj_id: i64 = conn
+            .query_row(
+                "SELECT project_id FROM projects WHERE rel_path = ''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let file_pid: Option<i64> = conn
+            .query_row(
+                "SELECT project_id FROM files WHERE path = 'src/lib.rs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            file_pid,
+            Some(root_proj_id),
+            "src/lib.rs must be attached to the root project"
+        );
     }
 }

@@ -29,6 +29,7 @@ walkdir       = { workspace = true }
 blake3        = { workspace = true }
 ignore        = { workspace = true }
 strsim        = { workspace = true }
+standarbuild-detect = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -52,6 +52,7 @@ clap        = { version = "4", features = ["derive"] }
 ctrlc       = "3"
 ignore      = "0.4"
 strsim      = "0.11"
+standarbuild-detect = "0.1"
 candle-core         = { version = "0.9", default-features = false }
 candle-nn           = { version = "0.9", default-features = false }
 candle-transformers = { version = "0.9", default-features = false }
