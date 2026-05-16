@@ -19,8 +19,10 @@ use swc_core::ecma::ast::{
 
 use super::extract_doc;
 use super::helpers::map_access_modifier;
+use super::lookup::build_ts_lookup;
 use super::resolver::{TsConfigPaths, resolve_import};
 use super::visit;
+use crate::builtins::global as global_builtin_registry;
 use crate::walk_core::WalkContextCore;
 
 /// Per-file walker state for the TS/JS provider.
@@ -97,7 +99,8 @@ impl<'a> TsWalkContext<'a> {
     }
 
     /// Resolve a single-ident call target through the alias-table, then through
-    /// `<current_module_fqdn>::<name>` against `defined_fqdns`. Multi-segment
+    /// `<current_module_fqdn>::<name>` against `defined_fqdns`, then through
+    /// the language's [`BuiltinRegistry`] (Stage 3a-6b chain). Multi-segment
     /// member-expression calls (`obj.method`) are handled separately by the
     /// visitor (always Unresolved by method ident, day-1).
     pub(crate) fn resolve_call(
@@ -111,6 +114,11 @@ impl<'a> TsWalkContext<'a> {
         let local = format!("{current_module_fqdn}::{name}");
         if self.core.defined_fqdns.contains(&local) {
             return ResolvedOrUnresolved::Resolved { fqdn: local };
+        }
+        if let Some(entry) = global_builtin_registry().lookup(name, self.core.lookup.language) {
+            return ResolvedOrUnresolved::Resolved {
+                fqdn: entry.synthetic_fqdn.clone(),
+            };
         }
         ResolvedOrUnresolved::Unresolved { name: local }
     }
@@ -181,6 +189,7 @@ pub(crate) fn walk(
         tsconfig,
         comments,
     );
+    ctx.core.lookup = build_ts_lookup(module, file_module_fqdn);
     walk_p1(&mut ctx, &module.body, file_module_fqdn);
     walk_p2(&mut ctx, &module.body, file_module_fqdn);
     ctx.into_outputs()
