@@ -3,13 +3,14 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::storage::error::StorageError;
 use crate::storage::init::run_init_schema;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 6;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 7;
 
 const V1_TO_V2_SQL: &str = include_str!("../../migrations/v1_to_v2.sql");
 const V2_TO_V3_SQL: &str = include_str!("../../migrations/v2_to_v3.sql");
 const V3_TO_V4_SQL: &str = include_str!("../../migrations/v3_to_v4.sql");
 const V4_TO_V5_SQL: &str = include_str!("../../migrations/v4_to_v5.sql");
 const V5_TO_V6_SQL: &str = include_str!("../../migrations/v5_to_v6.sql");
+const V6_TO_V7_SQL: &str = include_str!("../../migrations/v6_to_v7.sql");
 
 pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), StorageError> {
     if !table_exists(conn, "schema_meta")? {
@@ -38,6 +39,7 @@ fn apply_upgrade(conn: &Connection, from: u32) -> Result<(), StorageError> {
         3 => conn.execute_batch(V3_TO_V4_SQL).map_err(StorageError::from),
         4 => conn.execute_batch(V4_TO_V5_SQL).map_err(StorageError::from),
         5 => conn.execute_batch(V5_TO_V6_SQL).map_err(StorageError::from),
+        6 => conn.execute_batch(V6_TO_V7_SQL).map_err(StorageError::from),
         other => Err(StorageError::InvalidSchemaMetadata {
             key: "schema_version".into(),
             value: format!("no upgrade path from version {other}"),
@@ -273,6 +275,46 @@ mod tests {
         assert!(
             post.iter().any(|c| c == "attributes"),
             "v1→v2 upgrade must add the attributes column"
+        );
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn upgrade_adds_module_lookups_workspace_imports_and_catalog_on_legacy_v6_db() {
+        let conn = fresh_conn();
+        run_init_schema(&conn).unwrap();
+        conn.execute_batch(V1_TO_V2_SQL).unwrap();
+        conn.execute_batch(V2_TO_V3_SQL).unwrap();
+        conn.execute_batch(V3_TO_V4_SQL).unwrap();
+        conn.execute_batch(V4_TO_V5_SQL).unwrap();
+        conn.execute_batch(V5_TO_V6_SQL).unwrap();
+        for t in ["module_lookups", "workspace_imports", "workspace_catalog"] {
+            assert!(
+                !table_exists(&conn, t).unwrap(),
+                "v6 must NOT have the {t} table"
+            );
+        }
+
+        ensure_schema(&conn).unwrap();
+
+        for t in ["module_lookups", "workspace_imports", "workspace_catalog"] {
+            assert!(
+                table_exists(&conn, t).unwrap(),
+                "v6\u{2192}v7 must add the {t} table"
+            );
+        }
+        // Verify the link_direction CHECK constraint is enforced.
+        let invalid_direction = conn.execute(
+            "INSERT INTO workspace_catalog (workspace_id, root_path, link_direction, linked_at) \
+             VALUES ('uuid-test', '/some/path', 9, 0)",
+            [],
+        );
+        assert!(
+            invalid_direction.is_err(),
+            "link_direction CHECK must reject values outside (0, 1, 2)"
         );
         assert_eq!(
             read_schema_version(&conn).unwrap(),
