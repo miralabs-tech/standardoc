@@ -10,6 +10,7 @@ mod kinds;
 mod language_kind;
 mod location;
 mod lookup;
+mod project;
 mod signature;
 mod symbol;
 mod workspace;
@@ -31,6 +32,7 @@ pub use lookup::{
 	AliasMutability, BindingSource, BuiltinTag, IdentResolution, ImportRecord, LocalDeclKind,
 	ModuleLookup, ScopeKind, ScopeRange, Substrate,
 };
+pub use project::{ProjectInfo, ProjectKind};
 pub use signature::{Modifiers, Param, Signature, SignatureMeta, TypeRef, compact_rust_tokens};
 pub use symbol::RawSymbol;
 pub use workspace::{LinkDirection, LinkedWorkspaceStatus};

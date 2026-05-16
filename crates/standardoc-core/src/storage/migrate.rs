@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::storage::error::StorageError;
 use crate::storage::init::run_init_schema;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 7;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 8;
 
 const V1_TO_V2_SQL: &str = include_str!("../../migrations/v1_to_v2.sql");
 const V2_TO_V3_SQL: &str = include_str!("../../migrations/v2_to_v3.sql");
@@ -11,6 +11,7 @@ const V3_TO_V4_SQL: &str = include_str!("../../migrations/v3_to_v4.sql");
 const V4_TO_V5_SQL: &str = include_str!("../../migrations/v4_to_v5.sql");
 const V5_TO_V6_SQL: &str = include_str!("../../migrations/v5_to_v6.sql");
 const V6_TO_V7_SQL: &str = include_str!("../../migrations/v6_to_v7.sql");
+const V7_TO_V8_SQL: &str = include_str!("../../migrations/v7_to_v8.sql");
 
 pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), StorageError> {
     if !table_exists(conn, "schema_meta")? {
@@ -40,6 +41,7 @@ fn apply_upgrade(conn: &Connection, from: u32) -> Result<(), StorageError> {
         4 => conn.execute_batch(V4_TO_V5_SQL).map_err(StorageError::from),
         5 => conn.execute_batch(V5_TO_V6_SQL).map_err(StorageError::from),
         6 => conn.execute_batch(V6_TO_V7_SQL).map_err(StorageError::from),
+        7 => conn.execute_batch(V7_TO_V8_SQL).map_err(StorageError::from),
         other => Err(StorageError::InvalidSchemaMetadata {
             key: "schema_version".into(),
             value: format!("no upgrade path from version {other}"),
@@ -315,6 +317,72 @@ mod tests {
         assert!(
             invalid_direction.is_err(),
             "link_direction CHECK must reject values outside (0, 1, 2)"
+        );
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn upgrade_adds_projects_table_and_files_project_id_column_on_legacy_v7_db() {
+        let conn = fresh_conn();
+        run_init_schema(&conn).unwrap();
+        conn.execute_batch(V1_TO_V2_SQL).unwrap();
+        conn.execute_batch(V2_TO_V3_SQL).unwrap();
+        conn.execute_batch(V3_TO_V4_SQL).unwrap();
+        conn.execute_batch(V4_TO_V5_SQL).unwrap();
+        conn.execute_batch(V5_TO_V6_SQL).unwrap();
+        conn.execute_batch(V6_TO_V7_SQL).unwrap();
+        assert!(
+            !table_exists(&conn, "projects").unwrap(),
+            "v7 must NOT have the projects table"
+        );
+        let pre_files_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('files')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            !pre_files_cols.iter().any(|c| c == "project_id"),
+            "v7 files table must NOT have the project_id column"
+        );
+
+        ensure_schema(&conn).unwrap();
+
+        assert!(
+            table_exists(&conn, "projects").unwrap(),
+            "v7→v8 must add the projects table"
+        );
+        let post_files_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('files')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            post_files_cols.iter().any(|c| c == "project_id"),
+            "v7→v8 must add files.project_id column, got {post_files_cols:?}"
+        );
+
+        // Confirm UNIQUE constraint on projects.root_path is enforced.
+        conn.execute(
+            "INSERT INTO projects (label, kind, root_path, rel_path) \
+             VALUES ('foo', 'rust', '/a/b', '.')",
+            [],
+        )
+        .unwrap();
+        let dup = conn.execute(
+            "INSERT INTO projects (label, kind, root_path, rel_path) \
+             VALUES ('bar', 'rust', '/a/b', './sub')",
+            [],
+        );
+        assert!(
+            dup.is_err(),
+            "UNIQUE on projects.root_path must reject duplicate insert"
         );
         assert_eq!(
             read_schema_version(&conn).unwrap(),
