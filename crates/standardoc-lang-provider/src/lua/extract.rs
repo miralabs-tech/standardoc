@@ -8,15 +8,16 @@ use full_moon::node::Node;
 use full_moon::tokenizer::{Position, TokenReference, TokenType};
 use standardoc_core::ExtractError;
 use standardoc_ir::{
-    Blake3Hash, EdgeKind, ExtractedFile, Kind, Language, LanguageKind, Modifiers, Param, RawEdge,
-    RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SourceOrigin, SymbolLocation,
-    TypeRef, Visibility,
+    Blake3Hash, BuiltinTier, EdgeKind, ExtractedFile, Kind, Language, LanguageKind, Modifiers,
+    Param, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SourceOrigin,
+    SymbolLocation, TypeRef, Visibility,
 };
 
 use super::extract_doc;
 use super::helpers::{compute_module_path, ident_text, string_literal_text};
 use super::resolver::resolve_require;
 use super::walk::{LuaWalkContext, walk};
+use crate::builtins::global as global_builtin_registry;
 use crate::utils::{file_span, hash_bytes, last_segment, parent_module};
 
 /// Parse a Lua source file with `full_moon`, walk it, and return an
@@ -403,14 +404,55 @@ fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &Functi
     let Some(call_name) = call_target_name(fc) else {
         return;
     };
-    let to = ResolvedOrUnresolved::Unresolved { name: call_name };
+    // Stage 3e-1: consult the Lua builtin registry. Lua has no Drop /
+    // Attribute classifications today (see `builtins/lua.rs` rationale)
+    // so every match is Edge — emit a synthetic FQDN with `via-builtin`
+    // / `builtin-<slug>` attrs. We try the full dotted/colon path first
+    // (`table.insert`, `string.format`, `os.time` are explicitly
+    // enumerated as hot members), then fall back to the leftmost
+    // segment for un-enumerated members of standard-library modules
+    // (`os.tmpname()` falls back to `os`, still tagged as a stdlib
+    // touch). Locals like `myTable.foo` miss both lookups and stay
+    // `Unresolved`.
+    let registry = global_builtin_registry();
+    let entry_opt = registry.lookup(&call_name, Language::Lua).or_else(|| {
+        let leftmost = call_name
+            .split(|c: char| c == '.' || c == ':')
+            .next()
+            .unwrap_or("");
+        if leftmost.is_empty() || leftmost == call_name {
+            return None;
+        }
+        registry.lookup(leftmost, Language::Lua)
+    });
+    let (to, attributes) = match entry_opt {
+        // Reserve the tier match for forward-compat: if a Drop /
+        // Attribute Lua builtin is ever added, mirror JS/TS/Rust and
+        // skip the edge silently.
+        Some(entry) => match entry.tier {
+            BuiltinTier::Drop | BuiltinTier::Attribute => return,
+            BuiltinTier::Edge => (
+                ResolvedOrUnresolved::Resolved {
+                    fqdn: entry.synthetic_fqdn.clone(),
+                },
+                vec![
+                    "via-builtin".to_string(),
+                    format!("builtin-{}", entry.tag.slug()),
+                ],
+            ),
+        },
+        None => (
+            ResolvedOrUnresolved::Unresolved { name: call_name },
+            vec![],
+        ),
+    };
     let confidence = to.default_confidence();
     ctx.push_edge(RawEdge {
         from_fqdn: from_fqdn.to_string(),
         kind: EdgeKind::Calls,
         to,
         sites: vec![site_for(&ctx.core.file_path, call_start(fc))],
-        attributes: vec![],
+        attributes,
         confidence,
     });
 }
@@ -994,5 +1036,105 @@ mod tests {
             .collect();
         assert_eq!(imports.len(), 1);
         assert_eq!(imports[0].from_fqdn, "myapp::main::init");
+    }
+
+    #[test]
+    fn stage3e1_lua_call_top_level_builtin_resolves_to_synthetic() {
+        // `print` is registered top-level (Edge tier, Console tag) —
+        // the call now produces a `Resolved` edge to the synthetic
+        // FQDN with `via-builtin` + `builtin-console` attrs, replacing
+        // the pre-3e-1 Unresolved fallthrough.
+        let src = "print(\"hi\")\n";
+        let r = extract(src, "main.lua", "main.lua");
+        let calls: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
+        assert_eq!(calls.len(), 1);
+        match &calls[0].to {
+            ResolvedOrUnresolved::Resolved { fqdn } => {
+                assert!(
+                    fqdn.starts_with("<builtin>::"),
+                    "expected synthetic FQDN, got {fqdn}"
+                );
+                assert!(fqdn.ends_with("::print"), "got {fqdn}");
+            }
+            other => panic!("expected Resolved synthetic, got {other:?}"),
+        }
+        assert!(calls[0].attributes.contains(&"via-builtin".to_string()));
+        assert!(
+            calls[0]
+                .attributes
+                .contains(&"builtin-console".to_string())
+        );
+    }
+
+    #[test]
+    fn stage3e1_lua_call_dotted_builtin_member_resolves() {
+        // `table.insert` is an explicitly enumerated hot member (Iter
+        // tag). Full-path lookup hits the registered entry, no fallback
+        // needed.
+        let src = "local t = {}\ntable.insert(t, 1)\n";
+        let r = extract(src, "main.lua", "main.lua");
+        let calls: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
+        assert_eq!(calls.len(), 1);
+        match &calls[0].to {
+            ResolvedOrUnresolved::Resolved { fqdn } => {
+                assert!(fqdn.ends_with("::table.insert"), "got {fqdn}");
+            }
+            other => panic!("expected Resolved synthetic, got {other:?}"),
+        }
+        assert!(calls[0].attributes.contains(&"builtin-iter".to_string()));
+    }
+
+    #[test]
+    fn stage3e1_lua_call_unenumerated_module_member_falls_back_to_module() {
+        // `os.tmpname()` isn't enumerated as a hot member — the full
+        // lookup misses but the leftmost-segment fallback hits the
+        // `os` module entry. The edge points at the module synthetic,
+        // signalling "this code touches the os stdlib module". (The
+        // visitor only enumerates top-level statement calls, so we
+        // use the call as a statement rather than an assignment RHS.)
+        let src = "os.tmpname()\n";
+        let r = extract(src, "main.lua", "main.lua");
+        let calls: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
+        assert_eq!(calls.len(), 1);
+        match &calls[0].to {
+            ResolvedOrUnresolved::Resolved { fqdn } => {
+                assert!(fqdn.ends_with("::os"), "got {fqdn}");
+            }
+            other => panic!("expected Resolved synthetic for os fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage3e1_lua_call_user_dotted_call_stays_unresolved() {
+        // `M.greet` is NOT a builtin (neither full nor leftmost) —
+        // unchanged from pre-3e-1: emitted as Unresolved canonical.
+        // Guards against the leftmost fallback over-matching.
+        let src = "M.greet(\"hi\")\n";
+        let r = extract(src, "main.lua", "main.lua");
+        let calls: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
+        assert_eq!(calls.len(), 1);
+        match &calls[0].to {
+            ResolvedOrUnresolved::Unresolved { name } => {
+                assert_eq!(name, "M.greet");
+            }
+            other => panic!("user dotted call must stay Unresolved, got {other:?}"),
+        }
+        assert!(calls[0].attributes.is_empty());
     }
 }
