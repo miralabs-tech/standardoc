@@ -166,23 +166,49 @@ impl StandardocMcp {
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
-        params.fqdn = normalize_fqdn(&params.fqdn);
+        // Cache key uses the dot-normalized form so a depth=1 hit on
+        // `Foo.bar` and a depth=2 hit on `Foo::bar` route to the same
+        // recent-call entry. DB lookup, however, MUST try the raw
+        // FQDN first — TS file segments such as `profiler.type` (from
+        // `profiler.type.ts`) carry a legitimate `.` that the OOP-
+        // style normalization would mangle into `profiler::type`.
+        let raw_fqdn = params.fqdn.clone();
+        let cache_key = normalize_fqdn(&raw_fqdn);
 
         let depth = params.depth.unwrap_or(GET_CONTEXT_DEFAULT_DEPTH);
         let now = current_unix_seconds();
-        let routing_hint = self.compute_routing_hint(&params.fqdn, depth, now);
+        let routing_hint = self.compute_routing_hint(&cache_key, depth, now);
         if depth <= 1 {
-            self.record_recent_depth1(&params.fqdn, now);
+            self.record_recent_depth1(&cache_key, now);
         }
 
+        // Try verbatim first; fall back to OOP-normalized form for
+        // LLM consumers that emit `Type.method` instead of `::`.
         let handle = self.handle.clone();
-        let fqdn = params.fqdn.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            query::context_for_symbol_with_neighbors(&handle, &fqdn, depth)
+        let raw_for_call = raw_fqdn.clone();
+        let (resolved_fqdn, result) = tokio::task::spawn_blocking(move || {
+            if let Some(ctx) =
+                query::context_for_symbol_with_neighbors(&handle, &raw_for_call, depth)?
+            {
+                return Ok::<(String, Option<_>), standardoc_core::StorageError>((
+                    raw_for_call,
+                    Some(ctx),
+                ));
+            }
+            if raw_for_call.contains('.') {
+                let normalized = normalize_fqdn(&raw_for_call);
+                if let Some(ctx) =
+                    query::context_for_symbol_with_neighbors(&handle, &normalized, depth)?
+                {
+                    return Ok((normalized, Some(ctx)));
+                }
+            }
+            Ok((raw_for_call, None))
         })
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        params.fqdn = resolved_fqdn;
 
         match result {
             Some(ctx) => {
@@ -281,14 +307,17 @@ impl StandardocMcp {
     )]
     async fn find_symbol(
         &self,
-        Parameters(mut params): Parameters<FindSymbolParams>,
+        Parameters(params): Parameters<FindSymbolParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
-        params.module = params.module.map(|m| normalize_fqdn(&m));
+        // Don't normalise the module filter — that turns TS file
+        // segments (`profiler.type`, `hud.element`) into nonexistent
+        // `profiler::type` keys. Stored module FQDNs use `::` for the
+        // hierarchy and keep the dot as a literal segment character.
 
         let trimmed = params.query.trim().to_owned();
         if trimmed.is_empty() {
@@ -355,14 +384,15 @@ impl StandardocMcp {
     )]
     async fn list_symbols(
         &self,
-        Parameters(mut params): Parameters<ListSymbolsParams>,
+        Parameters(params): Parameters<ListSymbolsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
-        params.module = params.module.map(|m| normalize_fqdn(&m));
+        // Don't normalise the module filter — same reason as
+        // `find_symbol`: TS file segments carry literal `.` chars.
 
         let filter = parse_filter(
             params.kind.as_deref(),
@@ -404,18 +434,18 @@ impl StandardocMcp {
     )]
     async fn find_symbols_by_pattern(
         &self,
-        Parameters(mut params): Parameters<FindSymbolsByPatternParams>,
+        Parameters(params): Parameters<FindSymbolsByPatternParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
-        // Normalise `.` → `::` on both the pattern and the module
-        // filter : the stored fqdns are always `::`-form, so OOP-style
-        // patterns like `*Type.method*` would otherwise match nothing.
-        params.module = params.module.map(|m| normalize_fqdn(&m));
-        params.pattern = normalize_fqdn(&params.pattern);
+        // Don't normalise the pattern or module filter — TS file
+        // segments (`profiler.type`, `hud.element`) embed a literal
+        // `.` and the GLOB match expects them verbatim. LLM consumers
+        // typing OOP-style `Type.method` patterns have to use the
+        // canonical `::` form here.
         let trimmed = params.pattern.trim().to_owned();
         if trimmed.is_empty() {
             return Ok(success_json::<Vec<RawSymbol>>(&Vec::new()));
@@ -484,7 +514,7 @@ impl StandardocMcp {
     )]
     async fn find_similar_symbols(
         &self,
-        Parameters(mut params): Parameters<FindSimilarSymbolsParams>,
+        Parameters(params): Parameters<FindSimilarSymbolsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
@@ -492,8 +522,8 @@ impl StandardocMcp {
             )]));
         }
         // `reference` is a name anchor, not an fqdn — leave it intact.
-        // Only the module filter is normalised since it's exact-match.
-        params.module = params.module.map(|m| normalize_fqdn(&m));
+        // Module filter is left verbatim too: TS file segments carry
+        // literal `.` chars that the exact-match filter expects.
 
         let trimmed = params.reference.trim().to_owned();
         if trimmed.is_empty() {
@@ -544,23 +574,42 @@ impl StandardocMcp {
     )]
     async fn get_body(
         &self,
-        Parameters(mut params): Parameters<GetBodyParams>,
+        Parameters(params): Parameters<GetBodyParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
-        params.fqdn = normalize_fqdn(&params.fqdn);
+        // Try raw FQDN first (preserves TS file segments like
+        // `profiler.type`), fall back to OOP-normalized form for LLM
+        // consumers that emit `Type.method` shorthand.
+        let raw_fqdn = params.fqdn.clone();
         let handle = self.handle.clone();
-        let fqdn = params.fqdn;
         let opts = query::BodyOptions {
             max_lines: params.max_lines,
             strip_attrs: params.strip_attrs.unwrap_or(false),
             signature_only: params.signature_only.unwrap_or(false),
         };
+        let raw_for_call = raw_fqdn.clone();
+        let opts_clone = opts.clone();
         let result =
-            tokio::task::spawn_blocking(move || query::body_for_fqdn(&handle, &fqdn, &opts))
+            tokio::task::spawn_blocking(move || {
+                if let Some(slice) =
+                    query::body_for_fqdn(&handle, &raw_for_call, &opts_clone)?
+                {
+                    return Ok::<_, standardoc_core::StorageError>(Some(slice));
+                }
+                if raw_for_call.contains('.') {
+                    let normalized = normalize_fqdn(&raw_for_call);
+                    if let Some(slice) =
+                        query::body_for_fqdn(&handle, &normalized, &opts_clone)?
+                    {
+                        return Ok(Some(slice));
+                    }
+                }
+                Ok(None)
+            })
                 .await
                 .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
                 .map_err(|e| server_error_to_rmcp(&e.into()))?;
@@ -809,14 +858,17 @@ impl StandardocMcp {
     )]
     pub async fn resolve_external(
         &self,
-        Parameters(mut params): Parameters<ResolveExternalParams>,
+        Parameters(params): Parameters<ResolveExternalParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
-        params.fqdn = normalize_fqdn(&params.fqdn);
+        // Leave the FQDN verbatim — callers feed `resolve_external`
+        // with FQDNs taken straight from `find_symbol` output, which
+        // is already in canonical `::` form. Normalising would mangle
+        // TS file segments (`profiler.type`) into nonexistent keys.
         let fqdn = params.fqdn.clone();
         let handle = self.handle.clone();
         let provider = Arc::clone(&self.provider);
@@ -894,16 +946,17 @@ impl StandardocMcp {
     )]
     async fn check_stale(
         &self,
-        Parameters(mut params): Parameters<CheckStaleParams>,
+        Parameters(params): Parameters<CheckStaleParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(
                 indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
             )]));
         }
-        for entry in &mut params.fetched {
-            entry.fqdn = normalize_fqdn(&entry.fqdn);
-        }
+        // Leave entry FQDNs verbatim — `check_stale` is called after
+        // `find_symbol` / `get_context` have already given the caller
+        // canonical `::`-form fqdns. Normalising would corrupt TS
+        // file segments containing literal `.` characters.
         if params.fetched.is_empty() {
             return Ok(success_json::<Vec<StaleEntryJson>>(&Vec::new()));
         }
