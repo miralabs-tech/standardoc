@@ -24,7 +24,7 @@ impl AliasMutability {
 /// `Ust { backing: "lua" }`, or compile to `Wasm`. `Custom` keeps the door
 /// open for UST-defined substrates added without recompiling the core.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum Substrate {
 	Native { language: Language },
 	Ust { backing: String },
@@ -43,7 +43,7 @@ impl Substrate {
 /// languages extracted natively today (Rust, TS/JS, Lua). `Custom` is the
 /// UST escape hatch.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum LocalDeclKind {
 	Function,
 	Class,
@@ -66,7 +66,7 @@ pub enum LocalDeclKind {
 /// `(start_line, end_line, parent)`. `Custom` extends to UST-introduced
 /// scope kinds.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum ScopeKind {
 	Module,
 	Function,
@@ -82,7 +82,7 @@ pub enum ScopeKind {
 /// are language-neutral semantic buckets; `Custom` lets UST languages
 /// introduce new tags at runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum BuiltinTag {
 	Net,
 	Decode,
@@ -104,7 +104,7 @@ pub enum BuiltinTag {
 /// carries exactly one `BindingSource`. The resolver uses it to know how
 /// to turn a binding into a `ResolvedOrUnresolved` edge target.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum BindingSource {
 	Import {
 		module_path: String,
@@ -141,16 +141,11 @@ pub struct ScopeRange {
 pub struct IdentResolution {
 	pub name: String,
 	pub source: BindingSource,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub resolved_fqdn: Option<String>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub aliases_to: Option<String>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub mutability: Option<AliasMutability>,
 	pub scope_idx: u32,
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub attributes: Vec<String>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub ir_kind: Option<Kind>,
 }
 
@@ -161,11 +156,8 @@ pub struct IdentResolution {
 pub struct ImportRecord {
 	pub local_name: String,
 	pub origin_module: String,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub origin_symbol: Option<String>,
-	#[serde(default)]
 	pub is_type_only: bool,
-	#[serde(default)]
 	pub is_re_export: bool,
 }
 
@@ -178,7 +170,6 @@ pub struct ModuleLookup {
 	pub language: Language,
 	pub scopes: Vec<ScopeRange>,
 	pub bindings: HashMap<String, Vec<IdentResolution>>,
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub imports: Vec<ImportRecord>,
 	pub built_at_epoch_ms: u64,
 }
