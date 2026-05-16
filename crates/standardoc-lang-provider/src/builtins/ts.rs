@@ -1,13 +1,99 @@
-use standardoc_ir::{BuiltinEntry, BuiltinRegistry, BuiltinTag, Kind, Language};
+use standardoc_ir::{BuiltinEntry, BuiltinRegistry, BuiltinTag, BuiltinTier, Kind, Language};
 
 pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
-	let add = |reg: &mut BuiltinRegistry, names: &[&str], kind: Kind, tag: BuiltinTag| {
+	let add = |reg: &mut BuiltinRegistry,
+	           names: &[&str],
+	           kind: Kind,
+	           tag: BuiltinTag,
+	           tier: BuiltinTier| {
 		for name in names {
-			reg.register(BuiltinEntry::new(*name, Language::TypeScript, kind, tag.clone()));
+			reg.register(BuiltinEntry::new(
+				*name,
+				Language::TypeScript,
+				kind,
+				tag.clone(),
+				tier,
+			));
 		}
 	};
 
-	// Containers / collections.
+	// --- Tier::Edge --- reflection, errors, observable APIs
+	add(
+		reg,
+		&["Object", "Symbol"],
+		Kind::Type,
+		BuiltinTag::Reflection,
+		BuiltinTier::Edge,
+	);
+	add(reg, &["Date"], Kind::Type, BuiltinTag::Time, BuiltinTier::Edge);
+	add(reg, &["RegExp"], Kind::Type, BuiltinTag::Format, BuiltinTier::Edge);
+	add(
+		reg,
+		&[
+			"Error",
+			"TypeError",
+			"RangeError",
+			"SyntaxError",
+			"ReferenceError",
+			"EvalError",
+			"URIError",
+		],
+		Kind::Type,
+		BuiltinTag::Custom { tag: "error".into() },
+		BuiltinTier::Edge,
+	);
+	add(
+		reg,
+		&["JSON"],
+		Kind::Type,
+		BuiltinTag::Custom { tag: "json".into() },
+		BuiltinTier::Edge,
+	);
+	add(reg, &["Math"], Kind::Type, BuiltinTag::Math, BuiltinTier::Edge);
+
+	// --- Tier::Attribute --- semantic effect folded into the source symbol
+	// Promise & friends → source fn flagged async; the wrapper itself
+	// is not an edge target (the inner type arg is still recursed).
+	add(
+		reg,
+		&["Promise", "PromiseLike"],
+		Kind::Type,
+		BuiltinTag::Async,
+		BuiltinTier::Attribute,
+	);
+	// Iter trait family — implementing or returning these implies an
+	// iter-shape on the source symbol; flag it, don't draw an edge.
+	add(
+		reg,
+		&[
+			"Iterator",
+			"Iterable",
+			"IterableIterator",
+			"Generator",
+			"GeneratorFunction",
+		],
+		Kind::Type,
+		BuiltinTag::Iter,
+		BuiltinTier::Attribute,
+	);
+	// Async iter family — same logic, async-flavored.
+	add(
+		reg,
+		&[
+			"AsyncIterator",
+			"AsyncIterable",
+			"AsyncIterableIterator",
+			"AsyncGenerator",
+			"AsyncGeneratorFunction",
+		],
+		Kind::Type,
+		BuiltinTag::Async,
+		BuiltinTier::Attribute,
+	);
+
+	// --- Tier::Drop --- structural noise, no edge, no attribute
+	// Container generics — the value is in the type arg, not the
+	// container itself (analogous to Rust Vec / HashMap Drop tier).
 	add(
 		reg,
 		&[
@@ -22,45 +108,10 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
 		],
 		Kind::Type,
 		BuiltinTag::Iter,
+		BuiltinTier::Drop,
 	);
-
-	// Async wrappers.
-	add(
-		reg,
-		&["Promise", "PromiseLike", "Awaited"],
-		Kind::Type,
-		BuiltinTag::Async,
-	);
-
-	// Sync iteration protocols.
-	add(
-		reg,
-		&[
-			"Iterator",
-			"Iterable",
-			"IterableIterator",
-			"Generator",
-			"GeneratorFunction",
-		],
-		Kind::Type,
-		BuiltinTag::Iter,
-	);
-
-	// Async iteration protocols.
-	add(
-		reg,
-		&[
-			"AsyncIterator",
-			"AsyncIterable",
-			"AsyncIterableIterator",
-			"AsyncGenerator",
-			"AsyncGeneratorFunction",
-		],
-		Kind::Type,
-		BuiltinTag::Async,
-	);
-
-	// Utility / mapped types.
+	// TS utility / mapped types — pure type-level reflection, never
+	// observable at runtime, drawing edges to them is noise.
 	add(
 		reg,
 		&[
@@ -85,51 +136,29 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
 			"Lowercase",
 			"Uppercase",
 			"NoInfer",
+			"Awaited",
 		],
 		Kind::Type,
 		BuiltinTag::Reflection,
+		BuiltinTier::Drop,
 	);
-
-	// Callable / function shape.
 	add(
 		reg,
 		&["Function"],
 		Kind::Type,
 		BuiltinTag::Custom { tag: "callable".into() },
+		BuiltinTier::Drop,
 	);
-
-	// Misc lib types — boxed primitives & introspection containers.
+	// Boxed primitive constructors — pure cast wrappers.
 	add(
 		reg,
-		&["Object", "Number", "String", "Boolean", "Symbol"],
+		&["Number", "String", "Boolean"],
 		Kind::Type,
 		BuiltinTag::Reflection,
+		BuiltinTier::Drop,
 	);
-	add(reg, &["Date"], Kind::Type, BuiltinTag::Time);
-	add(reg, &["RegExp"], Kind::Type, BuiltinTag::Format);
-	add(
-		reg,
-		&[
-			"Error",
-			"TypeError",
-			"RangeError",
-			"SyntaxError",
-			"ReferenceError",
-			"EvalError",
-			"URIError",
-		],
-		Kind::Type,
-		BuiltinTag::Custom { tag: "error".into() },
-	);
-	add(
-		reg,
-		&["JSON"],
-		Kind::Type,
-		BuiltinTag::Custom { tag: "json".into() },
-	);
-	add(reg, &["Math"], Kind::Type, BuiltinTag::Math);
-
-	// Typed arrays / raw memory buffers.
+	// Typed arrays / raw memory buffers — equivalent to Rust slices,
+	// drop the wrapper edge; element-type info is captured elsewhere.
 	add(
 		reg,
 		&[
@@ -151,5 +180,6 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
 		],
 		Kind::Type,
 		BuiltinTag::Memory,
+		BuiltinTier::Drop,
 	);
 }

@@ -18,7 +18,8 @@ mod workspace;
 pub use attribute::{RawAttribute, RawAttributeArg};
 pub use bridge_kind::BridgeKind;
 pub use builtins::{
-	BridgeMapping, BuiltinEntry, BuiltinRegistry, SubstrateBridge, make_synthetic_fqdn,
+	BridgeMapping, BuiltinEntry, BuiltinRegistry, BuiltinTier, SubstrateBridge,
+	make_synthetic_fqdn,
 };
 pub use call_site::{RawCallArg, RawCallSite};
 pub use document::RawDocument;

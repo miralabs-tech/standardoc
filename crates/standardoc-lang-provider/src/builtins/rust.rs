@@ -1,9 +1,19 @@
-use standardoc_ir::{BuiltinEntry, BuiltinRegistry, BuiltinTag, Kind, Language};
+use standardoc_ir::{BuiltinEntry, BuiltinRegistry, BuiltinTag, BuiltinTier, Kind, Language};
 
 pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
-	let add = |reg: &mut BuiltinRegistry, names: &[&str], kind: Kind, tag: BuiltinTag| {
+	let add = |reg: &mut BuiltinRegistry,
+	           names: &[&str],
+	           kind: Kind,
+	           tag: BuiltinTag,
+	           tier: BuiltinTier| {
 		for name in names {
-			reg.register(BuiltinEntry::new(*name, Language::Rust, kind, tag.clone()));
+			reg.register(BuiltinEntry::new(
+				*name,
+				Language::Rust,
+				kind,
+				tag.clone(),
+				tier,
+			));
 		}
 	};
 
@@ -12,7 +22,30 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
 	// Consumers handle them via a local SKIP_MARKERS const in the
 	// extraction layer.
 
-	// Primitive scalars.
+	// --- Tier::Edge --- error trait — implementing it is a semantic
+	// "this is an error type" signal worth showing in the graph.
+	add(
+		reg,
+		&["Error"],
+		Kind::Type,
+		BuiltinTag::Custom { tag: "error".into() },
+		BuiltinTier::Edge,
+	);
+
+	// --- Tier::Attribute --- iter-ness / async-ness folded into source
+	// Implementing `Iterator` or returning `impl Iterator` flags the
+	// source symbol as iter-shaped; same for `Future`/`Stream` → async.
+	add(
+		reg,
+		&["Iterator", "IntoIterator", "FromIterator"],
+		Kind::Type,
+		BuiltinTag::Iter,
+		BuiltinTier::Attribute,
+	);
+	add(reg, &["Future", "Stream"], Kind::Type, BuiltinTag::Async, BuiltinTier::Attribute);
+
+	// --- Tier::Drop --- structural noise, no edge, no attribute
+	// Primitive scalars — ubiquitous, the inner type info is the value.
 	add(
 		reg,
 		&[
@@ -21,9 +54,10 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
 		],
 		Kind::Type,
 		BuiltinTag::Memory,
+		BuiltinTier::Drop,
 	);
-
-	// Heap / smart pointers.
+	// Heap / smart pointers — wrap a payload of interest; the payload
+	// (inner type arg) is what gets recursed, the wrapper is noise.
 	add(
 		reg,
 		&[
@@ -39,9 +73,9 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
 		],
 		Kind::Type,
 		BuiltinTag::Memory,
+		BuiltinTier::Drop,
 	);
-
-	// Standard collections.
+	// Standard collections — same logic as TS Map/Set, JS Array.
 	add(
 		reg,
 		&[
@@ -56,9 +90,10 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
 		],
 		Kind::Type,
 		BuiltinTag::Iter,
+		BuiltinTier::Drop,
 	);
-
-	// Strings & paths.
+	// Strings & paths — too ubiquitous to draw edges; the type info
+	// is captured on the symbol's signature.returns slot directly.
 	add(
 		reg,
 		&[
@@ -66,42 +101,34 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
 		],
 		Kind::Type,
 		BuiltinTag::Format,
+		BuiltinTier::Drop,
 	);
-
-	// Sum / option containers (and their bare variants).
+	// Sum / option containers — `Result`/`Option` permeate every Rust
+	// function signature; tracing them is pure noise. The error-or-ok
+	// shape is implicit in `signature.returns`.
 	add(
 		reg,
 		&["Option", "Result", "Cow"],
 		Kind::Type,
 		BuiltinTag::Reflection,
+		BuiltinTier::Drop,
 	);
 	add(
 		reg,
 		&["Some", "None", "Ok", "Err"],
 		Kind::Type,
 		BuiltinTag::Custom { tag: "variant".into() },
+		BuiltinTier::Drop,
 	);
-
-	// Iterator traits.
-	add(
-		reg,
-		&["Iterator", "IntoIterator", "FromIterator"],
-		Kind::Type,
-		BuiltinTag::Iter,
-	);
-
-	// Futures / streams.
-	add(reg, &["Future", "Stream"], Kind::Type, BuiltinTag::Async);
-
-	// Marker traits.
+	// Marker traits — auto-derived, structural.
 	add(
 		reg,
 		&["Send", "Sync", "Sized", "Unpin", "Unsize"],
 		Kind::Type,
 		BuiltinTag::Reflection,
+		BuiltinTier::Drop,
 	);
-
-	// Common derive / blanket traits.
+	// Common derive / blanket traits — ubiquitous, no audit value.
 	add(
 		reg,
 		&[
@@ -129,19 +156,14 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
 		],
 		Kind::Type,
 		BuiltinTag::Reflection,
+		BuiltinTier::Drop,
 	);
-	add(
-		reg,
-		&["Error"],
-		Kind::Type,
-		BuiltinTag::Custom { tag: "error".into() },
-	);
-
-	// Callable traits.
+	// Callable trait family — closure-shape, structural.
 	add(
 		reg,
 		&["Fn", "FnMut", "FnOnce"],
 		Kind::Type,
 		BuiltinTag::Custom { tag: "callable".into() },
+		BuiltinTier::Drop,
 	);
 }

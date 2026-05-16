@@ -4,12 +4,34 @@ use crate::lookup::{BuiltinTag, Substrate};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// How the resolver should treat an identifier hit on this builtin.
+///
+/// - `Drop`: the builtin is structural noise (wrapper generics like
+///   `Vec`, `Array`, `Map`, primitive constants like `undefined`).
+///   Resolver returns "no edge", inner type args are still recursed.
+/// - `Attribute`: the builtin carries a semantic effect on the
+///   *source* symbol (e.g. `Promise`/`Future` → flag the enclosing fn
+///   as `async`). No edge in the graph — the tag is folded into the
+///   source symbol's attribute set.
+/// - `Edge`: the builtin is an observable action / API surface worth
+///   tracking as a graph edge (`JSON.parse`, `console.log`, `fetch`,
+///   `Math.random`, …). Emits a tagged edge to the synthetic builtin
+///   symbol, eagerly seeded in the DB at cold-start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinTier {
+	Drop,
+	Attribute,
+	Edge,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BuiltinEntry {
 	pub name: String,
 	pub language: Language,
 	pub kind: Kind,
 	pub tag: BuiltinTag,
+	pub tier: BuiltinTier,
 	pub synthetic_fqdn: String,
 }
 
@@ -19,6 +41,7 @@ impl BuiltinEntry {
 		language: Language,
 		kind: Kind,
 		tag: BuiltinTag,
+		tier: BuiltinTier,
 	) -> Self {
 		let name = name.into();
 		let synthetic_fqdn = make_synthetic_fqdn(language, &name);
@@ -27,6 +50,7 @@ impl BuiltinEntry {
 			language,
 			kind,
 			tag,
+			tier,
 			synthetic_fqdn,
 		}
 	}
@@ -174,6 +198,7 @@ mod tests {
 			Language::JavaScript,
 			Kind::Function,
 			BuiltinTag::Decode,
+			BuiltinTier::Edge,
 		));
 		reg.register_user(BuiltinEntry::new(
 			"myCustomGlobal",
@@ -182,6 +207,7 @@ mod tests {
 			BuiltinTag::Custom {
 				tag: "ust:user-defined".into(),
 			},
+			BuiltinTier::Edge,
 		));
 
 		let native = reg
