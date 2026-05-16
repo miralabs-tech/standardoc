@@ -1665,21 +1665,77 @@ mod tests {
     }
 
     #[test]
-    fn bug_c3_inner_generic_arg_emits_inside_builtin_wrapper() {
-        // `Vec<Foo>` — Stage 3a-8b: Vec now emits as a builtin synthetic
-        // fqdn (<builtin>::rust::Vec) with a via-builtin attribute;
-        // inner Foo still emits normally as a resolved local type.
+    fn stage3e1_drop_tier_wrapper_skipped_inner_arg_still_emits() {
+        // `Vec<Foo>` — Stage 3e-1: `Vec` is now classified as
+        // `BuiltinTier::Drop` (structural noise) and produces no
+        // `UsesType` edge. The inner `Foo` still emits normally — the
+        // recursion through `visit_type_path` happens regardless of the
+        // wrapper's tier decision.
         let parsed = parse("pub struct Foo; pub fn collect() -> Vec<Foo> { vec![] }");
         let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
         let targets = resolved_targets(&refs);
         assert!(
-            targets.contains(&"<builtin>::rust::Vec".to_string()),
-            "expected Vec emitted as builtin synthetic, got {targets:?}",
+            !targets.iter().any(|t| t == "<builtin>::rust::Vec"),
+            "Drop-tier Vec must not surface, got {targets:?}",
         );
         assert!(
             targets.contains(&"c::Foo".to_string()),
-            "expected inner Foo emitted, got {targets:?}",
+            "inner Foo must still emit, got {targets:?}",
+        );
+    }
+
+    #[test]
+    fn stage3e1_uses_type_edge_tier_builtin_emits_with_attrs() {
+        // `Error` is the lone `BuiltinTier::Edge` entry in the Rust
+        // registry. A trait bound `T: Error` should produce a UsesType
+        // edge to `<builtin>::rust::Error` carrying `via-builtin` plus
+        // the `builtin-<tag>` slug — parity with TS Edge-tier emission.
+        let parsed = parse("pub fn boom<T: Error>(e: T) {}");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type", "via-builtin"]);
+        let targets = resolved_targets(&refs);
+        assert!(
+            targets.iter().any(|t| t == "<builtin>::rust::Error"),
+            "expected Edge-tier Error synthetic, got {targets:?}",
+        );
+        let has_tag_attr = refs.iter().any(|e| {
+            e.attributes
+                .iter()
+                .any(|a| a.starts_with("builtin-") && a != "builtin-")
+        });
+        assert!(has_tag_attr, "expected builtin-<slug> attr on edge");
+    }
+
+    #[test]
+    fn stage3e1_uses_type_attribute_tier_skipped() {
+        // `Iterator` is `BuiltinTier::Attribute` — folded into source
+        // flags in 3e-1b. Until then it skips emission entirely. The
+        // inner item type still recurses (no inner here, just guards
+        // against the bound itself producing an edge).
+        let parsed = parse("pub fn collect<T: Iterator>(it: T) {}");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type"]);
+        let targets = resolved_targets(&refs);
+        assert!(
+            !targets.iter().any(|t| t.ends_with("::Iterator")),
+            "Attribute-tier Iterator must not surface, got {targets:?}",
+        );
+    }
+
+    #[test]
+    fn stage3e1_uses_type_primitive_skipped_via_registry() {
+        // `u32` / `String` / `bool` are registered as `BuiltinTier::Drop`
+        // primitives — no UsesType edge from a parameter / return slot.
+        // Validates that the registry is the single source of truth now
+        // (previously the deleted `RUST_BUILTIN_TYPES` const lived here).
+        let parsed = parse("pub fn add(a: u32, b: u32, name: String) -> bool { true }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type"]);
+        let targets = resolved_targets(&refs);
+        assert!(
+            targets.is_empty(),
+            "primitives + String must skip edges, got {targets:?}",
         );
     }
 

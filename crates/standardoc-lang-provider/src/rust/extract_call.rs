@@ -1,9 +1,10 @@
 use proc_macro2::Span;
-use standardoc_ir::{EdgeKind, RawEdge, ResolvedOrUnresolved, Site};
+use standardoc_ir::{BuiltinTier, EdgeKind, Language, RawEdge, ResolvedOrUnresolved, Site};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 use super::walk::{WalkContext, col_from_span, line_from_span, path_to_string};
+use crate::builtins::global as global_builtin_registry;
 
 pub(crate) fn visit_block(
     ctx: &mut WalkContext,
@@ -61,8 +62,35 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
             let path_str = path_to_string(&expr_path.path);
             if !path_str.is_empty() {
                 let span = expr_path.span();
-                let to = self.ctx.resolve_path(&path_str, &self.current_module);
-                self.emit_call(to, span);
+                let leftmost = path_str.split("::").next().unwrap_or("");
+                match global_builtin_registry().lookup(leftmost, Language::Rust) {
+                    // Stage 3e-1: Drop = structural noise (`Vec::new`,
+                    // `Box::new`, `Some(x)`, `Ok(x)`, `String::from`).
+                    // Attribute = source-flag promotion target (`Iterator`,
+                    // `Future`; rare for call positions). Both skip the
+                    // edge — inner args still walked below.
+                    Some(entry) if matches!(
+                        entry.tier,
+                        BuiltinTier::Drop | BuiltinTier::Attribute
+                    ) => {}
+                    // Edge-tier call (e.g. `Error::source(...)`) — emit
+                    // straight to the synthetic builtin FQDN with the
+                    // standard `via-builtin` / `builtin-<slug>` attrs.
+                    Some(entry) => {
+                        let to = ResolvedOrUnresolved::Resolved {
+                            fqdn: entry.synthetic_fqdn.clone(),
+                        };
+                        let attrs = vec![
+                            "via-builtin".to_string(),
+                            format!("builtin-{}", entry.tag.slug()),
+                        ];
+                        self.emit_call_with_attributes(to, span, attrs);
+                    }
+                    None => {
+                        let to = self.ctx.resolve_path(&path_str, &self.current_module);
+                        self.emit_call(to, span);
+                    }
+                }
             }
         }
         // Recurse into args (nested calls) and the func expr (in case it's not a path).
@@ -275,15 +303,51 @@ mod tests {
 
     #[test]
     fn turbofish_call_drops_generics_in_emitted_path() {
-        // Multi-segment unaliased path stays text-as-written (Rust 2018: prelude/extern,
-        // not module-local). What we validate here is the generic stripping.
-        let parsed = parse("fn caller() { Vec::<u8>::new(); }");
+        // Multi-segment unaliased path stays text-as-written. Generic
+        // stripping itself is validated here with a non-builtin name so
+        // Stage 3e-1 tier gating doesn't interfere (`Vec` is now Drop
+        // and would skip the edge entirely — covered separately).
+        let parsed = parse("fn caller() { MyType::<u8>::new(); }");
         let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         match &cs[0].to {
-            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "Vec::new"),
+            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "MyType::new"),
             other => panic!("got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stage3e1_call_drop_tier_builtin_skipped() {
+        // `Vec` is registered as `BuiltinTier::Drop` — `Vec::new()` is
+        // structural noise and produces no `Calls` edge. The body still
+        // walks for any inner-call recursion (none here).
+        let parsed = parse("fn caller() { Vec::<u8>::new(); String::new(); Box::new(0u8); }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let cs = calls(&edges);
+        assert!(
+            cs.is_empty(),
+            "Drop-tier builtin calls must not surface, got {cs:?}"
+        );
+    }
+
+    #[test]
+    fn stage3e1_call_drop_skips_but_args_still_walked() {
+        // The Drop-tier wrapper (`Some`) is skipped, but the call inside
+        // the args (`inner()`) must still surface — the visitor recurses
+        // through `syn::visit::visit_expr_call` after the tier decision.
+        let parsed = parse("fn inner() {} fn caller() { Some(inner()); }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let names: Vec<_> = calls(&edges)
+            .into_iter()
+            .filter_map(|e| match &e.to {
+                ResolvedOrUnresolved::Resolved { fqdn } => Some(fqdn.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.contains(&"c::inner".to_string()),
+            "inner() call must surface even when wrapped in Some(_), got {names:?}"
+        );
     }
 }

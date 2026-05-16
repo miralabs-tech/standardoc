@@ -16,7 +16,9 @@
 //! union fields.
 
 use proc_macro2::Span;
-use standardoc_ir::{BindingSource, EdgeKind, Language, RawEdge, ResolvedOrUnresolved, Site};
+use standardoc_ir::{
+    BindingSource, BuiltinTier, EdgeKind, Language, RawEdge, ResolvedOrUnresolved, Site,
+};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
@@ -30,118 +32,11 @@ pub(crate) const TYPE_CTX_EXTENDS: &str = "type-extends";
 pub(crate) const TYPE_CTX_IMPLEMENTS: &str = "type-implements";
 const TYPE_TAG_UNRESOLVED: &str = "unresolved-type";
 
-/// Rust builtin / std-prelude type names filtered out of `UsesType`
-/// edge emission. Mirrors `TS_BUILTIN_TYPES` for the TS provider.
-/// Inner generic args still recurse — only the wrapper name is skipped.
-///
-/// Also includes the primitive types parsed as `Type::Path` (e.g. `u8`,
-/// `str`, `bool`), the `Self` keyword (not a real symbol — refers back
-/// to the enclosing impl block), and `_` (placeholder).
 /// Reserved markers that are syntactic placeholders, not real symbols —
 /// `Self` refers back to the enclosing impl block, `self` is the receiver
 /// keyword, `_` is the inferred-type placeholder. None should ever emit
 /// a UsesType edge.
 const SKIP_MARKERS: &[&str] = &["Self", "self", "_"];
-
-#[allow(dead_code)]
-const RUST_BUILTIN_TYPES: &[&str] = &[
-    // Reserved / non-symbol markers
-    "Self",
-    "self",
-    "_",
-    // Primitives
-    "bool",
-    "char",
-    "str",
-    "u8",
-    "u16",
-    "u32",
-    "u64",
-    "u128",
-    "usize",
-    "i8",
-    "i16",
-    "i32",
-    "i64",
-    "i128",
-    "isize",
-    "f32",
-    "f64",
-    // Heap / smart pointers
-    "Box",
-    "Rc",
-    "Arc",
-    "Pin",
-    "Cell",
-    "RefCell",
-    "UnsafeCell",
-    "Mutex",
-    "RwLock",
-    // Collections
-    "Vec",
-    "VecDeque",
-    "LinkedList",
-    "BinaryHeap",
-    "HashMap",
-    "HashSet",
-    "BTreeMap",
-    "BTreeSet",
-    // Strings / paths
-    "String",
-    "OsString",
-    "OsStr",
-    "PathBuf",
-    "Path",
-    "CString",
-    "CStr",
-    // Option / Result / Cow
-    "Option",
-    "Some",
-    "None",
-    "Result",
-    "Ok",
-    "Err",
-    "Cow",
-    // Iterators / futures
-    "Iterator",
-    "IntoIterator",
-    "FromIterator",
-    "Future",
-    "Stream",
-    // Marker traits
-    "Send",
-    "Sync",
-    "Sized",
-    "Unpin",
-    "Unsize",
-    // Common traits
-    "Drop",
-    "Clone",
-    "Copy",
-    "Default",
-    "PartialEq",
-    "Eq",
-    "PartialOrd",
-    "Ord",
-    "Hash",
-    "Debug",
-    "Display",
-    "From",
-    "Into",
-    "TryFrom",
-    "TryInto",
-    "AsRef",
-    "AsMut",
-    "Borrow",
-    "BorrowMut",
-    "ToString",
-    "ToOwned",
-    "Error",
-    // Fn traits
-    "Fn",
-    "FnMut",
-    "FnOnce",
-];
 
 /// Walk a single `syn::Type` and emit `UsesType` edges. `locals` is
 /// the set of generic type-param names introduced in the enclosing
@@ -351,30 +246,40 @@ fn emit_uses_type_path(
         return;
     }
     if let Some(entry) = global_builtin_registry().lookup(leftmost, Language::Rust) {
-        let to = ResolvedOrUnresolved::Resolved {
-            fqdn: entry.synthetic_fqdn.clone(),
-        };
-        let confidence = to.default_confidence();
-        let file_path = ctx.core.file_path.clone();
-        let attributes = vec![
-            "via-type".to_string(),
-            emission_context.to_string(),
-            "via-builtin".to_string(),
-            format!("builtin-{}", entry.tag.slug()),
-        ];
-        ctx.push_edge(RawEdge {
-            from_fqdn: enclosing_fqdn.to_string(),
-            kind: EdgeKind::UsesType,
-            to,
-            sites: vec![Site {
-                file: file_path,
-                line: line_from_span(span),
-                col: col_from_span(span),
-            }],
-            attributes,
-            confidence,
-        });
-        return;
+        match entry.tier {
+            // Stage 3e-1: `Drop` = structural noise (`Vec<T>`, `Box<T>`,
+            // `Option<T>`, marker traits, …). `Attribute` = source-flag
+            // promotion target (`Iterator`/`Future`; folded into source
+            // symbol in 3e-1b). Both skip edge emission — inner type
+            // args still recurse via `visit_type_path` / `visit_trait_bound`.
+            BuiltinTier::Drop | BuiltinTier::Attribute => return,
+            BuiltinTier::Edge => {
+                let to = ResolvedOrUnresolved::Resolved {
+                    fqdn: entry.synthetic_fqdn.clone(),
+                };
+                let confidence = to.default_confidence();
+                let file_path = ctx.core.file_path.clone();
+                let attributes = vec![
+                    "via-type".to_string(),
+                    emission_context.to_string(),
+                    "via-builtin".to_string(),
+                    format!("builtin-{}", entry.tag.slug()),
+                ];
+                ctx.push_edge(RawEdge {
+                    from_fqdn: enclosing_fqdn.to_string(),
+                    kind: EdgeKind::UsesType,
+                    to,
+                    sites: vec![Site {
+                        file: file_path,
+                        line: line_from_span(span),
+                        col: col_from_span(span),
+                    }],
+                    attributes,
+                    confidence,
+                });
+                return;
+            }
+        }
     }
     let to = ctx.resolve_path(path_str, current_module);
     if let ResolvedOrUnresolved::Resolved { fqdn } = &to
