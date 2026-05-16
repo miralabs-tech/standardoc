@@ -36,6 +36,7 @@ tokio       = { version = "1", default-features = false, features = ["sync", "rt
 tokio-util  = { version = "0.7", default-features = false }
 tower-lsp-server = "0.23"
 rmcp        = "1.7"
+async-trait = "0.1"
 axum        = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 schemars    = "1"
 notify      = "8"

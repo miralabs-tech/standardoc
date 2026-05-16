@@ -13,6 +13,7 @@ mod error;
 mod handler;
 mod progress;
 pub(crate) mod serve;
+mod session_store;
 mod usage;
 
 pub use handler::{ResolveExternalJson, ResolveExternalParams, StandardocMcp};
