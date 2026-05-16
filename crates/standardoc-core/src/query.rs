@@ -9,6 +9,7 @@
 //! `BridgeKind` distinction (cf. storage::conv::unresolved_to_storage).
 
 mod similarity;
+pub mod workspace;
 
 use rusqlite::{Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};

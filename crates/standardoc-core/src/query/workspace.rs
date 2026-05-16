@@ -1,0 +1,288 @@
+//! Cross-workspace catalog ops and module-lookup queries — the query-layer
+//! façade over `storage::workspace_catalog`, `storage::module_lookup`, and
+//! `storage::cross_workspace`. MCP/LSP tools call into this, never into
+//! the storage submodules directly.
+
+use std::path::Path;
+
+use standardoc_ir::{LinkDirection, ModuleLookup};
+use strsim::jaro_winkler;
+
+use crate::storage::cross_workspace::{CrossWorkspaceResolution, list_cross_workspace_providers};
+use crate::storage::error::StorageError;
+use crate::storage::handle::IndexHandle;
+use crate::storage::module_lookup::{self, PRIMARY_WORKSPACE_ID};
+use crate::storage::workspace_catalog::{self, LinkedWorkspace};
+
+/// Strsim floor for path did-you-mean suggestions. Tuned to surface
+/// likely typos (`projcts` → `projects`) without flooding with weakly
+/// related names.
+const PATH_DID_YOU_MEAN_THRESHOLD: f64 = 0.7;
+
+/// Hard cap on suggestion count to keep tool responses compact.
+const PATH_DID_YOU_MEAN_LIMIT: usize = 5;
+
+/// Error variants returned by [`link_workspace`]. `PathNotFound` carries
+/// a did-you-mean list computed from sibling directory entries so MCP /
+/// LSP tools can surface them in a single round-trip.
+#[derive(Debug)]
+pub enum LinkWorkspaceError {
+    PathNotFound {
+        input: String,
+        suggestions: Vec<String>,
+    },
+    Storage(StorageError),
+}
+
+impl From<StorageError> for LinkWorkspaceError {
+    fn from(e: StorageError) -> Self {
+        LinkWorkspaceError::Storage(e)
+    }
+}
+
+impl std::fmt::Display for LinkWorkspaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LinkWorkspaceError::PathNotFound { input, suggestions } => {
+                if suggestions.is_empty() {
+                    write!(f, "path not found: {input}")
+                } else {
+                    write!(
+                        f,
+                        "path not found: {input} (did you mean: {})",
+                        suggestions.join(", ")
+                    )
+                }
+            }
+            LinkWorkspaceError::Storage(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for LinkWorkspaceError {}
+
+/// Walk UP `input` until an existing ancestor directory is found, then
+/// jaro-winkler match sibling directory names against the first missing
+/// component (case-insensitive). Returns the top-N rebuilt paths whose
+/// score meets [`PATH_DID_YOU_MEAN_THRESHOLD`].
+///
+/// Returns an empty vec when no existing ancestor is reachable or no
+/// sibling clears the threshold.
+pub fn path_did_you_mean(input: &Path) -> Vec<String> {
+    let mut cursor = input;
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let existing = loop {
+        if cursor.is_dir() {
+            break Some(cursor);
+        }
+        match (cursor.parent(), cursor.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_os_string());
+                cursor = parent;
+            }
+            _ => break None,
+        }
+    };
+    let Some(existing) = existing else {
+        return Vec::new();
+    };
+    let Some(needle_os) = missing.last() else {
+        return Vec::new();
+    };
+    let needle = needle_os.to_string_lossy().to_lowercase();
+    let Ok(entries) = std::fs::read_dir(existing) else {
+        return Vec::new();
+    };
+    let mut scored: Vec<(String, f64)> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .map(|name| {
+            let score = jaro_winkler(&needle, &name.to_lowercase());
+            (name, score)
+        })
+        .filter(|(_, s)| *s >= PATH_DID_YOU_MEAN_THRESHOLD)
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored
+        .into_iter()
+        .take(PATH_DID_YOU_MEAN_LIMIT)
+        .map(|(name, _)| {
+            let mut rebuilt = existing.to_path_buf();
+            rebuilt.push(name);
+            for component in missing.iter().rev().skip(1) {
+                rebuilt.push(component);
+            }
+            rebuilt.display().to_string()
+        })
+        .collect()
+}
+
+/// Register a linked workspace. Canonicalises `root_path` before storing;
+/// on filesystem error returns [`LinkWorkspaceError::PathNotFound`] with
+/// did-you-mean suggestions.
+pub fn link_workspace(
+    handle: &IndexHandle,
+    root_path: &str,
+    direction: LinkDirection,
+) -> Result<String, LinkWorkspaceError> {
+    let raw = Path::new(root_path);
+    let canonical = std::fs::canonicalize(raw).map_err(|_| LinkWorkspaceError::PathNotFound {
+        input: root_path.to_string(),
+        suggestions: path_did_you_mean(raw),
+    })?;
+    let canon_str = canonical.to_string_lossy();
+    let pool = handle.pool().map_err(StorageError::from)?;
+    let conn = pool.get().map_err(StorageError::from)?;
+    Ok(workspace_catalog::register_linked_workspace(
+        &conn,
+        &canon_str,
+        direction,
+    )?)
+}
+
+pub fn unlink_workspace(handle: &IndexHandle, workspace_id: &str) -> Result<(), StorageError> {
+    let pool = handle.pool()?;
+    let conn = pool.get()?;
+    workspace_catalog::unregister_linked_workspace(&conn, workspace_id)
+}
+
+pub fn list_linked_workspaces(handle: &IndexHandle) -> Result<Vec<LinkedWorkspace>, StorageError> {
+    let pool = handle.pool()?;
+    let conn = pool.get()?;
+    workspace_catalog::list_linked_workspaces(&conn)
+}
+
+/// Fetch the persisted `ModuleLookup` for `(workspace_id, module_fqdn)`.
+/// `workspace_id` defaults to the [`PRIMARY_WORKSPACE_ID`] sentinel when
+/// the caller omits it.
+pub fn get_module_lookup(
+    handle: &IndexHandle,
+    workspace_id: Option<&str>,
+    module_fqdn: &str,
+) -> Result<Option<ModuleLookup>, StorageError> {
+    let wid = workspace_id.unwrap_or(PRIMARY_WORKSPACE_ID);
+    let pool = handle.pool()?;
+    let conn = pool.get()?;
+    module_lookup::get_module_lookup(&conn, wid, module_fqdn)
+}
+
+/// Persist (UPSERT) a `ModuleLookup` blob under `(workspace_id, module_fqdn)`.
+/// `workspace_id` defaults to the [`PRIMARY_WORKSPACE_ID`] sentinel. This is
+/// the write-side symmetric to [`get_module_lookup`]; the daemon's walk
+/// pipeline uses it after the AOT pre-pass for each module, and Stage
+/// 3b-6 tests use it to seed peer workspaces.
+pub fn put_module_lookup(
+    handle: &IndexHandle,
+    workspace_id: Option<&str>,
+    lookup: &ModuleLookup,
+) -> Result<(), StorageError> {
+    let wid = workspace_id.unwrap_or(PRIMARY_WORKSPACE_ID);
+    let pool = handle.pool()?;
+    let conn = pool.get()?;
+    module_lookup::put_module_lookup(&conn, wid, lookup)
+}
+
+/// Enumerate every linked workspace that re-exports / declares
+/// `(origin_module, origin_symbol)`. Returns an empty vec when no
+/// linked workspace matches.
+pub fn resolve_cross_workspace(
+    handle: &IndexHandle,
+    origin_module: &str,
+    origin_symbol: &str,
+) -> Result<Vec<CrossWorkspaceResolution>, StorageError> {
+    let pool = handle.pool()?;
+    let conn = pool.get()?;
+    list_cross_workspace_providers(&conn, origin_module, origin_symbol)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn path_did_you_mean_returns_close_sibling_directory() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("projects")).unwrap();
+        fs::create_dir(dir.path().join("docs")).unwrap();
+
+        let typo = dir.path().join("projcts");
+        let suggestions = path_did_you_mean(&typo);
+        assert!(
+            suggestions.iter().any(|s| s.ends_with("projects")),
+            "expected `projects` in suggestions, got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn path_did_you_mean_returns_empty_when_no_close_match() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("alpha")).unwrap();
+        fs::create_dir(dir.path().join("beta")).unwrap();
+
+        let nothing_close = dir.path().join("zzzzzz");
+        let suggestions = path_did_you_mean(&nothing_close);
+        assert!(
+            suggestions.is_empty(),
+            "expected no suggestions for far-removed name, got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn path_did_you_mean_walks_up_to_first_existing_ancestor() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("workspace")).unwrap();
+        fs::create_dir(dir.path().join("worskpace")).unwrap();
+
+        // The user typed two missing components (workspce/foo/bar). We
+        // expect suggestions to surface `workspace` and `worskpace` —
+        // anchored at the existing tempdir, with the missing tail
+        // re-appended after the corrected component.
+        let bad = dir.path().join("workspce").join("foo");
+        let suggestions = path_did_you_mean(&bad);
+        assert!(
+            suggestions.iter().any(|s| s.contains("workspace")),
+            "expected `workspace` as a suggestion, got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn path_did_you_mean_skips_files() {
+        let dir = tempdir().unwrap();
+        // A regular file with a name very close to the target — must be
+        // excluded because we only suggest directories.
+        fs::write(dir.path().join("projects"), "not a dir").unwrap();
+
+        let typo = dir.path().join("projcts");
+        let suggestions = path_did_you_mean(&typo);
+        assert!(
+            suggestions.is_empty(),
+            "files must not appear in did-you-mean output, got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn link_workspace_error_path_not_found_renders_did_you_mean() {
+        let err = LinkWorkspaceError::PathNotFound {
+            input: "/no/such/path".into(),
+            suggestions: vec!["/no/such/path1".into(), "/no/such/path2".into()],
+        };
+        let rendered = format!("{err}");
+        assert!(rendered.contains("did you mean"));
+        assert!(rendered.contains("/no/such/path1"));
+        assert!(rendered.contains("/no/such/path2"));
+    }
+
+    #[test]
+    fn link_workspace_error_path_not_found_omits_section_when_no_suggestions() {
+        let err = LinkWorkspaceError::PathNotFound {
+            input: "/no/such/path".into(),
+            suggestions: vec![],
+        };
+        let rendered = format!("{err}");
+        assert!(!rendered.contains("did you mean"));
+        assert!(rendered.contains("/no/such/path"));
+    }
+}

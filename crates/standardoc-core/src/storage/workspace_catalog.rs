@@ -12,13 +12,14 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 use standardoc_ir::{LinkDirection, LinkedWorkspaceStatus};
 use uuid::Uuid;
 
 use crate::storage::error::StorageError;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LinkedWorkspace {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinkedWorkspace {
 	pub workspace_id: String,
 	pub root_path: String,
 	pub link_direction: LinkDirection,

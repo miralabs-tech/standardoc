@@ -17,11 +17,11 @@ use serde::{Deserialize, Serialize};
 use standardoc_core::{
     IndexHandle, LanguageProvider, RagWatcherHandle, ResolveOutcome, ResolverRegistry,
     RevisionRelinkHandle, ScanFilters, SessionsHandle, UsagePeriod, WatcherHandle,
-    query::{self, SymbolFilter},
+    query::{self, SymbolFilter, workspace as workspace_query},
     sessions::memory_sync::{export_memory_dir, import_memory_dir},
 };
 use standardoc_ir::SourceOrigin;
-use standardoc_ir::{Kind, RawSymbol, Visibility};
+use standardoc_ir::{Kind, LinkDirection, RawSymbol, Visibility};
 use standardoc_rag::embedder::Embedder;
 use standardoc_rag::store::RagStore;
 use standardoc_rag::types::{Chunk, ChunkRef};
@@ -933,23 +933,148 @@ impl StandardocMcp {
 
         Ok(success_json(&entries))
     }
+
+    /// Register a linked peer workspace so its persisted `ModuleLookup`
+    /// blobs become reachable for cross-workspace import resolution.
+    /// The `path` is canonicalised before storage; on a filesystem miss
+    /// the tool returns `invalid_params` with a `did_you_mean` list
+    /// built from sibling directories of the closest existing ancestor.
+    #[tool(
+        description = "Register a linked peer workspace (cross-workspace import resolution). `path` is canonicalised. `direction` is one of `in` (peer feeds us), `out` (we feed peer), `bidirectional`. Returns the freshly-minted UUID workspace_id. Missing path returns invalid_params with a `did_you_mean` list."
+    )]
+    async fn link_workspace(
+        &self,
+        Parameters(params): Parameters<LinkWorkspaceParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let direction = parse_link_direction(&params.direction)?;
+        let path_for_response = params.path.clone();
+        let handle = self.handle.clone();
+        let path = params.path;
+        let result = tokio::task::spawn_blocking(move || {
+            workspace_query::link_workspace(&handle, &path, direction)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?;
+        match result {
+            Ok(workspace_id) => Ok(success_json(&LinkWorkspaceJson {
+                workspace_id,
+                root_path: path_for_response,
+                direction: link_direction_label(direction).to_string(),
+            })),
+            Err(workspace_query::LinkWorkspaceError::PathNotFound { input, suggestions }) => {
+                Err(ErrorData::invalid_params(
+                    format!("path not found: {input}"),
+                    Some(serde_json::json!({
+                        "input": input,
+                        "did_you_mean": suggestions,
+                    })),
+                ))
+            }
+            Err(workspace_query::LinkWorkspaceError::Storage(e)) => {
+                Err(server_error_to_rmcp(&e.into()))
+            }
+        }
+    }
+
+    /// Unregister a linked workspace, dropping its `module_lookups` and
+    /// `workspace_imports` rows transactionally. Symbols imported from
+    /// it stop resolving on the next index pass.
+    #[tool(
+        description = "Unregister a linked workspace by its `workspace_id`. Cleans up dependent `module_lookups` and `workspace_imports` rows. Idempotent — unregistering an unknown id is a no-op."
+    )]
+    async fn unlink_workspace(
+        &self,
+        Parameters(params): Parameters<UnlinkWorkspaceParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.handle.clone();
+        let workspace_id = params.workspace_id;
+        tokio::task::spawn_blocking(move || workspace_query::unlink_workspace(&handle, &workspace_id))
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+            .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        Ok(success_json(&serde_json::json!({ "ok": true })))
+    }
+
+    /// Enumerate every linked workspace registered in the catalog,
+    /// ordered by registration time (oldest first).
+    #[tool(
+        description = "List every registered linked workspace (newest first not guaranteed — registration order). Each entry surfaces workspace_id, canonical root_path, direction, status, and the epoch ms of registration and last index run."
+    )]
+    async fn list_linked_workspaces(&self) -> Result<CallToolResult, ErrorData> {
+        let handle = self.handle.clone();
+        let rows = tokio::task::spawn_blocking(move || workspace_query::list_linked_workspaces(&handle))
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+            .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        Ok(success_json(&serde_json::json!({ "workspaces": rows })))
+    }
+
+    /// Fetch the persisted `ModuleLookup` blob for `(workspace_id,
+    /// module_fqdn)`. `workspace_id` defaults to `"primary"`. Returns
+    /// `null` when no row matches — useful to debug the Stage 3a AOT
+    /// pre-pass output without re-running the indexer.
+    #[tool(
+        description = "Fetch the persisted ModuleLookup for `module_fqdn` (full structured bindings/scopes/imports as JSON). `workspace_id` defaults to `\"primary\"` — pass a linked workspace UUID to inspect a peer. Returns null when no row matches."
+    )]
+    async fn module_lookup(
+        &self,
+        Parameters(params): Parameters<ModuleLookupParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.handle.clone();
+        let workspace_id = params.workspace_id;
+        let module_fqdn = params.module_fqdn;
+        let result = tokio::task::spawn_blocking(move || {
+            workspace_query::get_module_lookup(&handle, workspace_id.as_deref(), &module_fqdn)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        match result {
+            Some(lookup) => Ok(success_json(&lookup)),
+            None => Ok(success_json(&serde_json::Value::Null)),
+        }
+    }
+
+    /// Enumerate every linked workspace that re-exports / declares the
+    /// requested symbol at module-root scope. Returns an empty
+    /// `providers` array when no peer matches.
+    #[tool(
+        description = "Resolve `(origin_module, origin_symbol)` against every linked workspace's persisted ModuleLookup. Returns `{providers: [...]}` listing each peer that exposes the symbol at module-root scope. Empty list = no match."
+    )]
+    async fn resolve_cross_workspace(
+        &self,
+        Parameters(params): Parameters<ResolveCrossWorkspaceParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.handle.clone();
+        let origin_module = params.origin_module;
+        let origin_symbol = params.origin_symbol;
+        let providers = tokio::task::spawn_blocking(move || {
+            workspace_query::resolve_cross_workspace(&handle, &origin_module, &origin_symbol)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        Ok(success_json(&serde_json::json!({ "providers": providers })))
+    }
 }
 
 #[tool_handler]
 impl ServerHandler for StandardocMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::default(),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some(
-                "Standardoc MCP server. Use `find_symbol` to discover symbols by name fragment, \
-                 then `get_context` for the structured chunk of a specific FQDN. The workspace \
-                 indexes itself in the background on startup; tools called before indexing \
-                 completes return a friendly progress message — retry shortly."
-                    .to_string(),
-            ),
-        }
+        // `ServerInfo` is `#[non_exhaustive]` since rmcp 1.0 — build
+        // via Default then override the fields we care about.
+        let mut info = ServerInfo::default();
+        info.protocol_version = ProtocolVersion::default();
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.server_info = Implementation::from_build_env();
+        info.instructions = Some(
+            "Standardoc MCP server. Use `find_symbol` to discover symbols by name fragment, \
+             then `get_context` for the structured chunk of a specific FQDN. The workspace \
+             indexes itself in the background on startup; tools called before indexing \
+             completes return a friendly progress message — retry shortly."
+                .to_string(),
+        );
+        info
     }
 }
 
@@ -1388,6 +1513,47 @@ pub(crate) struct StaleEntryJson {
     pub status: String,
 }
 
+/// Tool input — `link_workspace(path, direction)`. `direction` is one of
+/// `"in"`, `"out"`, `"bidirectional"` (snake_case to match the IR enum's
+/// serde shape). Path is canonicalised server-side.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct LinkWorkspaceParams {
+    pub path: String,
+    pub direction: String,
+}
+
+/// Tool input — `unlink_workspace(workspace_id)`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct UnlinkWorkspaceParams {
+    pub workspace_id: String,
+}
+
+/// Tool input — `module_lookup(module_fqdn, workspace_id?)`. Omit
+/// `workspace_id` to query the primary workspace.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct ModuleLookupParams {
+    pub module_fqdn: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+/// Tool input — `resolve_cross_workspace(origin_module, origin_symbol)`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct ResolveCrossWorkspaceParams {
+    pub origin_module: String,
+    pub origin_symbol: String,
+}
+
+/// Tool output for `link_workspace`. Mirrors the input path back so the
+/// caller can confirm canonicalisation didn't redirect them somewhere
+/// unexpected.
+#[derive(Debug, Serialize)]
+pub(crate) struct LinkWorkspaceJson {
+    pub workspace_id: String,
+    pub root_path: String,
+    pub direction: String,
+}
+
 const fn source_origin_label(origin: SourceOrigin) -> &'static str {
     match origin {
         SourceOrigin::Workspace => "workspace",
@@ -1412,6 +1578,28 @@ fn parse_filter(
         module,
         include_external,
     })
+}
+
+fn parse_link_direction(s: &str) -> Result<LinkDirection, ErrorData> {
+    match s {
+        "in" => Ok(LinkDirection::In),
+        "out" => Ok(LinkDirection::Out),
+        "bidirectional" => Ok(LinkDirection::Bidirectional),
+        other => Err(ErrorData::invalid_params(
+            format!(
+                "unknown direction `{other}` — expected one of: in, out, bidirectional"
+            ),
+            None,
+        )),
+    }
+}
+
+const fn link_direction_label(d: LinkDirection) -> &'static str {
+    match d {
+        LinkDirection::In => "in",
+        LinkDirection::Out => "out",
+        LinkDirection::Bidirectional => "bidirectional",
+    }
 }
 
 fn parse_kind(s: &str) -> Result<Kind, ErrorData> {
@@ -2376,5 +2564,132 @@ mod tests {
              {stats:?} — fire-and-forget spawn likely failed silently \
              (check SessionsHandle::open or the spawn_blocking chain)"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_workspace_returns_workspace_id_for_existing_path() {
+        let (dir, mcp) = fixture();
+        let peer = tempfile::tempdir().unwrap();
+        let result = mcp
+            .link_workspace(Parameters(LinkWorkspaceParams {
+                path: peer.path().to_string_lossy().into_owned(),
+                direction: "in".into(),
+            }))
+            .await
+            .expect("link_workspace ok");
+        let body = body_text(&result);
+        assert!(body.contains("\"workspace_id\""), "got `{body}`");
+        assert!(body.contains("\"direction\": \"in\""), "got `{body}`");
+        drop(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_workspace_rejects_missing_path_with_did_you_mean() {
+        let (_dir, mcp) = fixture();
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::create_dir(parent.path().join("projects")).unwrap();
+        let typo = parent.path().join("projcts");
+        let err = mcp
+            .link_workspace(Parameters(LinkWorkspaceParams {
+                path: typo.to_string_lossy().into_owned(),
+                direction: "in".into(),
+            }))
+            .await
+            .expect_err("missing path must surface invalid_params");
+        let data = format!("{:?}", err.data);
+        assert!(data.contains("did_you_mean"), "got `{data}`");
+        assert!(data.contains("projects"), "got `{data}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_workspace_rejects_unknown_direction() {
+        let (_dir, mcp) = fixture();
+        let peer = tempfile::tempdir().unwrap();
+        let err = mcp
+            .link_workspace(Parameters(LinkWorkspaceParams {
+                path: peer.path().to_string_lossy().into_owned(),
+                direction: "sideways".into(),
+            }))
+            .await
+            .expect_err("bogus direction must be rejected");
+        assert!(format!("{err}").contains("direction"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_linked_workspaces_returns_empty_array_on_fresh_index() {
+        let (_dir, mcp) = fixture();
+        let result = mcp
+            .list_linked_workspaces()
+            .await
+            .expect("list_linked_workspaces ok");
+        let body = body_text(&result);
+        assert!(body.contains("\"workspaces\""), "got `{body}`");
+        // Fresh index = no rows.
+        assert!(body.contains("\"workspaces\": []"), "got `{body}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unlink_workspace_after_link_removes_row() {
+        let (_dir, mcp) = fixture();
+        let peer = tempfile::tempdir().unwrap();
+        let link = mcp
+            .link_workspace(Parameters(LinkWorkspaceParams {
+                path: peer.path().to_string_lossy().into_owned(),
+                direction: "out".into(),
+            }))
+            .await
+            .expect("link ok");
+        let link_body = body_text(&link);
+        let workspace_id = link_body
+            .split("\"workspace_id\": \"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .expect("workspace_id present")
+            .to_string();
+
+        let _ = mcp
+            .unlink_workspace(Parameters(UnlinkWorkspaceParams {
+                workspace_id: workspace_id.clone(),
+            }))
+            .await
+            .expect("unlink ok");
+
+        let list = mcp
+            .list_linked_workspaces()
+            .await
+            .expect("list ok");
+        let list_body = body_text(&list);
+        assert!(
+            !list_body.contains(&workspace_id),
+            "workspace must be gone after unlink, got `{list_body}`"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn module_lookup_returns_null_when_module_absent() {
+        let (_dir, mcp) = fixture();
+        let result = mcp
+            .module_lookup(Parameters(ModuleLookupParams {
+                module_fqdn: "no::such::module".into(),
+                workspace_id: None,
+            }))
+            .await
+            .expect("module_lookup ok");
+        let body = body_text(&result);
+        assert_eq!(body.trim(), "null");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_cross_workspace_returns_empty_providers_on_fresh_index() {
+        let (_dir, mcp) = fixture();
+        let result = mcp
+            .resolve_cross_workspace(Parameters(ResolveCrossWorkspaceParams {
+                origin_module: "ws_b::lib".into(),
+                origin_symbol: "Foo".into(),
+            }))
+            .await
+            .expect("resolve_cross_workspace ok");
+        let body = body_text(&result);
+        assert!(body.contains("\"providers\": []"), "got `{body}`");
     }
 }

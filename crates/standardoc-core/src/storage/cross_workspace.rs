@@ -16,13 +16,14 @@
 //! optimisation when the persisted catalog grows.
 
 use rusqlite::{Connection, params};
+use serde::Serialize;
 use standardoc_ir::{BindingSource, ModuleLookup};
 
 use crate::storage::error::StorageError;
 use crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CrossWorkspaceResolution {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CrossWorkspaceResolution {
 	/// The linked workspace that provides the symbol.
 	pub workspace_id: String,
 	/// The fqdn the import resolves to in the providing workspace,
