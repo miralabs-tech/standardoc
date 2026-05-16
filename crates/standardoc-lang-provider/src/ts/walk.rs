@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use standardoc_ir::{
-    Blake3Hash, EdgeKind, Kind, Language, LanguageKind, Modifiers, Param, RawDocument, RawEdge,
-    RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation, TypeRef,
-    Visibility,
+    Blake3Hash, BuiltinTag, BuiltinTier, EdgeKind, Kind, Language, LanguageKind, Modifiers, Param,
+    RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site,
+    SymbolLocation, TypeRef, Visibility,
 };
 use swc_core::common::BytePos;
 use swc_core::common::comments::SingleThreadedComments;
@@ -103,24 +103,42 @@ impl<'a> TsWalkContext<'a> {
     /// the language's [`BuiltinRegistry`] (Stage 3a-6b chain). Multi-segment
     /// member-expression calls (`obj.method`) are handled separately by the
     /// visitor (always Unresolved by method ident, day-1).
+    ///
+    /// Stage 3e-1: returns `None` when the name matches a builtin classified
+    /// as [`BuiltinTier::Drop`] (structural noise — `Array`, `Map`, `undefined`)
+    /// or [`BuiltinTier::Attribute`] (semantic effect on source — `Promise` /
+    /// iterator families; folded into source-symbol flags in 3e-1b, not yet
+    /// wired). Edge-tier builtins surface as `Resolved{synthetic}` with the
+    /// [`BuiltinTag`] propagated through [`CallTarget::via_builtin`] so
+    /// callers can stamp `via-builtin` / `builtin-<slug>` attrs.
     pub(crate) fn resolve_call(
         &self,
         name: &str,
         current_module_fqdn: &str,
-    ) -> ResolvedOrUnresolved {
+    ) -> Option<CallTarget> {
         if let Some(import) = self.import_aliases.get(name) {
-            return import.target.clone();
+            return Some(CallTarget::plain(import.target.clone()));
         }
         let local = format!("{current_module_fqdn}::{name}");
         if self.core.defined_fqdns.contains(&local) {
-            return ResolvedOrUnresolved::Resolved { fqdn: local };
+            return Some(CallTarget::plain(ResolvedOrUnresolved::Resolved {
+                fqdn: local,
+            }));
         }
         if let Some(entry) = global_builtin_registry().lookup(name, self.core.lookup.language) {
-            return ResolvedOrUnresolved::Resolved {
-                fqdn: entry.synthetic_fqdn.clone(),
+            return match entry.tier {
+                BuiltinTier::Drop | BuiltinTier::Attribute => None,
+                BuiltinTier::Edge => Some(CallTarget {
+                    to: ResolvedOrUnresolved::Resolved {
+                        fqdn: entry.synthetic_fqdn.clone(),
+                    },
+                    via_builtin: Some(entry.tag.clone()),
+                }),
             };
         }
-        ResolvedOrUnresolved::Unresolved { name: local }
+        Some(CallTarget::plain(ResolvedOrUnresolved::Unresolved {
+            name: local,
+        }))
     }
 
     pub(crate) fn span_location(&self, span: Span) -> SymbolLocation {
@@ -165,6 +183,56 @@ impl<'a> TsWalkContext<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedImport {
     pub(crate) target: ResolvedOrUnresolved,
+}
+
+/// Output of [`TsWalkContext::resolve_call`]. Carries the canonical edge
+/// target plus, when the resolution landed on a `BuiltinTier::Edge` builtin,
+/// the originating [`BuiltinTag`] so emitters can attach `via-builtin` /
+/// `builtin-<slug>` attributes (Rust UsesType already does this — Stage
+/// 3e-1 brings TS to parity).
+#[derive(Debug, Clone)]
+pub(crate) struct CallTarget {
+    pub(crate) to: ResolvedOrUnresolved,
+    pub(crate) via_builtin: Option<BuiltinTag>,
+}
+
+impl CallTarget {
+    /// Wrap a non-builtin resolution (import alias, defined local, or
+    /// canonical-unresolved). `via_builtin` is `None`.
+    pub(crate) fn plain(to: ResolvedOrUnresolved) -> Self {
+        Self {
+            to,
+            via_builtin: None,
+        }
+    }
+}
+
+/// Stamp the standard heritage edge (`Extends` / `Implements`) for a
+/// class / interface heritage clause, folding `via-builtin` / `builtin-<slug>`
+/// attrs when the target is a synthetic Edge-tier builtin (matches the
+/// Rust UsesType emission pattern).
+fn push_heritage_edge(
+    ctx: &mut TsWalkContext<'_>,
+    from_fqdn: &str,
+    kind: EdgeKind,
+    target: CallTarget,
+    span: Span,
+) {
+    let mut attributes: Vec<String> = vec![];
+    if let Some(tag) = &target.via_builtin {
+        attributes.push("via-builtin".to_string());
+        attributes.push(format!("builtin-{}", tag.slug()));
+    }
+    let confidence = target.to.default_confidence();
+    let site = ctx.span_site(span);
+    ctx.push_edge(RawEdge {
+        from_fqdn: from_fqdn.to_string(),
+        kind,
+        to: target.to,
+        sites: vec![site],
+        attributes,
+        confidence,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -695,16 +763,15 @@ fn extract_class_inner(
 
     if let Some(super_class) = &class.super_class {
         let span = super_class.span();
-        let to = ctx.resolve_call(&render_expr_name(super_class), parent_fqdn);
-        let confidence = to.default_confidence();
-        ctx.push_edge(RawEdge {
-            from_fqdn: class_fqdn.clone(),
-            kind: EdgeKind::Extends,
-            to,
-            sites: vec![ctx.span_site(span)],
-            attributes: vec![],
-            confidence,
-        });
+        // Stage 3e-1: `None` means the heritage target is a Drop/Attribute
+        // builtin (e.g. `class C extends Array` / `extends Promise`); skip
+        // the edge but keep walking generic args so inner type refs still
+        // surface their own UsesType edges.
+        if let Some(target) =
+            ctx.resolve_call(&render_expr_name(super_class), parent_fqdn)
+        {
+            push_heritage_edge(ctx, &class_fqdn, EdgeKind::Extends, target, span);
+        }
         // Bug B Stage 2b: walk extends' generic args
         // (`class X extends Foo<Bar>` → UsesType edge to Bar).
         if let Some(type_params) = &class.super_type_params {
@@ -719,16 +786,11 @@ fn extract_class_inner(
     }
     for impl_target in &class.implements {
         let span = impl_target.span;
-        let to = ctx.resolve_call(&render_ts_entity_name(&impl_target.expr), parent_fqdn);
-        let confidence = to.default_confidence();
-        ctx.push_edge(RawEdge {
-            from_fqdn: class_fqdn.clone(),
-            kind: EdgeKind::Implements,
-            to,
-            sites: vec![ctx.span_site(span)],
-            attributes: vec![],
-            confidence,
-        });
+        if let Some(target) =
+            ctx.resolve_call(&render_ts_entity_name(&impl_target.expr), parent_fqdn)
+        {
+            push_heritage_edge(ctx, &class_fqdn, EdgeKind::Implements, target, span);
+        }
         // Bug B Stage 2b: walk implements' generic args
         // (`class X implements Foo<Bar>` → UsesType edge to Bar).
         if let Some(type_args) = &impl_target.type_args {
@@ -1023,16 +1085,9 @@ fn extract_interface_decl(
     );
     for ext in &item.extends {
         let span = ext.span;
-        let to = ctx.resolve_call(&render_expr_name(&ext.expr), parent_fqdn);
-        let confidence = to.default_confidence();
-        ctx.push_edge(RawEdge {
-            from_fqdn: fqdn.clone(),
-            kind: EdgeKind::Extends,
-            to,
-            sites: vec![ctx.span_site(span)],
-            attributes: vec![],
-            confidence,
-        });
+        if let Some(target) = ctx.resolve_call(&render_expr_name(&ext.expr), parent_fqdn) {
+            push_heritage_edge(ctx, &fqdn, EdgeKind::Extends, target, span);
+        }
         // Bug B Stage 2b: walk the extends' generic args
         // (`interface I extends J<K>` → UsesType edge to K).
         if let Some(type_args) = &ext.type_args {
@@ -1812,7 +1867,14 @@ mod tests {
                 },
             },
         );
-        match ctx.resolve_call("Foo", "src") {
+        let target = ctx
+            .resolve_call("Foo", "src")
+            .expect("alias path always yields Some");
+        assert!(
+            target.via_builtin.is_none(),
+            "alias resolution carries no via_builtin"
+        );
+        match target.to {
             ResolvedOrUnresolved::Unresolved { name } => {
                 assert_eq!(name, "@app::src::foo::Foo");
             }
@@ -1834,7 +1896,14 @@ mod tests {
             &comments,
         );
         ctx.core.defined_fqdns.insert("src::foo".into());
-        match ctx.resolve_call("foo", "src") {
+        let target = ctx
+            .resolve_call("foo", "src")
+            .expect("module-local resolved path always yields Some");
+        assert!(
+            target.via_builtin.is_none(),
+            "module-local resolution carries no via_builtin"
+        );
+        match target.to {
             ResolvedOrUnresolved::Resolved { fqdn } => assert_eq!(fqdn, "src::foo"),
             other => panic!("expected resolved, got {other:?}"),
         }
@@ -1853,9 +1922,140 @@ mod tests {
             None,
             &comments,
         );
-        match ctx.resolve_call("nope", "src") {
+        let target = ctx
+            .resolve_call("nope", "src")
+            .expect("fall-through path always yields Some(Unresolved)");
+        assert!(
+            target.via_builtin.is_none(),
+            "fall-through unresolved carries no via_builtin"
+        );
+        match target.to {
             ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "src::nope"),
             other => panic!("expected unresolved module-local, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage3e1_resolve_call_builtin_edge_emits_synthetic_with_tag() {
+        // `Math` is registered in the TS builtins as `BuiltinTier::Edge`
+        // with tag `BuiltinTag::Math` — resolution should produce a
+        // synthetic FQDN AND propagate the tag for downstream attribute
+        // stamping (`via-builtin` + `builtin-math`).
+        let (cm, _module, comments) = parse_ts("");
+        let ctx = TsWalkContext::new(
+            "src/index.ts".into(),
+            "@app".into(),
+            "src".into(),
+            cm,
+            PathBuf::new(),
+            PathBuf::new(),
+            None,
+            &comments,
+        );
+        let target = ctx
+            .resolve_call("Math", "src")
+            .expect("Edge-tier builtin must resolve to Some");
+        match &target.to {
+            ResolvedOrUnresolved::Resolved { fqdn } => {
+                assert!(
+                    fqdn.starts_with("<builtin>::"),
+                    "expected synthetic FQDN, got {fqdn}"
+                );
+                assert!(
+                    fqdn.ends_with("::Math"),
+                    "expected synthetic to end with ::Math, got {fqdn}"
+                );
+            }
+            other => panic!("expected Resolved synthetic for Edge tier, got {other:?}"),
+        }
+        match target.via_builtin {
+            Some(BuiltinTag::Math) => {}
+            other => panic!("expected via_builtin = Some(Math), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage3e1_resolve_call_builtin_drop_returns_none() {
+        // `Array` is registered as `BuiltinTier::Drop` in the TS builtins —
+        // structural container noise, no edge should be emitted. Resolver
+        // returns `None` so callers can skip without further inspection.
+        let (cm, _module, comments) = parse_ts("");
+        let ctx = TsWalkContext::new(
+            "src/index.ts".into(),
+            "@app".into(),
+            "src".into(),
+            cm,
+            PathBuf::new(),
+            PathBuf::new(),
+            None,
+            &comments,
+        );
+        assert!(
+            ctx.resolve_call("Array", "src").is_none(),
+            "Drop-tier builtin must resolve to None"
+        );
+    }
+
+    #[test]
+    fn stage3e1_resolve_call_builtin_attribute_returns_none() {
+        // `Promise` is `BuiltinTier::Attribute` — folded into source-symbol
+        // flags in 3e-1b (not yet wired). Until then the resolver also
+        // returns `None` (no edge, no source-flag promotion either, by
+        // design — we ship skip semantics first).
+        let (cm, _module, comments) = parse_ts("");
+        let ctx = TsWalkContext::new(
+            "src/index.ts".into(),
+            "@app".into(),
+            "src".into(),
+            cm,
+            PathBuf::new(),
+            PathBuf::new(),
+            None,
+            &comments,
+        );
+        assert!(
+            ctx.resolve_call("Promise", "src").is_none(),
+            "Attribute-tier builtin must resolve to None until 3e-1b"
+        );
+    }
+
+    #[test]
+    fn stage3e1_resolve_call_alias_overrides_builtin() {
+        // An explicit import alias shadows a global builtin name. The
+        // alias path wins (carries no via_builtin) — guards against the
+        // tier dispatch accidentally taking precedence over user code
+        // that locally rebinds `Promise`, `Math`, etc.
+        let (cm, _module, comments) = parse_ts("");
+        let mut ctx = TsWalkContext::new(
+            "src/index.ts".into(),
+            "@app".into(),
+            "src".into(),
+            cm,
+            PathBuf::new(),
+            PathBuf::new(),
+            None,
+            &comments,
+        );
+        ctx.add_import_alias(
+            "Promise".into(),
+            ResolvedImport {
+                target: ResolvedOrUnresolved::Resolved {
+                    fqdn: "@app::src::polyfill::Promise".into(),
+                },
+            },
+        );
+        let target = ctx
+            .resolve_call("Promise", "src")
+            .expect("alias shadow must yield Some, not the Attribute None");
+        assert!(
+            target.via_builtin.is_none(),
+            "alias-shadowed Promise is NOT a builtin"
+        );
+        match target.to {
+            ResolvedOrUnresolved::Resolved { fqdn } => {
+                assert_eq!(fqdn, "@app::src::polyfill::Promise");
+            }
+            other => panic!("expected aliased Resolved, got {other:?}"),
         }
     }
 

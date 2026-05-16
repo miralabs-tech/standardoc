@@ -1,4 +1,6 @@
-use standardoc_ir::{AliasMutability, EdgeKind, ModuleLookup, RawEdge, ResolvedOrUnresolved};
+use standardoc_ir::{
+    AliasMutability, BuiltinTag, EdgeKind, ModuleLookup, RawEdge, ResolvedOrUnresolved,
+};
 use swc_core::common::Span;
 use swc_core::ecma::ast::{
     ArrowExpr, BlockStmt, BlockStmtOrExpr, CallExpr, Callee, CatchClause, Expr,
@@ -9,8 +11,20 @@ use swc_core::ecma::ast::{
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
 
-use super::walk::TsWalkContext;
-use crate::template::{JS_GLOBALS, TS_BUILTIN_TYPES};
+use super::walk::{CallTarget, TsWalkContext};
+use crate::template::JS_GLOBALS;
+
+/// Append `via-builtin` + `builtin-<slug>` attrs when the target is a
+/// synthetic Edge-tier builtin. No-op when `via_builtin` is `None`. Pair
+/// with every TS emit site that consumes a [`CallTarget`] so Calls /
+/// References / UsesType edges expose the same builtin provenance as the
+/// Rust UsesType emitter (`extract_type.rs`).
+fn append_via_builtin(attrs: &mut Vec<String>, via_builtin: Option<&BuiltinTag>) {
+    if let Some(tag) = via_builtin {
+        attrs.push("via-builtin".to_string());
+        attrs.push(format!("builtin-{}", tag.slug()));
+    }
+}
 
 // --- Bug B Stage 2b: type-emission context sub-tags ---
 //
@@ -207,17 +221,25 @@ const fn alias_mut_slug(m: AliasMutability) -> &'static str {
 
 /// Result of resolving a name against the AOT `ModuleLookup` plus the
 /// `resolve_call` fall-through chain. Internal output type — callers
-/// pattern-match on the two variants to decide between emitting an edge
-/// (Target) or skipping (Local for nested-scope bindings without alias).
+/// pattern-match on the variants to decide between emitting an edge
+/// (Target) or skipping (Local for nested-scope bindings without alias,
+/// Skip for Drop/Attribute-tier builtins).
 enum NameResolution {
     /// Either an alias propagation (Some(mutability)) or a module-level
     /// resolution (None) — both carry the canonical target so the caller
-    /// can emit `Calls` / `References` / `UsesType` accordingly.
-    Target(ResolvedOrUnresolved, Option<AliasMutability>),
+    /// can emit `Calls` / `References` / `UsesType` accordingly. The
+    /// inner [`CallTarget`] also carries the originating [`BuiltinTag`]
+    /// when the resolution landed on an Edge-tier builtin.
+    Target(CallTarget, Option<AliasMutability>),
     /// Nested-scope local binding (param, let/const/var/fn-expr) without
     /// an alias. Callers skip emission — locals aren't surfaced in the
     /// module graph by design.
     Local,
+    /// Stage 3e-1: the name matched a builtin classified as
+    /// [`BuiltinTier::Drop`] (`Array` / `Map` / `undefined` / …) or
+    /// [`BuiltinTier::Attribute`] (`Promise` / iterator families — flag
+    /// promotion lands in 3e-1b). Every emit path early-returns.
+    Skip,
 }
 
 struct CallVisitor<'a, 'b> {
@@ -304,41 +326,55 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
         let lookup = &self.ctx.core.lookup;
         if let Some(res) = lookup.resolve_local(name, self.current_scope_idx) {
             if res.scope_idx == ModuleLookup::ROOT_SCOPE {
-                return NameResolution::Target(
-                    self.ctx.resolve_call(name, &self.current_module),
-                    None,
-                );
+                return match self.ctx.resolve_call(name, &self.current_module) {
+                    Some(target) => NameResolution::Target(target, None),
+                    None => NameResolution::Skip,
+                };
             }
             if let (Some(alias_str), Some(m)) = (res.aliases_to.as_deref(), res.mutability) {
-                let target = self.ctx.resolve_call(alias_str, &self.current_module);
-                return NameResolution::Target(target, Some(m));
+                return match self.ctx.resolve_call(alias_str, &self.current_module) {
+                    Some(target) => NameResolution::Target(target, Some(m)),
+                    None => NameResolution::Skip,
+                };
             }
             return NameResolution::Local;
         }
-        NameResolution::Target(self.ctx.resolve_call(name, &self.current_module), None)
+        match self.ctx.resolve_call(name, &self.current_module) {
+            Some(target) => NameResolution::Target(target, None),
+            None => NameResolution::Skip,
+        }
     }
 
-    fn emit_call(&mut self, to: ResolvedOrUnresolved, span: Span) {
-        self.emit_call_inner(to, span, &[]);
+    fn emit_call(&mut self, target: CallTarget, span: Span) {
+        let mut attrs: Vec<String> = vec![];
+        append_via_builtin(&mut attrs, target.via_builtin.as_ref());
+        self.emit_call_raw(target.to, span, attrs);
     }
 
     /// Bug B Stage 2 — `Calls` edge emitted through a propagated scope
     /// alias. Tags the edge with `via-alias` / `via-alias-mutable` so
     /// consumers can distinguish direct calls from chained-binding
-    /// calls (and know to discount mutable-alias edges).
+    /// calls (and know to discount mutable-alias edges). Edge-tier
+    /// builtins shadowed by an alias still carry `via-builtin` since the
+    /// resolution propagates through the alias chain.
     fn emit_call_via_alias(
         &mut self,
-        to: ResolvedOrUnresolved,
+        target: CallTarget,
         span: Span,
         mutability: AliasMutability,
     ) {
-        self.emit_call_inner(to, span, &[alias_mut_slug(mutability)]);
+        let mut attrs: Vec<String> = vec![alias_mut_slug(mutability).to_string()];
+        append_via_builtin(&mut attrs, target.via_builtin.as_ref());
+        self.emit_call_raw(target.to, span, attrs);
     }
 
-    fn emit_call_inner(&mut self, to: ResolvedOrUnresolved, span: Span, extra_attrs: &[&str]) {
+    /// Lowest-level Calls emitter — used directly for member-access
+    /// expressions (`obj.method()`) where the resolution is always an
+    /// explicit `Unresolved` constructed at the call site, with no
+    /// `CallTarget` plumbing involved.
+    fn emit_call_raw(&mut self, to: ResolvedOrUnresolved, span: Span, attributes: Vec<String>) {
         let site = self.ctx.span_site(span);
         let confidence = to.default_confidence();
-        let attributes = extra_attrs.iter().map(|s| (*s).to_string()).collect();
         self.ctx.push_edge(RawEdge {
             from_fqdn: self.enclosing_fqdn.clone(),
             kind: EdgeKind::Calls,
@@ -358,20 +394,28 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
         // or a destructured slot is still the read we want surfaced).
         // Pure value-reads (`emit_value_ref`) keep the strict local-skip
         // rule; this asymmetry is intentional.
-        let (to, alias_mut) = match self.resolve_name(name) {
-            NameResolution::Local => (self.ctx.resolve_call(name, &self.current_module), None),
+        let (target, alias_mut) = match self.resolve_name(name) {
+            NameResolution::Skip => return,
+            // Local binding shadows the name — re-resolve through the
+            // module-level chain to produce a canonical-unresolved (or
+            // None for Drop/Attribute builtins, which we then skip).
+            NameResolution::Local => match self.ctx.resolve_call(name, &self.current_module) {
+                Some(t) => (t, None),
+                None => return,
+            },
             NameResolution::Target(t, m) => (t, m),
         };
-        let confidence = to.default_confidence();
+        let confidence = target.to.default_confidence();
         let site = self.ctx.span_site(span);
         let mut attributes = vec![attribute.to_string()];
         if let Some(m) = alias_mut {
             attributes.push(alias_mut_slug(m).to_string());
         }
+        append_via_builtin(&mut attributes, target.via_builtin.as_ref());
         self.ctx.push_edge(RawEdge {
             from_fqdn: self.enclosing_fqdn.clone(),
             kind: EdgeKind::References,
-            to,
+            to: target.to,
             sites: vec![site],
             attributes,
             confidence,
@@ -396,11 +440,11 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
         if JS_GLOBALS.contains(&name) {
             return;
         }
-        let (to, alias_mut) = match self.resolve_name(name) {
-            NameResolution::Local => return,
+        let (target, alias_mut) = match self.resolve_name(name) {
+            NameResolution::Skip | NameResolution::Local => return,
             NameResolution::Target(t, m) => (t, m),
         };
-        let target_fqdn = match &to {
+        let target_fqdn = match &target.to {
             ResolvedOrUnresolved::Resolved { fqdn } => fqdn,
             // Skip unresolved value-reads — Stage 1 safety net preserved.
             // An aliased canonical-unresolved target is also dropped here;
@@ -412,16 +456,17 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
         if target_fqdn == &self.enclosing_fqdn {
             return;
         }
-        let confidence = to.default_confidence();
+        let confidence = target.to.default_confidence();
         let site = self.ctx.span_site(span);
         let mut attributes = vec!["value-read".to_string()];
         if let Some(m) = alias_mut {
             attributes.push(alias_mut_slug(m).to_string());
         }
+        append_via_builtin(&mut attributes, target.via_builtin.as_ref());
         self.ctx.push_edge(RawEdge {
             from_fqdn: self.enclosing_fqdn.clone(),
             kind: EdgeKind::References,
-            to,
+            to: target.to,
             sites: vec![site],
             attributes,
             confidence,
@@ -441,12 +486,19 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
     ///
     /// Resolution: same waterfall as `emit_value_ref` (scope alias /
     /// scope local / fall-through `resolve_call`). Skipped names:
-    /// - [`TS_BUILTIN_TYPES`] wrappers (`Array<Foo>`, `Map<K,V>`, …) —
-    ///   inner args still recurse and emit their own edges from the
-    ///   caller's `visit_ts_type_ref`.
+    /// - Drop-tier builtins (`Array<Foo>`, `Map<K,V>`, `Partial<T>`, …) —
+    ///   `resolve_call` returns `None`, surfaced as `NameResolution::Skip`.
+    ///   Inner type args still recurse from the caller's `visit_ts_type_ref`.
+    /// - Attribute-tier builtins (`Promise<T>`, iterator families) — also
+    ///   `Skip` for now; 3e-1b promotes them to source-symbol flags.
     /// - Scope-local bindings (incl. generic type params bound in the
     ///   enclosing function scope) — no edge for `function f<T>(x: T)`.
     /// - Self-references on `enclosing_fqdn`.
+    ///
+    /// Edge-tier builtins (`Date`, `JSON`, `Math`, `Error`, `Object`,
+    /// `Symbol`, …) now DO surface — they emit a `UsesType` edge to the
+    /// synthetic builtin FQDN with `via-builtin` / `builtin-<slug>`
+    /// attributes (parity with Rust UsesType, fixing a Stage 3a-6c gap).
     ///
     /// Unresolved targets ARE emitted (with an extra `unresolved-type`
     /// attribute) so the viz can toggle them on/off without re-extracting.
@@ -454,32 +506,30 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
         let Some(ctx) = self.type_emission_context else {
             return;
         };
-        if TS_BUILTIN_TYPES.contains(&name) {
-            return;
-        }
-        let to = match self.resolve_name(name) {
-            NameResolution::Local => return,
+        let target = match self.resolve_name(name) {
+            NameResolution::Skip | NameResolution::Local => return,
             NameResolution::Target(t, _) => t,
         };
-        if let ResolvedOrUnresolved::Resolved { fqdn } = &to
+        if let ResolvedOrUnresolved::Resolved { fqdn } = &target.to
             && fqdn == &self.enclosing_fqdn
         {
             return;
         }
         let is_unresolved = matches!(
-            &to,
+            &target.to,
             ResolvedOrUnresolved::Unresolved { .. } | ResolvedOrUnresolved::UnresolvedBridge { .. }
         );
-        let confidence = to.default_confidence();
+        let confidence = target.to.default_confidence();
         let site = self.ctx.span_site(span);
         let mut attributes = vec!["via-type".to_string(), ctx.to_string()];
         if is_unresolved {
             attributes.push(TYPE_TAG_UNRESOLVED.to_string());
         }
+        append_via_builtin(&mut attributes, target.via_builtin.as_ref());
         self.ctx.push_edge(RawEdge {
             from_fqdn: self.enclosing_fqdn.clone(),
             kind: EdgeKind::UsesType,
-            to,
+            to: target.to,
             sites: vec![site],
             attributes,
             confidence,
@@ -537,25 +587,33 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
                 // at a local, etc.) are NOT surfaced — the matching
                 // call lives entirely inside the enclosing FQDN.
                 match self.resolve_name(ident.sym.as_ref()) {
-                    NameResolution::Local => {}
-                    NameResolution::Target(to, Some(m)) => {
-                        self.emit_call_via_alias(to, ident.span, m);
+                    NameResolution::Local | NameResolution::Skip => {}
+                    NameResolution::Target(target, Some(m)) => {
+                        self.emit_call_via_alias(target, ident.span, m);
                     }
-                    NameResolution::Target(to, None) => {
-                        self.emit_call(to, ident.span);
+                    NameResolution::Target(target, None) => {
+                        self.emit_call(target, ident.span);
                     }
                 }
             }
             Expr::Member(member) => {
                 if let Some(name) = member_prop_name(&member.prop) {
-                    self.emit_call(ResolvedOrUnresolved::Unresolved { name }, member.span);
+                    self.emit_call_raw(
+                        ResolvedOrUnresolved::Unresolved { name },
+                        member.span,
+                        vec![],
+                    );
                 }
             }
             Expr::OptChain(opt) => {
                 if let OptChainBase::Member(member) = opt.base.as_ref()
                     && let Some(name) = member_prop_name(&member.prop)
                 {
-                    self.emit_call(ResolvedOrUnresolved::Unresolved { name }, opt.span);
+                    self.emit_call_raw(
+                        ResolvedOrUnresolved::Unresolved { name },
+                        opt.span,
+                        vec![],
+                    );
                 }
             }
             _ => {}

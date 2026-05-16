@@ -100,6 +100,31 @@ pub enum BuiltinTag {
 	Custom { tag: String },
 }
 
+impl BuiltinTag {
+	/// Kebab-slug representation, used as a suffix in edge attributes
+	/// like `builtin-fs`, `builtin-async`, `builtin-<custom>`. Stable
+	/// across languages so viz/queries can filter by tag without caring
+	/// which provider produced the edge.
+	pub fn slug(&self) -> String {
+		match self {
+			BuiltinTag::Net => "net".into(),
+			BuiltinTag::Decode => "decode".into(),
+			BuiltinTag::Encode => "encode".into(),
+			BuiltinTag::Console => "console".into(),
+			BuiltinTag::FileSystem => "fs".into(),
+			BuiltinTag::Process => "process".into(),
+			BuiltinTag::Math => "math".into(),
+			BuiltinTag::Time => "time".into(),
+			BuiltinTag::Memory => "memory".into(),
+			BuiltinTag::Reflection => "reflection".into(),
+			BuiltinTag::Async => "async".into(),
+			BuiltinTag::Iter => "iter".into(),
+			BuiltinTag::Format => "format".into(),
+			BuiltinTag::Custom { tag } => tag.clone(),
+		}
+	}
+}
+
 /// Origin of an `IdentResolution`. Every entry in `ModuleLookup.bindings`
 /// carries exactly one `BindingSource`. The resolver uses it to know how
 /// to turn a binding into a `ResolvedOrUnresolved` edge target.

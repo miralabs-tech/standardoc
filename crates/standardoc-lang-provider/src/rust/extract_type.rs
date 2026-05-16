@@ -16,9 +16,7 @@
 //! union fields.
 
 use proc_macro2::Span;
-use standardoc_ir::{
-    BindingSource, BuiltinTag, EdgeKind, Language, RawEdge, ResolvedOrUnresolved, Site,
-};
+use standardoc_ir::{BindingSource, EdgeKind, Language, RawEdge, ResolvedOrUnresolved, Site};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
@@ -44,25 +42,6 @@ const TYPE_TAG_UNRESOLVED: &str = "unresolved-type";
 /// keyword, `_` is the inferred-type placeholder. None should ever emit
 /// a UsesType edge.
 const SKIP_MARKERS: &[&str] = &["Self", "self", "_"];
-
-fn builtin_tag_slug(tag: &BuiltinTag) -> String {
-    match tag {
-        BuiltinTag::Net => "net".into(),
-        BuiltinTag::Decode => "decode".into(),
-        BuiltinTag::Encode => "encode".into(),
-        BuiltinTag::Console => "console".into(),
-        BuiltinTag::FileSystem => "fs".into(),
-        BuiltinTag::Process => "process".into(),
-        BuiltinTag::Math => "math".into(),
-        BuiltinTag::Time => "time".into(),
-        BuiltinTag::Memory => "memory".into(),
-        BuiltinTag::Reflection => "reflection".into(),
-        BuiltinTag::Async => "async".into(),
-        BuiltinTag::Iter => "iter".into(),
-        BuiltinTag::Format => "format".into(),
-        BuiltinTag::Custom { tag } => tag.clone(),
-    }
-}
 
 #[allow(dead_code)]
 const RUST_BUILTIN_TYPES: &[&str] = &[
@@ -381,7 +360,7 @@ fn emit_uses_type_path(
             "via-type".to_string(),
             emission_context.to_string(),
             "via-builtin".to_string(),
-            format!("builtin-{}", builtin_tag_slug(&entry.tag)),
+            format!("builtin-{}", entry.tag.slug()),
         ];
         ctx.push_edge(RawEdge {
             from_fqdn: enclosing_fqdn.to_string(),
