@@ -12,6 +12,7 @@ mod extract_call;
 mod extract_doc;
 mod extract_type;
 mod extract_use;
+mod lookup;
 mod module_path;
 mod visibility;
 mod walk;

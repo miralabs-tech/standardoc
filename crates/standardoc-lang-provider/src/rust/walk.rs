@@ -155,6 +155,7 @@ pub(crate) fn walk(
     crate_name: &str,
 ) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
     let mut ctx = WalkContext::new(file_path, crate_name, module_fqdn.to_string());
+    ctx.core.lookup = super::lookup::build_rust_lookup(parsed, module_fqdn);
     walk_p1(&mut ctx, &parsed.items, module_fqdn);
     walk_p2(&mut ctx, &parsed.items, module_fqdn);
     (ctx.core.symbols, ctx.core.edges, ctx.core.documents)
