@@ -12,6 +12,7 @@ mod location;
 mod lookup;
 mod signature;
 mod symbol;
+mod workspace;
 
 pub use attribute::{RawAttribute, RawAttributeArg};
 pub use bridge_kind::BridgeKind;
@@ -32,3 +33,4 @@ pub use lookup::{
 };
 pub use signature::{Modifiers, Param, Signature, SignatureMeta, TypeRef, compact_rust_tokens};
 pub use symbol::RawSymbol;
+pub use workspace::{LinkDirection, LinkedWorkspaceStatus};

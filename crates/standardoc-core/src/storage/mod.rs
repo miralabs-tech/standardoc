@@ -19,6 +19,7 @@ pub(crate) mod migrate;
 pub(crate) mod module_lookup;
 pub(crate) mod retry;
 pub(crate) mod symbols;
+pub(crate) mod workspace_catalog;
 
 #[cfg(test)]
 pub(crate) mod test_utils;
