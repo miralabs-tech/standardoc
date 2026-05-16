@@ -1,0 +1,384 @@
+//! Bug C-3 — Rust counterpart of TS Stage 2b. Walks a `syn::Type` /
+//! `syn::TypeParamBound` / `syn::Signature` from a known enclosing
+//! symbol FQDN and emits `UsesType` edges for every resolvable named
+//! type reference inside. The attribute taxonomy mirrors TS Stage 2b:
+//!
+//! - root tag `via-type`
+//! - emission-context sub-tag (`type-annotation`, `type-constraint`,
+//!   `type-alias-body`, `type-extends`, `type-implements`)
+//! - `unresolved-type` marker when the resolution lands on
+//!   `Unresolved{,Bridge}` (filterable consumer-side, no
+//!   re-extraction needed when the viz toggles "show unknown types").
+//!
+//! The hook sites (in `walk.rs`) cover: fn signatures (params/return/
+//! generic constraints/where clauses), struct/enum field types,
+//! const/static types, type alias RHS, trait/impl block contents,
+//! union fields.
+
+use std::collections::HashSet;
+
+use proc_macro2::Span;
+use standardoc_ir::{EdgeKind, RawEdge, ResolvedOrUnresolved, Site};
+use syn::spanned::Spanned;
+use syn::visit::Visit;
+
+use super::walk::{WalkContext, col_from_span, line_from_span, path_to_string};
+
+pub(crate) const TYPE_CTX_ANNOTATION: &str = "type-annotation";
+pub(crate) const TYPE_CTX_CONSTRAINT: &str = "type-constraint";
+pub(crate) const TYPE_CTX_ALIAS_BODY: &str = "type-alias-body";
+pub(crate) const TYPE_CTX_EXTENDS: &str = "type-extends";
+pub(crate) const TYPE_CTX_IMPLEMENTS: &str = "type-implements";
+const TYPE_TAG_UNRESOLVED: &str = "unresolved-type";
+
+/// Rust builtin / std-prelude type names filtered out of `UsesType`
+/// edge emission. Mirrors `TS_BUILTIN_TYPES` for the TS provider.
+/// Inner generic args still recurse — only the wrapper name is skipped.
+///
+/// Also includes the primitive types parsed as `Type::Path` (e.g. `u8`,
+/// `str`, `bool`), the `Self` keyword (not a real symbol — refers back
+/// to the enclosing impl block), and `_` (placeholder).
+const RUST_BUILTIN_TYPES: &[&str] = &[
+    // Reserved / non-symbol markers
+    "Self",
+    "self",
+    "_",
+    // Primitives
+    "bool",
+    "char",
+    "str",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "u128",
+    "usize",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "i128",
+    "isize",
+    "f32",
+    "f64",
+    // Heap / smart pointers
+    "Box",
+    "Rc",
+    "Arc",
+    "Pin",
+    "Cell",
+    "RefCell",
+    "UnsafeCell",
+    "Mutex",
+    "RwLock",
+    // Collections
+    "Vec",
+    "VecDeque",
+    "LinkedList",
+    "BinaryHeap",
+    "HashMap",
+    "HashSet",
+    "BTreeMap",
+    "BTreeSet",
+    // Strings / paths
+    "String",
+    "OsString",
+    "OsStr",
+    "PathBuf",
+    "Path",
+    "CString",
+    "CStr",
+    // Option / Result / Cow
+    "Option",
+    "Some",
+    "None",
+    "Result",
+    "Ok",
+    "Err",
+    "Cow",
+    // Iterators / futures
+    "Iterator",
+    "IntoIterator",
+    "FromIterator",
+    "Future",
+    "Stream",
+    // Marker traits
+    "Send",
+    "Sync",
+    "Sized",
+    "Unpin",
+    "Unsize",
+    // Common traits
+    "Drop",
+    "Clone",
+    "Copy",
+    "Default",
+    "PartialEq",
+    "Eq",
+    "PartialOrd",
+    "Ord",
+    "Hash",
+    "Debug",
+    "Display",
+    "From",
+    "Into",
+    "TryFrom",
+    "TryInto",
+    "AsRef",
+    "AsMut",
+    "Borrow",
+    "BorrowMut",
+    "ToString",
+    "ToOwned",
+    "Error",
+    // Fn traits
+    "Fn",
+    "FnMut",
+    "FnOnce",
+];
+
+/// Walk a single `syn::Type` and emit `UsesType` edges. `locals` is
+/// the set of generic type-param names introduced in the enclosing
+/// scope — names matching are skipped (avoids `<T>` leaking as a
+/// phantom `<module>::T` UsesType edge). Hook this from any
+/// declaration-site type position (struct field, const, var, alias).
+pub(crate) fn visit_type(
+    ctx: &mut WalkContext,
+    ty: &syn::Type,
+    current_module: &str,
+    enclosing_fqdn: &str,
+    emission_context: &'static str,
+    locals: &HashSet<String>,
+) {
+    let mut visitor = TypeRefVisitor {
+        ctx,
+        current_module: current_module.to_string(),
+        enclosing_fqdn: enclosing_fqdn.to_string(),
+        emission_context,
+        locals,
+    };
+    visitor.visit_type(ty);
+}
+
+/// Walk a single `syn::TypeParamBound` (the `Foo` in `<T: Foo>` or
+/// `dyn Foo + Bar`) and emit a `UsesType` edge. The bound's trait path
+/// is NOT a `Type::Path` in syn, so the generic `visit_type` doesn't
+/// reach it — this entry point closes that gap.
+pub(crate) fn visit_type_param_bound(
+    ctx: &mut WalkContext,
+    bound: &syn::TypeParamBound,
+    current_module: &str,
+    enclosing_fqdn: &str,
+    emission_context: &'static str,
+    locals: &HashSet<String>,
+) {
+    let mut visitor = TypeRefVisitor {
+        ctx,
+        current_module: current_module.to_string(),
+        enclosing_fqdn: enclosing_fqdn.to_string(),
+        emission_context,
+        locals,
+    };
+    visitor.visit_type_param_bound(bound);
+}
+
+/// Convenience: walk a full `syn::Signature` and emit `UsesType` edges
+/// for every type position inside (param types, return type, generic
+/// param bounds, where-clause predicates). Generic param names declared
+/// by the signature itself are collected as `locals` automatically and
+/// merged with `outer_locals` (e.g. struct-level generics for a method).
+pub(crate) fn visit_signature(
+    ctx: &mut WalkContext,
+    sig: &syn::Signature,
+    current_module: &str,
+    enclosing_fqdn: &str,
+    outer_locals: &HashSet<String>,
+) {
+    let mut locals = outer_locals.clone();
+    locals.extend(collect_generic_param_idents(&sig.generics));
+
+    for input in &sig.inputs {
+        if let syn::FnArg::Typed(pat) = input {
+            visit_type(
+                ctx,
+                &pat.ty,
+                current_module,
+                enclosing_fqdn,
+                TYPE_CTX_ANNOTATION,
+                &locals,
+            );
+        }
+    }
+    if let syn::ReturnType::Type(_, ty) = &sig.output {
+        visit_type(
+            ctx,
+            ty,
+            current_module,
+            enclosing_fqdn,
+            TYPE_CTX_ANNOTATION,
+            &locals,
+        );
+    }
+    visit_generics(
+        ctx,
+        &sig.generics,
+        current_module,
+        enclosing_fqdn,
+        &locals,
+    );
+}
+
+/// Walk a `syn::Generics`' bounds + where-clause predicates and emit
+/// `UsesType` edges under `type-constraint`. The generic param decls
+/// themselves are already bound into `locals` by the caller (we don't
+/// want `T` in `<T: Foo>` to emit, only `Foo`).
+pub(crate) fn visit_generics(
+    ctx: &mut WalkContext,
+    generics: &syn::Generics,
+    current_module: &str,
+    enclosing_fqdn: &str,
+    locals: &HashSet<String>,
+) {
+    for param in &generics.params {
+        if let syn::GenericParam::Type(tp) = param {
+            for bound in &tp.bounds {
+                visit_type_param_bound(
+                    ctx,
+                    bound,
+                    current_module,
+                    enclosing_fqdn,
+                    TYPE_CTX_CONSTRAINT,
+                    locals,
+                );
+            }
+        }
+    }
+    if let Some(wc) = &generics.where_clause {
+        for pred in &wc.predicates {
+            if let syn::WherePredicate::Type(pt) = pred {
+                visit_type(
+                    ctx,
+                    &pt.bounded_ty,
+                    current_module,
+                    enclosing_fqdn,
+                    TYPE_CTX_CONSTRAINT,
+                    locals,
+                );
+                for bound in &pt.bounds {
+                    visit_type_param_bound(
+                        ctx,
+                        bound,
+                        current_module,
+                        enclosing_fqdn,
+                        TYPE_CTX_CONSTRAINT,
+                        locals,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Helper exposed for callers that need to bind item-level generic
+/// param idents (`struct S<T> { … }` → `T` is a local visible to all
+/// field types). Returns just the `TypeParam` idents — `LifetimeParam`
+/// and `ConstParam` don't influence UsesType emission.
+pub(crate) fn collect_generic_param_idents(generics: &syn::Generics) -> HashSet<String> {
+    generics
+        .params
+        .iter()
+        .filter_map(|p| match p {
+            syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+struct TypeRefVisitor<'a, 'l> {
+    ctx: &'a mut WalkContext,
+    current_module: String,
+    enclosing_fqdn: String,
+    emission_context: &'static str,
+    locals: &'l HashSet<String>,
+}
+
+impl<'a, 'l, 'ast> Visit<'ast> for TypeRefVisitor<'a, 'l> {
+    fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+        let path_str = path_to_string(&node.path);
+        emit_uses_type_path(
+            self.ctx,
+            &path_str,
+            &self.current_module,
+            &self.enclosing_fqdn,
+            self.emission_context,
+            self.locals,
+            node.span(),
+        );
+        // Recurse into generic args so `Vec<Foo>` emits on Foo even
+        // when `Vec` is filtered as a builtin.
+        syn::visit::visit_type_path(self, node);
+    }
+
+    fn visit_trait_bound(&mut self, node: &'ast syn::TraitBound) {
+        let path_str = path_to_string(&node.path);
+        emit_uses_type_path(
+            self.ctx,
+            &path_str,
+            &self.current_module,
+            &self.enclosing_fqdn,
+            self.emission_context,
+            self.locals,
+            node.span(),
+        );
+        syn::visit::visit_trait_bound(self, node);
+    }
+}
+
+fn emit_uses_type_path(
+    ctx: &mut WalkContext,
+    path_str: &str,
+    current_module: &str,
+    enclosing_fqdn: &str,
+    emission_context: &'static str,
+    locals: &HashSet<String>,
+    span: Span,
+) {
+    let leftmost = path_str.split("::").next().unwrap_or("");
+    if leftmost.is_empty() {
+        return;
+    }
+    if RUST_BUILTIN_TYPES.contains(&leftmost) {
+        return;
+    }
+    if locals.contains(leftmost) {
+        return;
+    }
+    let to = ctx.resolve_path(path_str, current_module);
+    if let ResolvedOrUnresolved::Resolved { fqdn } = &to
+        && fqdn == enclosing_fqdn
+    {
+        return;
+    }
+    let is_unresolved = matches!(
+        &to,
+        ResolvedOrUnresolved::Unresolved { .. } | ResolvedOrUnresolved::UnresolvedBridge { .. }
+    );
+    let confidence = to.default_confidence();
+    let mut attributes = vec!["via-type".to_string(), emission_context.to_string()];
+    if is_unresolved {
+        attributes.push(TYPE_TAG_UNRESOLVED.to_string());
+    }
+    let file_path = ctx.core.file_path.clone();
+    ctx.push_edge(RawEdge {
+        from_fqdn: enclosing_fqdn.to_string(),
+        kind: EdgeKind::UsesType,
+        to,
+        sites: vec![Site {
+            file: file_path,
+            line: line_from_span(span),
+            col: col_from_span(span),
+        }],
+        attributes,
+        confidence,
+    });
+}

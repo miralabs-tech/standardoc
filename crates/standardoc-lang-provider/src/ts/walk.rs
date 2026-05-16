@@ -455,11 +455,20 @@ fn process_decl(
         }
         Decl::TsTypeAlias(it) => {
             let sym = extract_type_alias_decl(ctx, it, current_module, exported);
+            let alias_fqdn = sym.fqdn.clone();
             ctx.push_symbol_with_doc(sym, outer_pos);
+            // Bug B Stage 2b: walk the alias body for `UsesType` edges
+            // (`type X = Foo | Bar` → edges from X to Foo and Bar).
+            visit::visit_ts_type_for_uses(
+                ctx,
+                &it.type_ann,
+                current_module,
+                &alias_fqdn,
+                visit::TYPE_CTX_ALIAS_BODY,
+            );
         }
         Decl::TsEnum(it) => {
-            let sym = extract_enum_decl(ctx, it, current_module, exported);
-            ctx.push_symbol_with_doc(sym, outer_pos);
+            extract_enum_decl(ctx, it, current_module, exported, outer_pos);
         }
         Decl::TsModule(_) | Decl::Using(_) => {}
     }
@@ -686,6 +695,17 @@ fn extract_class_inner(
             attributes: vec![],
             confidence,
         });
+        // Bug B Stage 2b: walk extends' generic args
+        // (`class X extends Foo<Bar>` → UsesType edge to Bar).
+        if let Some(type_params) = &class.super_type_params {
+            visit::visit_type_params_for_uses(
+                ctx,
+                type_params,
+                parent_fqdn,
+                &class_fqdn,
+                visit::TYPE_CTX_EXTENDS,
+            );
+        }
     }
     for impl_target in &class.implements {
         let span = impl_target.span;
@@ -699,6 +719,17 @@ fn extract_class_inner(
             attributes: vec![],
             confidence,
         });
+        // Bug B Stage 2b: walk implements' generic args
+        // (`class X implements Foo<Bar>` → UsesType edge to Bar).
+        if let Some(type_args) = &impl_target.type_args {
+            visit::visit_type_params_for_uses(
+                ctx,
+                type_args,
+                parent_fqdn,
+                &class_fqdn,
+                visit::TYPE_CTX_IMPLEMENTS,
+            );
+        }
     }
 
     for member in &class.body {
@@ -721,13 +752,36 @@ fn extract_class_inner(
             ClassMember::ClassProp(prop) => {
                 if let Some(prop_name) = method_name_string(&prop.key) {
                     let sym = extract_class_prop(ctx, prop, &class_fqdn, &prop_name);
+                    let prop_fqdn = sym.fqdn.clone();
                     ctx.push_symbol_with_doc(sym, prop.span.lo);
+                    // Bug B Stage 2b: walk the prop's type annotation
+                    // (`class X { field: Foo }` → UsesType from
+                    // `X::field` to Foo).
+                    if let Some(ann) = &prop.type_ann {
+                        visit::visit_type_ann_for_uses(
+                            ctx,
+                            ann,
+                            parent_fqdn,
+                            &prop_fqdn,
+                            visit::TYPE_CTX_CLASS_PROP,
+                        );
+                    }
                 }
             }
             ClassMember::PrivateProp(pprop) => {
                 let private_name = format!("#{}", pprop.key.name);
                 let sym = extract_private_prop(ctx, pprop, &class_fqdn, &private_name);
+                let prop_fqdn = sym.fqdn.clone();
                 ctx.push_symbol_with_doc(sym, pprop.span.lo);
+                if let Some(ann) = &pprop.type_ann {
+                    visit::visit_type_ann_for_uses(
+                        ctx,
+                        ann,
+                        parent_fqdn,
+                        &prop_fqdn,
+                        visit::TYPE_CTX_CLASS_PROP,
+                    );
+                }
             }
             // TsIndexSignature is a typing artifact (`[key: string]: T`) with no
             // symbol identity. Empty / StaticBlock / AutoAccessor are skipped
@@ -903,7 +957,7 @@ fn extract_var_decl(
         ctx.push_symbol_with_doc(
             RawSymbol {
                 name,
-                fqdn,
+                fqdn: fqdn.clone(),
                 kind,
                 language_kind,
                 module: Some(parent_fqdn.to_string()),
@@ -914,6 +968,20 @@ fn extract_var_decl(
                 attributes: vec![],
             },
             outer_pos,
+        );
+        // Bug B Stage 2b: walk the declarator's pattern for the type
+        // annotation (`const x: Foo = …`, `let [a, b]: [Foo, Bar] = …`).
+        // Init walking happens later in `visit_var_initializers` via the
+        // CallVisitor — that path also picks up nested `BindingIdent`
+        // annotations, but only when an init is present. Walking the
+        // pattern here covers init-less let-decls and top-level ambient
+        // shapes consistently.
+        visit::visit_pat_for_uses(
+            ctx,
+            &declarator.name,
+            parent_fqdn,
+            &fqdn,
+            visit::TYPE_CTX_ANNOTATION,
         );
     }
 }
@@ -955,6 +1023,186 @@ fn extract_interface_decl(
             attributes: vec![],
             confidence,
         });
+        // Bug B Stage 2b: walk the extends' generic args
+        // (`interface I extends J<K>` → UsesType edge to K).
+        if let Some(type_args) = &ext.type_args {
+            visit::visit_type_params_for_uses(
+                ctx,
+                type_args,
+                parent_fqdn,
+                &fqdn,
+                visit::TYPE_CTX_EXTENDS,
+            );
+        }
+    }
+    // Bug C-1 — push a `RawSymbol` per interface body member so the
+    // viz can display interface internals (properties, methods, …).
+    // Each member's type annotations emit `UsesType` edges from the
+    // member's fqdn (rather than the interface fqdn), giving the graph
+    // per-field provenance instead of an aggregate-on-the-parent edge.
+    // `TsCallSignatureDecl` / `TsConstructSignatureDecl` /
+    // `TsIndexSignature` are typing artifacts without symbol identity
+    // (no name we can attach to) and are intentionally skipped.
+    for member in &item.body.body {
+        use swc_core::ecma::ast::TsTypeElement;
+        match member {
+            TsTypeElement::TsPropertySignature(prop) => {
+                if prop.computed {
+                    continue;
+                }
+                let Some(member_name) = interface_member_key_name(&prop.key) else {
+                    continue;
+                };
+                let member_fqdn = format!("{fqdn}::{member_name}");
+                ctx.push_symbol_with_doc(
+                    RawSymbol {
+                        name: member_name,
+                        fqdn: member_fqdn.clone(),
+                        kind: Kind::Value,
+                        language_kind: LanguageKind::from("interface_property"),
+                        module: Some(fqdn.clone()),
+                        visibility: map_access_modifier(None, exported),
+                        location: ctx.span_location(prop.span),
+                        signature: None,
+                        body_hash: ctx.body_hash_of(prop.span),
+                        attributes: vec![],
+                    },
+                    prop.span.lo,
+                );
+                if let Some(ann) = &prop.type_ann {
+                    visit::visit_type_ann_for_uses(
+                        ctx,
+                        ann,
+                        parent_fqdn,
+                        &member_fqdn,
+                        visit::TYPE_CTX_INTERFACE_MEMBER,
+                    );
+                }
+            }
+            TsTypeElement::TsMethodSignature(method) => {
+                if method.computed {
+                    continue;
+                }
+                let Some(member_name) = interface_member_key_name(&method.key) else {
+                    continue;
+                };
+                let member_fqdn = format!("{fqdn}::{member_name}");
+                ctx.push_symbol_with_doc(
+                    RawSymbol {
+                        name: member_name,
+                        fqdn: member_fqdn.clone(),
+                        kind: Kind::Function,
+                        language_kind: LanguageKind::from("interface_method"),
+                        module: Some(fqdn.clone()),
+                        visibility: map_access_modifier(None, exported),
+                        location: ctx.span_location(method.span),
+                        signature: None,
+                        body_hash: ctx.body_hash_of(method.span),
+                        attributes: vec![],
+                    },
+                    method.span.lo,
+                );
+                for p in &method.params {
+                    visit::visit_ts_fn_param_for_uses(
+                        ctx,
+                        p,
+                        parent_fqdn,
+                        &member_fqdn,
+                        visit::TYPE_CTX_ANNOTATION,
+                    );
+                }
+                if let Some(ann) = &method.type_ann {
+                    visit::visit_type_ann_for_uses(
+                        ctx,
+                        ann,
+                        parent_fqdn,
+                        &member_fqdn,
+                        visit::TYPE_CTX_ANNOTATION,
+                    );
+                }
+                if let Some(type_params) = &method.type_params {
+                    visit::visit_ts_type_param_decl_for_uses(
+                        ctx,
+                        type_params,
+                        parent_fqdn,
+                        &member_fqdn,
+                        visit::TYPE_CTX_CONSTRAINT,
+                    );
+                }
+            }
+            TsTypeElement::TsGetterSignature(getter) => {
+                if getter.computed {
+                    continue;
+                }
+                let Some(member_name) = interface_member_key_name(&getter.key) else {
+                    continue;
+                };
+                let member_fqdn = format!("{fqdn}::{member_name}");
+                ctx.push_symbol_with_doc(
+                    RawSymbol {
+                        name: member_name,
+                        fqdn: member_fqdn.clone(),
+                        kind: Kind::Function,
+                        language_kind: LanguageKind::from("interface_getter"),
+                        module: Some(fqdn.clone()),
+                        visibility: map_access_modifier(None, exported),
+                        location: ctx.span_location(getter.span),
+                        signature: None,
+                        body_hash: ctx.body_hash_of(getter.span),
+                        attributes: vec![],
+                    },
+                    getter.span.lo,
+                );
+                if let Some(ann) = &getter.type_ann {
+                    visit::visit_type_ann_for_uses(
+                        ctx,
+                        ann,
+                        parent_fqdn,
+                        &member_fqdn,
+                        visit::TYPE_CTX_ANNOTATION,
+                    );
+                }
+            }
+            TsTypeElement::TsSetterSignature(setter) => {
+                if setter.computed {
+                    continue;
+                }
+                let Some(member_name) = interface_member_key_name(&setter.key) else {
+                    continue;
+                };
+                let member_fqdn = format!("{fqdn}::{member_name}");
+                ctx.push_symbol_with_doc(
+                    RawSymbol {
+                        name: member_name,
+                        fqdn: member_fqdn.clone(),
+                        kind: Kind::Function,
+                        language_kind: LanguageKind::from("interface_setter"),
+                        module: Some(fqdn.clone()),
+                        visibility: map_access_modifier(None, exported),
+                        location: ctx.span_location(setter.span),
+                        signature: None,
+                        body_hash: ctx.body_hash_of(setter.span),
+                        attributes: vec![],
+                    },
+                    setter.span.lo,
+                );
+                visit::visit_ts_fn_param_for_uses(
+                    ctx,
+                    &setter.param,
+                    parent_fqdn,
+                    &member_fqdn,
+                    visit::TYPE_CTX_ANNOTATION,
+                );
+            }
+            // Call / construct / index signatures have no symbol identity
+            // (anonymous, structural). Their type annotations could still
+            // emit edges from the interface fqdn, but day-1 we skip them
+            // — they're rare in modern TS and the structural typing they
+            // express is better handled by Stage 3's lookup table.
+            TsTypeElement::TsCallSignatureDecl(_)
+            | TsTypeElement::TsConstructSignatureDecl(_)
+            | TsTypeElement::TsIndexSignature(_) => {}
+        }
     }
 }
 
@@ -981,26 +1229,53 @@ fn extract_type_alias_decl(
     }
 }
 
+/// Bug C-1 — extracts the enum symbol AND one `RawSymbol` per
+/// `TsEnumMember`. Pushes everything internally (the caller no longer
+/// receives a `RawSymbol`); this mirrors `extract_interface_decl`'s
+/// convention for declarations that own multiple sub-symbols.
 fn extract_enum_decl(
-    ctx: &TsWalkContext<'_>,
+    ctx: &mut TsWalkContext<'_>,
     item: &TsEnumDecl,
     parent_fqdn: &str,
     exported: bool,
-) -> RawSymbol {
+    outer_pos: BytePos,
+) {
     let name = item.id.sym.to_string();
-    let fqdn = format!("{parent_fqdn}::{name}");
+    let enum_fqdn = format!("{parent_fqdn}::{name}");
     let span = item.span;
-    RawSymbol {
-        name,
-        fqdn,
-        kind: Kind::Type,
-        language_kind: LanguageKind::from("enum"),
-        module: Some(parent_fqdn.to_string()),
-        visibility: map_access_modifier(None, exported),
-        location: ctx.span_location(span),
-        signature: None,
-        body_hash: ctx.body_hash_of(span),
-        attributes: vec![],
+    ctx.push_symbol_with_doc(
+        RawSymbol {
+            name,
+            fqdn: enum_fqdn.clone(),
+            kind: Kind::Type,
+            language_kind: LanguageKind::from("enum"),
+            module: Some(parent_fqdn.to_string()),
+            visibility: map_access_modifier(None, exported),
+            location: ctx.span_location(span),
+            signature: None,
+            body_hash: ctx.body_hash_of(span),
+            attributes: vec![],
+        },
+        outer_pos,
+    );
+    for member in &item.members {
+        let member_name = ts_enum_member_id_name(&member.id);
+        let member_fqdn = format!("{enum_fqdn}::{member_name}");
+        ctx.push_symbol_with_doc(
+            RawSymbol {
+                name: member_name,
+                fqdn: member_fqdn,
+                kind: Kind::Value,
+                language_kind: LanguageKind::from("enum_member"),
+                module: Some(enum_fqdn.clone()),
+                visibility: map_access_modifier(None, exported),
+                location: ctx.span_location(member.span),
+                signature: None,
+                body_hash: ctx.body_hash_of(member.span),
+                attributes: vec![],
+            },
+            member.span.lo,
+        );
     }
 }
 
@@ -1153,6 +1428,32 @@ fn method_name_string(key: &swc_core::ecma::ast::PropName) -> Option<String> {
         swc_core::ecma::ast::PropName::Computed(_) | swc_core::ecma::ast::PropName::BigInt(_) => {
             None
         }
+    }
+}
+
+/// Bug C-1 — extract a stable name from a TS interface-member key
+/// (`TsPropertySignature.key: Box<Expr>` and friends). Common shapes:
+/// `Expr::Ident` → identifier name, `Expr::Lit(Str)` → quoted property
+/// name. Computed / spread / unknown shapes return `None` so the
+/// caller skips emission of an anonymous sub-symbol.
+fn interface_member_key_name(expr: &swc_core::ecma::ast::Expr) -> Option<String> {
+    match expr {
+        swc_core::ecma::ast::Expr::Ident(id) => Some(id.sym.to_string()),
+        swc_core::ecma::ast::Expr::Lit(swc_core::ecma::ast::Lit::Str(s)) => {
+            Some(s.value.to_string_lossy().into_owned())
+        }
+        swc_core::ecma::ast::Expr::Lit(swc_core::ecma::ast::Lit::Num(n)) => Some(n.value.to_string()),
+        _ => None,
+    }
+}
+
+/// Bug C-1 — extract the textual name of a `TsEnumMember.id`.
+/// swc parses both `Ident(Foo)` and `Str("Foo")` flavors (TS lets you
+/// write `enum E { "foo bar" = 1 }`).
+fn ts_enum_member_id_name(id: &swc_core::ecma::ast::TsEnumMemberId) -> String {
+    match id {
+        swc_core::ecma::ast::TsEnumMemberId::Ident(i) => i.sym.to_string(),
+        swc_core::ecma::ast::TsEnumMemberId::Str(s) => s.value.to_string_lossy().into_owned(),
     }
 }
 

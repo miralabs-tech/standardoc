@@ -14,6 +14,7 @@ use crate::walk_core::WalkContextCore;
 use super::body_hash;
 use super::extract_call;
 use super::extract_doc;
+use super::extract_type;
 use super::extract_use;
 use super::visibility;
 
@@ -170,33 +171,86 @@ fn process_item_p1(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
     match item {
         syn::Item::Fn(it) => {
             let path = ctx.core.file_path.clone();
+            let fn_fqdn = format!("{current_module}::{}", it.sig.ident);
             ctx.push_symbol_with_doc(extract_fn(it, current_module, &path), &it.attrs);
+            // Bug C-3: walk the signature for UsesType edges. Fn-level
+            // generic params bind as locals automatically inside
+            // `visit_signature`. No outer locals at module scope.
+            let outer = std::collections::HashSet::new();
+            extract_type::visit_signature(ctx, &it.sig, current_module, &fn_fqdn, &outer);
         }
         syn::Item::Struct(it) => {
-            let path = ctx.core.file_path.clone();
-            ctx.push_symbol_with_doc(extract_struct(it, current_module, &path), &it.attrs);
+            extract_struct(ctx, it, current_module);
         }
         syn::Item::Enum(it) => {
-            let path = ctx.core.file_path.clone();
-            ctx.push_symbol_with_doc(extract_enum(it, current_module, &path), &it.attrs);
+            extract_enum(ctx, it, current_module);
         }
         syn::Item::Union(it) => {
             let path = ctx.core.file_path.clone();
+            let union_fqdn = format!("{current_module}::{}", it.ident);
             ctx.push_symbol_with_doc(extract_union(it, current_module, &path), &it.attrs);
+            // Bug C-3: walk each union field's type for UsesType edges.
+            let locals = extract_type::collect_generic_param_idents(&it.generics);
+            for field in &it.fields.named {
+                extract_type::visit_type(
+                    ctx,
+                    &field.ty,
+                    current_module,
+                    &union_fqdn,
+                    extract_type::TYPE_CTX_ANNOTATION,
+                    &locals,
+                );
+            }
+            extract_type::visit_generics(ctx, &it.generics, current_module, &union_fqdn, &locals);
         }
         syn::Item::Trait(it) => extract_trait(ctx, it, current_module),
         syn::Item::Impl(it) => extract_impl(ctx, it, current_module),
         syn::Item::Type(it) => {
             let path = ctx.core.file_path.clone();
+            let alias_fqdn = format!("{current_module}::{}", it.ident);
             ctx.push_symbol_with_doc(extract_type_alias(it, current_module, &path), &it.attrs);
+            // Bug C-3: walk the alias RHS body for UsesType edges
+            // (`type X<T> = Vec<Foo<T>>` → edge to Foo from X with
+            // type-alias-body context; `T` is in locals → skipped).
+            let locals = extract_type::collect_generic_param_idents(&it.generics);
+            extract_type::visit_type(
+                ctx,
+                &it.ty,
+                current_module,
+                &alias_fqdn,
+                extract_type::TYPE_CTX_ALIAS_BODY,
+                &locals,
+            );
+            extract_type::visit_generics(ctx, &it.generics, current_module, &alias_fqdn, &locals);
         }
         syn::Item::Const(it) => {
             let path = ctx.core.file_path.clone();
+            let const_fqdn = format!("{current_module}::{}", it.ident);
             ctx.push_symbol_with_doc(extract_const(it, current_module, &path), &it.attrs);
+            // Bug C-3: walk const's type annotation (`const X: Foo = …`).
+            let empty = std::collections::HashSet::new();
+            extract_type::visit_type(
+                ctx,
+                &it.ty,
+                current_module,
+                &const_fqdn,
+                extract_type::TYPE_CTX_ANNOTATION,
+                &empty,
+            );
         }
         syn::Item::Static(it) => {
             let path = ctx.core.file_path.clone();
+            let static_fqdn = format!("{current_module}::{}", it.ident);
             ctx.push_symbol_with_doc(extract_static(it, current_module, &path), &it.attrs);
+            let empty = std::collections::HashSet::new();
+            extract_type::visit_type(
+                ctx,
+                &it.ty,
+                current_module,
+                &static_fqdn,
+                extract_type::TYPE_CTX_ANNOTATION,
+                &empty,
+            );
         }
         syn::Item::Macro(it) => {
             let path = ctx.core.file_path.clone();
@@ -285,30 +339,207 @@ fn extract_fn(item: &syn::ItemFn, parent_fqdn: &str, path: &str) -> RawSymbol {
     }
 }
 
-fn extract_struct(item: &syn::ItemStruct, parent_fqdn: &str, path: &str) -> RawSymbol {
-    type_def_symbol(
-        item.ident.to_string(),
+/// Bug C-2 — push the struct symbol AND one `RawSymbol` per field.
+/// Named fields use the field ident as name; tuple struct fields use
+/// the positional index as both name and the fqdn segment. Each field's
+/// type is rendered as a `TypeRef` string and stored on
+/// `signature.returns` — the closest existing IR slot for a non-fn
+/// "this symbol exposes a single value of type T" relationship. Stage
+/// 2b-equivalent `UsesType` edges from a field to its type are NOT
+/// emitted here (deferred to Bug C-3 — the Rust counterpart of TS
+/// Stage 2b).
+fn extract_struct(ctx: &mut WalkContext, item: &syn::ItemStruct, parent_fqdn: &str) {
+    let path = ctx.core.file_path.clone();
+    let struct_name = item.ident.to_string();
+    let struct_fqdn = format!("{parent_fqdn}::{struct_name}");
+    let parent_sym = type_def_symbol(
+        struct_name,
         parent_fqdn,
-        path,
+        &path,
         "struct",
         &item.vis,
         item.span(),
         &item.to_token_stream(),
         &item.attrs,
-    )
+    );
+    ctx.push_symbol_with_doc(parent_sym, &item.attrs);
+    // Bug C-3: bind struct-level generic type params as locals so they
+    // don't leak as phantom UsesType edges from field types
+    // (`struct S<T> { f: T }` → `T` skipped).
+    let locals = extract_type::collect_generic_param_idents(&item.generics);
+    push_struct_fields(ctx, &item.fields, &struct_fqdn, &path, parent_fqdn, &locals);
+    extract_type::visit_generics(ctx, &item.generics, parent_fqdn, &struct_fqdn, &locals);
 }
 
-fn extract_enum(item: &syn::ItemEnum, parent_fqdn: &str, path: &str) -> RawSymbol {
-    type_def_symbol(
-        item.ident.to_string(),
+/// Bug C-2 — push the enum symbol AND one `RawSymbol` per variant.
+/// Variants are typed as `Kind::Type` (they construct a value of a
+/// distinct sum-type case). Inner fields of tuple/struct variants are
+/// NOT decomposed in v1 — that's a follow-up if usage demands it.
+fn extract_enum(ctx: &mut WalkContext, item: &syn::ItemEnum, parent_fqdn: &str) {
+    let path = ctx.core.file_path.clone();
+    let enum_name = item.ident.to_string();
+    let enum_fqdn = format!("{parent_fqdn}::{enum_name}");
+    let parent_sym = type_def_symbol(
+        enum_name,
         parent_fqdn,
-        path,
+        &path,
         "enum",
         &item.vis,
         item.span(),
         &item.to_token_stream(),
         &item.attrs,
-    )
+    );
+    ctx.push_symbol_with_doc(parent_sym, &item.attrs);
+    // Bug C-3: bind enum-level generic type params as locals visible
+    // to variant field types.
+    let locals = extract_type::collect_generic_param_idents(&item.generics);
+    for variant in &item.variants {
+        let variant_name = variant.ident.to_string();
+        let variant_fqdn = format!("{enum_fqdn}::{variant_name}");
+        ctx.push_symbol_with_doc(
+            RawSymbol {
+                name: variant_name,
+                fqdn: variant_fqdn.clone(),
+                kind: Kind::Type,
+                language_kind: LanguageKind::from("enum_variant"),
+                module: Some(enum_fqdn.clone()),
+                // Variants inherit the enum's visibility — they're not
+                // independently exportable in Rust.
+                visibility: visibility::map(&item.vis),
+                location: span_to_location(variant.span(), &path),
+                signature: None,
+                body_hash: Some(body_hash::hash_tokens(&variant.to_token_stream())),
+                attributes: extract_attributes(&variant.attrs, &path),
+            },
+            &variant.attrs,
+        );
+        // Bug C-3: walk the variant's inner field types
+        // (`enum E { V(Foo, Bar) }` → V → UsesType{Foo, Bar}).
+        // Inner fields are NOT pushed as sub-symbols (deferred follow-up)
+        // but their type references are emitted from the variant fqdn.
+        match &variant.fields {
+            syn::Fields::Named(named) => {
+                for field in &named.named {
+                    extract_type::visit_type(
+                        ctx,
+                        &field.ty,
+                        parent_fqdn,
+                        &variant_fqdn,
+                        extract_type::TYPE_CTX_ANNOTATION,
+                        &locals,
+                    );
+                }
+            }
+            syn::Fields::Unnamed(unnamed) => {
+                for field in &unnamed.unnamed {
+                    extract_type::visit_type(
+                        ctx,
+                        &field.ty,
+                        parent_fqdn,
+                        &variant_fqdn,
+                        extract_type::TYPE_CTX_ANNOTATION,
+                        &locals,
+                    );
+                }
+            }
+            syn::Fields::Unit => {}
+        }
+    }
+    extract_type::visit_generics(ctx, &item.generics, parent_fqdn, &enum_fqdn, &locals);
+}
+
+/// Shared between `extract_struct` and (later) struct-variant
+/// decomposition: walk a `syn::Fields` enum and push a sub-symbol per
+/// named/tuple field. Unit fields produce nothing.
+///
+/// `current_module` is needed for `UsesType` resolution; `locals` is the
+/// set of generic type-param names visible to the field's type
+/// annotation (struct/enum-level generics).
+fn push_struct_fields(
+    ctx: &mut WalkContext,
+    fields: &syn::Fields,
+    parent_fqdn: &str,
+    path: &str,
+    current_module: &str,
+    locals: &std::collections::HashSet<String>,
+) {
+    match fields {
+        syn::Fields::Named(named) => {
+            for field in &named.named {
+                let Some(ident) = &field.ident else { continue };
+                push_field(
+                    ctx,
+                    field,
+                    &ident.to_string(),
+                    parent_fqdn,
+                    path,
+                    "field",
+                    current_module,
+                    locals,
+                );
+            }
+        }
+        syn::Fields::Unnamed(unnamed) => {
+            for (idx, field) in unnamed.unnamed.iter().enumerate() {
+                push_field(
+                    ctx,
+                    field,
+                    &idx.to_string(),
+                    parent_fqdn,
+                    path,
+                    "tuple_field",
+                    current_module,
+                    locals,
+                );
+            }
+        }
+        syn::Fields::Unit => {}
+    }
+}
+
+fn push_field(
+    ctx: &mut WalkContext,
+    field: &syn::Field,
+    name: &str,
+    parent_fqdn: &str,
+    path: &str,
+    language_kind: &str,
+    current_module: &str,
+    locals: &std::collections::HashSet<String>,
+) {
+    let field_fqdn = format!("{parent_fqdn}::{name}");
+    let ty_str = compact_rust_tokens(&field.ty.to_token_stream().to_string());
+    let signature = Signature {
+        params: vec![],
+        returns: Some(TypeRef::new(ty_str)),
+        modifiers: Modifiers::default(),
+        meta: SignatureMeta::default(),
+    };
+    ctx.push_symbol_with_doc(
+        RawSymbol {
+            name: name.to_string(),
+            fqdn: field_fqdn.clone(),
+            kind: Kind::Value,
+            language_kind: LanguageKind::from(language_kind),
+            module: Some(parent_fqdn.to_string()),
+            visibility: visibility::map(&field.vis),
+            location: span_to_location(field.span(), path),
+            signature: Some(signature),
+            body_hash: Some(body_hash::hash_tokens(&field.to_token_stream())),
+            attributes: extract_attributes(&field.attrs, path),
+        },
+        &field.attrs,
+    );
+    // Bug C-3: emit UsesType from the field fqdn for every named type
+    // inside the field's annotation.
+    extract_type::visit_type(
+        ctx,
+        &field.ty,
+        current_module,
+        &field_fqdn,
+        extract_type::TYPE_CTX_ANNOTATION,
+        locals,
+    );
 }
 
 fn extract_union(item: &syn::ItemUnion, parent_fqdn: &str, path: &str) -> RawSymbol {
@@ -385,6 +616,22 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
         &item.attrs,
     );
 
+    // Bug C-3: bind trait-level generic params as locals so methods'
+    // signatures see them.
+    let trait_locals = extract_type::collect_generic_param_idents(&item.generics);
+    // Walk supertrait bounds (`trait T: Foo + Bar`) with type-extends.
+    for bound in &item.supertraits {
+        extract_type::visit_type_param_bound(
+            ctx,
+            bound,
+            parent_fqdn,
+            &trait_fqdn,
+            extract_type::TYPE_CTX_EXTENDS,
+            &trait_locals,
+        );
+    }
+    extract_type::visit_generics(ctx, &item.generics, parent_fqdn, &trait_fqdn, &trait_locals);
+
     for trait_item in &item.items {
         if let syn::TraitItem::Fn(item_fn) = trait_item {
             let fn_name = item_fn.sig.ident.to_string();
@@ -394,7 +641,7 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
             ctx.push_symbol_with_doc(
                 RawSymbol {
                     name: fn_name,
-                    fqdn: fn_fqdn,
+                    fqdn: fn_fqdn.clone(),
                     kind: Kind::Function,
                     language_kind: LanguageKind::from("trait_fn"),
                     module: Some(trait_fqdn.clone()),
@@ -405,6 +652,16 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
                     attributes: extract_attributes(&item_fn.attrs, &path),
                 },
                 &item_fn.attrs,
+            );
+            // Bug C-3: walk the trait method's signature. Pass the
+            // trait's generics as outer_locals so a method using `T`
+            // declared at the trait level doesn't emit on `T`.
+            extract_type::visit_signature(
+                ctx,
+                &item_fn.sig,
+                parent_fqdn,
+                &fn_fqdn,
+                &trait_locals,
             );
         }
     }
@@ -440,6 +697,35 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
         });
     }
 
+    // Bug C-3: bind impl-level generic params + walk impl-level
+    // constraints. Then walk the self type's generic args
+    // (`impl<T> Foo<Bar> for Baz<T>` → UsesType{Bar} from Baz, plus
+    // any constraint edges) under type-implements context.
+    let impl_locals = extract_type::collect_generic_param_idents(&item.generics);
+    extract_type::visit_generics(ctx, &item.generics, parent_fqdn, &target_fqdn, &impl_locals);
+    if let Some((_, trait_path, _)) = &item.trait_ {
+        // Walk the trait path's generic args (`impl Trait<Foo> for X`
+        // → UsesType{Foo} with type-implements). The trait path
+        // itself already produced an `Implements` edge above; this
+        // adds the inner args as `UsesType`.
+        for seg in &trait_path.segments {
+            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                for arg in &args.args {
+                    if let syn::GenericArgument::Type(ty) = arg {
+                        extract_type::visit_type(
+                            ctx,
+                            ty,
+                            parent_fqdn,
+                            &target_fqdn,
+                            extract_type::TYPE_CTX_IMPLEMENTS,
+                            &impl_locals,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     for impl_item in &item.items {
         if let syn::ImplItem::Fn(item_fn) = impl_item {
             let fn_name = item_fn.sig.ident.to_string();
@@ -449,7 +735,7 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
             ctx.push_symbol_with_doc(
                 RawSymbol {
                     name: fn_name,
-                    fqdn: fn_fqdn,
+                    fqdn: fn_fqdn.clone(),
                     kind: Kind::Function,
                     language_kind: LanguageKind::from("impl_fn"),
                     module: Some(target_fqdn.clone()),
@@ -460,6 +746,15 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
                     attributes: extract_attributes(&item_fn.attrs, &path),
                 },
                 &item_fn.attrs,
+            );
+            // Bug C-3: walk the impl method's signature with the
+            // impl block's generics as outer_locals.
+            extract_type::visit_signature(
+                ctx,
+                &item_fn.sig,
+                parent_fqdn,
+                &fn_fqdn,
+                &impl_locals,
             );
         }
     }
@@ -768,21 +1063,74 @@ mod tests {
     }
 
     #[test]
-    fn struct_emits_type_symbol() {
+    fn struct_emits_type_symbol_and_field_sub_symbols() {
+        // Bug C-2: a struct now pushes the parent type symbol AND one
+        // Value-kind sub-symbol per named field.
         let parsed = parse("pub struct Foo { x: u32 }");
         let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(symbols.len(), 1);
-        assert_eq!(symbols[0].kind, Kind::Type);
-        assert_eq!(symbols[0].language_kind.as_str(), "struct");
-        assert_eq!(symbols[0].fqdn, "c::Foo");
+        let foo = symbols.iter().find(|s| s.fqdn == "c::Foo").unwrap();
+        assert_eq!(foo.kind, Kind::Type);
+        assert_eq!(foo.language_kind.as_str(), "struct");
+        let field = symbols.iter().find(|s| s.fqdn == "c::Foo::x").unwrap();
+        assert_eq!(field.kind, Kind::Value);
+        assert_eq!(field.language_kind.as_str(), "field");
+        assert_eq!(field.module.as_deref(), Some("c::Foo"));
+        // Type captured on signature.returns as a TypeRef.
+        assert_eq!(
+            field.signature.as_ref().unwrap().returns.as_ref().unwrap().display,
+            "u32",
+        );
     }
 
     #[test]
-    fn enum_emits_type_symbol() {
+    fn tuple_struct_emits_positional_field_sub_symbols() {
+        let parsed = parse("pub struct Pair(pub u32, pub String);");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let f0 = symbols.iter().find(|s| s.fqdn == "c::Pair::0").unwrap();
+        let f1 = symbols.iter().find(|s| s.fqdn == "c::Pair::1").unwrap();
+        assert_eq!(f0.language_kind.as_str(), "tuple_field");
+        assert_eq!(f1.language_kind.as_str(), "tuple_field");
+        assert_eq!(
+            f0.signature.as_ref().unwrap().returns.as_ref().unwrap().display,
+            "u32",
+        );
+        assert_eq!(
+            f1.signature.as_ref().unwrap().returns.as_ref().unwrap().display,
+            "String",
+        );
+    }
+
+    #[test]
+    fn enum_emits_type_symbol_and_variant_sub_symbols() {
+        // Bug C-2: enum pushes the parent type symbol AND one Type-kind
+        // sub-symbol per variant.
         let parsed = parse("enum E { A, B }");
         let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(symbols[0].kind, Kind::Type);
-        assert_eq!(symbols[0].language_kind.as_str(), "enum");
+        let e = symbols.iter().find(|s| s.fqdn == "c::E").unwrap();
+        assert_eq!(e.kind, Kind::Type);
+        assert_eq!(e.language_kind.as_str(), "enum");
+        let a = symbols.iter().find(|s| s.fqdn == "c::E::A").unwrap();
+        let b = symbols.iter().find(|s| s.fqdn == "c::E::B").unwrap();
+        assert_eq!(a.language_kind.as_str(), "enum_variant");
+        assert_eq!(a.module.as_deref(), Some("c::E"));
+        assert_eq!(b.language_kind.as_str(), "enum_variant");
+    }
+
+    #[test]
+    fn unit_struct_emits_only_parent_symbol() {
+        let parsed = parse("pub struct Marker;");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let marker = symbols.iter().find(|s| s.fqdn == "c::Marker").unwrap();
+        assert_eq!(marker.language_kind.as_str(), "struct");
+        // No sub-fields for a unit struct.
+        let children: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.module.as_deref() == Some("c::Marker"))
+            .collect();
+        assert!(
+            children.is_empty(),
+            "expected no sub-symbols for unit struct, got {children:?}",
+        );
     }
 
     #[test]
@@ -1108,5 +1456,257 @@ mod tests {
             ctx.resolve_path("self::foo", "c"),
             ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "c::foo"
         ));
+    }
+
+    // --- Bug C-3 tests: Rust UsesType emission ---
+
+    fn uses_type_edges(edges: &[RawEdge]) -> Vec<&RawEdge> {
+        edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::UsesType)
+            .collect()
+    }
+
+    fn uses_type_with<'a>(edges: &'a [RawEdge], attrs: &[&str]) -> Vec<&'a RawEdge> {
+        edges
+            .iter()
+            .filter(|e| {
+                e.kind == EdgeKind::UsesType
+                    && attrs.iter().all(|a| e.attributes.iter().any(|x| x == a))
+            })
+            .collect()
+    }
+
+    fn resolved_targets(edges: &[&RawEdge]) -> Vec<String> {
+        edges
+            .iter()
+            .filter_map(|e| match &e.to {
+                ResolvedOrUnresolved::Resolved { fqdn } => Some(fqdn.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bug_c3_fn_param_type_emits_uses_type() {
+        let parsed = parse("pub struct Foo; pub fn process(x: Foo) {}");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
+        let targets = resolved_targets(&refs);
+        assert!(
+            targets.contains(&"c::Foo".to_string()),
+            "expected UsesType edge to c::Foo, got {targets:?}",
+        );
+        assert!(
+            refs.iter().any(|e| e.from_fqdn == "c::process"),
+            "expected edge from c::process, got {refs:?}",
+        );
+    }
+
+    #[test]
+    fn bug_c3_fn_return_type_emits_uses_type() {
+        let parsed = parse("pub struct Bar; pub fn make() -> Bar { Bar }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
+        let targets = resolved_targets(&refs);
+        assert!(targets.contains(&"c::Bar".to_string()));
+    }
+
+    #[test]
+    fn bug_c3_struct_field_type_emits_uses_type_from_field_fqdn() {
+        let parsed = parse("pub struct Foo; pub struct Bar { pub f: Foo }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
+        // Per-field provenance: edge originates from c::Bar::f, not c::Bar.
+        let from_field: Vec<&RawEdge> = refs
+            .iter()
+            .copied()
+            .filter(|e| e.from_fqdn == "c::Bar::f")
+            .collect();
+        assert!(
+            !from_field.is_empty(),
+            "expected UsesType edge from c::Bar::f, got {refs:?}",
+        );
+        let targets = resolved_targets(&from_field);
+        assert!(targets.contains(&"c::Foo".to_string()));
+    }
+
+    #[test]
+    fn bug_c3_generic_type_param_does_not_leak() {
+        let parsed = parse("pub fn id<T>(x: T) -> T { x }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_edges(&edges);
+        // `T` is fn-level generic → bound as local → no UsesType edge to c::T.
+        let leaked: Vec<_> = refs
+            .iter()
+            .filter(|e| match &e.to {
+                ResolvedOrUnresolved::Resolved { fqdn } => fqdn == "c::T",
+                ResolvedOrUnresolved::Unresolved { name } => name == "c::T",
+                _ => false,
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "generic param T leaked as UsesType edge: {leaked:?}",
+        );
+    }
+
+    #[test]
+    fn bug_c3_struct_generic_param_does_not_leak_in_fields() {
+        let parsed = parse("pub struct Box2<T> { pub inner: T }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_edges(&edges);
+        let leaked: Vec<_> = refs
+            .iter()
+            .filter(|e| match &e.to {
+                ResolvedOrUnresolved::Resolved { fqdn } => fqdn == "c::T",
+                ResolvedOrUnresolved::Unresolved { name } => name == "c::T",
+                _ => false,
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "struct-level T leaked: {leaked:?}",
+        );
+    }
+
+    #[test]
+    fn bug_c3_generic_constraint_emits_type_constraint() {
+        let parsed =
+            parse("pub trait Foo {} pub fn process<T: Foo>(x: T) -> T { x }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type", "type-constraint"]);
+        let targets = resolved_targets(&refs);
+        assert!(
+            targets.contains(&"c::Foo".to_string()),
+            "expected UsesType/type-constraint edge to c::Foo, got {targets:?}",
+        );
+    }
+
+    #[test]
+    fn bug_c3_where_clause_emits_type_constraint() {
+        let parsed =
+            parse("pub trait Foo {} pub fn process<T>(x: T) where T: Foo { let _ = x; }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type", "type-constraint"]);
+        let targets = resolved_targets(&refs);
+        assert!(
+            targets.contains(&"c::Foo".to_string()),
+            "expected via-type/type-constraint via where-clause to c::Foo, got {targets:?}",
+        );
+    }
+
+    #[test]
+    fn bug_c3_type_alias_body_emits_uses_type() {
+        let parsed = parse("pub struct Foo; pub type X = Foo;");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type", "type-alias-body"]);
+        let targets = resolved_targets(&refs);
+        assert!(
+            targets.contains(&"c::Foo".to_string()),
+            "expected UsesType/type-alias-body to c::Foo, got {targets:?}",
+        );
+        assert!(refs.iter().all(|e| e.from_fqdn == "c::X"));
+    }
+
+    #[test]
+    fn bug_c3_const_static_type_emits_uses_type() {
+        let parsed =
+            parse("pub struct Cfg; pub const K: Cfg = Cfg; pub static M: Cfg = Cfg;");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
+        let const_edges: Vec<_> =
+            refs.iter().filter(|e| e.from_fqdn == "c::K").collect();
+        let static_edges: Vec<_> =
+            refs.iter().filter(|e| e.from_fqdn == "c::M").collect();
+        assert!(!const_edges.is_empty(), "expected const K → Cfg edge");
+        assert!(!static_edges.is_empty(), "expected static M → Cfg edge");
+    }
+
+    #[test]
+    fn bug_c3_trait_supertrait_emits_type_extends() {
+        let parsed = parse("pub trait Foo {} pub trait Bar: Foo {}");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type", "type-extends"]);
+        let targets = resolved_targets(&refs);
+        assert!(
+            targets.contains(&"c::Foo".to_string()),
+            "expected UsesType/type-extends from Bar to Foo, got {targets:?}",
+        );
+    }
+
+    #[test]
+    fn bug_c3_impl_trait_generic_arg_emits_type_implements() {
+        let parsed = parse(
+            "pub struct Foo; pub trait Iface<T> {} pub struct C; \
+             impl Iface<Foo> for C {}",
+        );
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type", "type-implements"]);
+        let targets = resolved_targets(&refs);
+        assert!(
+            targets.contains(&"c::Foo".to_string()),
+            "expected UsesType/type-implements arg to c::Foo, got {targets:?}",
+        );
+    }
+
+    #[test]
+    fn bug_c3_inner_generic_arg_emits_inside_builtin_wrapper() {
+        // `Vec<Foo>` — outer Vec filtered (builtin), inner Foo emits.
+        let parsed = parse("pub struct Foo; pub fn collect() -> Vec<Foo> { vec![] }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
+        let targets = resolved_targets(&refs);
+        assert!(
+            !targets.contains(&"c::Vec".to_string())
+                && !targets.iter().any(|t| t.ends_with("::Vec")),
+            "expected Vec filtered as builtin, got {targets:?}",
+        );
+        assert!(
+            targets.contains(&"c::Foo".to_string()),
+            "expected inner Foo emitted, got {targets:?}",
+        );
+    }
+
+    #[test]
+    fn bug_c3_unresolved_type_carries_unresolved_type_attr() {
+        let parsed = parse("pub fn x(p: SomeUnknown) {}");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type", "unresolved-type"]);
+        assert!(
+            !refs.is_empty(),
+            "expected unresolved-type marker on unknown type ref",
+        );
+        let unresolved_names: Vec<&str> = refs
+            .iter()
+            .filter_map(|e| match &e.to {
+                ResolvedOrUnresolved::Unresolved { name } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            unresolved_names.iter().any(|n| n.ends_with("::SomeUnknown")),
+            "expected unresolved canonical name, got {unresolved_names:?}",
+        );
+    }
+
+    #[test]
+    fn bug_c3_enum_variant_inner_field_types_emit_from_variant_fqdn() {
+        let parsed = parse(
+            "pub struct Foo; pub struct Bar; pub enum E { V(Foo, Bar) }",
+        );
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
+        let from_variant: Vec<&RawEdge> = refs
+            .iter()
+            .copied()
+            .filter(|e| e.from_fqdn == "c::E::V")
+            .collect();
+        let targets = resolved_targets(&from_variant);
+        assert!(
+            targets.contains(&"c::Foo".to_string())
+                && targets.contains(&"c::Bar".to_string()),
+            "expected variant V → Foo, Bar (got {targets:?})",
+        );
     }
 }

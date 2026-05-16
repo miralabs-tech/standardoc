@@ -176,6 +176,98 @@ pub(crate) const JS_GLOBALS: &[&str] = &[
     "decodeURIComponent",
 ];
 
+/// TS builtin type names filtered out of `UsesType` edge emission. Mirror
+/// of [`JS_GLOBALS`] but for the **type namespace** — these are TS lib
+/// utility types and built-in generics ambient in `lib.d.ts` rather than
+/// project-owned symbols. Keeps the graph free of `Array<Foo>`,
+/// `Promise<Bar>`, `Partial<T>`, `Record<K, V>`, etc. The *inner* type
+/// args still recurse and emit their own edges — only the wrapper name
+/// is filtered.
+///
+/// Primitive keyword types (`string`, `number`, `boolean`, `void`, …)
+/// are parsed by swc as `TsKeywordType` and never reach `TsTypeRef`, so
+/// they don't need an entry here.
+pub(crate) const TS_BUILTIN_TYPES: &[&str] = &[
+    // Containers / collections
+    "Array",
+    "ReadonlyArray",
+    "Map",
+    "ReadonlyMap",
+    "Set",
+    "ReadonlySet",
+    "WeakMap",
+    "WeakSet",
+    // Async / iteration
+    "Promise",
+    "PromiseLike",
+    "Awaited",
+    "Iterator",
+    "Iterable",
+    "IterableIterator",
+    "AsyncIterator",
+    "AsyncIterable",
+    "AsyncIterableIterator",
+    "Generator",
+    "AsyncGenerator",
+    "GeneratorFunction",
+    "AsyncGeneratorFunction",
+    // Utility types
+    "Partial",
+    "Required",
+    "Readonly",
+    "Pick",
+    "Omit",
+    "Exclude",
+    "Extract",
+    "NonNullable",
+    "ReturnType",
+    "Parameters",
+    "InstanceType",
+    "Record",
+    "ConstructorParameters",
+    "ThisParameterType",
+    "OmitThisParameter",
+    "ThisType",
+    "Capitalize",
+    "Uncapitalize",
+    "Lowercase",
+    "Uppercase",
+    "NoInfer",
+    // Misc lib types
+    "Function",
+    "Object",
+    "Number",
+    "String",
+    "Boolean",
+    "Symbol",
+    "Date",
+    "RegExp",
+    "Error",
+    "TypeError",
+    "RangeError",
+    "SyntaxError",
+    "ReferenceError",
+    "EvalError",
+    "URIError",
+    "JSON",
+    "Math",
+    "ArrayBuffer",
+    "ArrayBufferLike",
+    "SharedArrayBuffer",
+    "DataView",
+    "Int8Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "Int16Array",
+    "Uint16Array",
+    "Int32Array",
+    "Uint32Array",
+    "Float32Array",
+    "Float64Array",
+    "BigInt64Array",
+    "BigUint64Array",
+];
+
 struct IdentCollector<'a> {
     base_offset: usize,
     attribute: TemplateAttribute,
