@@ -62,9 +62,14 @@ export function formatNeighborGroup(
 }
 
 export function targetLabel(t: ResolvedOrUnresolvedJson): string {
-  if ('Resolved' in t) return t.Resolved.fqdn;
-  if ('Unresolved' in t) return `<unresolved: ${t.Unresolved.name}>`;
-  return `<bridge ${t.UnresolvedBridge.bridge}: ${t.UnresolvedBridge.name}>`;
+  switch (t.kind) {
+    case 'resolved':
+      return t.fqdn;
+    case 'unresolved':
+      return `<unresolved: ${t.name}>`;
+    case 'unresolved_bridge':
+      return `<bridge ${t.bridge}: ${t.name}>`;
+  }
 }
 
 function indent(text: string): string {

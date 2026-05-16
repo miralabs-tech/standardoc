@@ -31,12 +31,13 @@ export interface RawSymbolJson {
   signature?: unknown;
   body_hash: string | null;
   attributes?: unknown[];
+  is_external?: boolean;
 }
 
 export type ResolvedOrUnresolvedJson =
-  | { Resolved: { fqdn: string } }
-  | { Unresolved: { name: string } }
-  | { UnresolvedBridge: { bridge: string; name: string } };
+  | { kind: 'resolved'; fqdn: string }
+  | { kind: 'unresolved'; name: string }
+  | { kind: 'unresolved_bridge'; bridge: string; name: string };
 
 export interface NeighborSymbolJson {
   edge_kind: EdgeKindJson;
@@ -56,4 +57,25 @@ export interface SymbolContextWithNeighborsJson {
   callees: NeighborSymbolJson[];
   imports: NeighborSymbolJson[];
   imported_by: NeighborSymbolJson[];
+}
+
+export interface ListSymbolsPageJson {
+  items: RawSymbolJson[];
+  next_cursor: string | null;
+}
+
+export interface CurrentRevisionJson {
+  revision: number;
+  rag: { enabled: boolean; embedder: { id: string; dim: number } | null };
+  watcher: { active: boolean };
+  indexing: { ready: boolean };
+}
+
+export type CheckStaleEntryJson =
+  | { fqdn: string; status: 'fresh' }
+  | { fqdn: string; status: 'stale'; last_modified_revision: number }
+  | { fqdn: string; status: 'missing' };
+
+export interface CheckStaleJson {
+  results: CheckStaleEntryJson[];
 }

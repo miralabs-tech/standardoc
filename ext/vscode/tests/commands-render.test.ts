@@ -62,13 +62,13 @@ describe('pickTopFqdn', () => {
 
 describe('targetLabel', () => {
   test('Resolved → fqdn', () => {
-    expect(targetLabel({ Resolved: { fqdn: 'a::b' } })).toBe('a::b');
+    expect(targetLabel({ kind: 'resolved', fqdn: 'a::b' })).toBe('a::b');
   });
   test('Unresolved → bracketed name', () => {
-    expect(targetLabel({ Unresolved: { name: 'foo' } })).toBe('<unresolved: foo>');
+    expect(targetLabel({ kind: 'unresolved', name: 'foo' })).toBe('<unresolved: foo>');
   });
   test('UnresolvedBridge → bracketed bridge+name', () => {
-    expect(targetLabel({ UnresolvedBridge: { bridge: 'tauri', name: 'cmd' } })).toBe(
+    expect(targetLabel({ kind: 'unresolved_bridge', bridge: 'tauri', name: 'cmd' })).toBe(
       '<bridge tauri: cmd>',
     );
   });
@@ -91,8 +91,8 @@ describe('formatNeighborGroup', () => {
 
   test('non-empty group lists each neighbor with edge_kind', () => {
     const ns: NeighborSymbolJson[] = [
-      { edge_kind: 'CALLS', target: { Resolved: { fqdn: 'a::b' } }, resolved_symbol: null },
-      { edge_kind: 'CALLS', target: { Unresolved: { name: 'unk' } }, resolved_symbol: null },
+      { edge_kind: 'CALLS', target: { kind: 'resolved', fqdn: 'a::b' }, resolved_symbol: null },
+      { edge_kind: 'CALLS', target: { kind: 'unresolved', name: 'unk' }, resolved_symbol: null },
     ];
     const s = formatNeighborGroup('callees', ns);
     expect(s).toContain('callees (2):');
@@ -109,11 +109,11 @@ describe('formatSymbolContext', () => {
       document_description: 'Documents the parse pipeline.',
     },
     callers: [
-      { edge_kind: 'CALLS', target: { Resolved: { fqdn: 'cli::main' } }, resolved_symbol: null },
+      { edge_kind: 'CALLS', target: { kind: 'resolved', fqdn: 'cli::main' }, resolved_symbol: null },
     ],
     callees: [],
     imports: [
-      { edge_kind: 'IMPORTS', target: { Resolved: { fqdn: 'std::sync::Arc' } }, resolved_symbol: null },
+      { edge_kind: 'IMPORTS', target: { kind: 'resolved', fqdn: 'std::sync::Arc' }, resolved_symbol: null },
     ],
     imported_by: [],
   };

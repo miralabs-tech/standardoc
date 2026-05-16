@@ -215,6 +215,32 @@ export class McpClient implements vscode.Disposable {
     return this.callTool('usage_stats', { period });
   }
 
+  async currentRevision(): Promise<string> {
+    return this.callTool('current_revision', {});
+  }
+
+  async checkStale(pairs: ReadonlyArray<{ fqdn: string; fetched_at_revision: number }>): Promise<string> {
+    return this.callTool('check_stale', { pairs: [...pairs] });
+  }
+
+  async listSymbols(args: {
+    readonly kind?: string;
+    readonly visibility?: string;
+    readonly module?: string;
+    readonly limit?: number;
+    readonly include_external?: boolean;
+    readonly cursor?: string;
+  }): Promise<string> {
+    const payload: Record<string, unknown> = {};
+    if (args.kind !== undefined) payload.kind = args.kind;
+    if (args.visibility !== undefined) payload.visibility = args.visibility;
+    if (args.module !== undefined) payload.module = args.module;
+    if (args.limit !== undefined) payload.limit = args.limit;
+    if (args.include_external !== undefined) payload.include_external = args.include_external;
+    if (args.cursor !== undefined) payload.cursor = args.cursor;
+    return this.callTool('list_symbols', payload);
+  }
+
   async stop(): Promise<void> {
     const client = this.client;
     this.client = null;
