@@ -7,6 +7,7 @@ mod paths;
 pub mod projects;
 mod provider;
 mod reindex;
+mod seed_builtins;
 mod watcher;
 mod writer;
 

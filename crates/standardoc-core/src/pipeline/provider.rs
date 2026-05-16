@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use standardoc_ir::ExtractedFile;
+use standardoc_ir::{BuiltinEntry, ExtractedFile};
 
 pub trait LanguageProvider: Send + Sync {
     fn extract(
@@ -9,6 +9,17 @@ pub trait LanguageProvider: Send + Sync {
         path: &str,
         ctx: &ExtractContext<'_>,
     ) -> Result<ExtractedFile, ExtractError>;
+
+    /// Stage 3e-1: builtin entries the pipeline should eagerly seed at
+    /// cold-start so the synthetic FQDNs emitted by tier-aware resolvers
+    /// (`<builtin>::ts::Math`, `<builtin>::lua::print`, …) resolve to a
+    /// real row in `symbols`. Default returns empty — providers that
+    /// expose a `BuiltinRegistry` override to surface their Edge-tier
+    /// entries. Drop / Attribute tiers do NOT seed: they never produce
+    /// edges in the first place, so a DB row would be unreachable.
+    fn edge_builtins(&self) -> Vec<BuiltinEntry> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

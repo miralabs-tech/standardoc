@@ -1,9 +1,13 @@
 use std::path::Path;
 
 use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
-use standardoc_ir::{EdgeKind, ExtractedFile, Language, RawEdge, ResolvedOrUnresolved, Site};
+use standardoc_ir::{
+    BuiltinEntry, BuiltinTier, EdgeKind, ExtractedFile, Language, RawEdge, ResolvedOrUnresolved,
+    Site,
+};
 use swc_core::ecma::parser::{EsSyntax, Syntax, TsSyntax};
 
+use crate::builtins::global as global_builtin_registry;
 use crate::lua::LuaProvider;
 use crate::rust::RustProvider;
 use crate::sfc::{self, SfcDocument, pad_until_byte_offset};
@@ -98,6 +102,30 @@ impl LanguageProvider for WorkspaceProvider {
             Some(Dispatch::Svelte) => self.extract_sfc(content, path, ctx, Framework::Svelte),
             None => Err(ExtractError::UnsupportedLanguage { file: path.into() }),
         }
+    }
+
+    /// Edge-tier entries flattened across every registered language —
+    /// the cold-start seeder turns each into a synthetic `RawSymbol`
+    /// row so resolver-emitted edges to `<builtin>::<lang>::<name>`
+    /// land on a real `symbols.id` instead of unresolved canonicals.
+    fn edge_builtins(&self) -> Vec<BuiltinEntry> {
+        let reg = global_builtin_registry();
+        let mut out: Vec<BuiltinEntry> = Vec::new();
+        for entries in reg.by_language.values() {
+            out.extend(
+                entries
+                    .iter()
+                    .filter(|e| e.tier == BuiltinTier::Edge)
+                    .cloned(),
+            );
+        }
+        out.extend(
+            reg.user_extensions
+                .iter()
+                .filter(|e| e.tier == BuiltinTier::Edge)
+                .cloned(),
+        );
+        out
     }
 }
 

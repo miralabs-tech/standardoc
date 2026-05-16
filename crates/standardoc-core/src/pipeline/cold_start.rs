@@ -10,6 +10,7 @@ use crate::pipeline::paths::{has_supported_extension, to_workspace_relative};
 use crate::pipeline::projects::{discover_and_persist_projects, reconcile_files_project_id};
 use crate::pipeline::provider::LanguageProvider;
 use crate::pipeline::reindex::{Outcome, commit_outcomes, process_one};
+use crate::pipeline::seed_builtins;
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
 
@@ -46,6 +47,15 @@ pub fn run(
     // means `files.project_id` stays NULL and consumers degrade
     // gracefully (treat the workspace as a single anonymous project).
     discover_projects_quietly(handle, &workspace_root);
+
+    // Stage 3e-1 — eagerly seed Edge-tier builtin symbols so the
+    // synthetic FQDNs emitted by tier-aware resolvers
+    // (`<builtin>::ts::Math`, `<builtin>::lua::print`, …) resolve
+    // against a real `symbols.id` instead of staying as unresolved
+    // canonicals. Best-effort: failures fall back to the pre-3e-1
+    // behaviour (edges remain unresolved) without blocking cold start.
+    let edge_builtins = provider.edge_builtins();
+    seed_builtins::seed_quietly(handle, &edge_builtins);
 
     let candidates = collect_candidates(&workspace_root, filters)?;
     let total = u64_of(candidates.len());
