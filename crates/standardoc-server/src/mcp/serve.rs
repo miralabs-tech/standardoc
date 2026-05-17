@@ -17,7 +17,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::handler::StandardocMcp;
 use super::progress::run_cold_start_with_progress;
-use super::session_store::FileSessionStore;
 use crate::ServerError;
 
 /// Run the MCP daemon over stdio. Async; the caller owns the tokio runtime.
@@ -150,42 +149,38 @@ pub async fn serve_mcp_http(
         StandardocMcp::new(handle.clone(), Arc::clone(&provider), Arc::clone(&filters)),
         rag_pipeline.as_ref(),
     );
-    let workspace_root = handle.workspace_root().to_path_buf();
     kick_off_indexing(&template, handle, provider, filters, rag_pipeline);
 
-    // rmcp 1.7 stateful + persisted SessionStore: stateful mode keeps
-    // per-session state server-side and lets the streamable-http
-    // transport reuse a stable `Mcp-Session-Id` header across calls.
-    // Combined with a persisted `SessionStore` rooted at
-    // `<workspace>/.standardoc/mcp-sessions.json`, this lets a new
-    // daemon process (post-rebuild, post-restart, post-migration)
-    // transparently restore Claude Code's session : the next request
-    // lands on the new instance with a stale session_id, the in-memory
-    // table misses, the store is consulted, the initialize handshake
-    // is replayed from disk, and the call proceeds without any
-    // re-init dance. The CC user no longer has to manually reconnect
-    // the MCP server from settings after every dev rebuild.
+    // Stateless + json_response : each MCP request is self-contained,
+    // the response is plain `application/json` (no SSE stream to lose).
+    // Two reasons for this choice over the session-store path :
     //
-    // Trade-off : stateful_mode forces the SSE response path (the
-    // `json_response` field is ignored when stateful_mode is true).
-    // The pre-3e-1 commit that flipped stateful_mode to false did so
-    // because the playground (Chrome) plus CC concurrent connections
-    // triggered Chrome's ERR_INCOMPLETE_CHUNKED_ENCODING storm and
-    // evicted CC's session. With session persistence in place, that
-    // eviction becomes recoverable — the next CC call restores the
-    // session from disk transparently. If the eviction storm itself
-    // proves disruptive in practice (concurrent CC + playground), a
-    // dedicated stateless `/mcp-stateless` endpoint is a clean
-    // follow-up — same handler, different config.
+    // 1. Multi-client safety. The previous experiment with
+    //    `stateful_mode = true` re-introduced the
+    //    `ERR_INCOMPLETE_CHUNKED_ENCODING` storm we'd seen when the
+    //    playground (Chrome) and Claude Code shared the daemon — the
+    //    SSE stream's death evicted live sessions.
+    //
+    // 2. Reconnect ergonomics. With a long-lived SSE channel, Claude
+    //    Code's MCP transport treats the stream's death (daemon
+    //    restart, rebuild, migration) as a hard "server down" signal
+    //    and refuses to retry until the user manually reconnects from
+    //    settings. Stateless mode has no persistent channel — every
+    //    tool call is a fresh HTTP request, and the next call lands on
+    //    the new daemon transparently. Combined with `mcp.endpoint`
+    //    port reuse, daemon restarts become invisible to CC.
+    //
+    // The `FileSessionStore` lives in this crate as dead code for now
+    // — kept around because rmcp's session-store hook is the right
+    // primitive if/when we want a stateful transport again (e.g. for
+    // server-pushed notifications). Not wired today.
     //
     // `StreamableHttpServerConfig` is `#[non_exhaustive]` since rmcp
     // 1.0 — build via Default then override the fields we care about.
-    let session_store: Arc<dyn rmcp::transport::streamable_http_server::session::store::SessionStore> =
-        Arc::new(FileSessionStore::new(&workspace_root));
     let mut http_cfg = StreamableHttpServerConfig::default();
-    http_cfg.stateful_mode = true;
+    http_cfg.stateful_mode = false;
+    http_cfg.json_response = true;
     http_cfg.cancellation_token = CancellationToken::new();
-    http_cfg.session_store = Some(session_store);
     let service = StreamableHttpService::new(
         move || Ok(template.clone()),
         Arc::new(LocalSessionManager::default()),

@@ -26,11 +26,19 @@ use tokio::sync::RwLock;
 /// Total state size is tiny — a few KB max even with many concurrent
 /// clients — so the JSON-file backend is overkill-free. A SQLite
 /// sidecar would be possible later if we need richer querying / TTL.
+///
+/// Note: currently dead code — the MCP HTTP transport runs in
+/// stateless mode (see `serve.rs` rationale). Kept here as the
+/// right primitive for the day we want stateful sessions again
+/// (e.g. server-pushed notifications). Unit tests still cover the
+/// behavior so the implementation doesn't bit-rot.
+#[allow(dead_code)]
 pub(crate) struct FileSessionStore {
     path: PathBuf,
     cache: Arc<RwLock<HashMap<String, SessionState>>>,
 }
 
+#[allow(dead_code)]
 impl FileSessionStore {
     /// Build a store rooted at `<workspace_root>/.standardoc/mcp-sessions.json`.
     /// If the file already exists and parses cleanly, its contents prime
@@ -71,6 +79,7 @@ impl FileSessionStore {
     }
 }
 
+#[allow(dead_code)]
 fn load_from_disk(path: &Path) -> Option<HashMap<String, SessionState>> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
