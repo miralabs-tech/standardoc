@@ -244,6 +244,12 @@ pub struct SymbolFilter {
     pub visibility: Option<Visibility>,
     pub module: Option<String>,
     pub include_external: bool,
+    /// L3e: scope the result to a single workspace. `None` resolves to
+    /// the primary workspace via [`Self::effective_workspace_id`] —
+    /// matches the "give me MY symbols" mental model. Pass
+    /// `Some(workspace_id)` to scope a query to a specific linked peer.
+    /// There is no "all workspaces" mode — call once per workspace.
+    pub workspace_id: Option<String>,
 }
 
 impl Default for SymbolFilter {
@@ -253,7 +259,17 @@ impl Default for SymbolFilter {
             visibility: None,
             module: None,
             include_external: true,
+            workspace_id: None,
         }
+    }
+}
+
+impl SymbolFilter {
+    /// Returns the workspace_id string to use in SQL. `None` → primary.
+    pub fn effective_workspace_id(&self) -> &str {
+        self.workspace_id
+            .as_deref()
+            .unwrap_or(crate::storage::module_lookup::PRIMARY_WORKSPACE_ID)
     }
 }
 
@@ -272,6 +288,7 @@ pub fn search_text(
     let vis_text = filter.visibility.map(visibility_to_sql_text);
     let module = filter.module.as_deref();
     let include_external = filter.include_external;
+    let workspace_id = filter.effective_workspace_id();
     with_conn(handle, |conn| {
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
@@ -284,8 +301,9 @@ pub fn search_text(
                AND (?3 IS NULL OR s.visibility = ?3) \
                AND (?4 IS NULL OR s.module     = ?4) \
                AND (?5 = 1 OR s.is_external = 0) \
+               AND s.workspace_id = ?6 \
              ORDER BY rank \
-             LIMIT ?6",
+             LIMIT ?7",
         )?;
         let rows = stmt
             .query_map(
@@ -295,6 +313,7 @@ pub fn search_text(
                     vis_text,
                     module,
                     include_external,
+                    workspace_id,
                     limit_i64
                 ],
                 read_symbol_row,
@@ -360,6 +379,7 @@ pub fn list_symbols(
     let vis_text = filter.visibility.map(visibility_to_sql_text);
     let module = filter.module.as_deref();
     let include_external = filter.include_external;
+    let workspace_id = filter.effective_workspace_id();
     let cursor_param = cursor;
     let items: Vec<RawSymbol> = with_conn(handle, |conn| {
         let mut stmt = conn.prepare(
@@ -372,8 +392,9 @@ pub fn list_symbols(
                AND (?3 IS NULL OR s.module     = ?3) \
                AND (?4 = 1 OR s.is_external = 0) \
                AND (?5 IS NULL OR s.fqdn       > ?5) \
+               AND s.workspace_id = ?6 \
              ORDER BY s.fqdn \
-             LIMIT ?6",
+             LIMIT ?7",
         )?;
         let rows = stmt
             .query_map(
@@ -383,6 +404,7 @@ pub fn list_symbols(
                     module,
                     include_external,
                     cursor_param,
+                    workspace_id,
                     limit_i64
                 ],
                 read_symbol_row,
@@ -422,6 +444,7 @@ pub fn find_by_pattern(
     let vis_text = filter.visibility.map(visibility_to_sql_text);
     let module = filter.module.as_deref();
     let include_external = filter.include_external;
+    let workspace_id = filter.effective_workspace_id();
     with_conn(handle, |conn| {
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
@@ -433,8 +456,9 @@ pub fn find_by_pattern(
                AND (?3 IS NULL OR s.visibility = ?3) \
                AND (?4 IS NULL OR s.module     = ?4) \
                AND (?5 = 1 OR s.is_external = 0) \
+               AND s.workspace_id = ?6 \
              ORDER BY s.fqdn \
-             LIMIT ?6",
+             LIMIT ?7",
         )?;
         let rows = stmt
             .query_map(
@@ -444,6 +468,7 @@ pub fn find_by_pattern(
                     vis_text,
                     module,
                     include_external,
+                    workspace_id,
                     limit_i64
                 ],
                 read_symbol_row,
@@ -3412,5 +3437,174 @@ mod tests {
         assert!(ctx.imports.is_empty());
         assert!(ctx.callers.is_empty());
         assert!(ctx.imported_by.is_empty());
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // L3e-1: scope-aware query layer (workspace_id filter)
+    // ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn search_text_defaults_to_primary_scope_when_workspace_id_is_none() {
+        // L3e-1: with `workspace_id=None` the FTS query narrows to
+        // primary, peer rows are invisible. Matches "give me MY
+        // symbols" default.
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol(&conn, "src/main.rs", "alpha", "primary::alpha", 1);
+            seed_symbol_in_workspace(
+                &conn,
+                "src/main.rs",
+                "alpha",
+                "peer::alpha",
+                10,
+                "peer-uuid-l3e1",
+            );
+        }
+        let got =
+            search_text(&handle, "alpha", 50, &SymbolFilter::default()).unwrap();
+        let fqdns: Vec<&str> = got.iter().map(|s| s.fqdn.as_str()).collect();
+        assert_eq!(
+            fqdns,
+            vec!["primary::alpha"],
+            "default scope must hide peer rows"
+        );
+    }
+
+    #[test]
+    fn search_text_explicit_workspace_id_returns_peer_rows_only() {
+        // L3e-1: with `workspace_id=Some(peer)`, primary rows are
+        // invisible and only the matching peer row surfaces.
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol(&conn, "src/main.rs", "alpha", "primary::alpha", 1);
+            seed_symbol_in_workspace(
+                &conn,
+                "src/main.rs",
+                "alpha",
+                "peer::alpha",
+                10,
+                "peer-uuid-l3e2",
+            );
+        }
+        let filter = SymbolFilter {
+            workspace_id: Some("peer-uuid-l3e2".into()),
+            ..Default::default()
+        };
+        let got = search_text(&handle, "alpha", 50, &filter).unwrap();
+        let fqdns: Vec<&str> = got.iter().map(|s| s.fqdn.as_str()).collect();
+        assert_eq!(fqdns, vec!["peer::alpha"], "peer scope must hide primary");
+    }
+
+    #[test]
+    fn find_by_pattern_defaults_to_primary_scope() {
+        // L3e-1: same default-primary semantics for GLOB pattern queries.
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol(&conn, "src/main.rs", "helper_a", "primary::helper_a", 1);
+            seed_symbol_in_workspace(
+                &conn,
+                "src/main.rs",
+                "helper_b",
+                "peer::helper_b",
+                10,
+                "peer-uuid-l3e3",
+            );
+        }
+        let got = find_by_pattern(&handle, "helper_*", &SymbolFilter::default(), 50)
+            .unwrap();
+        let fqdns: Vec<&str> = got.iter().map(|s| s.fqdn.as_str()).collect();
+        assert_eq!(fqdns, vec!["primary::helper_a"]);
+    }
+
+    #[test]
+    fn find_by_pattern_explicit_workspace_id_returns_peer_match_only() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol(&conn, "src/main.rs", "helper_a", "primary::helper_a", 1);
+            seed_symbol_in_workspace(
+                &conn,
+                "src/main.rs",
+                "helper_b",
+                "peer::helper_b",
+                10,
+                "peer-uuid-l3e4",
+            );
+        }
+        let filter = SymbolFilter {
+            workspace_id: Some("peer-uuid-l3e4".into()),
+            ..Default::default()
+        };
+        let got = find_by_pattern(&handle, "helper_*", &filter, 50).unwrap();
+        let fqdns: Vec<&str> = got.iter().map(|s| s.fqdn.as_str()).collect();
+        assert_eq!(fqdns, vec!["peer::helper_b"]);
+    }
+
+    #[test]
+    fn list_symbols_defaults_to_primary_scope() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol(&conn, "src/main.rs", "alpha", "primary::alpha", 1);
+            seed_symbol_in_workspace(
+                &conn,
+                "src/main.rs",
+                "beta",
+                "peer::beta",
+                10,
+                "peer-uuid-l3e5",
+            );
+        }
+        let page =
+            list_symbols(&handle, &SymbolFilter::default(), 50, None).unwrap();
+        let fqdns: Vec<&str> = page.items.iter().map(|s| s.fqdn.as_str()).collect();
+        assert_eq!(fqdns, vec!["primary::alpha"]);
+    }
+
+    #[test]
+    fn list_symbols_explicit_workspace_id_returns_peer_rows_only() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol(&conn, "src/main.rs", "alpha", "primary::alpha", 1);
+            seed_symbol_in_workspace(
+                &conn,
+                "src/main.rs",
+                "beta",
+                "peer::beta",
+                10,
+                "peer-uuid-l3e6",
+            );
+        }
+        let filter = SymbolFilter {
+            workspace_id: Some("peer-uuid-l3e6".into()),
+            ..Default::default()
+        };
+        let page = list_symbols(&handle, &filter, 50, None).unwrap();
+        let fqdns: Vec<&str> = page.items.iter().map(|s| s.fqdn.as_str()).collect();
+        assert_eq!(fqdns, vec!["peer::beta"]);
+    }
+
+    #[test]
+    fn symbol_filter_effective_workspace_id_defaults_to_primary() {
+        // Pure unit test for the helper — None resolves to the
+        // PRIMARY_WORKSPACE_ID sentinel, Some round-trips through.
+        let default = SymbolFilter::default();
+        assert_eq!(default.effective_workspace_id(), PRIMARY_WORKSPACE_ID);
+
+        let explicit = SymbolFilter {
+            workspace_id: Some("abc".into()),
+            ..Default::default()
+        };
+        assert_eq!(explicit.effective_workspace_id(), "abc");
     }
 }
