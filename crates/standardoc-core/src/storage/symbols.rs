@@ -52,7 +52,7 @@ pub(crate) fn insert_symbol(
                 signature_json, body_hash, is_external, source_origin, \
                 last_modified_revision, flags, workspace_id\
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19) \
-             ON CONFLICT(fqdn) DO UPDATE SET \
+             ON CONFLICT(workspace_id, fqdn) DO UPDATE SET \
                 name                    = excluded.name, \
                 kind                    = excluded.kind, \
                 language_kind           = excluded.language_kind, \

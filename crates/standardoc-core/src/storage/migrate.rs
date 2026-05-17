@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::storage::error::StorageError;
 use crate::storage::init::run_init_schema;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 11;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 12;
 
 const V1_TO_V2_SQL: &str = include_str!("../../migrations/v1_to_v2.sql");
 const V2_TO_V3_SQL: &str = include_str!("../../migrations/v2_to_v3.sql");
@@ -15,6 +15,7 @@ const V7_TO_V8_SQL: &str = include_str!("../../migrations/v7_to_v8.sql");
 const V8_TO_V9_SQL: &str = include_str!("../../migrations/v8_to_v9.sql");
 const V9_TO_V10_SQL: &str = include_str!("../../migrations/v9_to_v10.sql");
 const V10_TO_V11_SQL: &str = include_str!("../../migrations/v10_to_v11.sql");
+const V11_TO_V12_SQL: &str = include_str!("../../migrations/v11_to_v12.sql");
 
 pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), StorageError> {
     if !table_exists(conn, "schema_meta")? {
@@ -48,6 +49,7 @@ fn apply_upgrade(conn: &Connection, from: u32) -> Result<(), StorageError> {
         8 => conn.execute_batch(V8_TO_V9_SQL).map_err(StorageError::from),
         9 => conn.execute_batch(V9_TO_V10_SQL).map_err(StorageError::from),
         10 => conn.execute_batch(V10_TO_V11_SQL).map_err(StorageError::from),
+        11 => conn.execute_batch(V11_TO_V12_SQL).map_err(StorageError::from),
         other => Err(StorageError::InvalidSchemaMetadata {
             key: "schema_version".into(),
             value: format!("no upgrade path from version {other}"),
@@ -606,6 +608,219 @@ mod tests {
             "legacy v10 rows must default to workspace_id='primary' post-upgrade"
         );
 
+        // Note: v10→v11 originally added an explicit
+        // `idx_symbols_workspace_id_fqdn` index, but the subsequent
+        // v11→v12 rebuild drops it in favour of the composite UNIQUE's
+        // implicit `sqlite_autoindex_symbols_*` — equivalent lookup
+        // path with less storage. Since `ensure_schema` runs the full
+        // chain up to SUPPORTED_SCHEMA_VERSION, we assert on what
+        // survives at v12 (the composite UNIQUE constraint behaviour
+        // is covered by the dedicated v11→v12 rebuild test).
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn upgrade_rebuilds_symbols_table_with_composite_unique_on_legacy_v11_db() {
+        // Stage 3b-7-b Layer 3a: v11 has `UNIQUE (fqdn)` alone. The
+        // v11→v12 rebuild swaps it for `UNIQUE (workspace_id, fqdn)`
+        // while preserving every column, every existing row's id (FK
+        // integrity), the FTS triggers, and the AUTOINCREMENT counter.
+        let conn = fresh_conn();
+        run_init_schema(&conn).unwrap();
+        conn.execute_batch(V1_TO_V2_SQL).unwrap();
+        conn.execute_batch(V2_TO_V3_SQL).unwrap();
+        conn.execute_batch(V3_TO_V4_SQL).unwrap();
+        conn.execute_batch(V4_TO_V5_SQL).unwrap();
+        conn.execute_batch(V5_TO_V6_SQL).unwrap();
+        conn.execute_batch(V6_TO_V7_SQL).unwrap();
+        conn.execute_batch(V7_TO_V8_SQL).unwrap();
+        conn.execute_batch(V8_TO_V9_SQL).unwrap();
+        conn.execute_batch(V9_TO_V10_SQL).unwrap();
+        conn.execute_batch(V10_TO_V11_SQL).unwrap();
+
+        // Seed v11 fixtures: a file row, two symbols (assigned ids 1
+        // and 2 by AUTOINCREMENT), and an edge referencing symbol 1
+        // — the edge is the FK-integrity canary.
+        conn.execute(
+            "INSERT INTO files (path, content_hash, language, last_scanned, byte_size, is_external) \
+             VALUES ('src/x.rs', 'h', 'rust', 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols (\
+                fqdn, name, kind, language_kind, language, module, visibility, \
+                file_path, start_line, end_line, start_col, end_col, \
+                signature_json, body_hash, is_external, source_origin, \
+                last_modified_revision, flags, workspace_id\
+             ) VALUES ('x::caller', 'caller', 'function', 'fn', 'rust', NULL, 'public', \
+                'src/x.rs', 0, 0, 0, 0, NULL, NULL, 0, 'workspace', 0, '[]', 'primary')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols (\
+                fqdn, name, kind, language_kind, language, module, visibility, \
+                file_path, start_line, end_line, start_col, end_col, \
+                signature_json, body_hash, is_external, source_origin, \
+                last_modified_revision, flags, workspace_id\
+             ) VALUES ('x::callee', 'callee', 'function', 'fn', 'rust', NULL, 'public', \
+                'src/x.rs', 0, 0, 0, 0, NULL, NULL, 0, 'workspace', 0, '[]', 'primary')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO edges (from_symbol_id, kind, to_symbol_id) \
+             VALUES (1, 'CALLS', 2)",
+            [],
+        )
+        .unwrap();
+
+        // Verify the v11 invariant we want to relax: same fqdn can't
+        // be inserted twice regardless of workspace_id.
+        let pre = conn.execute(
+            "INSERT INTO symbols (\
+                fqdn, name, kind, language_kind, language, module, visibility, \
+                file_path, start_line, end_line, start_col, end_col, \
+                signature_json, body_hash, is_external, source_origin, \
+                last_modified_revision, flags, workspace_id\
+             ) VALUES ('x::caller', 'caller', 'function', 'fn', 'rust', NULL, 'public', \
+                'src/x.rs', 0, 0, 0, 0, NULL, NULL, 0, 'workspace', 0, '[]', 'peer-uuid-1')",
+            [],
+        );
+        assert!(
+            pre.is_err(),
+            "v11 must reject same-fqdn insert regardless of workspace_id"
+        );
+
+        ensure_schema(&conn).unwrap();
+
+        // 1. Schema version bumped.
+        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+
+        // 2. Existing rows preserved with same ids — the FK canary
+        //    (edge) still resolves both endpoints.
+        let preserved_ids: Vec<i64> = conn
+            .prepare("SELECT id FROM symbols ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            preserved_ids,
+            vec![1, 2],
+            "ids must be preserved exactly through the rebuild"
+        );
+        let edge_endpoints: (i64, i64) = conn
+            .query_row(
+                "SELECT from_symbol_id, to_symbol_id FROM edges WHERE from_symbol_id = 1",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(edge_endpoints, (1, 2), "edge FK refs must survive rebuild");
+
+        // 3. PRAGMA foreign_key_check returns zero violation rows.
+        let fk_violations: Vec<(String, i64)> = conn
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            fk_violations.is_empty(),
+            "PRAGMA foreign_key_check must return no violations, got {fk_violations:?}"
+        );
+
+        // 4. UNIQUE constraint is now COMPOSITE — same fqdn under a
+        //    different workspace_id is allowed.
+        conn.execute(
+            "INSERT INTO symbols (\
+                fqdn, name, kind, language_kind, language, module, visibility, \
+                file_path, start_line, end_line, start_col, end_col, \
+                signature_json, body_hash, is_external, source_origin, \
+                last_modified_revision, flags, workspace_id\
+             ) VALUES ('x::caller', 'caller', 'function', 'fn', 'rust', NULL, 'public', \
+                'src/x.rs', 0, 0, 0, 0, NULL, NULL, 0, 'workspace', 0, '[]', 'peer-uuid-1')",
+            [],
+        )
+        .expect("v12: same fqdn, different workspace_id must be allowed");
+
+        // 5. UNIQUE still enforces against duplicate (workspace_id, fqdn).
+        let dup = conn.execute(
+            "INSERT INTO symbols (\
+                fqdn, name, kind, language_kind, language, module, visibility, \
+                file_path, start_line, end_line, start_col, end_col, \
+                signature_json, body_hash, is_external, source_origin, \
+                last_modified_revision, flags, workspace_id\
+             ) VALUES ('x::caller', 'caller', 'function', 'fn', 'rust', NULL, 'public', \
+                'src/x.rs', 0, 0, 0, 0, NULL, NULL, 0, 'workspace', 0, '[]', 'peer-uuid-1')",
+            [],
+        );
+        assert!(
+            dup.is_err(),
+            "v12 must reject duplicate (workspace_id, fqdn) — composite UNIQUE"
+        );
+
+        // 6. FTS triggers were recreated — inserting a new symbol
+        //    pushes it into the FTS index, and an MATCH query finds it.
+        conn.execute(
+            "INSERT INTO symbols (\
+                fqdn, name, kind, language_kind, language, module, visibility, \
+                file_path, start_line, end_line, start_col, end_col, \
+                signature_json, body_hash, is_external, source_origin, \
+                last_modified_revision, flags, workspace_id\
+             ) VALUES ('x::distinctive_marker', 'distinctive_marker', 'function', 'fn', 'rust', NULL, 'public', \
+                'src/x.rs', 0, 0, 0, 0, NULL, NULL, 0, 'workspace', 0, '[]', 'primary')",
+            [],
+        )
+        .unwrap();
+        let fts_hit: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbols_fts WHERE symbols_fts MATCH 'distinctive_marker'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            fts_hit, 1,
+            "post-rebuild FTS triggers must still index new inserts"
+        );
+
+        // 7. AUTOINCREMENT state sane — next INSERT lands at MAX(id)+1
+        //    rather than restarting from 1 or jumping wildly.
+        let next_id: i64 = conn
+            .query_row(
+                "SELECT MAX(id) FROM symbols",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // We inserted: 2 v11 rows, 1 peer-uuid clone, 1 distinctive_marker
+        // → ids 1, 2, 3, 4. The sqlite_sequence must reflect this so
+        // the NEXT INSERT goes to 5 (not 1, not 2).
+        assert_eq!(next_id, 4, "AUTOINCREMENT bookkeeping must reflect every inserted row");
+        let seq: Option<i64> = conn
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'symbols'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert_eq!(
+            seq,
+            Some(4),
+            "sqlite_sequence must be re-keyed to 'symbols' with the correct counter"
+        );
+
+        // 8. All the expected indexes are present after rebuild (the
+        //    explicit idx_symbols_workspace_id_fqdn is dropped on
+        //    purpose: the composite UNIQUE auto-index supersedes it).
         let indexes: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'symbols'")
             .unwrap()
@@ -613,14 +828,20 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert!(
-            indexes.iter().any(|i| i == "idx_symbols_workspace_id_fqdn"),
-            "v10→v11 must create idx_symbols_workspace_id_fqdn, got {indexes:?}"
-        );
-        assert_eq!(
-            read_schema_version(&conn).unwrap(),
-            SUPPORTED_SCHEMA_VERSION
-        );
+        for expected in [
+            "idx_symbols_language",
+            "idx_symbols_kind",
+            "idx_symbols_name",
+            "idx_symbols_file_path",
+            "idx_symbols_module",
+            "idx_symbols_is_external",
+            "idx_symbols_last_modified_revision",
+        ] {
+            assert!(
+                indexes.iter().any(|i| i == expected),
+                "v11→v12 rebuild must recreate {expected}, got {indexes:?}"
+            );
+        }
     }
 
     #[test]
