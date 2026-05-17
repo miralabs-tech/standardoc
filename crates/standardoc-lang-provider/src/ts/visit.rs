@@ -992,13 +992,9 @@ impl Visit for CallVisitor<'_, '_> {
     /// `Constructor` node. No `return_type` (constructors are
     /// implicit-void in TS) and no `type_params` (TS forbids generic
     /// constructors). Params are `ParamOrTsParamProp` — the latter is
-    /// the `constructor(private readonly db: Db)` shorthand.
-    ///
-    /// TODO: TsParamProp idents (`private db: Db` in the param list)
-    /// are not seeded as scope-local bindings by the lookup builder
-    /// yet, so body refs to `db` will resolve as `Unresolved` in the
-    /// REFERENCES edge layer. See `ts/lookup/builder.rs` and the
-    /// `ir4c_constructor_ts_param_prop_marker_pending` test.
+    /// the `constructor(private readonly db: Db)` shorthand whose
+    /// idents are bound by `LookupBuilder::visit_constructor` with
+    /// the `"param-property"` attribute.
     fn visit_constructor(&mut self, node: &swc_core::ecma::ast::Constructor) {
         self.enter_scope_at(node.span.lo.0, node.span.hi.0);
         for param in &node.params {
@@ -2477,21 +2473,6 @@ mod tests {
         assert_eq!(
             cs.receiver_chain,
             vec!["this".to_string(), "api".to_string()]
-        );
-    }
-
-    #[test]
-    #[ignore = "Pending TsParamProp lookup fix — the `constructor(private db: Db)` shorthand \
-                does NOT seed `db` as a scope-local binding in the lookup builder, so body \
-                refs to `db` resolve as Unresolved in the REFERENCES edge layer. The \
-                call_site layer is textual-only and can't observe binding resolution \
-                directly — strip `#[ignore]` and convert this test to a lookup-aware \
-                assertion once `ts/lookup/builder.rs` binds TsParamProp idents."]
-    fn ir4c_constructor_ts_param_prop_marker_pending() {
-        panic!(
-            "convert to a lookup-aware assertion once ts/lookup/builder.rs binds \
-             TsParamProp idents into the ctor scope (placeholder marker for IR-4-c \
-             follow-up)"
         );
     }
 

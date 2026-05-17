@@ -4,11 +4,11 @@ use standardoc_ir::{
 };
 use swc_core::common::BytePos;
 use swc_core::ecma::ast::{
-	ArrowExpr, BlockStmt, CatchClause, Class, ClassDecl, Decl, DefaultDecl, ExportDecl,
-	ExportDefaultDecl, ExportSpecifier, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt, Function,
-	ImportDecl, ImportSpecifier, MemberExpr, Module, ModuleDecl, ModuleExportName, ModuleItem,
-	NamedExport, ObjectPatProp, Pat, Stmt, TsEnumDecl, TsInterfaceDecl, TsTypeAliasDecl, VarDecl,
-	VarDeclKind, VarDeclarator,
+	ArrowExpr, BlockStmt, CatchClause, Class, ClassDecl, Constructor, Decl, DefaultDecl,
+	ExportDecl, ExportDefaultDecl, ExportSpecifier, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt,
+	Function, ImportDecl, ImportSpecifier, MemberExpr, Module, ModuleDecl, ModuleExportName,
+	ModuleItem, NamedExport, ObjectPatProp, ParamOrTsParamProp, Pat, Stmt, TsEnumDecl,
+	TsInterfaceDecl, TsParamPropParam, TsTypeAliasDecl, VarDecl, VarDeclKind, VarDeclarator,
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
 
@@ -434,6 +434,41 @@ impl<'a> Visit for LookupBuilder<'a> {
 		self.pop_scope();
 	}
 
+	/// Constructor envelope — mirror of `visit_function` for SWC's
+	/// `Constructor` node (distinct AST type from `Function`, no
+	/// `return_type`, no `type_params`). Params are `ParamOrTsParamProp`:
+	/// plain `Param` follows the usual `bind_pat` path, while the
+	/// `TsParamProp` shorthand (`constructor(private readonly db: Db)`)
+	/// also seeds a binding for the ident — tagged with the
+	/// `"param-property"` attribute so consumers can recognise the
+	/// double-duty (param + implicit `this.db = db` assignment).
+	fn visit_constructor(&mut self, node: &Constructor) {
+		self.push_scope(ScopeKind::Function, node.span.lo, node.span.hi);
+		for param in &node.params {
+			match param {
+				ParamOrTsParamProp::Param(p) => {
+					self.bind_pat(&p.pat, BindingSource::Param, vec![]);
+				}
+				ParamOrTsParamProp::TsParamProp(prop) => {
+					match &prop.param {
+						TsParamPropParam::Ident(id) => self.add_binding(
+							id.id.sym.to_string(),
+							BindingSource::Param,
+							vec!["param-property".into()],
+						),
+						TsParamPropParam::Assign(assign) => self.bind_pat(
+							&assign.left,
+							BindingSource::Param,
+							vec!["param-property".into()],
+						),
+					}
+				}
+			}
+		}
+		node.visit_children_with(self);
+		self.pop_scope();
+	}
+
 	fn visit_class_decl(&mut self, node: &ClassDecl) {
 		// Class name is hoisted at module level by `hoist_module_items`.
 		// Just descend so `visit_class` handles type params + body scope.
@@ -794,5 +829,72 @@ import * as ns from "ns-pkg";
 			.resolve_local("outer", inner_scope)
 			.expect("outer reachable via parent");
 		assert_eq!(outer.scope_idx, ModuleLookup::ROOT_SCOPE);
+	}
+
+	// --- Constructor param binding (IR-4-c follow-up) ----------------------
+
+	#[test]
+	fn constructor_plain_param_bound_in_function_scope() {
+		// Plain `Param` (not `TsParamProp`) inside a constructor must
+		// land in the constructor's Function scope, just like a normal
+		// fn param — proves the `ParamOrTsParamProp::Param` branch of
+		// `visit_constructor` routes through `bind_pat` correctly.
+		let module = parse("class Foo { constructor(x: number) {} }\n");
+		let lookup = build_ts_lookup(&module, "m");
+		let x = lookup
+			.bindings
+			.get("x")
+			.and_then(|v| v.first())
+			.expect("x binding");
+		assert!(matches!(x.source, BindingSource::Param));
+		assert_ne!(x.scope_idx, ModuleLookup::ROOT_SCOPE);
+		assert!(
+			!x.attributes.iter().any(|a| a == "param-property"),
+			"plain Param must NOT carry param-property"
+		);
+	}
+
+	#[test]
+	fn constructor_ts_param_prop_ident_seeds_binding_with_attribute() {
+		// `constructor(private readonly db: Db)` shorthand — `db` is a
+		// param-property: SWC encodes it as TsParamProp(Ident). The
+		// lookup builder must seed `db` as a Param binding so body refs
+		// resolve, AND tag it `param-property` so consumers can recognise
+		// the implicit `this.db = db` assignment.
+		let module =
+			parse("class Foo { constructor(private readonly db: Db) {} }\n");
+		let lookup = build_ts_lookup(&module, "m");
+		let db = lookup
+			.bindings
+			.get("db")
+			.and_then(|v| v.first())
+			.expect("db binding");
+		assert!(matches!(db.source, BindingSource::Param));
+		assert_ne!(db.scope_idx, ModuleLookup::ROOT_SCOPE);
+		assert!(
+			db.attributes.iter().any(|a| a == "param-property"),
+			"TsParamProp must carry param-property attribute"
+		);
+	}
+
+	#[test]
+	fn constructor_ts_param_prop_with_default_value_binds_via_assign_pat() {
+		// `constructor(public x = 0)` — TsParamProp(Assign) variant.
+		// SWC encodes the LHS as a `Pat` (here `Pat::Ident("x")`) inside
+		// an AssignPat. The lookup builder must route through `bind_pat`
+		// to seed the underlying ident.
+		let module = parse("class Foo { constructor(public x = 0) {} }\n");
+		let lookup = build_ts_lookup(&module, "m");
+		let x = lookup
+			.bindings
+			.get("x")
+			.and_then(|v| v.first())
+			.expect("x binding");
+		assert!(matches!(x.source, BindingSource::Param));
+		assert_ne!(x.scope_idx, ModuleLookup::ROOT_SCOPE);
+		assert!(
+			x.attributes.iter().any(|a| a == "param-property"),
+			"TsParamProp(Assign) must carry param-property attribute"
+		);
 	}
 }
