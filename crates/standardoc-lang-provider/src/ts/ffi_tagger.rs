@@ -51,7 +51,7 @@ use standardoc_ir::{
 use swc_core::common::{SourceMap, Spanned};
 use swc_core::ecma::ast::{
     CallExpr, Callee, Expr, ImportSpecifier, Lit, MemberExpr, MemberProp, Module, ModuleDecl,
-    ModuleExportName, ModuleItem, ObjectLit, Prop, PropName, PropOrSpread,
+    ModuleExportName, ModuleItem, ObjectLit, Pat, Prop, PropName, PropOrSpread, VarDeclarator,
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
 
@@ -67,12 +67,28 @@ const BUN_FFI_DLOPEN: &str = "dlopen";
 /// from a `bun:ffi dlopen`" in the viz / debug output.
 const CONVENTION_BUN_DLOPEN: &str = "bun-dlopen";
 const CONVENTION_DENO_DLOPEN: &str = "deno-dlopen";
+const CONVENTION_NAPI: &str = "napi";
 
 /// `language_kind` value stamped on every virtual TS symbol the
 /// tagger emits to anchor a binding. Distinct from `fn` (an authored
 /// function) so consumers and the viz can render these as native-
 /// boundary nodes rather than first-class TS functions.
 const FFI_IMPORT_LANGUAGE_KIND: &str = "ffi_import";
+
+/// `abi` slug for NAPI bindings. NAPI is the Node-API surface used
+/// by every modern native addon (`.node` artefact + `bindings`
+/// package). It doesn't fit the built-in `FfiAbi::Lua` / `Jni` /
+/// `PythonCApi` slots, so we route through `FfiAbi::Other("napi")`
+/// for now — bumping it into the enum proper is a one-line follow-up
+/// once consumers settle on a uniform tag.
+const NAPI_ABI_SLUG: &str = "napi";
+
+/// The `require("bindings")` factory package used by Node addons to
+/// locate the `.node` artefact across build configurations.
+const BINDINGS_PACKAGE: &str = "bindings";
+
+/// File extension suffix marking a compiled native addon.
+const NODE_ADDON_EXT: &str = ".node";
 
 /// Public entry point. Walks `module` once for imports of `bun:ffi`,
 /// then a second time via the `FfiVisitor` for `dlopen` / `Deno.dlopen`
@@ -249,6 +265,152 @@ impl Visit for FfiVisitor<'_> {
         // Continue descending — nested dlopen calls (e.g. inside an
         // IIFE or factory) still surface.
         call.visit_children_with(self);
+    }
+
+    fn visit_import_decl(&mut self, decl: &swc_core::ecma::ast::ImportDecl) {
+        // `import addon from "./addon.node"` — the foreign artefact
+        // is a compiled Node addon. Emit one virtual symbol +
+        // placeholder binding per specifier so the viz can render
+        // the JS ↔ native boundary even without per-function
+        // resolution.
+        let src_value = decl.src.value.to_string_lossy().into_owned();
+        if !src_value.ends_with(NODE_ADDON_EXT) {
+            return;
+        }
+        let abi_name = node_path_basename(&src_value);
+        for spec in &decl.specifiers {
+            let (local_name, span) = match spec {
+                ImportSpecifier::Default(d) => {
+                    (d.local.sym.as_ref().to_owned(), d.local.span)
+                }
+                ImportSpecifier::Namespace(n) => {
+                    (n.local.sym.as_ref().to_owned(), n.local.span)
+                }
+                ImportSpecifier::Named(n) => {
+                    (n.local.sym.as_ref().to_owned(), n.local.span)
+                }
+            };
+            self.emit_napi_binding(&local_name, &abi_name, span);
+        }
+    }
+
+    fn visit_var_declarator(&mut self, decl: &VarDeclarator) {
+        if let Some(name) = let_name_from_pat(&decl.name)
+            && let Some(init) = decl.init.as_deref()
+            && let Some(abi_name) = napi_abi_name_from_init(init)
+        {
+            self.emit_napi_binding(&name, &abi_name, decl.span);
+        }
+        decl.visit_children_with(self);
+    }
+}
+
+impl FfiVisitor<'_> {
+    fn emit_napi_binding(
+        &mut self,
+        local_name: &str,
+        abi_name: &str,
+        span: swc_core::common::Span,
+    ) {
+        let fqdn = format!("{}::{}", self.module_fqdn, local_name);
+        let location = self.span_location(span);
+        self.symbols.push(RawSymbol {
+            name: local_name.to_owned(),
+            fqdn: fqdn.clone(),
+            kind: Kind::Value,
+            language_kind: LanguageKind::from(FFI_IMPORT_LANGUAGE_KIND),
+            module: Some(self.module_fqdn.to_owned()),
+            visibility: Visibility::Private,
+            location,
+            signature: None as Option<Signature>,
+            body_hash: None,
+            attributes: vec![],
+            flags: vec!["ffi-import".to_owned(), "napi".to_owned()],
+        });
+        self.bindings.push(RawFfiBinding {
+            symbol_fqdn: fqdn,
+            abi: FfiAbi::Other(NAPI_ABI_SLUG.to_owned()),
+            direction: FfiDirection::Import,
+            abi_name: abi_name.to_owned(),
+            convention: Some(CONVENTION_NAPI.to_owned()),
+        });
+    }
+}
+
+/// Pull the basename out of a `./path/to/addon.node` literal so the
+/// binding's `abi_name` carries the addon identity even when the path
+/// uses prefixes / build-output suffixes.
+fn node_path_basename(path: &str) -> String {
+    let stripped = path.strip_suffix(NODE_ADDON_EXT).unwrap_or(path);
+    stripped
+        .rsplit(|c: char| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(stripped)
+        .to_owned()
+}
+
+/// Pattern-match an expression that yields a Node addon:
+///
+///   * `require("./addon.node")` → basename of the path
+///   * `require("bindings")("name")` → the `"name"` argument
+///
+/// Returns `None` for anything else.
+fn napi_abi_name_from_init(expr: &Expr) -> Option<String> {
+    let Expr::Call(call) = expr else { return None };
+    let Callee::Expr(callee_expr) = &call.callee else {
+        return None;
+    };
+    match callee_expr.as_ref() {
+        // `require("...node")` shape.
+        Expr::Ident(id) if id.sym.as_ref() == "require" => {
+            let first = call.args.first()?;
+            let Expr::Lit(Lit::Str(s)) = first.expr.as_ref() else {
+                return None;
+            };
+            let raw = s.value.to_string_lossy();
+            if !raw.ends_with(NODE_ADDON_EXT) {
+                return None;
+            }
+            Some(node_path_basename(&raw))
+        }
+        // `require("bindings")("name")` shape.
+        Expr::Call(inner) => {
+            let Callee::Expr(inner_callee) = &inner.callee else {
+                return None;
+            };
+            let Expr::Ident(id) = inner_callee.as_ref() else {
+                return None;
+            };
+            if id.sym.as_ref() != "require" {
+                return None;
+            }
+            let inner_first = inner.args.first()?;
+            let Expr::Lit(Lit::Str(inner_s)) = inner_first.expr.as_ref() else {
+                return None;
+            };
+            if inner_s.value.to_string_lossy() != BINDINGS_PACKAGE {
+                return None;
+            }
+            let outer_first = call.args.first()?;
+            let Expr::Lit(Lit::Str(s)) = outer_first.expr.as_ref() else {
+                return None;
+            };
+            Some(s.value.to_string_lossy().into_owned())
+        }
+        _ => None,
+    }
+}
+
+/// Extract the binding name from a simple `let x = ...` declarator.
+/// Returns `None` for destructuring patterns (`const { a, b } =
+/// require(...)`) — the consumer can fall back to per-property
+/// imports via `bun:ffi`'s `{ a, b }` shape if they really need
+/// that granularity.
+fn let_name_from_pat(pat: &Pat) -> Option<String> {
+    if let Pat::Ident(bi) = pat {
+        Some(bi.id.sym.as_ref().to_owned())
+    } else {
+        None
     }
 }
 
@@ -469,5 +631,83 @@ mod tests {
         // The property key `foo` is on line 2.
         assert_eq!(foo.location.start_line, 2);
         assert_eq!(foo.location.file, "test.ts");
+    }
+
+    // ------------------------------------------------------------------
+    // NAPI follow-up — `.node` addon detection (no per-fn granularity)
+    // ------------------------------------------------------------------
+
+    fn napi_binding(bindings: &[RawFfiBinding]) -> &RawFfiBinding {
+        bindings
+            .iter()
+            .find(|b| b.convention.as_deref() == Some("napi"))
+            .expect("napi binding")
+    }
+
+    #[test]
+    fn napi_default_import_of_node_addon_emits_placeholder_binding() {
+        let src = "import addon from \"./addon.node\";\n";
+        let (symbols, bindings) = run(src);
+        let sym = symbols.iter().find(|s| s.name == "addon").unwrap();
+        assert!(sym.flags.iter().any(|f| f == "napi"));
+        let b = napi_binding(&bindings);
+        assert_eq!(b.symbol_fqdn, "pkg::test::addon");
+        assert!(matches!(&b.abi, FfiAbi::Other(s) if s == "napi"));
+        assert_eq!(b.direction, FfiDirection::Import);
+        assert_eq!(b.abi_name, "addon");
+    }
+
+    #[test]
+    fn napi_require_of_node_path_emits_placeholder_binding() {
+        let src = "const native = require(\"./build/native.node\");\n";
+        let (_symbols, bindings) = run(src);
+        let b = napi_binding(&bindings);
+        assert_eq!(b.symbol_fqdn, "pkg::test::native");
+        assert_eq!(b.abi_name, "native");
+    }
+
+    #[test]
+    fn napi_bindings_factory_uses_inner_string_as_abi_name() {
+        let src = "const addon = require(\"bindings\")(\"my-addon\");\n";
+        let (symbols, bindings) = run(src);
+        let sym = symbols.iter().find(|s| s.name == "addon").unwrap();
+        assert!(sym.flags.iter().any(|f| f == "napi"));
+        let b = napi_binding(&bindings);
+        assert_eq!(b.symbol_fqdn, "pkg::test::addon");
+        assert_eq!(b.abi_name, "my-addon");
+    }
+
+    #[test]
+    fn napi_non_addon_require_is_ignored() {
+        // `require("./helpers.js")` isn't a NAPI addon — bail.
+        let src = "const helpers = require(\"./helpers.js\");\n";
+        let (_symbols, bindings) = run(src);
+        assert!(
+            bindings
+                .iter()
+                .all(|b| b.convention.as_deref() != Some("napi"))
+        );
+    }
+
+    #[test]
+    fn napi_destructuring_const_is_skipped() {
+        // `const { foo } = require(\"./addon.node\")` — destructuring
+        // isn't covered; bun:ffi's `{ foo: ... }` object shape is
+        // the way to get per-key granularity.
+        let src = "const { foo } = require(\"./addon.node\");\n";
+        let (_symbols, bindings) = run(src);
+        assert!(
+            bindings
+                .iter()
+                .all(|b| b.convention.as_deref() != Some("napi"))
+        );
+    }
+
+    #[test]
+    fn napi_path_strips_dir_prefix_in_abi_name() {
+        let src = "const addon = require(\"./build/Release/addon.node\");\n";
+        let (_symbols, bindings) = run(src);
+        let b = napi_binding(&bindings);
+        assert_eq!(b.abi_name, "addon");
     }
 }
