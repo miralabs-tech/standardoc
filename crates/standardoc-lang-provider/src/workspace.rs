@@ -481,4 +481,141 @@ mod tests {
         assert_eq!(payload_first, source_first);
         assert_eq!(payload_second, source_second);
     }
+
+    // --- IR-4-e: SFC (Vue / Svelte) inherits TS call_site population ---
+
+    mod ir4e_sfc {
+        use super::super::WorkspaceProvider;
+        use standardoc_core::{ExtractContext, LanguageProvider};
+        use std::fs;
+        use std::path::Path;
+        use tempfile::tempdir;
+
+        fn write(root: &Path, rel: &str, content: &str) {
+            let abs = root.join(rel);
+            if let Some(parent) = abs.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(abs, content).unwrap();
+        }
+
+        #[test]
+        fn ir4e_vue_sfc_script_call_sites_flow_through_ts_extractor() {
+            // Vue SFC with `<script lang="ts">` containing both a free-fn
+            // call and a member call. Both must surface in
+            // `ExtractedFile.call_sites` exactly as if extracted from a
+            // pure `.ts` file — SFC delegates to the TS extractor.
+            let dir = tempdir().unwrap();
+            let root = dir.path();
+            write(root, "package.json", r#"{"name":"@app/ui"}"#);
+            let src = r#"<template><h1>Hi</h1></template>
+<script lang="ts">
+function caller() {
+    foo("hi", 42);
+    obj.api.create(payload);
+}
+</script>
+"#;
+            write(root, "src/App.vue", src);
+            let provider = WorkspaceProvider::new();
+            let ctx = ExtractContext { workspace_root: root };
+            let extracted = provider.extract(src, "src/App.vue", &ctx).unwrap();
+            assert_eq!(extracted.language, standardoc_ir::Language::Vue);
+            // Free-fn call_site preserved.
+            let foo_cs = extracted
+                .call_sites
+                .iter()
+                .find(|c| c.callee_text == "foo")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected foo(...) call_site to flow through Vue SFC, got {:?}",
+                        extracted.call_sites
+                    )
+                });
+            assert_eq!(foo_cs.args.len(), 2);
+            assert!(foo_cs.args[0].is_string_literal);
+            assert_eq!(foo_cs.args[0].value, "hi");
+            // Member call_site preserved with receiver_chain.
+            let create_cs = extracted
+                .call_sites
+                .iter()
+                .find(|c| c.callee_text == "obj.api.create")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected obj.api.create call_site in Vue SFC, got {:?}",
+                        extracted.call_sites
+                    )
+                });
+            assert_eq!(
+                create_cs.receiver_chain,
+                vec!["obj".to_string(), "api".to_string()]
+            );
+        }
+
+        #[test]
+        fn ir4e_svelte_sfc_script_call_sites_flow_through_ts_extractor() {
+            // Same test as Vue but for Svelte — the SFC orchestrator
+            // routes both through `extract_sfc` -> ts::extract_with_overrides.
+            let dir = tempdir().unwrap();
+            let root = dir.path();
+            write(root, "package.json", r#"{"name":"@app/svelte-ui"}"#);
+            let src = r#"<script lang="ts">
+function handler() {
+    fetch("/api/ping");
+}
+</script>
+<h1>hi</h1>
+"#;
+            write(root, "src/Counter.svelte", src);
+            let provider = WorkspaceProvider::new();
+            let ctx = ExtractContext { workspace_root: root };
+            let extracted = provider.extract(src, "src/Counter.svelte", &ctx).unwrap();
+            assert_eq!(extracted.language, standardoc_ir::Language::Svelte);
+            let fetch_cs = extracted
+                .call_sites
+                .iter()
+                .find(|c| c.callee_text == "fetch")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected fetch(...) call_site in Svelte SFC, got {:?}",
+                        extracted.call_sites
+                    )
+                });
+            assert_eq!(fetch_cs.args.len(), 1);
+            assert!(fetch_cs.args[0].is_string_literal);
+            assert_eq!(fetch_cs.args[0].value, "/api/ping");
+        }
+
+        #[test]
+        #[ignore = "TS walker doesn't visit top-level Stmt::Expr (only Stmt::Decl). \
+                    Vue 3 script-setup idiom of top-level call statements is therefore \
+                    invisible to call_site emission. Pre-existing limitation; activates \
+                    when top-level expression walking is wired up (separate change)."]
+        fn ir4e_vue_script_setup_call_sites_attributed_to_module_fqdn() {
+            // `<script setup>` runs in module scope — call_sites emitted
+            // at the top level would have `from_fqdn` equal to the SFC's
+            // module fqdn. Vue 3 idiomatic shape. Ignored because the TS
+            // walker currently skips top-level expression statements.
+            let dir = tempdir().unwrap();
+            let root = dir.path();
+            write(root, "package.json", r#"{"name":"@app/setup"}"#);
+            let src = r#"<script setup lang="ts">
+import { onMount } from "vue";
+onMount(() => { console.log("ready"); });
+</script>
+"#;
+            write(root, "src/Mounted.vue", src);
+            let provider = WorkspaceProvider::new();
+            let ctx = ExtractContext { workspace_root: root };
+            let extracted = provider.extract(src, "src/Mounted.vue", &ctx).unwrap();
+            assert!(
+                extracted
+                    .call_sites
+                    .iter()
+                    .any(|c| c.callee_text == "onMount"),
+                "onMount() should surface as a call_site in script-setup, got {:?}",
+                extracted.call_sites
+            );
+        }
+    }
 }

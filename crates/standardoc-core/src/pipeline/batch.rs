@@ -37,6 +37,14 @@ pub(crate) fn apply_upsert_file(
     apply_edges(conn, &plan, &extracted.edges)?;
     promote_unresolved_batch(conn, &new_or_modified_ids)?;
     apply_documents(conn, &plan, &new_or_modified_ids, &extracted.documents)?;
+    // TODO(IR-4-f, post-1.0): persist `extracted.call_sites` so the plugin
+    // layer can query textual call shapes from the DB. The IR-4-a..d
+    // commits populate `RawCallSite` from every extractor, but this
+    // pipeline currently drops the vec on the floor — call_sites are
+    // observational data the plugin layer will need, but their storage
+    // schema (dedicated table vs JSON blob per file, indexes on
+    // callee_text / receiver_chain) deserves its own design pass and
+    // schema migration rather than being slipped in here.
     Ok(())
 }
 
