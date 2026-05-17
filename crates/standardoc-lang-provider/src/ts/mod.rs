@@ -8,6 +8,7 @@ use swc_core::ecma::parser::Syntax;
 
 mod extract;
 mod extract_doc;
+mod ffi_tagger;
 mod helpers;
 mod lookup;
 mod resolver;
