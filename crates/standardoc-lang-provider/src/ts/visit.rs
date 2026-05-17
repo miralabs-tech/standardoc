@@ -194,6 +194,26 @@ pub(crate) fn visit_expression_for_calls(
     expr.visit_with(&mut visitor);
 }
 
+/// Pass-2 entry: walk a constructor body for `CallExpr` / `NewExpr` /
+/// `Callee::Super`. Mirror of `visit_function_body` but adapted for SWC's
+/// `Constructor` node, which is a distinct AST type from `Function` (no
+/// `return_type`, no `type_params`, params are `ParamOrTsParamProp`).
+pub(crate) fn visit_constructor_body(
+    ctx: &mut TsWalkContext<'_>,
+    ctor: &swc_core::ecma::ast::Constructor,
+    current_module: &str,
+    enclosing_fqdn: &str,
+) {
+    if ctor.body.is_none() {
+        return;
+    }
+    let mut visitor = CallVisitor::new(ctx, current_module, enclosing_fqdn);
+    // Enter via `ctor.visit_with` so our `visit_constructor` override
+    // pushes the constructor scope and seeds params before walking the
+    // body — same shape as `visit_function_body` delegates to `visit_function`.
+    ctor.visit_with(&mut visitor);
+}
+
 /// `template-*` slug carried into `RawEdge.attributes` for JSX-extracted
 /// REFERENCES edges. Mirror of [`crate::template::TemplateAttribute`] but
 /// kept ASCII-only here so the visitor doesn't depend on the template
@@ -962,6 +982,28 @@ impl Visit for CallVisitor<'_, '_> {
         // like `const fn = FOO`). Walking `body.stmts` directly would
         // leave `current_scope_idx` at the function scope and miss
         // those bindings when resolving inner idents.
+        if let Some(body) = &node.body {
+            body.visit_with(self);
+        }
+        self.exit_scope();
+    }
+
+    /// Constructor envelope — mirrors `visit_function` for SWC's
+    /// `Constructor` node. No `return_type` (constructors are
+    /// implicit-void in TS) and no `type_params` (TS forbids generic
+    /// constructors). Params are `ParamOrTsParamProp` — the latter is
+    /// the `constructor(private readonly db: Db)` shorthand.
+    ///
+    /// TODO: TsParamProp idents (`private db: Db` in the param list)
+    /// are not seeded as scope-local bindings by the lookup builder
+    /// yet, so body refs to `db` will resolve as `Unresolved` in the
+    /// REFERENCES edge layer. See `ts/lookup/builder.rs` and the
+    /// `ir4c_constructor_ts_param_prop_marker_pending` test.
+    fn visit_constructor(&mut self, node: &swc_core::ecma::ast::Constructor) {
+        self.enter_scope_at(node.span.lo.0, node.span.hi.0);
+        for param in &node.params {
+            param.visit_with(self);
+        }
         if let Some(body) = &node.body {
             body.visit_with(self);
         }
@@ -2368,13 +2410,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TS walker doesn't visit constructor bodies yet; the Callee::Super branch in \
-                visit_call_expr is dead until that's wired up (separate change)."]
     fn ir4c_super_call_emits_call_site_with_super_callee_text() {
-        // `super(x)` — `Callee::Super`. callee_text would be the
-        // literal string "super"; receiver_chain stays empty. Ignored
-        // because the TS walker currently skips `ClassMember::Constructor`
-        // bodies — the visitor never reaches the super-call.
+        // `super(x)` — `Callee::Super`. callee_text is the literal
+        // string "super"; receiver_chain stays empty. Attributed to
+        // the constructor's FQDN now that `visit_constructor_body`
+        // walks the constructor body in `walk::visit_class_methods`.
         let css = run_with_call_sites(
             "class Foo extends Bar { constructor() { super(\"x\"); } }",
         );
@@ -2382,10 +2422,77 @@ mod tests {
             .iter()
             .find(|c| c.callee_text == "super")
             .unwrap_or_else(|| panic!("expected super(...) call_site, got {css:?}"));
+        assert_eq!(cs.from_fqdn, "src::Foo::constructor");
         assert!(cs.receiver_chain.is_empty());
         assert_eq!(cs.args.len(), 1);
         assert!(cs.args[0].is_string_literal);
         assert_eq!(cs.args[0].value, "x");
+    }
+
+    #[test]
+    fn ir4c_constructor_body_call_attributed_to_ctor_fqdn() {
+        // Free-fn call inside a constructor body must be attributed
+        // to `<module>::<Class>::constructor`, not the enclosing
+        // module FQDN — proves the new ctor walker passes the right
+        // enclosing_fqdn down to the CallVisitor.
+        let css = run_with_call_sites("class Foo { constructor() { helper(\"x\"); } }");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "helper")
+            .unwrap_or_else(|| panic!("expected helper(...) call_site, got {css:?}"));
+        assert_eq!(cs.from_fqdn, "src::Foo::constructor");
+        assert!(cs.receiver_chain.is_empty());
+    }
+
+    #[test]
+    fn ir4c_constructor_body_new_expression_emits_call_site() {
+        // `new Bar()` inside a constructor — NewExpr path traversed by
+        // the new ctor walker, attributed to the ctor FQDN.
+        let css = run_with_call_sites("class Foo { constructor() { new Bar(\"x\"); } }");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "Bar")
+            .unwrap_or_else(|| panic!("expected new Bar(...) call_site, got {css:?}"));
+        assert_eq!(cs.from_fqdn, "src::Foo::constructor");
+        assert_eq!(cs.args.len(), 1);
+        assert!(cs.args[0].is_string_literal);
+    }
+
+    #[test]
+    fn ir4c_constructor_body_method_chain_receiver_walked() {
+        // `this.api.create()` inside a constructor — receiver_chain
+        // walker should produce `["this", "api"]` and attribute the
+        // call to the ctor FQDN. Proves the scope push/pop of the
+        // new `visit_constructor` override doesn't break member-walk.
+        let css = run_with_call_sites(
+            "class Foo { constructor() { this.api.create(); } }",
+        );
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "this.api.create")
+            .unwrap_or_else(|| {
+                panic!("expected this.api.create() call_site, got {css:?}")
+            });
+        assert_eq!(cs.from_fqdn, "src::Foo::constructor");
+        assert_eq!(
+            cs.receiver_chain,
+            vec!["this".to_string(), "api".to_string()]
+        );
+    }
+
+    #[test]
+    #[ignore = "Pending TsParamProp lookup fix — the `constructor(private db: Db)` shorthand \
+                does NOT seed `db` as a scope-local binding in the lookup builder, so body \
+                refs to `db` resolve as Unresolved in the REFERENCES edge layer. The \
+                call_site layer is textual-only and can't observe binding resolution \
+                directly — strip `#[ignore]` and convert this test to a lookup-aware \
+                assertion once `ts/lookup/builder.rs` binds TsParamProp idents."]
+    fn ir4c_constructor_ts_param_prop_marker_pending() {
+        panic!(
+            "convert to a lookup-aware assertion once ts/lookup/builder.rs binds \
+             TsParamProp idents into the ctor scope (placeholder marker for IR-4-c \
+             follow-up)"
+        );
     }
 
     #[test]

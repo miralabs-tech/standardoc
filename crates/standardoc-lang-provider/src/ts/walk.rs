@@ -576,14 +576,26 @@ fn visit_class_methods(
 ) {
     let class_fqdn = format!("{current_module}::{class_name}");
     for member in &class.body {
-        let ClassMember::Method(method) = member else {
-            continue;
-        };
-        let Some(method_name) = method_name_string(&method.key) else {
-            continue;
-        };
-        let method_fqdn = format!("{class_fqdn}::{method_name}");
-        visit::visit_function_body(ctx, &method.function, current_module, &method_fqdn);
+        match member {
+            ClassMember::Method(method) => {
+                let Some(method_name) = method_name_string(&method.key) else {
+                    continue;
+                };
+                let method_fqdn = format!("{class_fqdn}::{method_name}");
+                visit::visit_function_body(
+                    ctx,
+                    &method.function,
+                    current_module,
+                    &method_fqdn,
+                );
+            }
+            ClassMember::Constructor(ctor) => {
+                // FQDN must match `extract_constructor`'s Pass-1 shape.
+                let ctor_fqdn = format!("{class_fqdn}::constructor");
+                visit::visit_constructor_body(ctx, ctor, current_module, &ctor_fqdn);
+            }
+            _ => {}
+        }
     }
 }
 
