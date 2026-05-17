@@ -21,8 +21,20 @@ impl AliasMutability {
 
 /// Where the code physically lives / executes. Orthogonal to `Language`:
 /// a Lua program can run as `Native { language: Lua }`, be embedded via
-/// `Ust { backing: "lua" }`, or compile to `Wasm`. `Custom` keeps the door
-/// open for UST-defined substrates added without recompiling the core.
+/// `Ust { backing: "lua" }`, or compile to `Wasm`.
+///
+/// IR-2 1.0 widening — the six unit variants (`Browser`, `Node`,
+/// `Database`, `MessageBus`, `Kernel`, `Hypervisor`) promote common
+/// substrates to first-class so the (from, to) pair on a
+/// [`crate::SubstrateBridge`] can express e.g. Tauri (Native↔Browser)
+/// or Prisma (Node↔Database) without falling back to `Custom`. Fine-
+/// grained disambiguation (`postgres` vs `mysql`, `chromium` vs
+/// `webkit`) stays in [`Custom`] via tags like `"database:postgres"`
+/// or `"browser:webkit"` — and in [`crate::BridgeKind`] (`prisma`,
+/// `sqlx`, …) for the access mechanism.
+///
+/// `Custom` keeps the door open for UST-defined substrates added
+/// without recompiling the core.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Substrate {
@@ -30,6 +42,23 @@ pub enum Substrate {
 	Ust { backing: String },
 	Wasm,
 	Ffi { abi: String },
+	/// Browser-side JS runtime (V8, SpiderMonkey, JavaScriptCore). Engine
+	/// specifics → `Custom { tag: "browser:<engine>" }`.
+	Browser,
+	/// Server-side JS runtime (Node.js, Bun, Deno). Runtime specifics →
+	/// `Custom { tag: "node:<runtime>" }`.
+	Node,
+	/// Database execution environment (stored procs, views, triggers,
+	/// agg pipelines). Engine specifics → `Custom { tag: "database:<engine>" }`.
+	Database,
+	/// Message-bus consumer / producer environment (Kafka, Redis streams,
+	/// NATS, RabbitMQ, …). Transport specifics →
+	/// `Custom { tag: "message_bus:<transport>" }`.
+	MessageBus,
+	/// OS kernel space (drivers, eBPF programs, kernel modules).
+	Kernel,
+	/// Hypervisor / VM-monitor execution (Xen, KVM extensions).
+	Hypervisor,
 	Custom { tag: String },
 }
 
@@ -409,5 +438,66 @@ mod tests {
 		let s = serde_json::to_string(&custom_substrate).unwrap();
 		let back: Substrate = serde_json::from_str(&s).unwrap();
 		assert_eq!(custom_substrate, back);
+	}
+
+	#[test]
+	fn ir2_widened_substrate_variants_round_trip_via_serde_json() {
+		for v in [
+			Substrate::Browser,
+			Substrate::Node,
+			Substrate::Database,
+			Substrate::MessageBus,
+			Substrate::Kernel,
+			Substrate::Hypervisor,
+		] {
+			let s = serde_json::to_string(&v).unwrap();
+			let back: Substrate = serde_json::from_str(&s).unwrap();
+			assert_eq!(v, back, "round-trip mismatch for {v:?}");
+		}
+	}
+
+	#[test]
+	fn ir2_widened_substrate_variants_serialize_to_snake_case() {
+		assert_eq!(serde_json::to_string(&Substrate::Browser).unwrap(), "\"browser\"");
+		assert_eq!(serde_json::to_string(&Substrate::Node).unwrap(), "\"node\"");
+		assert_eq!(serde_json::to_string(&Substrate::Database).unwrap(), "\"database\"");
+		// `MessageBus` is the case that exercises snake_case lowering;
+		// a regression here would silently re-tag the variant in stored
+		// `SubstrateBridge` JSON.
+		assert_eq!(
+			serde_json::to_string(&Substrate::MessageBus).unwrap(),
+			"\"message_bus\""
+		);
+		assert_eq!(serde_json::to_string(&Substrate::Kernel).unwrap(), "\"kernel\"");
+		assert_eq!(
+			serde_json::to_string(&Substrate::Hypervisor).unwrap(),
+			"\"hypervisor\""
+		);
+	}
+
+	#[test]
+	fn ir2_widened_substrate_variants_are_distinct_from_custom_tag_form() {
+		// First-class variants must NOT compare equal to their `Custom`
+		// tag-string equivalents — equality/hash distinguish so the
+		// `SubstrateBridge` (from, to) lookup keys don't collide between
+		// `Browser` and `Custom { tag: "browser" }`.
+		assert_ne!(
+			Substrate::Browser,
+			Substrate::Custom {
+				tag: "browser".into()
+			}
+		);
+		assert_ne!(
+			Substrate::Database,
+			Substrate::Custom {
+				tag: "database".into()
+			}
+		);
+		assert_ne!(
+			Substrate::MessageBus,
+			Substrate::Custom {
+				tag: "message_bus".into()
+			}
+		);
 	}
 }
