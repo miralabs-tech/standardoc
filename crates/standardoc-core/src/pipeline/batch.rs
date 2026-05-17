@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension};
 use standardoc_ir::{ExtractedFile, RawDocument, RawEdge};
 
 use crate::pipeline::diff::{DiffPlan, diff_symbols, fetch_existing_symbols};
+use crate::storage::call_sites::{delete_call_sites_by_file, insert_call_site};
 use crate::storage::documents::{DocumentInput, delete_document, upsert_document};
 use crate::storage::edge_sites::{delete_edge_sites_by_file, insert_edge_sites};
 use crate::storage::edges::{delete_edges_from, insert_edge, promote_unresolved_batch};
@@ -37,14 +38,28 @@ pub(crate) fn apply_upsert_file(
     apply_edges(conn, &plan, &extracted.edges)?;
     promote_unresolved_batch(conn, &new_or_modified_ids)?;
     apply_documents(conn, &plan, &new_or_modified_ids, &extracted.documents)?;
-    // TODO(IR-4-f, post-1.0): persist `extracted.call_sites` so the plugin
-    // layer can query textual call shapes from the DB. The IR-4-a..d
-    // commits populate `RawCallSite` from every extractor, but this
-    // pipeline currently drops the vec on the floor — call_sites are
-    // observational data the plugin layer will need, but their storage
-    // schema (dedicated table vs JSON blob per file, indexes on
-    // callee_text / receiver_chain) deserves its own design pass and
-    // schema migration rather than being slipped in here.
+    // IR-4-f: persist the call_sites vec populated by the extractors
+    // since IR-4-b/c/d. Delete-then-batch-insert mirrors the documents
+    // pattern — re-extraction is the common path, and a full re-write
+    // is cheaper than diffing per-call-site identity (which would need
+    // a stable id we don't currently carry on the IR side).
+    apply_call_sites(conn, path, &extracted.call_sites)?;
+    Ok(())
+}
+
+/// IR-4-f — re-sync the `call_sites` rows for `file_path` with the
+/// freshly-extracted vec. Drops every existing row keyed by the file,
+/// then inserts the new set. Idempotent: running with an empty vec
+/// against a file that previously had call_sites cleanly purges them.
+fn apply_call_sites(
+    conn: &Connection,
+    file_path: &str,
+    call_sites: &[standardoc_ir::RawCallSite],
+) -> Result<(), StorageError> {
+    delete_call_sites_by_file(conn, file_path)?;
+    for cs in call_sites {
+        insert_call_site(conn, file_path, cs)?;
+    }
     Ok(())
 }
 
@@ -709,5 +724,134 @@ mod tests {
 
         let f2 = get_file(&conn, "src/main.rs").unwrap().unwrap();
         assert_eq!(f2.last_scan_error, None);
+    }
+
+    // --- IR-4-f: call_sites end-to-end through apply_upsert_file ---
+
+    use crate::storage::call_sites::count_call_sites_by_file;
+    use standardoc_ir::{RawCallArg, RawCallSite};
+
+    fn extracted_with_call_sites(
+        file: &str,
+        symbols: Vec<RawSymbol>,
+        call_sites: Vec<RawCallSite>,
+    ) -> ExtractedFile {
+        ExtractedFile {
+            file: file.into(),
+            language: Language::Rust,
+            source_origin: SourceOrigin::Workspace,
+            is_external: false,
+            content_hash: Blake3Hash::new([0xab; 32]),
+            byte_size: 4096,
+            symbols,
+            edges: vec![],
+            call_sites,
+            documents: vec![],
+        }
+    }
+
+    fn cs(from_fqdn: &str, callee: &str, line: u32) -> RawCallSite {
+        RawCallSite {
+            from_fqdn: from_fqdn.into(),
+            callee_text: callee.into(),
+            args: vec![RawCallArg {
+                value: "x".into(),
+                is_string_literal: false,
+            }],
+            receiver_chain: vec![],
+            site: Site {
+                file: "src/main.rs".into(),
+                line,
+                col: 4,
+            },
+        }
+    }
+
+    #[test]
+    fn ir4f_apply_upsert_file_persists_call_sites_vec_to_db() {
+        // The IR-4-b/c/d extractors emit a `Vec<RawCallSite>` on
+        // `ExtractedFile`; this test checks the batch pipeline actually
+        // lands every record in the new `call_sites` table.
+        let conn = fresh_conn();
+        let ef = extracted_with_call_sites(
+            "src/main.rs",
+            vec![sym("caller", "crate::caller", 0x01, 1)],
+            vec![
+                cs("crate::caller", "foo", 5),
+                cs("crate::caller", "bar", 7),
+                cs("crate::caller", "baz", 9),
+            ],
+        );
+        apply_upsert_file(&conn, &ef, 0).unwrap();
+        assert_eq!(
+            count_call_sites_by_file(&conn, "src/main.rs").unwrap(),
+            3,
+            "all three call_sites must reach the DB"
+        );
+    }
+
+    #[test]
+    fn ir4f_re_extract_replaces_call_sites_set() {
+        // Second extract of the same file with a different call_sites
+        // vec must DROP the old rows AND insert the new ones — no
+        // accumulation, no stale entries.
+        let conn = fresh_conn();
+        let ef1 = extracted_with_call_sites(
+            "src/main.rs",
+            vec![sym("caller", "crate::caller", 0x01, 1)],
+            vec![
+                cs("crate::caller", "old_a", 5),
+                cs("crate::caller", "old_b", 7),
+            ],
+        );
+        apply_upsert_file(&conn, &ef1, 0).unwrap();
+        assert_eq!(count_call_sites_by_file(&conn, "src/main.rs").unwrap(), 2);
+
+        let ef2 = extracted_with_call_sites(
+            "src/main.rs",
+            vec![sym("caller", "crate::caller", 0x02, 1)],
+            vec![cs("crate::caller", "new_one", 9)],
+        );
+        apply_upsert_file(&conn, &ef2, 1).unwrap();
+        assert_eq!(
+            count_call_sites_by_file(&conn, "src/main.rs").unwrap(),
+            1,
+            "re-extract must replace, not accumulate"
+        );
+        let callee: String = conn
+            .query_row(
+                "SELECT callee_text FROM call_sites WHERE file_path = ?1",
+                ["src/main.rs"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(callee, "new_one");
+    }
+
+    #[test]
+    fn ir4f_re_extract_with_empty_call_sites_clears_existing() {
+        // If the extractor produces zero call_sites on a re-extract
+        // (e.g. user deleted all function bodies), the table must be
+        // purged for that file. Idempotency check for `apply_call_sites`.
+        let conn = fresh_conn();
+        let ef1 = extracted_with_call_sites(
+            "src/main.rs",
+            vec![sym("caller", "crate::caller", 0x01, 1)],
+            vec![cs("crate::caller", "doomed", 5)],
+        );
+        apply_upsert_file(&conn, &ef1, 0).unwrap();
+        assert_eq!(count_call_sites_by_file(&conn, "src/main.rs").unwrap(), 1);
+
+        let ef2 = extracted_with_call_sites(
+            "src/main.rs",
+            vec![sym("caller", "crate::caller", 0x02, 1)],
+            vec![],
+        );
+        apply_upsert_file(&conn, &ef2, 1).unwrap();
+        assert_eq!(
+            count_call_sites_by_file(&conn, "src/main.rs").unwrap(),
+            0,
+            "empty call_sites vec must purge existing rows"
+        );
     }
 }

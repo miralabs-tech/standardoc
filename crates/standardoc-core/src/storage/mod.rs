@@ -4,6 +4,7 @@
 // in later sessions, hence the surviving `dead_code` allow.
 #![allow(dead_code)]
 
+pub(crate) mod call_sites;
 pub(crate) mod conv;
 pub(crate) mod cross_workspace;
 pub(crate) mod documents;
