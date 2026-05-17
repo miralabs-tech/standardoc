@@ -93,7 +93,7 @@ pub struct SymbolContextWithNeighbors {
 
 const SYMBOL_COLUMNS: &str = "fqdn, name, kind, language_kind, module, visibility, \
      file_path, start_line, end_line, start_col, end_col, \
-     signature_json, body_hash";
+     signature_json, body_hash, flags";
 
 fn with_conn<F, R>(handle: &IndexHandle, f: F) -> Result<R, StorageError>
 where
@@ -245,7 +245,7 @@ pub fn search_text(
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
-                    s.signature_json, s.body_hash \
+                    s.signature_json, s.body_hash, s.flags \
              FROM symbols_fts f \
              JOIN symbols s ON s.id = f.rowid \
              WHERE symbols_fts MATCH ?1 \
@@ -334,7 +334,7 @@ pub fn list_symbols(
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
-                    s.signature_json, s.body_hash \
+                    s.signature_json, s.body_hash, s.flags \
              FROM symbols s \
              WHERE (?1 IS NULL OR s.kind       = ?1) \
                AND (?2 IS NULL OR s.visibility = ?2) \
@@ -395,7 +395,7 @@ pub fn find_by_pattern(
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
-                    s.signature_json, s.body_hash \
+                    s.signature_json, s.body_hash, s.flags \
              FROM symbols s \
              WHERE (s.name GLOB ?1 OR s.fqdn GLOB ?1) \
                AND (?2 IS NULL OR s.kind       = ?2) \
@@ -457,7 +457,7 @@ pub fn find_similar(
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
-                    s.signature_json, s.body_hash \
+                    s.signature_json, s.body_hash, s.flags \
              FROM symbols s \
              WHERE (?1 IS NULL OR s.kind       = ?1) \
                AND (?2 IS NULL OR s.visibility = ?2) \
@@ -547,8 +547,8 @@ pub fn context_for_symbol(
                 |row| {
                     Ok((
                         read_symbol_row(row)?,
-                        row.get::<_, Option<String>>(13)?,
                         row.get::<_, Option<String>>(14)?,
+                        row.get::<_, Option<String>>(15)?,
                     ))
                 },
             )
@@ -1180,6 +1180,7 @@ struct SymbolRowRaw {
     end_col: i64,
     signature_json: Option<String>,
     body_hash_hex: Option<String>,
+    flags_json: String,
 }
 
 fn read_symbol_row(row: &Row<'_>) -> rusqlite::Result<SymbolRowRaw> {
@@ -1197,6 +1198,7 @@ fn read_symbol_row(row: &Row<'_>) -> rusqlite::Result<SymbolRowRaw> {
         end_col: row.get(10)?,
         signature_json: row.get(11)?,
         body_hash_hex: row.get(12)?,
+        flags_json: row.get(13)?,
     })
 }
 
@@ -1234,11 +1236,16 @@ fn build_symbol(raw: SymbolRowRaw) -> Result<RawSymbol, StorageError> {
         signature,
         body_hash,
         attributes: Vec::new(),
-        // Stage 3e-1b: hydrated by the storage layer in v9 (see
-        // `pipeline::batch` flush path). Reader-side wire-up lands in
-        // the storage migration commit that follows the IR addition.
-        flags: Vec::new(),
+        flags: parse_flags_json(&raw.flags_json),
     })
+}
+
+/// Best-effort decode of the `symbols.flags` TEXT column (JSON array of
+/// strings). Returns an empty vec on any parse error — schema-level
+/// guarantees the column is never NULL, so this only triggers on a
+/// genuinely corrupted row.
+fn parse_flags_json(raw: &str) -> Vec<String> {
+    serde_json::from_str(raw).unwrap_or_default()
 }
 
 fn position_to_u32(field: &str, value: i64) -> Result<u32, StorageError> {

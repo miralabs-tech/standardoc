@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::storage::error::StorageError;
 use crate::storage::init::run_init_schema;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 8;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 9;
 
 const V1_TO_V2_SQL: &str = include_str!("../../migrations/v1_to_v2.sql");
 const V2_TO_V3_SQL: &str = include_str!("../../migrations/v2_to_v3.sql");
@@ -12,6 +12,7 @@ const V4_TO_V5_SQL: &str = include_str!("../../migrations/v4_to_v5.sql");
 const V5_TO_V6_SQL: &str = include_str!("../../migrations/v5_to_v6.sql");
 const V6_TO_V7_SQL: &str = include_str!("../../migrations/v6_to_v7.sql");
 const V7_TO_V8_SQL: &str = include_str!("../../migrations/v7_to_v8.sql");
+const V8_TO_V9_SQL: &str = include_str!("../../migrations/v8_to_v9.sql");
 
 pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), StorageError> {
     if !table_exists(conn, "schema_meta")? {
@@ -42,6 +43,7 @@ fn apply_upgrade(conn: &Connection, from: u32) -> Result<(), StorageError> {
         5 => conn.execute_batch(V5_TO_V6_SQL).map_err(StorageError::from),
         6 => conn.execute_batch(V6_TO_V7_SQL).map_err(StorageError::from),
         7 => conn.execute_batch(V7_TO_V8_SQL).map_err(StorageError::from),
+        8 => conn.execute_batch(V8_TO_V9_SQL).map_err(StorageError::from),
         other => Err(StorageError::InvalidSchemaMetadata {
             key: "schema_version".into(),
             value: format!("no upgrade path from version {other}"),
@@ -384,6 +386,70 @@ mod tests {
             dup.is_err(),
             "UNIQUE on projects.root_path must reject duplicate insert"
         );
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn upgrade_adds_flags_column_to_symbols_on_legacy_v8_db() {
+        let conn = fresh_conn();
+        run_init_schema(&conn).unwrap();
+        conn.execute_batch(V1_TO_V2_SQL).unwrap();
+        conn.execute_batch(V2_TO_V3_SQL).unwrap();
+        conn.execute_batch(V3_TO_V4_SQL).unwrap();
+        conn.execute_batch(V4_TO_V5_SQL).unwrap();
+        conn.execute_batch(V5_TO_V6_SQL).unwrap();
+        conn.execute_batch(V6_TO_V7_SQL).unwrap();
+        conn.execute_batch(V7_TO_V8_SQL).unwrap();
+        let pre: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('symbols')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            !pre.iter().any(|c| c == "flags"),
+            "v8 must NOT have the flags column"
+        );
+
+        ensure_schema(&conn).unwrap();
+
+        let post: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('symbols')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            post.iter().any(|c| c == "flags"),
+            "v8→v9 upgrade must add the flags column, got {post:?}"
+        );
+        // Default for legacy rows: '[]' (empty JSON array).
+        conn.execute(
+            "INSERT INTO files (path, content_hash, language, last_scanned, byte_size, is_external) \
+             VALUES ('src/x.rs', 'h', 'rust', 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols (\
+                fqdn, name, kind, language_kind, language, module, visibility, \
+                file_path, start_line, end_line, start_col, end_col, \
+                signature_json, body_hash, is_external, source_origin, \
+                last_modified_revision\
+             ) VALUES ('x::f', 'f', 'function', 'fn', 'rust', NULL, 'public', \
+                'src/x.rs', 0, 0, 0, 0, NULL, NULL, 0, 'workspace', 0)",
+            [],
+        )
+        .unwrap();
+        let default_flags: String = conn
+            .query_row("SELECT flags FROM symbols WHERE fqdn = 'x::f'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(default_flags, "[]", "legacy-row insertion must default flags to '[]'");
         assert_eq!(
             read_schema_version(&conn).unwrap(),
             SUPPORTED_SCHEMA_VERSION

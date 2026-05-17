@@ -31,6 +31,12 @@ pub(crate) fn insert_symbol(
         .as_ref()
         .map(standardoc_ir::Blake3Hash::to_hex);
     let revision_i64 = i64::try_from(ctx.revision).unwrap_or(i64::MAX);
+    // Stage 3e-1b: persist `RawSymbol.flags` as a JSON-array TEXT
+    // column so queries can `LIKE`/`json_each` filter without an
+    // extra join. `serde_json::to_string` on `&Vec<String>` always
+    // succeeds — the `expect` never fires.
+    let flags_json = serde_json::to_string(&symbol.flags)
+        .expect("Vec<String> serializes to JSON");
 
     let id = conn
         .query_row(
@@ -38,8 +44,8 @@ pub(crate) fn insert_symbol(
                 fqdn, name, kind, language_kind, language, module, visibility, \
                 file_path, start_line, end_line, start_col, end_col, \
                 signature_json, body_hash, is_external, source_origin, \
-                last_modified_revision\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
+                last_modified_revision, flags\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18) \
              ON CONFLICT(fqdn) DO UPDATE SET \
                 name                    = excluded.name, \
                 kind                    = excluded.kind, \
@@ -56,7 +62,8 @@ pub(crate) fn insert_symbol(
                 body_hash               = excluded.body_hash, \
                 is_external             = excluded.is_external, \
                 source_origin           = excluded.source_origin, \
-                last_modified_revision  = excluded.last_modified_revision \
+                last_modified_revision  = excluded.last_modified_revision, \
+                flags                   = excluded.flags \
              RETURNING id",
             rusqlite::params![
                 symbol.fqdn,
@@ -76,6 +83,7 @@ pub(crate) fn insert_symbol(
                 ctx.is_external,
                 source_origin_to_sql_text(ctx.source_origin),
                 revision_i64,
+                flags_json,
             ],
             |row| row.get::<_, i64>(0),
         )
