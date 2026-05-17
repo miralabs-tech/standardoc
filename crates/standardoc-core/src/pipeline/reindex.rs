@@ -15,6 +15,7 @@ use crate::pipeline::paths::{guess_language, to_workspace_relative};
 use crate::pipeline::provider::{ExtractContext, ExtractError, LanguageProvider};
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
+use crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
 
 #[derive(Debug, Error)]
 pub enum ColdStartError {
@@ -174,7 +175,9 @@ pub(crate) fn commit_outcomes(
     let next_revision = handle.revision().saturating_add(1);
     for outcome in outcomes {
         match outcome {
-            Outcome::Upsert { extracted, .. } => apply_upsert_file(&tx, extracted, next_revision)?,
+            Outcome::Upsert { extracted, .. } => {
+                apply_upsert_file(&tx, extracted, next_revision, PRIMARY_WORKSPACE_ID)?
+            }
             Outcome::ParseError {
                 rel,
                 language,

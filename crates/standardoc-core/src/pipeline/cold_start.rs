@@ -148,7 +148,7 @@ fn u64_of(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
 
-fn collect_candidates(
+pub(crate) fn collect_candidates(
     workspace_root: &Path,
     filters: &ScanFilters,
 ) -> Result<Vec<PathBuf>, ColdStartError> {
@@ -483,6 +483,7 @@ mod tests {
         // must route through `apply_delete_file` so `delete_symbol`'s
         // reverse-promote step runs in the SAME transaction.
         use crate::pipeline::batch::apply_upsert_file;
+        use crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
         use standardoc_ir::{EdgeConfidence, EdgeKind, RawEdge, ResolvedOrUnresolved};
 
         let dir = tempdir().unwrap();
@@ -540,8 +541,8 @@ mod tests {
         let target = sample_extracted("src/target.rs", "crate::target");
         {
             let conn = handle.pool().unwrap().get().unwrap();
-            apply_upsert_file(&conn, &target, 0).unwrap();
-            apply_upsert_file(&conn, &caller_extracted, 0).unwrap();
+            apply_upsert_file(&conn, &target, 0, PRIMARY_WORKSPACE_ID).unwrap();
+            apply_upsert_file(&conn, &caller_extracted, 0, PRIMARY_WORKSPACE_ID).unwrap();
             // After insert, the resolved-on-insert promotion should have
             // linked the edge to target's symbol id — sanity-check before
             // the cleanup so we know the cascade has something to chew.

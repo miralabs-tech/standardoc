@@ -5,6 +5,7 @@ pub mod external_invalidation;
 mod filters;
 pub mod manifest_invalidation;
 mod paths;
+pub mod peer_extract;
 pub mod peer_import;
 pub mod projects;
 mod provider;

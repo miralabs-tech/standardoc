@@ -8,6 +8,7 @@ use tokio::sync::mpsc::Receiver;
 use crate::commands::IngestCommand;
 use crate::pipeline::batch::{apply_delete_file, apply_upsert_file, record_parse_error};
 use crate::storage::error::StorageError;
+use crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
 
 pub(crate) struct WriterContext {
     pub(crate) pool: Arc<RwLock<Option<Pool<SqliteConnectionManager>>>>,
@@ -67,7 +68,7 @@ fn dispatch(
 ) -> Result<(), StorageError> {
     match cmd {
         IngestCommand::UpsertFile { extracted, .. } => {
-            apply_upsert_file(conn, &extracted, revision)
+            apply_upsert_file(conn, &extracted, revision, PRIMARY_WORKSPACE_ID)
         }
         IngestCommand::DeleteFile { path } => apply_delete_file(conn, &path),
         IngestCommand::RecordParseError {
