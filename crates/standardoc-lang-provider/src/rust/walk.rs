@@ -3,12 +3,14 @@ use std::collections::{HashMap, HashSet};
 use proc_macro2::Span;
 use quote::ToTokens;
 use standardoc_ir::{
-    EdgeKind, Kind, Language, LanguageKind, Modifiers, ModuleLookup, Param, RawAttribute,
-    RawAttributeArg, RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature,
-    SignatureMeta, Site, SymbolLocation, TypeRef, Visibility, compact_rust_tokens,
+    AliasMutability, BuiltinTag, BuiltinTier, EdgeKind, Kind, Language, LanguageKind, Modifiers,
+    ModuleLookup, Param, RawAttribute, RawAttributeArg, RawDocument, RawEdge, RawSymbol,
+    ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation, TypeRef, Visibility,
+    compact_rust_tokens,
 };
 use syn::spanned::Spanned;
 
+use crate::builtins::global as global_builtin_registry;
 use crate::walk_core::WalkContextCore;
 
 use super::body_hash;
@@ -63,7 +65,7 @@ impl WalkContext {
     pub(crate) fn register_attribute_flag(
         &mut self,
         source_fqdn: &str,
-        tag: &standardoc_ir::BuiltinTag,
+        tag: &BuiltinTag,
     ) {
         self.attribute_flags
             .entry(source_fqdn.to_string())
@@ -162,6 +164,115 @@ impl WalkContext {
             name: path.to_string(),
         }
     }
+
+    /// Stage 3e-2 — resolve a name read in value position. Pipeline mirrors
+    /// the TS-side `ts::visit::CallVisitor::resolve_name`:
+    ///
+    /// 1. Single-ident paths consult [`ModuleLookup::resolve_local`] first.
+    ///    - Hit at [`ModuleLookup::ROOT_SCOPE`] (hoisted item / import) →
+    ///      fall through to module-level resolution; root-scope locals are
+    ///      already covered by `defined_fqdns` + `alias_table`.
+    ///    - Hit at nested scope with alias → propagate the alias's
+    ///      canonical-text through module-level resolution, carrying the
+    ///      [`AliasMutability`] so the visitor can stamp `via-alias[-mutable]`.
+    ///    - Hit at nested scope without alias → [`NameResolution::Local`].
+    /// 2. Multi-segment paths (`Foo::CONST`) skip the scope walk — locals
+    ///    don't have `::`.
+    /// 3. Module-level resolution checks the leftmost segment against the
+    ///    builtin registry (Drop/Attribute/Edge tiers), then falls through
+    ///    to [`WalkContext::resolve_path`].
+    pub(crate) fn resolve_name(
+        &self,
+        path: &str,
+        scope_idx: u32,
+        current_module: &str,
+    ) -> NameResolution {
+        let segments: Vec<&str> = path.split("::").filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            return NameResolution::Drop;
+        }
+
+        if segments.len() == 1 {
+            if let Some(res) = self.core.lookup.resolve_local(segments[0], scope_idx) {
+                if res.scope_idx != ModuleLookup::ROOT_SCOPE {
+                    if let (Some(alias_str), Some(m)) =
+                        (res.aliases_to.as_deref(), res.mutability)
+                    {
+                        return self.resolve_module_level(alias_str, current_module, Some(m));
+                    }
+                    return NameResolution::Local;
+                }
+                // ROOT_SCOPE — fall through to module-level resolution.
+            }
+        }
+
+        self.resolve_module_level(path, current_module, None)
+    }
+
+    /// Stage 3e-2 helper — module-level half of [`Self::resolve_name`].
+    /// Builtin tier check on the leftmost segment, then [`Self::resolve_path`]
+    /// fallback. Wraps the outcome in [`NameResolution::Target`] preserving
+    /// the optional `alias_mut` propagated by the caller.
+    fn resolve_module_level(
+        &self,
+        path: &str,
+        current_module: &str,
+        alias_mut: Option<AliasMutability>,
+    ) -> NameResolution {
+        let leftmost = path.split("::").next().unwrap_or("");
+        if let Some(entry) = global_builtin_registry().lookup(leftmost, Language::Rust) {
+            return match entry.tier {
+                BuiltinTier::Drop => NameResolution::Drop,
+                BuiltinTier::Attribute => NameResolution::Attribute(entry.tag.clone()),
+                BuiltinTier::Edge => NameResolution::Target {
+                    to: ResolvedOrUnresolved::Resolved {
+                        fqdn: entry.synthetic_fqdn.clone(),
+                    },
+                    alias_mut,
+                    via_builtin: Some(entry.tag.clone()),
+                },
+            };
+        }
+        NameResolution::Target {
+            to: self.resolve_path(path, current_module),
+            alias_mut,
+            via_builtin: None,
+        }
+    }
+}
+
+/// Stage 3e-2 — outcome of resolving a name (single-ident or multi-segment
+/// path) read in value position against the AOT [`ModuleLookup`] scope chain
+/// plus [`WalkContext::resolve_path`] fall-through. Mirrors
+/// `ts::visit::NameResolution`. Callers pattern-match the variants to decide
+/// between emitting an edge (`Target`) or skipping (`Local` for nested-scope
+/// bindings without alias, `Drop` for tier-classified noise, `Attribute` for
+/// tier-classified source-flag promotion targets).
+#[derive(Debug, Clone)]
+pub(crate) enum NameResolution {
+    /// Builtin classified as [`BuiltinTier::Drop`] (`Vec`, `Box`, `Some`,
+    /// `Ok`, `String::from`, …). Caller silently skips emission.
+    Drop,
+    /// Nested-scope local binding (let, fn param, closure param, match arm)
+    /// without an alias. Caller skips emission — locals aren't surfaced in
+    /// the module graph by design.
+    Local,
+    /// Builtin classified as [`BuiltinTier::Attribute`] (`Iterator`,
+    /// `IntoIterator`, `Future`, `Stream`, …). Caller skips the edge but
+    /// registers the carried [`BuiltinTag`] against the enclosing FQDN via
+    /// [`WalkContext::register_attribute_flag`] so the symbol picks up
+    /// `"async"` / `"iter"` / custom UST flags in its `flags` vec.
+    Attribute(BuiltinTag),
+    /// Resolvable target — caller emits the edge with the carried `to`,
+    /// optional `alias_mut` (Some when reached through a scope alias), and
+    /// optional `via_builtin` (Some when the leftmost segment matched an
+    /// [`BuiltinTier::Edge`]-tier builtin so the emitter can stamp
+    /// `via-builtin` / `builtin-<slug>` attrs).
+    Target {
+        to: ResolvedOrUnresolved,
+        alias_mut: Option<AliasMutability>,
+        via_builtin: Option<BuiltinTag>,
+    },
 }
 
 fn join_segments(prefix: &str, rest: &str) -> String {
@@ -1530,6 +1641,84 @@ mod tests {
             ctx.resolve_path("self::foo", "c"),
             ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "c::foo"
         ));
+    }
+
+    // --- Stage 3e-2 foundation: resolve_name tests ---
+
+    #[test]
+    fn stage3e2_resolve_name_empty_path_returns_drop() {
+        let ctx = WalkContext::new("src/lib.rs", "c", "c".to_string());
+        assert!(matches!(
+            ctx.resolve_name("", ModuleLookup::ROOT_SCOPE, "c"),
+            NameResolution::Drop
+        ));
+    }
+
+    #[test]
+    fn stage3e2_resolve_name_module_local_resolved_when_defined() {
+        let mut ctx = WalkContext::new("src/lib.rs", "c", "c".to_string());
+        ctx.core.defined_fqdns.insert("c::bar".to_string());
+        match ctx.resolve_name("bar", ModuleLookup::ROOT_SCOPE, "c") {
+            NameResolution::Target {
+                to: ResolvedOrUnresolved::Resolved { fqdn },
+                alias_mut: None,
+                via_builtin: None,
+            } => assert_eq!(fqdn, "c::bar"),
+            other => panic!("expected Target Resolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage3e2_resolve_name_falls_back_to_unresolved_module_local() {
+        let ctx = WalkContext::new("src/lib.rs", "c", "c".to_string());
+        match ctx.resolve_name("missing", ModuleLookup::ROOT_SCOPE, "c") {
+            NameResolution::Target {
+                to: ResolvedOrUnresolved::Unresolved { name },
+                ..
+            } => assert_eq!(name, "c::missing"),
+            other => panic!("expected Target Unresolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage3e2_resolve_name_builtin_drop_tier_returns_drop() {
+        // `Vec` is Drop-tier on Rust per Stage 3e-1 (structural noise).
+        let ctx = WalkContext::new("src/lib.rs", "c", "c".to_string());
+        assert!(matches!(
+            ctx.resolve_name("Vec", ModuleLookup::ROOT_SCOPE, "c"),
+            NameResolution::Drop
+        ));
+        // Multi-segment with Drop-tier leftmost also drops.
+        assert!(matches!(
+            ctx.resolve_name("Vec::new", ModuleLookup::ROOT_SCOPE, "c"),
+            NameResolution::Drop
+        ));
+    }
+
+    #[test]
+    fn stage3e2_resolve_name_builtin_attribute_tier_returns_attribute() {
+        // `Iterator` is Attribute-tier on Rust per Stage 3e-1b (`iter` flag).
+        let ctx = WalkContext::new("src/lib.rs", "c", "c".to_string());
+        match ctx.resolve_name("Iterator", ModuleLookup::ROOT_SCOPE, "c") {
+            NameResolution::Attribute(tag) => {
+                assert_eq!(tag.slug(), "iter");
+            }
+            other => panic!("expected Attribute(iter), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage3e2_resolve_name_via_alias_table_resolves_to_canonical() {
+        let mut ctx = WalkContext::new("src/lib.rs", "c", "c".to_string());
+        ctx.add_alias("HM".into(), "std::collections::HashMap".into());
+        match ctx.resolve_name("HM", ModuleLookup::ROOT_SCOPE, "c") {
+            NameResolution::Target {
+                to: ResolvedOrUnresolved::Unresolved { name },
+                alias_mut: None,
+                via_builtin: None,
+            } => assert_eq!(name, "std::collections::HashMap"),
+            other => panic!("expected Target Unresolved canonical, got {other:?}"),
+        }
     }
 
     // --- Bug C-3 tests: Rust UsesType emission ---
