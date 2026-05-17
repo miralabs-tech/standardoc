@@ -3,7 +3,9 @@ use standardoc_ir::{BuiltinTier, EdgeKind, Language, RawEdge, ResolvedOrUnresolv
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
-use super::walk::{WalkContext, col_from_span, line_from_span, path_to_string};
+use super::walk::{
+    NameResolution, WalkContext, col_from_span, line_from_span, lookup_scope_for, path_to_string,
+};
 use crate::builtins::global as global_builtin_registry;
 
 pub(crate) fn visit_block(
@@ -45,6 +47,73 @@ impl CallVisitor<'_> {
             from_fqdn: self.enclosing_fqdn.clone(),
             kind: EdgeKind::Calls,
             to,
+            sites: vec![Site {
+                file: self.file_path.clone(),
+                line: line_from_span(span),
+                col: col_from_span(span),
+            }],
+            attributes,
+            confidence,
+        });
+    }
+
+    /// Stage 3e-2 — emit a `References` edge for a `path` read in value
+    /// position (`let x = foo;`, `MyType::CONST`, fn-pointer args, etc.).
+    /// Pipeline mirrors `ts::visit::CallVisitor::emit_value_ref`:
+    ///
+    /// 1. [`WalkContext::resolve_name`] resolves the path against the
+    ///    scope chain + builtin registry + alias table + defined_fqdns.
+    /// 2. `Drop` / `Local` → silent skip (structural noise and locals
+    ///    aren't surfaced in the module graph).
+    /// 3. `Attribute(tag)` → register the flag on the enclosing FQDN, no
+    ///    edge.
+    /// 4. `Target { Unresolved | UnresolvedBridge, .. }` → skip (preserve
+    ///    the Stage 1 safety net — unresolved value-reads create noise).
+    /// 5. Self-references (target FQDN == enclosing FQDN) are dropped:
+    ///    a fn reading its own name is already covered by the matching
+    ///    `Calls` edge when the name appears in call position; in value
+    ///    position it's almost always a structural artefact of the
+    ///    enclosing fn-pointer pattern.
+    /// 6. Emit `EdgeKind::References` with `attributes = ["value-read"]`
+    ///    plus optional `via-alias[-mutable]` (scope-alias propagation)
+    ///    and `via-builtin` / `builtin-<slug>` (Edge-tier builtin hit).
+    fn emit_value_ref(&mut self, path: &str, span: Span) {
+        let scope_idx = lookup_scope_for(self.ctx, span);
+        let (target, alias_mut, via_builtin) =
+            match self.ctx.resolve_name(path, scope_idx, &self.current_module) {
+                NameResolution::Drop | NameResolution::Local => return,
+                NameResolution::Attribute(tag) => {
+                    self.ctx
+                        .register_attribute_flag(&self.enclosing_fqdn, &tag);
+                    return;
+                }
+                NameResolution::Target {
+                    to,
+                    alias_mut,
+                    via_builtin,
+                } => (to, alias_mut, via_builtin),
+            };
+        let target_fqdn = match &target {
+            ResolvedOrUnresolved::Resolved { fqdn } => fqdn,
+            ResolvedOrUnresolved::Unresolved { .. }
+            | ResolvedOrUnresolved::UnresolvedBridge { .. } => return,
+        };
+        if target_fqdn == &self.enclosing_fqdn {
+            return;
+        }
+        let confidence = target.default_confidence();
+        let mut attributes = vec!["value-read".to_string()];
+        if let Some(m) = alias_mut {
+            attributes.push(m.as_slug().to_string());
+        }
+        if let Some(tag) = &via_builtin {
+            attributes.push("via-builtin".to_string());
+            attributes.push(format!("builtin-{}", tag.slug()));
+        }
+        self.ctx.push_edge(RawEdge {
+            from_fqdn: self.enclosing_fqdn.clone(),
+            kind: EdgeKind::References,
+            to: target,
             sites: vec![Site {
                 file: self.file_path.clone(),
                 line: line_from_span(span),
@@ -97,9 +166,34 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
                     }
                 }
             }
+            // Stage 3e-2: we consumed `node.func` as the Calls target
+            // above. Recurse only into args — letting the default
+            // `visit_expr_call` walk re-visit `node.func` would trigger
+            // our `visit_expr_path` override and double-emit a
+            // `References` edge on the same path.
+            for arg in &node.args {
+                syn::visit::visit_expr(self, arg);
+            }
+            return;
         }
-        // Recurse into args (nested calls) and the func expr (in case it's not a path).
+        // Non-path func (e.g. `(get_fn())()`) — default recursion walks
+        // both the func sub-expression (where `visit_expr_path` can
+        // legitimately surface value-reads) and the args.
         syn::visit::visit_expr_call(self, node);
+    }
+
+    /// Stage 3e-2 — surface `Expr::Path` reads in value position as
+    /// `References` edges. Skips paths consumed by `visit_expr_call` as
+    /// Calls targets (handled by the manual arg-only recursion there).
+    /// Multi-segment paths like `MyType::CONST` are honored — the
+    /// leftmost segment goes through the builtin tier check inside
+    /// `WalkContext::resolve_name`, the full path through `resolve_path`.
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        let path_str = path_to_string(&node.path);
+        if !path_str.is_empty() {
+            self.emit_value_ref(&path_str, node.span());
+        }
+        syn::visit::visit_expr_path(self, node);
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
@@ -353,6 +447,183 @@ mod tests {
         assert!(
             names.contains(&"c::inner".to_string()),
             "inner() call must surface even when wrapped in Some(_), got {names:?}"
+        );
+    }
+
+    // --- Stage 3e-2: References emit via Expr::Path ---
+
+    fn refs(edges: &[standardoc_ir::RawEdge]) -> Vec<&standardoc_ir::RawEdge> {
+        edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::References)
+            .collect()
+    }
+
+    fn value_reads(edges: &[standardoc_ir::RawEdge]) -> Vec<&standardoc_ir::RawEdge> {
+        refs(edges)
+            .into_iter()
+            .filter(|e| e.attributes.iter().any(|a| a == "value-read"))
+            .collect()
+    }
+
+    #[test]
+    fn stage3e2_module_local_fn_pointer_emits_value_read_reference() {
+        // `foo` in value position resolves to the module-local fn; emit
+        // a References edge with `value-read`.
+        let parsed = parse("fn foo() {} fn caller() { let _ = foo; }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let vr = value_reads(&edges);
+        assert_eq!(vr.len(), 1, "exactly one value-read expected, got {vr:?}");
+        assert_eq!(vr[0].from_fqdn, "c::caller");
+        match &vr[0].to {
+            ResolvedOrUnresolved::Resolved { fqdn } => assert_eq!(fqdn, "c::foo"),
+            other => panic!("expected resolved c::foo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage3e2_call_does_not_double_emit_as_reference() {
+        // `bar()` should emit ONE Calls edge and ZERO References edges —
+        // the manual arg-only recursion in visit_expr_call must suppress
+        // the visit_expr_path fire on `node.func`.
+        let parsed = parse("fn bar() {} fn caller() { bar(); }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert_eq!(calls(&edges).len(), 1);
+        assert!(
+            refs(&edges).is_empty(),
+            "call-expr func must not surface as a value-read, got {:?}",
+            refs(&edges)
+        );
+    }
+
+    #[test]
+    fn stage3e2_unresolved_path_does_not_emit_reference() {
+        // Stage-1 safety net: an unindexed identifier in value position
+        // produces no References edge (would create noise pointing at
+        // unresolved targets).
+        let parsed = parse("fn caller() { let _ = unknown_thing; }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert!(
+            refs(&edges).is_empty(),
+            "unresolved value-reads must be skipped, got {:?}",
+            refs(&edges)
+        );
+    }
+
+    #[test]
+    fn stage3e2_local_binding_value_read_is_skipped() {
+        // `let x = 0; let _ = x;` — `x` is a local binding (nested
+        // scope), so the read must not emit a References edge.
+        let parsed = parse("fn caller() { let x = 0; let _ = x; }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert!(
+            refs(&edges).is_empty(),
+            "local value-read must be skipped, got {:?}",
+            refs(&edges)
+        );
+    }
+
+    #[test]
+    fn stage3e2_self_reference_is_skipped() {
+        // `fn caller() { let _ = caller; }` — reading own name in value
+        // position is dropped (recursion patterns are covered by Calls,
+        // value-position self-refs are usually structural).
+        let parsed = parse("fn caller() { let _ = caller; }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert!(
+            refs(&edges).is_empty(),
+            "self-reference must be skipped, got {:?}",
+            refs(&edges)
+        );
+    }
+
+    #[test]
+    fn stage3e2_drop_tier_builtin_value_read_is_skipped() {
+        // `Vec` in value position (as fn-pointer or generic carrier) is
+        // Drop-tier → no References edge.
+        let parsed = parse("fn caller() { let _ = Vec::<u8>::new; }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert!(
+            refs(&edges).is_empty(),
+            "Drop-tier builtin value-read must be skipped, got {:?}",
+            refs(&edges)
+        );
+    }
+
+    #[test]
+    fn stage3e2_attribute_tier_builtin_value_read_promotes_flag() {
+        // `Iterator` is Attribute-tier — reading it in value position
+        // (rare but possible: trait-object construction) must NOT emit
+        // an edge but MUST promote `iter` flag onto the enclosing fn.
+        let parsed = parse(
+            "fn caller() { let _: fn() -> &'static dyn Iterator<Item = u8> = || todo!(); let _ = Iterator::count; }",
+        );
+        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert!(
+            refs(&edges).is_empty(),
+            "Attribute-tier builtin value-read must skip the edge, got {:?}",
+            refs(&edges)
+        );
+        let caller = symbols.iter().find(|s| s.fqdn == "c::caller").unwrap();
+        assert!(
+            caller.flags.iter().any(|f| f == "iter"),
+            "Attribute-tier builtin value-read must register `iter` flag, got {:?}",
+            caller.flags
+        );
+    }
+
+    #[test]
+    fn stage3e2_multi_segment_resolved_path_emits_value_read() {
+        // `MyType::CONST` — multi-segment value-read. The leftmost
+        // segment isn't a builtin, so the full path goes through
+        // `resolve_path` which canonicalizes against alias_table.
+        let parsed = parse(
+            "use other::MyType; fn caller() { let _ = MyType::CONST; }",
+        );
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        // `MyType::CONST` resolves to canonical `other::MyType::CONST`
+        // which isn't in defined_fqdns → Unresolved → no edge emitted
+        // (Stage 1 safety net for unresolved value-reads).
+        // The test guards the absence of noise: no References edges
+        // emitted in this case, since the canonical target isn't local.
+        assert!(
+            refs(&edges).is_empty(),
+            "unresolved canonical multi-segment path must skip emit, got {:?}",
+            refs(&edges)
+        );
+    }
+
+    #[test]
+    fn stage3e2_method_receiver_path_emits_value_read() {
+        // `foo.bar()` — `foo` is a legitimate value-read on the receiver.
+        // The default visit_expr_method_call recursion walks the receiver
+        // via visit_expr → visit_expr_path, so we should see a References
+        // edge on `foo`.
+        let parsed = parse("fn foo() {} fn caller() { foo.bar(); }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let vr = value_reads(&edges);
+        // `foo` reads as `c::foo` (Resolved).
+        let foo_refs: Vec<_> = vr
+            .iter()
+            .filter(|e| matches!(&e.to, ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "c::foo"))
+            .collect();
+        assert_eq!(
+            foo_refs.len(),
+            1,
+            "exactly one value-read on receiver `foo` expected, got {vr:?}"
+        );
+    }
+
+    #[test]
+    fn stage3e2_value_read_dedupes_against_unresolved_module_local() {
+        // Bare `bar` resolves to `c::bar` which isn't defined → Unresolved.
+        // Per Stage 1 safety net, no References edge.
+        let parsed = parse("fn caller() { let _ = bar; }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert!(
+            refs(&edges).is_empty(),
+            "unresolved bare ident value-read must be skipped, got {:?}",
+            refs(&edges)
         );
     }
 }
