@@ -20,12 +20,16 @@ use standardoc_core::{
     query::{
         self, SymbolFilter,
         call_sites::{self as call_sites_query, CallSiteFilters, FIND_CALL_SITES_DEFAULT_LIMIT},
+        graph::{
+            self as graph_query, FETCH_GRAPH_DEFAULT_DEPTH, FETCH_GRAPH_DEFAULT_MAX_NODES,
+            FETCH_GRAPH_MAX_DEPTH, FETCH_GRAPH_MAX_NODES_CAP, GraphRequest,
+        },
         projects as projects_query, workspace as workspace_query,
     },
     sessions::memory_sync::{export_memory_dir, import_memory_dir},
 };
 use standardoc_ir::SourceOrigin;
-use standardoc_ir::{IndexingMode, Kind, LinkDirection, RawSymbol, Visibility};
+use standardoc_ir::{EdgeKind, IndexingMode, Kind, LinkDirection, RawSymbol, Visibility};
 use standardoc_rag::embedder::Embedder;
 use standardoc_rag::store::RagStore;
 use standardoc_rag::types::{Chunk, ChunkRef};
@@ -84,15 +88,6 @@ const RECENT_DEPTH1_RETENTION_SECS: i64 = 1800;
 ///   dropped on shutdown so the dispatch thread joins before stdio closes
 ///   (mirrors `lsp::handler::StandardocLsp`).
 /// - `tool_router`: rmcp dispatch table built from the `#[tool]` methods.
-//
-// TODO(viz-readiness-G7): expose a `fetch_graph` MCP tool returning
-// `GraphPayload { symbols, edges, focal }` (shape defined in
-// `standardoc-graph-viz::payload`) so the viz crate can consume the
-// payload directly instead of rebuilding it client-side from
-// `find_symbols_by_pattern` + `get_context` primitives. Params: optional
-// `focal: String` (FQDN to center on), optional `depth: u8` (1..=N),
-// optional `kinds: Vec<EdgeKind>` filter. Server-side composition joins
-// symbols + edges from the index handle and stamps `outbound` per edge.
 #[derive(Clone)]
 pub struct StandardocMcp {
     handle: IndexHandle,
@@ -1362,6 +1357,34 @@ impl StandardocMcp {
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
         Ok(success_json(&rows))
     }
+
+    /// Pre-composed graph slice ready for the `standardoc-graph-viz` WASM
+    /// consumer. Two modes, dispatched on `focal`:
+    /// - `focal = Some(fqdn)` → bounded BFS around the centered node.
+    /// - `focal = None` → bounded snapshot of the workspace ordered by
+    ///   `fqdn` ASC.
+    /// All clamps (`depth`, `max_nodes`) happen here at the transport
+    /// boundary; the core composition trusts what it receives.
+    #[tool(
+        description = "Pre-composed graph payload for the visualisation layer. Returns `{symbols: [{fqdn, name, kind, visibility, module?, language_kind, is_external, file, start_line}], edges: [{from, to, kind, outbound}], focal?}` — flat shape the WASM viz consumes directly (no client-side reshape).\n\nTwo modes:\n- `focal: Some(fqdn)` → bounded BFS expansion around the node, `depth` hops (1..=5, default 2). Both outbound (edges_from) and inbound (edges_to) edges are walked; unresolved targets are skipped.\n- `focal: None` → bounded snapshot of the workspace ordered by FQDN ASC. Only edges whose target is also in the bounded set are included (no dangling).\n\nKnobs: `kinds` (allow-list of edge kinds — `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `DEFINES`, `USES_TYPE`, `EXPOSES_API`; case-insensitive, unknown values silently ignored); `max_nodes` (safety cap, default 500, clamped to 1..=5000); `include_external` (default false, scopes to workspace-authored symbols).\n\nReturns an empty `symbols`/`edges` vec with `focal` echoed when `focal` is supplied but the FQDN is unknown — lets the consumer distinguish 'no neighbors' from 'unknown symbol'."
+    )]
+    async fn fetch_graph(
+        &self,
+        Parameters(params): Parameters<FetchGraphParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !self.index_ready.load(Ordering::Acquire) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
+            )]));
+        }
+        let req = params.into_request();
+        let handle = self.handle.clone();
+        let response = tokio::task::spawn_blocking(move || graph_query::fetch_graph(&handle, req))
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+            .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        Ok(success_json(&response))
+    }
 }
 
 /// Drop empty / whitespace-only strings to `None` so an MCP caller can
@@ -1640,6 +1663,85 @@ pub(crate) struct FindCallSitesParams {
     pub callee_pattern: Option<String>,
     /// Maximum results to return. Defaults to 50, capped at 200 server-side.
     pub limit: Option<u8>,
+}
+
+/// Tool input — `fetch_graph(focal?, depth?, kinds?, max_nodes?,
+/// include_external?)`. Translated to `query::graph::GraphRequest`
+/// after server-side clamping. Unknown `kinds` strings are dropped
+/// silently — the consumer can send a superset without erroring.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct FetchGraphParams {
+    /// FQDN to center the expansion on. When `Some`, the response is a
+    /// BFS expansion of depth `depth` around this node. When `None`,
+    /// returns a bounded snapshot of the workspace (ordered by FQDN
+    /// ASC) up to `max_nodes`.
+    #[serde(default)]
+    pub focal: Option<String>,
+    /// BFS depth when `focal` is set. Clamped to `1..=5`. Defaults to
+    /// `2`. Ignored when `focal` is `None`.
+    #[serde(default)]
+    pub depth: Option<u8>,
+    /// Optional allow-list of edge kinds (case-insensitive: `CALLS`,
+    /// `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `DEFINES`,
+    /// `USES_TYPE`, `EXPOSES_API`). Unknown values are silently
+    /// dropped. `None` admits every kind.
+    #[serde(default)]
+    pub kinds: Option<Vec<String>>,
+    /// Safety cap on the number of symbol nodes returned. Clamped to
+    /// `1..=5000`. Defaults to `500`.
+    #[serde(default)]
+    pub max_nodes: Option<u32>,
+    /// When `true`, include `is_external = 1` rows (npm `.d.ts`,
+    /// Cargo crate metadata, luarocks). Defaults to `false` — the
+    /// "MY workspace" view.
+    #[serde(default)]
+    pub include_external: Option<bool>,
+}
+
+impl FetchGraphParams {
+    /// Apply the transport-side clamps and translate the kinds
+    /// allow-list. Keeping this on the Params type keeps the tool
+    /// method body small and gives tests an obvious seam.
+    fn into_request(self) -> GraphRequest {
+        let depth = self
+            .depth
+            .unwrap_or(FETCH_GRAPH_DEFAULT_DEPTH)
+            .clamp(1, FETCH_GRAPH_MAX_DEPTH);
+        let max_nodes = self
+            .max_nodes
+            .unwrap_or(FETCH_GRAPH_DEFAULT_MAX_NODES)
+            .clamp(1, FETCH_GRAPH_MAX_NODES_CAP);
+        let kinds = self.kinds.and_then(|raw| {
+            let parsed: std::collections::HashSet<EdgeKind> =
+                raw.iter().filter_map(|s| parse_edge_kind(s)).collect();
+            (!parsed.is_empty()).then_some(parsed)
+        });
+        GraphRequest {
+            focal: self.focal,
+            depth,
+            kinds,
+            max_nodes,
+            include_external: self.include_external.unwrap_or(false),
+        }
+    }
+}
+
+/// Case-insensitive parser for the `kinds` allow-list. Accepts both
+/// SCREAMING_SNAKE_CASE (the on-the-wire form emitted by `EdgeKind`'s
+/// `Serialize`) and lowercase for forgiving consumers. Unknown
+/// strings return `None` so the caller can ignore them.
+fn parse_edge_kind(raw: &str) -> Option<EdgeKind> {
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "CALLS" => Some(EdgeKind::Calls),
+        "IMPORTS" => Some(EdgeKind::Imports),
+        "EXTENDS" => Some(EdgeKind::Extends),
+        "IMPLEMENTS" => Some(EdgeKind::Implements),
+        "REFERENCES" => Some(EdgeKind::References),
+        "DEFINES" => Some(EdgeKind::Defines),
+        "USES_TYPE" | "USESTYPE" => Some(EdgeKind::UsesType),
+        "EXPOSES_API" | "EXPOSESAPI" => Some(EdgeKind::ExposesApi),
+        _ => None,
+    }
 }
 
 /// Tool input — `find_similar_symbols(reference, threshold?, limit?, kind?,
