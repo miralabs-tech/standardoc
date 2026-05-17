@@ -4,9 +4,9 @@ use proc_macro2::Span;
 use quote::ToTokens;
 use standardoc_ir::{
     AliasMutability, BuiltinTag, BuiltinTier, EdgeKind, Kind, Language, LanguageKind, Modifiers,
-    ModuleLookup, Param, RawAttribute, RawAttributeArg, RawDocument, RawEdge, RawSymbol,
-    ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation, TypeRef, Visibility,
-    compact_rust_tokens,
+    ModuleLookup, Param, RawAttribute, RawAttributeArg, RawCallSite, RawDocument, RawEdge,
+    RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation, TypeRef,
+    Visibility, compact_rust_tokens,
 };
 use syn::spanned::Spanned;
 
@@ -83,6 +83,10 @@ impl WalkContext {
 
     pub(crate) fn push_document(&mut self, doc: RawDocument) {
         self.core.push_document(doc);
+    }
+
+    pub(crate) fn push_call_site(&mut self, cs: RawCallSite) {
+        self.core.push_call_site(cs);
     }
 
     /// Push the symbol and, if `attrs` carries an outer doc-comment chain,
@@ -302,13 +306,18 @@ pub(crate) fn walk(
     module_fqdn: &str,
     file_path: &str,
     crate_name: &str,
-) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
+) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>, Vec<RawCallSite>) {
     let mut ctx = WalkContext::new(file_path, crate_name, module_fqdn.to_string());
     ctx.core.lookup = super::lookup::build_rust_lookup(parsed, module_fqdn);
     walk_p1(&mut ctx, &parsed.items, module_fqdn);
     walk_p2(&mut ctx, &parsed.items, module_fqdn);
     flush_attribute_flags(&mut ctx);
-    (ctx.core.symbols, ctx.core.edges, ctx.core.documents)
+    (
+        ctx.core.symbols,
+        ctx.core.edges,
+        ctx.core.documents,
+        ctx.core.call_sites,
+    )
 }
 
 /// Stage 3e-1b — apply Attribute-tier flags accumulated during the walk
@@ -1185,7 +1194,7 @@ mod tests {
     #[test]
     fn walks_simple_fn_emits_function_symbol() {
         let parsed = parse("fn foo() {}");
-        let (symbols, edges, _docs) = walk(&parsed, "mycrate", "src/lib.rs", "mycrate");
+        let (symbols, edges, _docs, _) = walk(&parsed, "mycrate", "src/lib.rs", "mycrate");
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].kind, Kind::Function);
         assert_eq!(symbols[0].fqdn, "mycrate::foo");
@@ -1197,14 +1206,14 @@ mod tests {
     #[test]
     fn pub_fn_visibility_is_public() {
         let parsed = parse("pub fn foo() {}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].visibility, Visibility::Public);
     }
 
     #[test]
     fn fn_signature_captures_params_and_return() {
         let parsed = parse("pub fn add(a: u32, b: u32) -> u32 { a + b }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let sig = symbols[0].signature.as_ref().unwrap();
         assert_eq!(sig.params.len(), 2);
         assert_eq!(sig.params[0].name, "a");
@@ -1216,14 +1225,14 @@ mod tests {
     #[test]
     fn async_fn_modifier_set() {
         let parsed = parse("async fn boot() {}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert!(symbols[0].signature.as_ref().unwrap().modifiers.is_async);
     }
 
     #[test]
     fn deprecated_attribute_propagates_to_modifier() {
         let parsed = parse("#[deprecated = \"use bar\"] fn foo() {}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let dep = symbols[0]
             .signature
             .as_ref()
@@ -1238,7 +1247,7 @@ mod tests {
     fn self_receiver_renders_as_self_typeref() {
         let parsed =
             parse("impl Foo {\n  fn a(self) {}\n  fn b(&self) {}\n  fn c(&mut self) {}\n}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let a = &symbols.iter().find(|s| s.name == "a").unwrap().signature;
         let b = &symbols.iter().find(|s| s.name == "b").unwrap().signature;
         let c = &symbols.iter().find(|s| s.name == "c").unwrap().signature;
@@ -1252,7 +1261,7 @@ mod tests {
         // Bug C-2: a struct now pushes the parent type symbol AND one
         // Value-kind sub-symbol per named field.
         let parsed = parse("pub struct Foo { x: u32 }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let foo = symbols.iter().find(|s| s.fqdn == "c::Foo").unwrap();
         assert_eq!(foo.kind, Kind::Type);
         assert_eq!(foo.language_kind.as_str(), "struct");
@@ -1270,7 +1279,7 @@ mod tests {
     #[test]
     fn tuple_struct_emits_positional_field_sub_symbols() {
         let parsed = parse("pub struct Pair(pub u32, pub String);");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let f0 = symbols.iter().find(|s| s.fqdn == "c::Pair::0").unwrap();
         let f1 = symbols.iter().find(|s| s.fqdn == "c::Pair::1").unwrap();
         assert_eq!(f0.language_kind.as_str(), "tuple_field");
@@ -1290,7 +1299,7 @@ mod tests {
         // Bug C-2: enum pushes the parent type symbol AND one Type-kind
         // sub-symbol per variant.
         let parsed = parse("enum E { A, B }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let e = symbols.iter().find(|s| s.fqdn == "c::E").unwrap();
         assert_eq!(e.kind, Kind::Type);
         assert_eq!(e.language_kind.as_str(), "enum");
@@ -1304,7 +1313,7 @@ mod tests {
     #[test]
     fn unit_struct_emits_only_parent_symbol() {
         let parsed = parse("pub struct Marker;");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let marker = symbols.iter().find(|s| s.fqdn == "c::Marker").unwrap();
         assert_eq!(marker.language_kind.as_str(), "struct");
         // No sub-fields for a unit struct.
@@ -1321,7 +1330,7 @@ mod tests {
     #[test]
     fn trait_emits_type_and_inner_fn_symbols() {
         let parsed = parse("pub trait T { fn foo(&self); fn bar(&self) -> u32 { 0 } }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols.len(), 3);
         assert_eq!(symbols[0].kind, Kind::Type);
         assert_eq!(symbols[0].language_kind.as_str(), "trait");
@@ -1336,7 +1345,7 @@ mod tests {
     #[test]
     fn inherent_impl_emits_method_symbols() {
         let parsed = parse("struct Foo; impl Foo { pub fn a(&self) {} fn b(&self) {} }");
-        let (symbols, edges, _docs) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, edges, _docs, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert!(edges.is_empty(), "no IMPLEMENTS for inherent impl");
         let foo = symbols.iter().find(|s| s.fqdn == "c::Foo").unwrap();
         assert_eq!(foo.kind, Kind::Type);
@@ -1349,7 +1358,7 @@ mod tests {
     #[test]
     fn trait_impl_emits_implements_edge() {
         let parsed = parse("struct Foo; impl SomeTrait for Foo { fn run(&self) {} }");
-        let (symbols, edges, _docs) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, edges, _docs, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let imp: Vec<_> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Implements)
@@ -1372,7 +1381,7 @@ mod tests {
         let parsed = parse(
             "impl<T> Iterator for &mut T { type Item = (); fn next(&mut self) -> Option<()> { None } }",
         );
-        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
 
         assert!(
             !symbols.iter().any(|s| s.fqdn.contains('&')),
@@ -1392,7 +1401,7 @@ mod tests {
     #[test]
     fn impl_block_on_tuple_self_type_emits_nothing() {
         let parsed = parse("impl SomeTrait for (u32, u32) { fn run(&self) {} }");
-        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert!(symbols.is_empty(), "tuple self-type must emit no symbol");
         assert!(edges.is_empty(), "tuple self-type must emit no edge");
     }
@@ -1401,7 +1410,7 @@ mod tests {
     fn trait_impl_with_use_alias_resolves_implements_target() {
         let parsed =
             parse("use crate::traits::Foo; struct Bar; impl Foo for Bar { fn run(&self) {} }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let imp = edges
             .iter()
             .find(|e| e.kind == EdgeKind::Implements)
@@ -1417,7 +1426,7 @@ mod tests {
     #[test]
     fn const_emits_value_symbol() {
         let parsed = parse("const N: u32 = 0;");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].kind, Kind::Value);
         assert_eq!(symbols[0].language_kind.as_str(), "const");
         assert_eq!(symbols[0].fqdn, "c::N");
@@ -1426,7 +1435,7 @@ mod tests {
     #[test]
     fn static_emits_value_symbol() {
         let parsed = parse("static GLOBAL: u32 = 0;");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].kind, Kind::Value);
         assert_eq!(symbols[0].language_kind.as_str(), "static");
     }
@@ -1434,7 +1443,7 @@ mod tests {
     #[test]
     fn type_alias_emits_type_symbol() {
         let parsed = parse("pub type Bytes = Vec<u8>;");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].kind, Kind::Type);
         assert_eq!(symbols[0].language_kind.as_str(), "type_alias");
     }
@@ -1442,7 +1451,7 @@ mod tests {
     #[test]
     fn macro_rules_with_export_is_public() {
         let parsed = parse("#[macro_export] macro_rules! say { () => {}; }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].kind, Kind::Macro);
         assert_eq!(symbols[0].visibility, Visibility::Public);
@@ -1451,14 +1460,14 @@ mod tests {
     #[test]
     fn macro_rules_without_export_is_private() {
         let parsed = parse("macro_rules! say { () => {}; }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].visibility, Visibility::Private);
     }
 
     #[test]
     fn inline_mod_pushes_fqdn_without_emitting_module_symbol() {
         let parsed = parse("mod inner { pub fn deep() {} }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(
             symbols.len(),
             1,
@@ -1471,7 +1480,7 @@ mod tests {
     #[test]
     fn attributes_are_captured_with_path_name() {
         let parsed = parse("#[derive(Debug, Clone)] pub struct X;");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].attributes.len(), 1);
         assert_eq!(symbols[0].attributes[0].name, "derive");
         assert_eq!(symbols[0].attributes[0].args.len(), 1);
@@ -1481,7 +1490,7 @@ mod tests {
     #[test]
     fn generic_params_captured_as_strings() {
         let parsed = parse("fn id<T>(x: T) -> T { x }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let g = &symbols[0]
             .signature
             .as_ref()
@@ -1495,7 +1504,7 @@ mod tests {
     #[test]
     fn where_clause_captured_as_text_without_leading_keyword() {
         let parsed = parse("fn foo<T>(x: T) where T: Send + Sync {}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let wc = symbols[0]
             .signature
             .as_ref()
@@ -1516,7 +1525,7 @@ mod tests {
     #[test]
     fn where_clause_is_none_when_absent() {
         let parsed = parse("fn bar() {}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let wc = &symbols[0]
             .signature
             .as_ref()
@@ -1529,7 +1538,7 @@ mod tests {
     #[test]
     fn inline_generic_bounds_remain_in_generic_params() {
         let parsed = parse("fn foo<T: Display + Clone>(x: T) {}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let g = &symbols[0]
             .signature
             .as_ref()
@@ -1545,7 +1554,7 @@ mod tests {
     fn span_locations_are_captured() {
         // proc-macro2 with span-locations feature gives 1-based lines for parsed source.
         let parsed = parse("\n\nfn foo() {}\n");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(symbols[0].location.start_line, 3);
     }
 
@@ -1753,7 +1762,7 @@ mod tests {
     #[test]
     fn bug_c3_fn_param_type_emits_uses_type() {
         let parsed = parse("pub struct Foo; pub fn process(x: Foo) {}");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
         let targets = resolved_targets(&refs);
         assert!(
@@ -1769,7 +1778,7 @@ mod tests {
     #[test]
     fn bug_c3_fn_return_type_emits_uses_type() {
         let parsed = parse("pub struct Bar; pub fn make() -> Bar { Bar }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
         let targets = resolved_targets(&refs);
         assert!(targets.contains(&"c::Bar".to_string()));
@@ -1778,7 +1787,7 @@ mod tests {
     #[test]
     fn bug_c3_struct_field_type_emits_uses_type_from_field_fqdn() {
         let parsed = parse("pub struct Foo; pub struct Bar { pub f: Foo }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
         // Per-field provenance: edge originates from c::Bar::f, not c::Bar.
         let from_field: Vec<&RawEdge> = refs
@@ -1797,7 +1806,7 @@ mod tests {
     #[test]
     fn bug_c3_generic_type_param_does_not_leak() {
         let parsed = parse("pub fn id<T>(x: T) -> T { x }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_edges(&edges);
         // `T` is fn-level generic → bound as local → no UsesType edge to c::T.
         let leaked: Vec<_> = refs
@@ -1817,7 +1826,7 @@ mod tests {
     #[test]
     fn bug_c3_struct_generic_param_does_not_leak_in_fields() {
         let parsed = parse("pub struct Box2<T> { pub inner: T }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_edges(&edges);
         let leaked: Vec<_> = refs
             .iter()
@@ -1837,7 +1846,7 @@ mod tests {
     fn bug_c3_generic_constraint_emits_type_constraint() {
         let parsed =
             parse("pub trait Foo {} pub fn process<T: Foo>(x: T) -> T { x }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-constraint"]);
         let targets = resolved_targets(&refs);
         assert!(
@@ -1850,7 +1859,7 @@ mod tests {
     fn bug_c3_where_clause_emits_type_constraint() {
         let parsed =
             parse("pub trait Foo {} pub fn process<T>(x: T) where T: Foo { let _ = x; }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-constraint"]);
         let targets = resolved_targets(&refs);
         assert!(
@@ -1862,7 +1871,7 @@ mod tests {
     #[test]
     fn bug_c3_type_alias_body_emits_uses_type() {
         let parsed = parse("pub struct Foo; pub type X = Foo;");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-alias-body"]);
         let targets = resolved_targets(&refs);
         assert!(
@@ -1876,7 +1885,7 @@ mod tests {
     fn bug_c3_const_static_type_emits_uses_type() {
         let parsed =
             parse("pub struct Cfg; pub const K: Cfg = Cfg; pub static M: Cfg = Cfg;");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
         let const_edges: Vec<_> =
             refs.iter().filter(|e| e.from_fqdn == "c::K").collect();
@@ -1889,7 +1898,7 @@ mod tests {
     #[test]
     fn bug_c3_trait_supertrait_emits_type_extends() {
         let parsed = parse("pub trait Foo {} pub trait Bar: Foo {}");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-extends"]);
         let targets = resolved_targets(&refs);
         assert!(
@@ -1904,7 +1913,7 @@ mod tests {
             "pub struct Foo; pub trait Iface<T> {} pub struct C; \
              impl Iface<Foo> for C {}",
         );
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-implements"]);
         let targets = resolved_targets(&refs);
         assert!(
@@ -1921,7 +1930,7 @@ mod tests {
         // recursion through `visit_type_path` happens regardless of the
         // wrapper's tier decision.
         let parsed = parse("pub struct Foo; pub fn collect() -> Vec<Foo> { vec![] }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
         let targets = resolved_targets(&refs);
         assert!(
@@ -1941,7 +1950,7 @@ mod tests {
         // edge to `<builtin>::rust::Error` carrying `via-builtin` plus
         // the `builtin-<tag>` slug — parity with TS Edge-tier emission.
         let parsed = parse("pub fn boom<T: Error>(e: T) {}");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "via-builtin"]);
         let targets = resolved_targets(&refs);
         assert!(
@@ -1963,7 +1972,7 @@ mod tests {
         // fn ; no edge surfaces (the property is a fact about the fn,
         // not a graph neighbor worth a node).
         let parsed = parse("pub fn collect<T: Iterator>(it: T) {}");
-        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type"]);
         let targets = resolved_targets(&refs);
         assert!(
@@ -1986,7 +1995,7 @@ mod tests {
         // `Future` is `BuiltinTier::Attribute` (`Async` tag) — same
         // mechanism as Iterator but flagged as `"async"`.
         let parsed = parse("pub fn run<F: Future>(fut: F) {}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let run_sym = symbols
             .iter()
             .find(|s| s.fqdn == "c::run")
@@ -2004,7 +2013,7 @@ mod tests {
         // (param bound + return bound) must produce the flag exactly
         // once — `HashSet` dedup happens at the register-time site.
         let parsed = parse("pub fn pipe<I: Iterator>(i: I) -> impl Iterator { i }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let pipe_sym = symbols
             .iter()
             .find(|s| s.fqdn == "c::pipe")
@@ -2028,7 +2037,7 @@ mod tests {
         // Validates that the registry is the single source of truth now
         // (previously the deleted `RUST_BUILTIN_TYPES` const lived here).
         let parsed = parse("pub fn add(a: u32, b: u32, name: String) -> bool { true }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type"]);
         let targets = resolved_targets(&refs);
         assert!(
@@ -2040,7 +2049,7 @@ mod tests {
     #[test]
     fn bug_c3_unresolved_type_carries_unresolved_type_attr() {
         let parsed = parse("pub fn x(p: SomeUnknown) {}");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "unresolved-type"]);
         assert!(
             !refs.is_empty(),
@@ -2064,7 +2073,7 @@ mod tests {
         let parsed = parse(
             "pub struct Foo; pub struct Bar; pub enum E { V(Foo, Bar) }",
         );
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
         let from_variant: Vec<&RawEdge> = refs
             .iter()
@@ -2091,7 +2100,7 @@ mod tests {
         let parsed = parse(
             "pub struct S<T>(T); impl<T> S<T> { pub fn m(&self) -> T { unimplemented!() } }",
         );
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let leaked: Vec<&RawEdge> = uses_type_edges(&edges)
             .into_iter()
             .filter(|e| {
@@ -2112,7 +2121,7 @@ mod tests {
     #[test]
     fn stage3c_trait_method_filters_trait_level_generic() {
         let parsed = parse("pub trait Tr<T> { fn m(&self) -> T; }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let leaked: Vec<&RawEdge> = uses_type_edges(&edges)
             .into_iter()
             .filter(|e| {
@@ -2135,7 +2144,7 @@ mod tests {
         let parsed = parse(
             "pub struct S<T>(T); impl<T> S<T> { pub fn m<U>(_x: T, _y: U) {} }",
         );
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let m_refs: Vec<&RawEdge> = uses_type_edges(&edges)
             .into_iter()
             .filter(|e| e.from_fqdn == "c::S::m")
@@ -2166,7 +2175,7 @@ mod tests {
         // resolution lands on `BindingSource::TypeParam` so no phantom
         // `c::T` UsesType edge fires.
         let parsed = parse("pub trait Tr<T> { fn m<T>(_x: T); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let leaked: Vec<&RawEdge> = uses_type_edges(&edges)
             .into_iter()
             .filter(|e| {

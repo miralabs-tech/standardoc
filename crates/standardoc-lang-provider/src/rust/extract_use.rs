@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn simple_use_emits_one_import_edge() {
         let parsed = parse("use std::collections::HashMap;");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let imp = imports(&edges);
         assert_eq!(imp.len(), 1);
         assert_eq!(imp[0].from_fqdn, "c");
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn use_group_emits_one_import_per_leaf() {
         let parsed = parse("use foo::{a, b, c};");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let imp = imports(&edges);
         assert_eq!(imp.len(), 3);
         let names: Vec<_> = imp
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn use_glob_emits_import_to_prefix() {
         let parsed = parse("use foo::*;");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let imp = imports(&edges);
         assert_eq!(imp.len(), 1);
         match &imp[0].to {
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn use_rename_populates_alias() {
         let parsed = parse("use foo::Bar as B; fn use_it() { B::new(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let imp = imports(&edges);
         assert_eq!(imp.len(), 1);
         match &imp[0].to {
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn use_crate_relative_canonicalizes_against_crate_name() {
         let parsed = parse("use crate::foo::bar;");
-        let (_, edges, _) = walk(&parsed, "mycrate", "src/lib.rs", "mycrate");
+        let (_, edges, _, _) = walk(&parsed, "mycrate", "src/lib.rs", "mycrate");
         let imp = imports(&edges);
         assert_eq!(imp.len(), 1);
         match &imp[0].to {
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn use_self_relative_canonicalizes_against_current_module() {
         let parsed = parse("use self::sub::thing;");
-        let (_, edges, _) = walk(&parsed, "mycrate::a", "src/a.rs", "mycrate");
+        let (_, edges, _, _) = walk(&parsed, "mycrate::a", "src/a.rs", "mycrate");
         let imp = imports(&edges);
         assert_eq!(imp.len(), 1);
         match &imp[0].to {
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn use_super_pops_one_module_level() {
         let parsed = parse("use super::sibling;");
-        let (_, edges, _) = walk(&parsed, "mycrate::a::b", "src/a/b.rs", "mycrate");
+        let (_, edges, _, _) = walk(&parsed, "mycrate::a::b", "src/a/b.rs", "mycrate");
         let imp = imports(&edges);
         assert_eq!(imp.len(), 1);
         match &imp[0].to {
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn extern_crate_emits_import_and_alias() {
         let parsed = parse("extern crate alloc as a; fn use_it() { a::vec::Vec::new(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let imp = imports(&edges);
         assert_eq!(imp.len(), 1);
         match &imp[0].to {
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn import_resolved_when_target_defined_in_same_file() {
         let parsed = parse("pub mod foo { pub fn bar() {} } use crate::foo::bar;");
-        let (_, edges, _) = walk(&parsed, "mycrate", "src/lib.rs", "mycrate");
+        let (_, edges, _, _) = walk(&parsed, "mycrate", "src/lib.rs", "mycrate");
         let imp = imports(&edges);
         assert_eq!(imp.len(), 1);
         match &imp[0].to {
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn nested_use_groups_emit_one_import_per_leaf() {
         let parsed = parse("use std::{io::{Read, Write}, fmt};");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let imp = imports(&edges);
         let names: Vec<String> = imp
             .iter()
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn pub_use_emits_phantom_symbol_and_marks_edge_as_re_export() {
         let parsed = parse("pub use foo::Bar;");
-        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
 
         let phantom = symbols
             .iter()
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn non_pub_use_does_not_emit_phantom_or_re_export_attribute() {
         let parsed = parse("use foo::Bar;");
-        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
 
         assert!(
             !symbols.iter().any(|s| s.fqdn == "c::Bar"),
@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn pub_use_with_alias_emits_phantom_at_alias_fqdn() {
         let parsed = parse("pub use foo::Bar as B;");
-        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
 
         assert!(
             symbols.iter().any(|s| s.fqdn == "c::B"),
@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn pub_use_glob_emits_wildcard_re_export_edge_no_phantom() {
         let parsed = parse("pub use foo::*;");
-        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
 
         // No phantom symbol for wildcard re-exports — we cannot enumerate
         // the target module's items in a single-file pass.
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn pub_use_group_emits_one_phantom_per_leaf() {
         let parsed = parse("pub use foo::{a, b};");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
 
         assert!(symbols.iter().any(|s| s.fqdn == "c::a"));
         assert!(symbols.iter().any(|s| s.fqdn == "c::b"));
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn use_self_in_group_imports_the_prefix_itself() {
         let parsed = parse("use foo::{self, bar};");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let imp = imports(&edges);
         let names: Vec<String> = imp
             .iter()

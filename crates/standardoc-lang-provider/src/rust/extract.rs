@@ -46,7 +46,8 @@ pub(crate) fn extract_file(
     }
 
     let mut symbols = vec![module_symbol];
-    let (item_symbols, edges, item_documents) = walk::walk(&parsed, &module_fqdn, path, crate_name);
+    let (item_symbols, edges, item_documents, call_sites) =
+        walk::walk(&parsed, &module_fqdn, path, crate_name);
     symbols.extend(item_symbols);
     documents.extend(item_documents);
 
@@ -59,7 +60,7 @@ pub(crate) fn extract_file(
         byte_size: u64::try_from(content.len()).unwrap_or(u64::MAX),
         symbols,
         edges,
-        call_sites: vec![],
+        call_sites,
         documents,
     })
 }

@@ -1,11 +1,77 @@
 use proc_macro2::Span;
-use standardoc_ir::{EdgeKind, RawEdge, ResolvedOrUnresolved, Site};
+use quote::ToTokens;
+use standardoc_ir::{EdgeKind, RawCallArg, RawCallSite, RawEdge, ResolvedOrUnresolved, Site};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 use super::walk::{
     NameResolution, WalkContext, col_from_span, line_from_span, lookup_scope_for, path_to_string,
 };
+
+/// IR-4-b: classify a positional argument expression into a [`RawCallArg`].
+/// String literals get `is_string_literal = true` with their unwrapped
+/// `value()` (no surrounding quotes); identifiers carry their dotted path
+/// text; anything else stringifies via `ToTokens` (token-text — a best-
+/// effort textual representation of the AST node).
+fn arg_from_expr(expr: &syn::Expr) -> RawCallArg {
+    if let syn::Expr::Lit(lit) = expr
+        && let syn::Lit::Str(s) = &lit.lit
+    {
+        return RawCallArg {
+            value: s.value(),
+            is_string_literal: true,
+        };
+    }
+    if let syn::Expr::Path(p) = expr {
+        return RawCallArg {
+            value: path_to_string(&p.path),
+            is_string_literal: false,
+        };
+    }
+    RawCallArg {
+        value: expr.to_token_stream().to_string(),
+        is_string_literal: false,
+    }
+}
+
+fn args_from_punctuated(
+    args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+) -> Vec<RawCallArg> {
+    args.iter().map(arg_from_expr).collect()
+}
+
+/// IR-4-b: walk a method-call receiver expression and produce the dotted
+/// `receiver_chain` segment list in source order. `a.b.c()` (receiver =
+/// `a.b`) yields `["a", "b"]`. The walk peels `ExprField` layers; at the
+/// inner-most non-field base it pushes a single segment — the path text
+/// for a `Path`, the full token text for anything else (computed access,
+/// nested calls, etc.).
+fn receiver_chain_from(receiver: &syn::Expr) -> Vec<String> {
+    let mut chain: Vec<String> = Vec::new();
+    let mut cursor: &syn::Expr = receiver;
+    loop {
+        match cursor {
+            syn::Expr::Field(field) => {
+                let member = match &field.member {
+                    syn::Member::Named(n) => n.to_string(),
+                    syn::Member::Unnamed(idx) => idx.index.to_string(),
+                };
+                chain.push(member);
+                cursor = &field.base;
+            }
+            syn::Expr::Path(p) => {
+                chain.push(path_to_string(&p.path));
+                break;
+            }
+            other => {
+                chain.push(other.to_token_stream().to_string());
+                break;
+            }
+        }
+    }
+    chain.reverse();
+    chain
+}
 
 pub(crate) fn visit_block(
     ctx: &mut WalkContext,
@@ -40,6 +106,32 @@ struct CallVisitor<'a> {
 }
 
 impl CallVisitor<'_> {
+    /// IR-4-b: push an observational [`RawCallSite`] alongside whatever
+    /// `Calls` / `References` edge was (or wasn't) emitted. Call sites
+    /// carry textual shape only — they're orthogonal to the edge tier
+    /// decisions (Drop / Local / Attribute) made by `resolve_name`, so
+    /// e.g. `Vec::new()` still surfaces as a `RawCallSite` even though
+    /// the Drop tier suppresses the graph edge.
+    fn emit_call_site(
+        &mut self,
+        callee_text: String,
+        args: Vec<RawCallArg>,
+        receiver_chain: Vec<String>,
+        span: Span,
+    ) {
+        self.ctx.push_call_site(RawCallSite {
+            from_fqdn: self.enclosing_fqdn.clone(),
+            callee_text,
+            args,
+            receiver_chain,
+            site: Site {
+                file: self.file_path.clone(),
+                line: line_from_span(span),
+                col: col_from_span(span),
+            },
+        });
+    }
+
     fn emit_call(&mut self, to: ResolvedOrUnresolved, span: Span) {
         self.emit_call_with_attributes(to, span, vec![]);
     }
@@ -179,6 +271,17 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
         if let syn::Expr::Path(expr_path) = &*node.func {
             let path_str = path_to_string(&expr_path.path);
             if !path_str.is_empty() {
+                // IR-4-b: observational call-site — always emitted,
+                // independent of the Drop/Local/Attribute tier dispatch
+                // below. The plugin layer reads call_sites to interpret
+                // textual call patterns (e.g. `tauri::invoke("foo")`)
+                // regardless of whether the graph edge was suppressed.
+                self.emit_call_site(
+                    path_str.clone(),
+                    args_from_punctuated(&node.args),
+                    Vec::new(),
+                    expr_path.span(),
+                );
                 // Stage 3e-2-ter: routed through `resolve_name` so the
                 // scope chain is honored. Drop/Attribute tier dispatch
                 // happens inside `resolve_name`; aliases propagate as
@@ -197,9 +300,16 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
             }
             return;
         }
-        // Non-path func (e.g. `(get_fn())()`) — default recursion walks
-        // both the func sub-expression (where `visit_expr_path` can
-        // legitimately surface value-reads) and the args.
+        // Non-path func (e.g. `(get_fn())()`) — surface the call shape
+        // for the plugin layer via the full token text, then defer to
+        // the default recursion for edge emission (visit_expr_path on
+        // any inner identifier triggers value-reads).
+        self.emit_call_site(
+            node.func.to_token_stream().to_string(),
+            args_from_punctuated(&node.args),
+            Vec::new(),
+            node.span(),
+        );
         syn::visit::visit_expr_call(self, node);
     }
 
@@ -241,6 +351,18 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let method = node.method.to_string();
         let span = node.method.span();
+        // IR-4-b: observational call-site — `obj.field.foo(x)` yields
+        // `callee_text = "<receiver-text>.foo"`, `receiver_chain` from
+        // walking down through ExprField layers (final segment is the
+        // receiver-text base, the method ident is NOT in the chain).
+        let receiver_chain = receiver_chain_from(&node.receiver);
+        let callee_text = format!("{}.{}", receiver_chain.join("."), method);
+        self.emit_call_site(
+            callee_text,
+            args_from_punctuated(&node.args),
+            receiver_chain,
+            span,
+        );
         self.emit_call(ResolvedOrUnresolved::Unresolved { name: method }, span);
         syn::visit::visit_expr_method_call(self, node);
     }
@@ -264,6 +386,12 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
             return;
         }
         let span = node.path.span();
+        // IR-4-b: macro args are an opaque token stream (not parsed as
+        // Rust expressions), so we surface the call-site with the
+        // `<path>!` callee_text but `args = []`. Plugins that care
+        // about macro payload can re-parse the token text from source
+        // — the IR layer doesn't try to interpret it.
+        self.emit_call_site(format!("{path_str}!"), Vec::new(), Vec::new(), span);
         let to = self.ctx.resolve_path(&path_str, &self.current_module);
         self.emit_call_with_attributes(to, span, vec!["macro".to_string()]);
     }
@@ -285,7 +413,7 @@ mod tests {
     #[test]
     fn expr_call_local_function_is_resolved_against_defined_fqdn() {
         let parsed = parse("fn bar() {} fn caller() { bar(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0].from_fqdn, "c::caller");
@@ -298,7 +426,7 @@ mod tests {
     #[test]
     fn expr_call_unknown_external_is_unresolved_canonical() {
         let parsed = parse("fn caller() { std::mem::take(&mut 0); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         match &cs[0].to {
@@ -310,7 +438,7 @@ mod tests {
     #[test]
     fn expr_call_via_alias_resolves_to_canonical() {
         let parsed = parse("use foo::bar; fn caller() { bar(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         match &cs[0].to {
@@ -322,7 +450,7 @@ mod tests {
     #[test]
     fn expr_method_call_is_always_unresolved_with_method_ident() {
         let parsed = parse("fn caller() { let v = vec![1]; v.iter().count(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         // Filter out the `vec!` macro edge — this test is about method calls.
         let cs: Vec<_> = calls(&edges)
             .into_iter()
@@ -344,7 +472,7 @@ mod tests {
     #[test]
     fn nested_calls_in_arguments_are_captured() {
         let parsed = parse("fn a() {} fn b() {} fn caller() { a(); b(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 2);
     }
@@ -352,7 +480,7 @@ mod tests {
     #[test]
     fn impl_fn_body_calls_attributed_to_method_fqdn() {
         let parsed = parse("fn helper() {} struct F; impl F { fn run(&self) { helper(); } }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0].from_fqdn, "c::F::run");
@@ -361,7 +489,7 @@ mod tests {
     #[test]
     fn trait_default_body_calls_attributed_to_trait_fn_fqdn() {
         let parsed = parse("fn helper() {} trait T { fn run(&self) { helper(); } }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0].from_fqdn, "c::T::run");
@@ -370,7 +498,7 @@ mod tests {
     #[test]
     fn async_block_body_is_walked_for_calls() {
         let parsed = parse("fn outside() {} fn caller() { let _ = async { outside(); }; }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         let names: Vec<_> = cs
             .iter()
@@ -389,7 +517,7 @@ mod tests {
     #[test]
     fn macro_invocation_emits_call_edge_with_macro_attribute() {
         let parsed = parse("fn caller() { println!(\"hi\"); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1, "exactly one macro call expected");
         assert!(
@@ -409,7 +537,7 @@ mod tests {
     fn macro_invocation_args_remain_opaque() {
         // Tokens inside `println!(...)` are NOT parsed as Rust; only the path is captured.
         let parsed = parse("fn outside() {} fn caller() { println!(\"{}\", outside()); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         // ONE edge for the println macro itself; the `outside()` inside is unreachable.
         let macro_edges: Vec<_> = cs
@@ -427,7 +555,7 @@ mod tests {
     #[test]
     fn closure_body_is_walked_for_calls() {
         let parsed = parse("fn inner() {} fn caller() { let f = || inner(); f(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         // ExprCall captures: inner() inside closure + f() outside (f is not a Path,
         // it's an ExprPath to local var → emitted with name "f", not in defined_fqdns).
@@ -449,7 +577,7 @@ mod tests {
         // Stage 3e-1 tier gating doesn't interfere (`Vec` is now Drop
         // and would skip the edge entirely — covered separately).
         let parsed = parse("fn caller() { MyType::<u8>::new(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         match &cs[0].to {
@@ -464,7 +592,7 @@ mod tests {
         // structural noise and produces no `Calls` edge. The body still
         // walks for any inner-call recursion (none here).
         let parsed = parse("fn caller() { Vec::<u8>::new(); String::new(); Box::new(0u8); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert!(
             cs.is_empty(),
@@ -478,7 +606,7 @@ mod tests {
         // the args (`inner()`) must still surface — the visitor recurses
         // through `syn::visit::visit_expr_call` after the tier decision.
         let parsed = parse("fn inner() {} fn caller() { Some(inner()); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let names: Vec<_> = calls(&edges)
             .into_iter()
             .filter_map(|e| match &e.to {
@@ -513,7 +641,7 @@ mod tests {
         // `foo` in value position resolves to the module-local fn; emit
         // a References edge with `value-read`.
         let parsed = parse("fn foo() {} fn caller() { let _ = foo; }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let vr = value_reads(&edges);
         assert_eq!(vr.len(), 1, "exactly one value-read expected, got {vr:?}");
         assert_eq!(vr[0].from_fqdn, "c::caller");
@@ -529,7 +657,7 @@ mod tests {
         // the manual arg-only recursion in visit_expr_call must suppress
         // the visit_expr_path fire on `node.func`.
         let parsed = parse("fn bar() {} fn caller() { bar(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert_eq!(calls(&edges).len(), 1);
         assert!(
             refs(&edges).is_empty(),
@@ -544,7 +672,7 @@ mod tests {
         // produces no References edge (would create noise pointing at
         // unresolved targets).
         let parsed = parse("fn caller() { let _ = unknown_thing; }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert!(
             refs(&edges).is_empty(),
             "unresolved value-reads must be skipped, got {:?}",
@@ -557,7 +685,7 @@ mod tests {
         // `let x = 0; let _ = x;` — `x` is a local binding (nested
         // scope), so the read must not emit a References edge.
         let parsed = parse("fn caller() { let x = 0; let _ = x; }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert!(
             refs(&edges).is_empty(),
             "local value-read must be skipped, got {:?}",
@@ -571,7 +699,7 @@ mod tests {
         // position is dropped (recursion patterns are covered by Calls,
         // value-position self-refs are usually structural).
         let parsed = parse("fn caller() { let _ = caller; }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert!(
             refs(&edges).is_empty(),
             "self-reference must be skipped, got {:?}",
@@ -584,7 +712,7 @@ mod tests {
         // `Vec` in value position (as fn-pointer or generic carrier) is
         // Drop-tier → no References edge.
         let parsed = parse("fn caller() { let _ = Vec::<u8>::new; }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert!(
             refs(&edges).is_empty(),
             "Drop-tier builtin value-read must be skipped, got {:?}",
@@ -600,7 +728,7 @@ mod tests {
         let parsed = parse(
             "fn caller() { let _: fn() -> &'static dyn Iterator<Item = u8> = || todo!(); let _ = Iterator::count; }",
         );
-        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert!(
             refs(&edges).is_empty(),
             "Attribute-tier builtin value-read must skip the edge, got {:?}",
@@ -622,7 +750,7 @@ mod tests {
         let parsed = parse(
             "use other::MyType; fn caller() { let _ = MyType::CONST; }",
         );
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         // `MyType::CONST` resolves to canonical `other::MyType::CONST`
         // which isn't in defined_fqdns → Unresolved → no edge emitted
         // (Stage 1 safety net for unresolved value-reads).
@@ -642,7 +770,7 @@ mod tests {
         // via visit_expr → visit_expr_path, so we should see a References
         // edge on `foo`.
         let parsed = parse("fn foo() {} fn caller() { foo.bar(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let vr = value_reads(&edges);
         // `foo` reads as `c::foo` (Resolved).
         let foo_refs: Vec<_> = vr
@@ -661,7 +789,7 @@ mod tests {
         // Bare `bar` resolves to `c::bar` which isn't defined → Unresolved.
         // Per Stage 1 safety net, no References edge.
         let parsed = parse("fn caller() { let _ = bar; }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert!(
             refs(&edges).is_empty(),
             "unresolved bare ident value-read must be skipped, got {:?}",
@@ -676,7 +804,7 @@ mod tests {
         // `let x = bar;` makes `x` an alias for `bar`. Reading `x`
         // surfaces as a References edge to `c::bar` with `via-alias`.
         let parsed = parse("fn bar() {} fn caller() { let x = bar; let _ = x; }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let vr = value_reads(&edges);
         // One value-read through alias (`x`) + one direct value-read on
         // the RHS (`bar` in `let x = bar;` is also an Expr::Path read).
@@ -701,7 +829,7 @@ mod tests {
         // `let mut x = bar;` — the binding is mutable, so the alias is
         // tagged `via-alias-mutable` to signal staleness risk.
         let parsed = parse("fn bar() {} fn caller() { let mut x = bar; let _ = x; }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let mutable_refs: Vec<_> = value_reads(&edges)
             .into_iter()
             .filter(|e| e.attributes.iter().any(|a| a == "via-alias-mutable"))
@@ -723,7 +851,7 @@ mod tests {
         // `let x = bar();` — RHS is a Call, not an alias-worthy Path.
         // `x` becomes an opaque Local → reading it surfaces nothing.
         let parsed = parse("fn bar() -> u32 { 0 } fn caller() { let x = bar(); let _ = x; }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         // The `bar()` call still emits a Calls edge.
         let cs = calls(&edges);
         assert!(cs.iter().any(|e| matches!(&e.to,
@@ -742,7 +870,7 @@ mod tests {
         // `let x: fn() = bar;` — the Pat::Type wrapper around Pat::Ident
         // must be peeled so alias detection still fires.
         let parsed = parse("fn bar() {} fn caller() { let x: fn() = bar; let _ = x; }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let alias_refs: Vec<_> = value_reads(&edges)
             .into_iter()
             .filter(|e| e.attributes.iter().any(|a| a == "via-alias"))
@@ -763,7 +891,7 @@ mod tests {
         // for `bar` (Const mutability). Stage 3e-2-ter routes the call
         // through resolve_name → emits Calls to c::bar with `via-alias`.
         let parsed = parse("fn bar() {} fn caller() { let f = bar; f(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let alias_calls: Vec<_> = calls(&edges)
             .into_iter()
             .filter(|e| e.attributes.iter().any(|a| a == "via-alias"))
@@ -783,7 +911,7 @@ mod tests {
     #[test]
     fn stage3e2ter_let_mut_alias_call_via_alias_mutable() {
         let parsed = parse("fn bar() {} fn caller() { let mut f = bar; f(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let mutable_calls: Vec<_> = calls(&edges)
             .into_iter()
             .filter(|e| e.attributes.iter().any(|a| a == "via-alias-mutable"))
@@ -802,7 +930,7 @@ mod tests {
         // the caller's scope. Calling it emits NO edge (mirror of TS
         // Bug B Stage 2 — locals in call position are skipped).
         let parsed = parse("fn caller(cb: fn()) { cb(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert!(
             calls(&edges).is_empty(),
             "fn-pointer param call must not emit a Calls edge, got {:?}",
@@ -816,7 +944,7 @@ mod tests {
         // no alias is registered for `f`. Reading `f` in call position
         // resolves to a Local without alias → skip.
         let parsed = parse("fn caller() { let f = || {}; f(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let non_macro: Vec<_> = calls(&edges)
             .into_iter()
             .filter(|e| !e.attributes.iter().any(|a| a == "macro"))
@@ -832,7 +960,7 @@ mod tests {
         // Regression guard: routing through resolve_name MUST preserve
         // the pre-3e-2-ter behavior for plain module-local fn calls.
         let parsed = parse("fn bar() {} fn caller() { bar(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         // No alias/builtin attrs on a direct module-local call.
@@ -853,7 +981,7 @@ mod tests {
         // NOT to Calls — `fn foo() { foo(); }` is a legitimate recursion
         // signal that must surface as a Calls edge.
         let parsed = parse("fn foo() { foo(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let self_calls: Vec<_> = calls(&edges)
             .into_iter()
             .filter(|e| {
@@ -873,7 +1001,7 @@ mod tests {
     fn stage3e2ter_drop_tier_call_still_skipped_via_resolve_name() {
         // Regression: Drop tier dispatch must still work post-refactor.
         let parsed = parse("fn caller() { Vec::<u8>::new(); }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         assert!(
             calls(&edges).is_empty(),
             "Drop-tier builtin call must be skipped, got {:?}",
@@ -889,7 +1017,7 @@ mod tests {
         let parsed = parse(
             "fn bar() {} fn baz() {} fn caller() { let (x, y) = (bar, baz); let _ = x; let _ = y; }",
         );
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         // The tuple expr's inner Expr::Path reads on bar and baz DO emit
         // value-reads at the RHS expression itself. But x/y reads on the
         // bottom lines must NOT emit (locals without alias).
@@ -909,5 +1037,162 @@ mod tests {
         );
         assert!(resolved_targets.contains(&"c::bar".to_string()));
         assert!(resolved_targets.contains(&"c::baz".to_string()));
+    }
+
+    // --- IR-4-b: call_sites emission (observational, separate from edges) ---
+
+    fn call_sites_of(parsed: &syn::File) -> Vec<standardoc_ir::RawCallSite> {
+        let (_, _, _, css) = walk(parsed, "c", "src/lib.rs", "c");
+        css
+    }
+
+    #[test]
+    fn ir4b_path_form_call_emits_call_site_with_classified_args() {
+        // `foo("hi", 42, x)` — three positional args: a string literal,
+        // a numeric literal, and an identifier. Each must surface with
+        // the correct `is_string_literal` flag.
+        let parsed = parse("fn caller() { let x = 0; foo(\"hi\", 42, x); }");
+        let css = call_sites_of(&parsed);
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "foo")
+            .unwrap_or_else(|| panic!("expected a call_site for foo(...), got {css:?}"));
+        assert_eq!(cs.from_fqdn, "c::caller");
+        assert!(cs.receiver_chain.is_empty());
+        assert_eq!(cs.args.len(), 3);
+        assert_eq!(cs.args[0].value, "hi");
+        assert!(cs.args[0].is_string_literal);
+        assert_eq!(cs.args[1].value, "42");
+        assert!(!cs.args[1].is_string_literal);
+        assert_eq!(cs.args[2].value, "x");
+        assert!(!cs.args[2].is_string_literal);
+    }
+
+    #[test]
+    fn ir4b_multi_segment_path_call_keeps_dotted_callee_text() {
+        // `tauri::invoke("ping")` — multi-segment path is preserved
+        // verbatim in `callee_text`; receiver_chain stays empty (path-
+        // form has no receiver concept).
+        let parsed = parse("fn caller() { tauri::invoke(\"ping\"); }");
+        let css = call_sites_of(&parsed);
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "tauri::invoke")
+            .unwrap_or_else(|| panic!("expected tauri::invoke call_site, got {css:?}"));
+        assert!(cs.receiver_chain.is_empty());
+        assert_eq!(cs.args.len(), 1);
+        assert_eq!(cs.args[0].value, "ping");
+        assert!(cs.args[0].is_string_literal);
+    }
+
+    #[test]
+    fn ir4b_method_call_emits_receiver_chain_single_segment() {
+        // `obj.bar(x)` — single-segment receiver_chain.
+        let parsed = parse("fn caller() { let obj = 0; obj.bar(x); }");
+        let css = call_sites_of(&parsed);
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text.ends_with(".bar"))
+            .unwrap_or_else(|| panic!("expected obj.bar call_site, got {css:?}"));
+        assert_eq!(cs.callee_text, "obj.bar");
+        assert_eq!(cs.receiver_chain, vec!["obj".to_string()]);
+        assert_eq!(cs.args.len(), 1);
+        assert_eq!(cs.args[0].value, "x");
+    }
+
+    #[test]
+    fn ir4b_chained_method_call_walks_field_layers_into_receiver_chain() {
+        // `obj.field.bar(x)` — receiver is `ExprField { base: Path("obj"), member: "field" }`.
+        // The chain must surface in source order: ["obj", "field"].
+        let parsed = parse("fn caller() { let obj = 0; obj.field.bar(x); }");
+        let css = call_sites_of(&parsed);
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text.ends_with(".bar"))
+            .unwrap_or_else(|| panic!("expected obj.field.bar call_site, got {css:?}"));
+        assert_eq!(cs.callee_text, "obj.field.bar");
+        assert_eq!(
+            cs.receiver_chain,
+            vec!["obj".to_string(), "field".to_string()]
+        );
+    }
+
+    #[test]
+    fn ir4b_macro_call_emits_call_site_with_bang_suffix_and_no_args() {
+        // `println!("hi")` — macro args are an opaque token stream, so
+        // `args` stays empty by design. `callee_text` carries the `!`
+        // suffix so consumers can distinguish macros from fn calls.
+        let parsed = parse("fn caller() { println!(\"hi\"); }");
+        let css = call_sites_of(&parsed);
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "println!")
+            .unwrap_or_else(|| panic!("expected println! call_site, got {css:?}"));
+        assert!(cs.args.is_empty());
+        assert!(cs.receiver_chain.is_empty());
+    }
+
+    #[test]
+    fn ir4b_drop_tier_call_still_emits_call_site() {
+        // `Vec::<u8>::new()` — the Drop tier suppresses the graph edge,
+        // but the call_site must still surface (observational, plugin-
+        // layer reads it regardless of edge-tier decisions). Generics
+        // are stripped in `callee_text` via `path_to_string`.
+        let parsed = parse("fn caller() { Vec::<u8>::new(); }");
+        let (_, edges, _, css) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert!(
+            calls(&edges).is_empty(),
+            "Drop-tier edge suppression must still hold"
+        );
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "Vec::new")
+            .unwrap_or_else(|| panic!("expected Vec::new call_site, got {css:?}"));
+        assert!(cs.receiver_chain.is_empty());
+    }
+
+    #[test]
+    fn ir4b_self_recursive_call_still_emits_call_site() {
+        // `fn foo() { foo(); }` — self-recursion preserved as a Calls
+        // edge (different from value-position self-refs) AND as a
+        // call_site (observational signal of the recursion).
+        let parsed = parse("fn foo() { foo(); }");
+        let css = call_sites_of(&parsed);
+        assert!(
+            css.iter().any(|c| c.callee_text == "foo"),
+            "self-recursive call must emit a call_site, got {css:?}"
+        );
+    }
+
+    #[test]
+    fn ir4b_call_site_from_fqdn_attributes_to_enclosing_method() {
+        // Same as `impl_fn_body_calls_attributed_to_method_fqdn` but
+        // checking the call_site path — `from_fqdn` must be the impl
+        // method's fqdn, not the module's.
+        let parsed = parse("fn helper() {} struct F; impl F { fn run(&self) { helper(); } }");
+        let css = call_sites_of(&parsed);
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "helper")
+            .unwrap_or_else(|| panic!("expected helper call_site, got {css:?}"));
+        assert_eq!(cs.from_fqdn, "c::F::run");
+    }
+
+    #[test]
+    fn ir4b_empty_callee_path_still_falls_through_to_default() {
+        // Edge case — `path_to_string` returns an empty string for a
+        // path with no segments. The call_site emit short-circuits in
+        // that case (the `if !path_str.is_empty()` guard), so no
+        // call_site is produced. Guard against regression by checking
+        // that pathological inputs don't crash the walk.
+        let parsed = parse("fn caller() { (|| {})(); }");
+        // `(|| {})()` is a non-path func — we DO emit a call_site with
+        // the stringified closure text. Just assert no panic + at
+        // least one call_site emitted on the non-path branch.
+        let css = call_sites_of(&parsed);
+        assert!(
+            css.iter().any(|c| !c.callee_text.is_empty()),
+            "non-path call must still emit a non-empty call_site"
+        );
     }
 }

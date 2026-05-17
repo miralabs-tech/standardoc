@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use standardoc_ir::{Language, ModuleLookup, RawDocument, RawEdge, RawSymbol};
+use standardoc_ir::{Language, ModuleLookup, RawCallSite, RawDocument, RawEdge, RawSymbol};
 
 #[derive(Debug)]
 pub(crate) struct WalkContextCore {
@@ -9,6 +9,12 @@ pub(crate) struct WalkContextCore {
     pub(crate) symbols: Vec<RawSymbol>,
     pub(crate) edges: Vec<RawEdge>,
     pub(crate) documents: Vec<RawDocument>,
+    /// IR-4: observational call-expression records — collected alongside
+    /// `Calls` edges but distinct in purpose. Edges drive the symbol
+    /// graph; call_sites carry textual shape (callee_text, literal arg
+    /// values, receiver chain) for the post-1.0 plugin layer to
+    /// re-interpret without re-parsing source.
+    pub(crate) call_sites: Vec<RawCallSite>,
     pub(crate) defined_fqdns: HashSet<String>,
     pub(crate) lookup: ModuleLookup,
 }
@@ -22,6 +28,7 @@ impl WalkContextCore {
             symbols: Vec::new(),
             edges: Vec::new(),
             documents: Vec::new(),
+            call_sites: Vec::new(),
             defined_fqdns: HashSet::new(),
             lookup,
         }
@@ -38,5 +45,9 @@ impl WalkContextCore {
 
     pub(crate) fn push_document(&mut self, doc: RawDocument) {
         self.documents.push(doc);
+    }
+
+    pub(crate) fn push_call_site(&mut self, cs: RawCallSite) {
+        self.call_sites.push(cs);
     }
 }
