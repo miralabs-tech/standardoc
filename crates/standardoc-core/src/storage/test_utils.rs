@@ -5,6 +5,7 @@ use standardoc_ir::{
 
 use crate::storage::files::{FileInput, upsert_file};
 use crate::storage::migrate::ensure_schema;
+use crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
 use crate::storage::symbols::SymbolInsertContext;
 
 pub(crate) fn fresh_conn() -> Connection {
@@ -60,5 +61,6 @@ pub(crate) fn symbol_ctx(file_path: &str) -> SymbolInsertContext<'_> {
         is_external: false,
         source_origin: SourceOrigin::Workspace,
         revision: 0,
+        workspace_id: PRIMARY_WORKSPACE_ID,
     }
 }

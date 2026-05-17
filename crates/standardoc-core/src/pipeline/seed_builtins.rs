@@ -98,6 +98,7 @@ pub(crate) fn seed_into(
                     is_external: true,
                     source_origin: SourceOrigin::ManualExternal,
                     revision: 0,
+                    workspace_id: crate::storage::module_lookup::PRIMARY_WORKSPACE_ID,
                 },
             )?;
             inserted += 1;

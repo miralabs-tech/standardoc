@@ -118,6 +118,36 @@ pub fn symbol_by_fqdn(handle: &IndexHandle, fqdn: &str) -> Result<Option<RawSymb
     })
 }
 
+/// Stage 3b-7-b Layer 2: scope-aware variant of [`symbol_by_fqdn`].
+///
+/// Matches `(workspace_id, fqdn)` exactly rather than `fqdn` alone — the
+/// foundation for cross-workspace lookups once Layer 3 lands peer rows in
+/// the same `symbols` table. Today every row carries
+/// `workspace_id = 'primary'`, so passing `PRIMARY_WORKSPACE_ID` returns
+/// the same answer as `symbol_by_fqdn`; the call shape is here so
+/// pipeline code that already knows its target workspace can express it
+/// without waiting for the broader sibling sweep (find_symbol /
+/// find_symbols_by_pattern / list_symbols) which is bundled with Layer 3.
+pub fn symbol_by_fqdn_in_workspace(
+    handle: &IndexHandle,
+    fqdn: &str,
+    workspace_id: &str,
+) -> Result<Option<RawSymbol>, StorageError> {
+    with_conn(handle, |conn| {
+        let raw = conn
+            .query_row(
+                &format!(
+                    "SELECT {SYMBOL_COLUMNS} FROM symbols \
+                     WHERE workspace_id = ?1 AND fqdn = ?2"
+                ),
+                rusqlite::params![workspace_id, fqdn],
+                read_symbol_row,
+            )
+            .optional()?;
+        raw.map(build_symbol).transpose()
+    })
+}
+
 pub fn symbols_by_name(
     handle: &IndexHandle,
     name: &str,
@@ -1543,6 +1573,7 @@ mod tests {
     use crate::storage::edge_sites::insert_edge_sites;
     use crate::storage::edges::insert_edge;
     use crate::storage::files::{FileInput, upsert_file};
+    use crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
     use crate::storage::symbols::{SymbolInsertContext, insert_symbol};
     use rusqlite::Connection;
     use standardoc_ir::{
@@ -1621,6 +1652,7 @@ mod tests {
                 is_external: false,
                 source_origin: SourceOrigin::Workspace,
                 revision: 0,
+                workspace_id: PRIMARY_WORKSPACE_ID,
             },
         )
         .unwrap();
@@ -1695,6 +1727,7 @@ mod tests {
                     is_external: false,
                     source_origin: SourceOrigin::Workspace,
                     revision: 0,
+                    workspace_id: PRIMARY_WORKSPACE_ID,
                 },
             )
             .unwrap();
@@ -1706,6 +1739,127 @@ mod tests {
         let sig = got.signature.expect("signature must round-trip");
         assert!(sig.modifiers.is_async);
         assert_eq!(sig.params[0].name, "x");
+    }
+
+    // --- Stage 3b-7-b Layer 2: scope-aware lookup ---
+
+    /// Helper: insert a symbol with an explicit workspace_id tag.
+    /// Layer-2 tests need this because `seed_symbol` always stamps
+    /// `PRIMARY_WORKSPACE_ID`; isolation tests must stamp peer UUIDs.
+    fn seed_symbol_in_workspace(
+        conn: &Connection,
+        file: &str,
+        name: &str,
+        fqdn: &str,
+        line: u32,
+        workspace_id: &str,
+    ) -> i64 {
+        let sym = RawSymbol {
+            name: name.into(),
+            fqdn: fqdn.into(),
+            kind: Kind::Function,
+            language_kind: LanguageKind::from("fn_item"),
+            module: None,
+            visibility: Visibility::Public,
+            location: SymbolLocation {
+                file: file.into(),
+                start_line: line,
+                end_line: line + 5,
+                start_col: 0,
+                end_col: 1,
+            },
+            signature: None,
+            body_hash: Some(Blake3Hash::new([0xab; 32])),
+            attributes: vec![],
+            flags: vec![],
+        };
+        insert_symbol(
+            conn,
+            &sym,
+            SymbolInsertContext {
+                file_path: file,
+                language: Language::Rust,
+                is_external: false,
+                source_origin: SourceOrigin::Workspace,
+                revision: 0,
+                workspace_id,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn symbol_by_fqdn_in_workspace_returns_match_for_primary_scope() {
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol(&conn, "src/main.rs", "foo", "crate::foo", 10);
+        }
+        let got = symbol_by_fqdn_in_workspace(&handle, "crate::foo", PRIMARY_WORKSPACE_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.fqdn, "crate::foo");
+    }
+
+    #[test]
+    fn symbol_by_fqdn_in_workspace_returns_none_for_mismatched_scope() {
+        // Primary row exists; lookup under a different workspace_id
+        // must NOT see it — that's the whole point of scope-aware queries.
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol(&conn, "src/main.rs", "foo", "crate::foo", 10);
+        }
+        assert_eq!(
+            symbol_by_fqdn_in_workspace(&handle, "crate::foo", "peer-uuid-abc").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn symbol_by_fqdn_in_workspace_isolates_peer_from_primary() {
+        // Layer-2 isolation smoke: a primary row and a peer row with
+        // distinct fqdns must each be visible only under their own
+        // workspace scope. (Same-fqdn collision needs Layer 3's
+        // UNIQUE(workspace_id, fqdn) — not in scope here.)
+        let (_dir, handle) = open_handle();
+        {
+            let conn = handle.pool().unwrap().get().unwrap();
+            seed_file(&conn, "src/main.rs");
+            seed_symbol(&conn, "src/main.rs", "alpha", "primary::alpha", 1);
+            seed_symbol_in_workspace(
+                &conn,
+                "src/main.rs",
+                "beta",
+                "peer::beta",
+                2,
+                "peer-uuid-xyz",
+            );
+        }
+        // Primary scope sees alpha, not beta.
+        assert!(
+            symbol_by_fqdn_in_workspace(&handle, "primary::alpha", PRIMARY_WORKSPACE_ID)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            symbol_by_fqdn_in_workspace(&handle, "peer::beta", PRIMARY_WORKSPACE_ID)
+                .unwrap()
+                .is_none()
+        );
+        // Peer scope sees beta, not alpha.
+        assert!(
+            symbol_by_fqdn_in_workspace(&handle, "peer::beta", "peer-uuid-xyz")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            symbol_by_fqdn_in_workspace(&handle, "primary::alpha", "peer-uuid-xyz")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -2050,6 +2204,7 @@ mod tests {
                 is_external: false,
                 source_origin: SourceOrigin::Workspace,
                 revision: 0,
+                workspace_id: PRIMARY_WORKSPACE_ID,
             },
         )
         .unwrap()
@@ -2871,6 +3026,7 @@ mod tests {
                 is_external: false,
                 source_origin: SourceOrigin::Workspace,
                 revision: 0,
+                workspace_id: PRIMARY_WORKSPACE_ID,
             },
         )
         .unwrap();

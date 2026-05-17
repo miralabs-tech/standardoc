@@ -14,6 +14,12 @@ pub(crate) struct SymbolInsertContext<'a> {
     pub is_external: bool,
     pub source_origin: SourceOrigin,
     pub revision: u64,
+    /// Stage 3b-7-b: which workspace owns this row. Primary writers pass
+    /// `PRIMARY_WORKSPACE_ID`; the autonomous peer indexer (Layer 3)
+    /// will pass a peer's catalog UUID. Stamped explicitly into the
+    /// INSERT — relying on the v11 column default ('primary') would
+    /// silently misclassify peer rows the day Layer 3 lands.
+    pub workspace_id: &'a str,
 }
 
 pub(crate) fn insert_symbol(
@@ -44,8 +50,8 @@ pub(crate) fn insert_symbol(
                 fqdn, name, kind, language_kind, language, module, visibility, \
                 file_path, start_line, end_line, start_col, end_col, \
                 signature_json, body_hash, is_external, source_origin, \
-                last_modified_revision, flags\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18) \
+                last_modified_revision, flags, workspace_id\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19) \
              ON CONFLICT(fqdn) DO UPDATE SET \
                 name                    = excluded.name, \
                 kind                    = excluded.kind, \
@@ -63,7 +69,8 @@ pub(crate) fn insert_symbol(
                 is_external             = excluded.is_external, \
                 source_origin           = excluded.source_origin, \
                 last_modified_revision  = excluded.last_modified_revision, \
-                flags                   = excluded.flags \
+                flags                   = excluded.flags, \
+                workspace_id            = excluded.workspace_id \
              RETURNING id",
             rusqlite::params![
                 symbol.fqdn,
@@ -84,6 +91,7 @@ pub(crate) fn insert_symbol(
                 source_origin_to_sql_text(ctx.source_origin),
                 revision_i64,
                 flags_json,
+                ctx.workspace_id,
             ],
             |row| row.get::<_, i64>(0),
         )

@@ -30,6 +30,7 @@ pub(crate) fn apply_upsert_file(
         is_external: extracted.is_external,
         source_origin: extracted.source_origin,
         revision,
+        workspace_id: crate::storage::module_lookup::PRIMARY_WORKSPACE_ID,
     };
 
     apply_deletes(conn, &plan)?;
