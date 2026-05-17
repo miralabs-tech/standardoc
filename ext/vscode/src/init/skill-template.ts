@@ -15,7 +15,7 @@ when_to_use: ALWAYS use Standardoc FIRST when exploring or modifying code
   → (3) raw file Read/Grep/Glob. Skip Standardoc only for pure text
   matching (strings, comments, config files unrelated to code symbols)
   or for files at a known path that you just need to read verbatim.
-allowed-tools: mcp__standardoc__find_symbol mcp__standardoc__find_symbols_by_pattern mcp__standardoc__find_similar_symbols mcp__standardoc__list_symbols mcp__standardoc__find_call_sites mcp__standardoc__get_context mcp__standardoc__get_body mcp__standardoc__fetch_chunks mcp__standardoc__resolve_external mcp__standardoc__module_lookup mcp__standardoc__resolve_cross_workspace mcp__standardoc__current_revision mcp__standardoc__check_stale mcp__standardoc__usage_stats mcp__standardoc__list_projects mcp__standardoc__project_for_file mcp__standardoc__link_workspace mcp__standardoc__unlink_workspace mcp__standardoc__list_linked_workspaces mcp__standardoc__set_link_direction mcp__standardoc__refresh_peer mcp__standardoc__session_save mcp__standardoc__session_list mcp__standardoc__session_get mcp__standardoc__session_sync_in mcp__standardoc__session_sync_out
+allowed-tools: mcp__standardoc__find_symbol mcp__standardoc__find_symbols_by_pattern mcp__standardoc__find_similar_symbols mcp__standardoc__list_symbols mcp__standardoc__find_call_sites mcp__standardoc__get_context mcp__standardoc__get_body mcp__standardoc__resolve_external mcp__standardoc__module_lookup mcp__standardoc__resolve_cross_workspace mcp__standardoc__current_revision mcp__standardoc__check_stale mcp__standardoc__list_projects mcp__standardoc__project_for_file mcp__standardoc__link_workspace mcp__standardoc__unlink_workspace mcp__standardoc__list_linked_workspaces mcp__standardoc__set_link_direction mcp__standardoc__refresh_peer
 ---
 
 # Standardoc — Primary Code Navigation
@@ -220,7 +220,7 @@ find_call_sites({ from_fqdn: "myapp::frontend::login::handler" })
 
 ### get_context
 
-\`get_context({ fqdn, depth?, query? })\`
+\`get_context({ fqdn, depth? })\`
 
 Returns the symbol + its neighbors (callers, callees, imports,
 imported_by, dependents, tests) as a graph slice.
@@ -229,15 +229,10 @@ imported_by, dependents, tests) as a graph slice.
 |---|---|---|---|
 | \`fqdn\` | string | required | Canonical (\`::\`) or OOP (\`.\`) form both accepted. |
 | \`depth\` | u8 | 1 | \`1\` = neighbor FQDNs + edge_kind only (cheap, exploration). \`2\` = same + full \`resolved_symbol\` payload per Resolved target (rich, reasoning). Hard-clamped to \`1..=2\`. |
-| \`query\` | string | — | Natural-language query used to re-rank \`chunk_refs\` by cosine similarity. Silently ignored when the daemon has no RAG store or no embedder. |
-
-The response also carries \`chunk_refs\` (envelopes pointing at related
-prose chunks — markdown docs, ADRs, design notes); use
-\`fetch_chunks\` to retrieve the actual text.
 
 ### get_body
 
-\`get_body({ fqdn, max_lines?, strip_attrs?, signature_only? })\`
+\`get_body({ fqdn, max_lines?, strip_attrs?, signature_only?, strip_inline_comments? })\`
 
 Returns the raw source text of a symbol identified by FQDN, sliced
 from the file at its declared \`start_line..end_line\`. Pair with
@@ -251,6 +246,7 @@ Three orthogonal knobs to keep the response tight:
 | \`max_lines\` | u32 | Cap total returned lines. Response sets \`truncated: true\` and \`total_body_lines\` so you can re-fetch without the cap when needed. |
 | \`strip_attrs\` | bool | Drop leading doc comments (\`///\`, \`//!\`, \`//\`, \`/* … */\`) AND attribute lines (\`#[…]\`, \`#![…]\`, including multi-line continuations) AND blank lines between them. Response sets \`stripped_lines: N\`. Massive shrink on handlers buried under verbose \`#[tool(description = "…")]\` blocks. |
 | \`signature_only\` | bool | Truncate after the first line containing \`{\` — returns the multi-line signature without the implementation. Response sets \`signature_only: true\`. No-op when no \`{\` is present. Combine with \`strip_attrs\` for the cleanest signature view. |
+| \`strip_inline_comments\` | bool | Remove inline \`// …\` line comments and \`/* … */\` block comments from the returned body. String-literal safe — \`"…"\`, Rust raw strings, TS template literals pass through untouched. Newlines inside multi-line block comments are preserved so line-number alignment stays intact. Layered on top of the other three knobs. |
 
 Returns \`null\` when no symbol matches the FQDN — call \`find_symbol\`
 first if you only have a name fragment.
@@ -268,35 +264,6 @@ column-exact positions.
 \`\`\`
 get_body({ fqdn: "myapp::auth::verify_token", strip_attrs: true, signature_only: true })
 // → multi-line signature only, no docs/attrs noise.
-\`\`\`
-
-### fetch_chunks
-
-\`fetch_chunks({ uris })\`
-
-Resolves a list of \`rag://<id>\` URIs (the references surfaced in
-\`chunk_refs\` on \`get_context\`) to full \`Chunk\` rows
-\`{id, source_path, chunk_idx, text, text_hash, section_header,
-byte_start, byte_end, created_at}\`. Unknown / non-existent ids are
-silently skipped — diff inputs vs outputs to detect drops. Returns
-chunks ordered by id ASC. The \`uris\` list is hard-capped at 64.
-
-The chunk-aware reasoning loop:
-
-\`\`\`
-get_context({ fqdn, depth: 1, query? })
-  → response.chunk_refs = [{uri, confidence, source_path, section_header}, ...]
-fetch_chunks({ uris: [uri1, uri2, ...] })
-  → [{text, ...}, ...]   // the actual prose to consider alongside the graph
-\`\`\`
-
-\`get_context\` alone gives you envelopes; \`fetch_chunks\` retrieves
-the actual text. Don't fetch every chunk — pick the 1–3 with the
-highest \`confidence\` (or the ones whose \`section_header\` matches
-your task) and fetch only those.
-
-\`\`\`
-fetch_chunks({ uris: ["rag://42", "rag://17"] })
 \`\`\`
 
 ---
@@ -502,10 +469,6 @@ available, then route your tool flow accordingly.
 \`\`\`json
 {
   "revision": 354,
-  "rag": {
-    "enabled": true,
-    "embedder": { "id": "bge-small-en-v1.5", "dim": 384 }
-  },
   "watcher": { "active": true },
   "indexing": { "ready": true },
   "workspace": { "kind": "cargo" }
@@ -514,13 +477,6 @@ available, then route your tool flow accordingly.
 
 **Decision matrix:**
 
-- \`rag.enabled = false\` → never call \`fetch_chunks\`; do not pass
-  \`query\` to \`get_context\` (will be ignored).
-- \`rag.enabled = true\` AND \`rag.embedder = null\` → \`chunk_refs\` are
-  populated but link-confidence ordered only; passing \`query\` to
-  \`get_context\` is a no-op (silent).
-- \`rag.embedder.id\` known → semantic re-rank works; pass natural-
-  language \`query\` to \`get_context\` for relevant prose.
 - \`indexing.ready = false\` → cold start in progress; read tools
   return a friendly "indexing in progress" text. Wait or back off.
 - \`watcher.active = false\` after \`indexing.ready = true\` → the daemon
@@ -551,105 +507,6 @@ where \`status\` is:
 
 Stateless server-side — track the \`(fqdn → revision)\` map yourself
 across turns. Call BEFORE re-reasoning on cached context.
-
----
-
-## Telemetry
-
-### usage_stats
-
-\`usage_stats({ period? })\`
-
-Returns the running tally of bytes the standardoc tools have returned
-vs. the raw file bytes those responses pointed at.
-
-| Param | Accepted values | Default |
-|---|---|---|
-| \`period\` | \`day\` / \`d\` / \`today\`, \`week\` / \`w\` / \`7d\`, \`all\` | \`all\` |
-
-Anything else returns \`invalid_params\` rather than silently coercing.
-
-Baseline is \`sum(file_sizes)\` of distinct source files referenced by
-each response — the honest "what an AI would have consumed reading
-the relevant sources raw" floor (no estimation multiplier).
-Response shape:
-
-\`\`\`
-{
-  period: "all",
-  calls: <int>,
-  bytes_out_total: <int>,       // what tools returned to the AI
-  baseline_bytes_total: <int>,  // raw file bytes that would have been read
-  bytes_saved: <int>,           // baseline - out (can be negative)
-  ratio: <float>                // bytes_out / baseline
-}
-\`\`\`
-
-A ratio of 0.14 means standardoc surfaced 14% of the raw bytes for
-the relevant source files — the rest is context the AI did not pay
-for. Only successful read-path tool calls are logged.
-
-The CLI sub-command \`stdoc reset-usage\` zeroes the counters from the
-shell when you want a clean baseline for a measurement run.
-
----
-
-## Session handoffs
-
-A separate SQLite DB at \`.standardoc-sessions/sessions.db\` (path
-independent of \`.standardoc/\` so a workspace reset doesn't wipe your
-handoff memos).
-
-### session_save
-
-\`session_save({ slug, body_md, supersedes? })\`
-
-UPSERT by \`slug\`. Use AT END of any session that locks decisions or
-ships meaningful work so the next chat can pick up via \`session_get\`.
-
-| Param | Type | Notes |
-|---|---|---|
-| \`slug\` | string | Unique identifier; UPSERT semantics. |
-| \`body_md\` | string | Markdown payload — the memo content. |
-| \`supersedes\` | string | Optional prior slug to mark as \`superseded\` (chain semantics — useful when a refactor invalidates an older lock). |
-
-### session_list
-
-\`session_list({ active_only? })\`
-
-List session memos newest-first.
-
-| Param | Type | Default | Notes |
-|---|---|---|---|
-| \`active_only\` | bool | true | Filter out superseded entries. |
-
-Returns the full \`body_md\` per row.
-
-### session_get
-
-\`session_get({ slug? })\`
-
-Fetch one memo. Pass \`slug\` to target a specific entry; omit it to
-get the most recent active session — the natural reentry point for a
-new chat. Returns \`null\` when nothing matches.
-
-### session_sync_in
-
-\`session_sync_in({ dir })\`
-
-Walk a directory of session-memo \`.md\` files, classify each by its
-frontmatter \`type:\`, and UPSERT the full row state (status,
-supersedes, created_at) into the sessions table. Used when migrating
-memos from another machine.
-
-### session_sync_out
-
-\`session_sync_out({ dir })\`
-
-Inverse of \`session_sync_in\`. Dump every session row to \`<slug>.md\`
-under \`dir\` with extended frontmatter (status, supersedes,
-created_at) and regenerate \`MEMORY.md\` as an index. Used to migrate
-sessions across machines or back up to a git repo.
 
 ---
 
@@ -698,15 +555,6 @@ sessions across machines or back up to a git repo.
    glob).
 2. If you already know the pattern shape, prefer
    \`find_symbols_by_pattern\` for a deterministic glob match.
-
-**"Pull in prose / docs alongside the code graph"**
-
-1. \`current_revision()\` → confirm \`rag.enabled = true\`.
-2. \`get_context({ fqdn, depth: 1, query: "..." })\` → response
-   carries \`chunk_refs: [{uri, confidence, source_path, section_header}]\`.
-3. \`fetch_chunks({ uris: [top_uri] })\` → actual prose text. Pair the
-   prose with the graph slice from step 2 for the full picture
-   (graph says WHERE and WHO; prose says WHY).
 
 **"A neighbor is Unresolved and looks like an external dependency"**
 
@@ -761,14 +609,6 @@ sessions across machines or back up to a git repo.
    its kind and root path.
 3. For a specific file, \`project_for_file({ path })\` to learn which
    sub-project owns it.
-
-**"Resume / save a session handoff"**
-
-1. \`session_get()\` (no slug) → latest active handoff, the natural
-   entry point for a new chat.
-2. Or \`session_list({ active_only: true })\` to scan recent memos.
-3. At end of a session that locks decisions or ships work,
-   \`session_save({ slug, body_md })\` so the next chat can pick up.
 
 ---
 

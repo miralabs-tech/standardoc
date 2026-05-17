@@ -5,21 +5,13 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { findFatalMarker, type FatalConfig } from '../daemon/fatal-marker';
-import { DEFAULT_RAG_SETTINGS, ragSpawnFlags, type RagSettings } from '../daemon/rag-flags';
 
 export type ContextDepth = 1 | 2;
 
 const FIND_SYMBOL_DEFAULT_LIMIT = 20;
-/** Normal cap : daemon should write the endpoint file within seconds. */
+/** Cap on the wait for the daemon to write its endpoint file. */
 const ENDPOINT_WAIT_MS = 15_000;
-/** Extended cap once the daemon emits `STDOC_RAG_DL_START` — the model
- *  download (~130 MB) takes longer on residential ADSL than the normal
- *  cap allows. We still cap so a stuck daemon eventually frees the
- *  supervisor, but with a generous ceiling. */
-const ENDPOINT_DL_WAIT_MS = 10 * 60_000;
 const ENDPOINT_POLL_MS = 100;
-const RAG_DL_START_MARKER = 'STDOC_RAG_DL_START';
-const RAG_DL_DONE_MARKER = 'STDOC_RAG_DL_DONE';
 
 /**
  * MCP client that supervises a SINGLE long-lived `standardoc mcp --http`
@@ -36,15 +28,6 @@ export class McpClient implements vscode.Disposable {
   private endpointUrl: string | null = null;
   private readonly fatalEmitter = new vscode.EventEmitter<FatalConfig>();
   private fatalFired = false;
-  private ragSettings: RagSettings = DEFAULT_RAG_SETTINGS;
-  /**
-   * Flips to `true` when the daemon emits `STDOC_RAG_DL_START` and back
-   * to `false` on `STDOC_RAG_DL_DONE`. `waitForEndpoint` consults this
-   * flag to switch from the 15 s normal cap to the 10 min DL cap —
-   * a fresh `--embedder candle` boot can spend most of that window
-   * pulling the ~130 MB BERT weights from HF Hub.
-   */
-  private ragDownloading = false;
 
   /**
    * Fires once per MCP child-process lifecycle when its stderr emits a
@@ -60,20 +43,6 @@ export class McpClient implements vscode.Disposable {
     private readonly port: number,
   ) {}
 
-  /**
-   * Updates the RAG flags applied to the next `--rag`/`--embedder` spawn.
-   * Does NOT restart the running daemon — the caller (typically the
-   * supervisor or the toggle command) is responsible for sequencing
-   * stop → setRagSettings → spawn.
-   */
-  setRagSettings(settings: RagSettings): void {
-    this.ragSettings = settings;
-  }
-
-  ragSettingsSnapshot(): RagSettings {
-    return this.ragSettings;
-  }
-
   /** Returns the discovered HTTP URL or `null` if the daemon is not started yet. */
   url(): string | null {
     return this.endpointUrl;
@@ -83,7 +52,6 @@ export class McpClient implements vscode.Disposable {
     if (this.client) return;
 
     this.fatalFired = false;
-    this.ragDownloading = false;
     // Belt-and-suspenders: nuke any leftover endpoint file BEFORE spawning the
     // new daemon. Covers the case where the previous daemon crashed without
     // going through `stop()` (which also performs this cleanup). Without
@@ -99,14 +67,7 @@ export class McpClient implements vscode.Disposable {
       }
     }
 
-    const args = [
-      'mcp',
-      this.workspaceRoot,
-      '--readonly',
-      '--http',
-      String(this.port),
-      ...ragSpawnFlags(this.ragSettings),
-    ];
+    const args = ['mcp', this.workspaceRoot, '--readonly', '--http', String(this.port)];
     this.output.appendLine(`[mcp] spawning ${binaryPath} ${args.slice(1).join(' ')}`);
     // stdin is piped (not 'ignore') so the daemon has a death-watch channel:
     // when the extension host dies (force-kill, BSOD, crash), the OS closes
@@ -135,13 +96,6 @@ export class McpClient implements vscode.Disposable {
    * Wait for the daemon to write `.standardoc/mcp.endpoint`. Aborts
    * early if the child process exits before the file appears (typical
    * cause: port already bound by another workspace's daemon).
-   *
-   * The effective deadline is dynamic: while `ragDownloading` is true
-   * (set by the stderr scanner on `STDOC_RAG_DL_START`), the deadline
-   * extends to `ENDPOINT_DL_WAIT_MS`. The flag resets on
-   * `STDOC_RAG_DL_DONE`, after which the normal cap applies — measured
-   * from the start of the wait, so a fast pipe still surfaces a hung
-   * daemon promptly.
    */
   private async waitForEndpoint(): Promise<string> {
     const endpointFile = path.join(this.workspaceRoot, '.standardoc', 'mcp.endpoint');
@@ -161,12 +115,8 @@ export class McpClient implements vscode.Disposable {
         if (code !== 'ENOENT') throw e;
       }
       const elapsed = Date.now() - start;
-      const cap = this.ragDownloading ? ENDPOINT_DL_WAIT_MS : ENDPOINT_WAIT_MS;
-      if (elapsed >= cap) {
-        throw new Error(
-          `timed out waiting for ${endpointFile} after ${cap}ms` +
-            (this.ragDownloading ? ' (during RAG model download)' : ''),
-        );
+      if (elapsed >= ENDPOINT_WAIT_MS) {
+        throw new Error(`timed out waiting for ${endpointFile} after ${ENDPOINT_WAIT_MS}ms`);
       }
       await new Promise(r => setTimeout(r, ENDPOINT_POLL_MS));
     }
@@ -178,7 +128,6 @@ export class McpClient implements vscode.Disposable {
     stderr.on('data', (chunk: Buffer | string) => {
       const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
       this.output.append(text);
-      this.scanRagMarkers(text);
       if (this.fatalFired) return;
       const marker = findFatalMarker(text);
       if (marker !== null) {
@@ -188,31 +137,12 @@ export class McpClient implements vscode.Disposable {
     });
   }
 
-  private scanRagMarkers(text: string): void {
-    if (text.includes(RAG_DL_START_MARKER)) {
-      this.ragDownloading = true;
-      this.output.appendLine('[mcp] RAG model download started — endpoint wait extended');
-    }
-    if (text.includes(RAG_DL_DONE_MARKER)) {
-      this.ragDownloading = false;
-      this.output.appendLine('[mcp] RAG model download finished');
-    }
-  }
-
   async findSymbol(query: string, limit: number = FIND_SYMBOL_DEFAULT_LIMIT): Promise<string> {
     return this.callTool('find_symbol', { query, limit });
   }
 
   async getContext(fqdn: string, depth: ContextDepth): Promise<string> {
     return this.callTool('get_context', { fqdn, depth });
-  }
-
-  async fetchChunks(uris: ReadonlyArray<string>): Promise<string> {
-    return this.callTool('fetch_chunks', { uris: [...uris] });
-  }
-
-  async usageStats(period: 'day' | 'week' | 'all'): Promise<string> {
-    return this.callTool('usage_stats', { period });
   }
 
   async currentRevision(): Promise<string> {

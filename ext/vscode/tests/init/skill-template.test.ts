@@ -56,7 +56,6 @@ describe('buildSkillContent', () => {
       // Reasoning
       'mcp__standardoc__get_context',
       'mcp__standardoc__get_body',
-      'mcp__standardoc__fetch_chunks',
       // External + cross-workspace
       'mcp__standardoc__resolve_external',
       'mcp__standardoc__module_lookup',
@@ -69,16 +68,9 @@ describe('buildSkillContent', () => {
       // Projects
       'mcp__standardoc__list_projects',
       'mcp__standardoc__project_for_file',
-      // Boot-time + telemetry
+      // Boot-time
       'mcp__standardoc__current_revision',
       'mcp__standardoc__check_stale',
-      'mcp__standardoc__usage_stats',
-      // Sessions
-      'mcp__standardoc__session_save',
-      'mcp__standardoc__session_list',
-      'mcp__standardoc__session_get',
-      'mcp__standardoc__session_sync_in',
-      'mcp__standardoc__session_sync_out',
     ]) {
       expect(c).toContain(tool);
     }
@@ -95,7 +87,6 @@ describe('buildSkillContent', () => {
     // Reasoning
     expect(c).toContain('### get_context');
     expect(c).toContain('### get_body');
-    expect(c).toContain('### fetch_chunks');
     // External + cross-workspace
     expect(c).toContain('### resolve_external');
     expect(c).toContain('### module_lookup');
@@ -108,16 +99,9 @@ describe('buildSkillContent', () => {
     // Projects
     expect(c).toContain('### list_projects');
     expect(c).toContain('### project_for_file');
-    // Boot-time + telemetry
+    // Boot-time
     expect(c).toContain('### current_revision');
     expect(c).toContain('### check_stale');
-    expect(c).toContain('### usage_stats');
-    // Sessions
-    expect(c).toContain('### session_save');
-    expect(c).toContain('### session_list');
-    expect(c).toContain('### session_get');
-    expect(c).toContain('### session_sync_in');
-    expect(c).toContain('### session_sync_out');
   });
 
   test('documents workspace_id default-primary scope on the 3 discovery tools (L3e)', () => {
@@ -204,7 +188,6 @@ describe('buildSkillContent', () => {
     expect(c).toContain('User edited a linked peer outside the daemon');
     expect(c).toContain("User wants to change a peer's direction");
     expect(c).toContain('Detect what changed since last fetch');
-    expect(c).toContain('Resume / save a session handoff');
   });
 
   test('documents resolve_external envelope statuses', () => {
@@ -221,12 +204,6 @@ describe('buildSkillContent', () => {
     expect(c).toContain('`stale`');
     expect(c).toContain('`fresh`');
     expect(c).toContain('`missing`');
-  });
-
-  test('documents session_save UPSERT semantic + supersedes chain', () => {
-    const c = buildSkillContent();
-    expect(c).toContain('UPSERT by `slug`');
-    expect(c).toContain('supersedes');
   });
 
   test('documents key concepts (FQDN, edge kinds, Resolved/Unresolved, workspace scope)', () => {

@@ -66,7 +66,6 @@ export interface ListSymbolsPageJson {
 
 export interface CurrentRevisionJson {
   revision: number;
-  rag: { enabled: boolean; embedder: { id: string; dim: number } | null };
   watcher: { active: boolean };
   indexing: { ready: boolean };
 }

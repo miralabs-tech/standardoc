@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import { describeFatalConfig } from './daemon/fatal-marker';
-import { readRagSettings, watchRagSettings } from './daemon/rag-settings';
 import { DaemonSupervisor, type DaemonState } from './daemon/supervisor';
 import { LspClient } from './lsp/client';
 import { McpClient } from './mcp/client';
@@ -30,44 +29,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const lsp = new LspClient(workspaceRoot, output);
   const mcp = new McpClient(workspaceRoot, output, port);
-  const initialRag = readRagSettings();
-  lsp.setRagSettings(initialRag);
-  mcp.setRagSettings(initialRag);
-  output.appendLine(
-    `[mcp] rag settings: enabled=${initialRag.enabled} embedder=${initialRag.embedder}`,
-  );
   const supervisor = new DaemonSupervisor(context, output, { lsp, mcp }, workspaceRoot);
 
   context.subscriptions.push(lsp, mcp, supervisor);
 
   const statusBar = new StatusBarController();
   context.subscriptions.push(statusBar);
-  statusBar.update(supervisor.current(), mcp.ragSettingsSnapshot());
-  context.subscriptions.push(
-    supervisor.onDidChangeState(state => statusBar.update(state, mcp.ragSettingsSnapshot())),
-  );
-
-  // Auto-restart the daemon when RAG settings change so the supervisor
-  // picks up new spawn flags on the next child process. Debounce-free :
-  // each setting change is a single configuration event from VSCode.
-  context.subscriptions.push(
-    watchRagSettings(next => {
-      output.appendLine(
-        `[mcp] rag settings changed: enabled=${next.enabled} embedder=${next.embedder} — restarting daemon`,
-      );
-      lsp.setRagSettings(next);
-      mcp.setRagSettings(next);
-      statusBar.update(supervisor.current(), next);
-      // The daemon retries SQLite open on transient lock-release races
-      // (~1.5 s exponential backoff), so a vanilla `restart()` is enough
-      // — no extra wait needed on Windows.
-      void supervisor.restart().catch(e => {
-        output.appendLine(
-          `[mcp] rag-driven restart failed: ${e instanceof Error ? e.message : String(e)}`,
-        );
-      });
-    }),
-  );
+  statusBar.update(supervisor.current());
+  context.subscriptions.push(supervisor.onDidChangeState(state => statusBar.update(state)));
 
   // Transition-aware toast: surface actionable hints when the daemon
   // moves INTO `fatal_config` or `failed`. Permanent state lives on the
