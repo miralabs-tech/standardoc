@@ -5,13 +5,14 @@
 
 use std::path::Path;
 
-use standardoc_ir::{LinkDirection, ModuleLookup};
+use standardoc_ir::{LinkDirection, ModuleLookup, WorkspaceKind};
 use strsim::jaro_winkler;
 
 use crate::storage::cross_workspace::{CrossWorkspaceResolution, list_cross_workspace_providers};
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
 use crate::storage::module_lookup::{self, PRIMARY_WORKSPACE_ID};
+use crate::storage::schema_meta;
 use crate::storage::workspace_catalog::{self, LinkedWorkspace};
 
 /// Strsim floor for path did-you-mean suggestions. Tuned to surface
@@ -151,6 +152,18 @@ pub fn list_linked_workspaces(handle: &IndexHandle) -> Result<Vec<LinkedWorkspac
     let pool = handle.pool()?;
     let conn = pool.get()?;
     workspace_catalog::list_linked_workspaces(&conn)
+}
+
+/// Stage 3e-3 — fetch the primary workspace's persisted [`WorkspaceKind`].
+/// Returns `Ok(None)` when discovery hasn't run yet at the current cold-
+/// start cycle (fresh DB, or pre-3e-3 database). MCP / LSP consumers
+/// default to [`WorkspaceKind::Single`] in that case.
+pub fn read_primary_workspace_kind(
+    handle: &IndexHandle,
+) -> Result<Option<WorkspaceKind>, StorageError> {
+    let pool = handle.pool()?;
+    let conn = pool.get()?;
+    schema_meta::read_workspace_kind(&conn)
 }
 
 /// Fetch the persisted `ModuleLookup` for `(workspace_id, module_fqdn)`.

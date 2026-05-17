@@ -639,7 +639,7 @@ impl StandardocMcp {
     /// the daemon is wired with, so an AI can pick the right tool path
     /// (e.g. omit `query` from `get_context` when `rag.embedder` is null).
     #[tool(
-        description = "Returns the current workspace revision number AND daemon capabilities (`rag.enabled`, `rag.embedder`, `watcher.active`, `indexing.ready`). Use the revision with `check_stale` to detect when fqdns you have already cited have been modified. Use the capabilities at session boot to decide tool flow — passing `query` to `get_context` only re-ranks chunks when `rag.embedder` is non-null. Cheap call; no parameters."
+        description = "Returns the current workspace revision number AND daemon capabilities (`rag.enabled`, `rag.embedder`, `watcher.active`, `indexing.ready`, `workspace.kind`). Use the revision with `check_stale` to detect when fqdns you have already cited have been modified. Use the capabilities at session boot to decide tool flow — passing `query` to `get_context` only re-ranks chunks when `rag.embedder` is non-null. `workspace.kind` is the detected monorepo organizer (cargo/npm/pnpm/yarn/bun/deno/go/lerna/nx/turborepo/mira/single/custom:<tag>) — null before cold-start detection finishes. Cheap call; no parameters."
     )]
     async fn current_revision(&self) -> Result<CallToolResult, ErrorData> {
         let revision = self.handle.revision();
@@ -657,6 +657,16 @@ impl StandardocMcp {
             .ok()
             .is_some_and(|guard| guard.is_some());
         let ready = self.index_ready.load(Ordering::Acquire);
+        // Stage 3e-3 — surface the detected workspace kind. Best-effort:
+        // pre-cold-start (or pre-3e-3 DBs) carry no persisted row and
+        // we report `null` rather than guessing `Single` here, so the
+        // caller can distinguish "not detected yet" from "detected as
+        // Single". Read failure → null + log (kind is informational,
+        // never load-bearing).
+        let workspace_kind = workspace_query::read_primary_workspace_kind(&self.handle)
+            .ok()
+            .flatten()
+            .map(|k| k.as_str().into_owned());
         Ok(success_json(&CurrentRevisionJson {
             revision,
             rag: RagCapabilityJson {
@@ -667,6 +677,7 @@ impl StandardocMcp {
                 active: watcher_active,
             },
             indexing: IndexingCapabilityJson { ready },
+            workspace: WorkspaceCapabilityJson { kind: workspace_kind },
         }))
     }
 
@@ -1537,14 +1548,16 @@ pub(crate) struct SessionSyncOutParams {
 /// working; new fields surface daemon capabilities so an AI can decide
 /// at boot whether passing `query` to `get_context` will re-rank chunks
 /// (`rag.embedder.is_some()`), whether the live watcher is debouncing
-/// edits (`watcher.active`), and whether early read calls would hit the
-/// "indexing in progress" branch (`indexing.ready`).
+/// edits (`watcher.active`), whether early read calls would hit the
+/// "indexing in progress" branch (`indexing.ready`), and what monorepo
+/// organizer the workspace uses (`workspace.kind`, Stage 3e-3).
 #[derive(Debug, Serialize)]
 pub(crate) struct CurrentRevisionJson {
     pub revision: u64,
     pub rag: RagCapabilityJson,
     pub watcher: WatcherCapabilityJson,
     pub indexing: IndexingCapabilityJson,
+    pub workspace: WorkspaceCapabilityJson,
 }
 
 #[derive(Debug, Serialize)]
@@ -1583,6 +1596,18 @@ pub(crate) struct IndexingCapabilityJson {
     /// `true` once cold start has flipped `index_ready`. Calls before
     /// this short-circuit with the `"indexing in progress"` text.
     pub ready: bool,
+}
+
+/// Stage 3e-3 — workspace-level metadata surfaced through
+/// `current_revision`. Mirrors the persisted `schema_meta.workspace_kind`
+/// row.
+#[derive(Debug, Serialize)]
+pub(crate) struct WorkspaceCapabilityJson {
+    /// Detected workspace organizer slug (`cargo`, `npm`, `pnpm`, `yarn`,
+    /// `bun`, `deno`, `go`, `lerna`, `nx`, `turborepo`, `mira`, `single`,
+    /// or `custom:<tag>`). `null` before cold-start has run discovery
+    /// (legacy DBs pre-3e-3 or first boot in progress).
+    pub kind: Option<String>,
 }
 
 /// Tool input — `usage_stats(period?)`. Accepted period strings (case-insensitive):
@@ -2611,6 +2636,28 @@ mod tests {
         let body = body_text(&result);
         assert!(body.contains("\"watcher\""), "got `{body}`");
         assert!(body.contains("\"active\": false"), "got `{body}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stage3e3_current_revision_workspace_kind_null_pre_cold_start() {
+        let (_dir, mcp) = fixture();
+        let result = mcp.current_revision().await.unwrap();
+        let body = body_text(&result);
+        assert!(body.contains("\"workspace\""), "got `{body}`");
+        // No discovery has run yet → null.
+        assert!(body.contains("\"kind\": null"), "got `{body}`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stage3e3_current_revision_workspace_kind_after_cold_start_is_single_or_kind() {
+        let (dir, mcp) = fixture();
+        cold_start_workspace(&mcp, dir.path());
+        let result = mcp.current_revision().await.unwrap();
+        let body = body_text(&result);
+        // Cold-start has run → kind row is persisted. The fixture has
+        // no workspace manifest at root → "single".
+        assert!(body.contains("\"workspace\""), "got `{body}`");
+        assert!(body.contains("\"kind\": \"single\""), "got `{body}`");
     }
 
     #[tokio::test(flavor = "multi_thread")]
