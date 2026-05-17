@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use full_moon::ast::{Ast, Expression, LastStmt, Stmt, Var};
-use standardoc_ir::{Language, RawDocument, RawEdge, RawSymbol};
+use standardoc_ir::{Language, RawCallSite, RawDocument, RawEdge, RawSymbol};
 
 use crate::walk_core::WalkContextCore;
 
@@ -65,6 +65,10 @@ impl LuaWalkContext {
 
     pub(crate) fn push_document(&mut self, doc: RawDocument) {
         self.core.push_document(doc);
+    }
+
+    pub(crate) fn push_call_site(&mut self, cs: RawCallSite) {
+        self.core.push_call_site(cs);
     }
 
     /// Marks a top-level `local <ident> = {}` so the post-pass can decide

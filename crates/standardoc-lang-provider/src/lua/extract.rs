@@ -9,8 +9,8 @@ use full_moon::tokenizer::{Position, TokenReference, TokenType};
 use standardoc_core::ExtractError;
 use standardoc_ir::{
     Blake3Hash, BuiltinTier, EdgeKind, ExtractedFile, Kind, Language, LanguageKind, Modifiers,
-    Param, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SourceOrigin,
-    SymbolLocation, TypeRef, Visibility,
+    Param, RawCallArg, RawCallSite, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature,
+    SignatureMeta, Site, SourceOrigin, SymbolLocation, TypeRef, Visibility,
 };
 
 use super::extract_doc;
@@ -96,7 +96,7 @@ pub(crate) fn extract_file(
         byte_size: u64::try_from(content.len()).unwrap_or(u64::MAX),
         symbols: ctx.core.symbols,
         edges: ctx.core.edges,
-        call_sites: vec![],
+        call_sites: ctx.core.call_sites,
         documents: ctx.core.documents,
     })
 }
@@ -409,6 +409,22 @@ fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &Functi
     let Some(call_name) = call_target_name(fc) else {
         return;
     };
+    // IR-4-d: observational call_site — emitted alongside the Calls
+    // edge so the plugin layer sees the textual shape regardless of
+    // whether `call_name` resolved against the builtin registry or
+    // landed as Unresolved. The push happens BEFORE the Drop/Attribute
+    // tier short-circuit below (Lua has no such builtins today, but
+    // the contract should hold if any are added in the future).
+    if let Some((callee_text, receiver_chain)) = call_target_decomposed(fc) {
+        let args = args_from_function_call(fc);
+        ctx.push_call_site(RawCallSite {
+            from_fqdn: from_fqdn.to_string(),
+            callee_text,
+            args,
+            receiver_chain,
+            site: site_for(&ctx.core.file_path, call_start(fc)),
+        });
+    }
     // Stage 3e-1: consult the Lua builtin registry. Lua has no Drop /
     // Attribute classifications today (see `builtins/lua.rs` rationale)
     // so every match is Edge — emit a synthetic FQDN with `via-builtin`
@@ -609,6 +625,140 @@ fn call_target_name(fc: &FunctionCall) -> Option<String> {
 
 fn call_start(fc: &FunctionCall) -> Position {
     fc.prefix().start_position().unwrap_or_default()
+}
+
+/// IR-4-d: decompose a `FunctionCall` into `(callee_text, receiver_chain)`
+/// for the [`RawCallSite`] record. Mirrors [`call_target_name`]'s walk
+/// but splits the final segment off as the called function — the
+/// preceding segments form the receiver chain (Lua doesn't truly have
+/// methods on a function-call basis, but `obj.field.foo()` is the
+/// shape plugins care about so we expose it the same way Rust and TS do).
+///
+/// Shape per pattern:
+/// - `foo(x)`           → callee_text=`foo`,        chain=[]
+/// - `M.foo(x)`         → callee_text=`M.foo`,      chain=[`M`]
+/// - `M.a.b.foo(x)`     → callee_text=`M.a.b.foo`,  chain=[`M`,`a`,`b`]
+/// - `obj:bar(x)`       → callee_text=`obj:bar`,    chain=[`obj`]
+/// - `M.api:create(x)`  → callee_text=`M.api:create`, chain=[`M`,`api`]
+///
+/// Returns `None` for shapes [`call_target_name`] rejects (call-result
+/// callees, computed indexing, …).
+fn call_target_decomposed(fc: &FunctionCall) -> Option<(String, Vec<String>)> {
+    let head = match fc.prefix() {
+        Prefix::Name(t) => ident_text(t).to_string(),
+        _ => return None,
+    };
+    if head.is_empty() {
+        return None;
+    }
+    let mut parts = vec![head];
+    let mut method_suffix: Option<String> = None;
+    for sfx in fc.suffixes() {
+        match sfx {
+            Suffix::Index(idx) => {
+                if let Some(n) = index_dot_name(idx) {
+                    parts.push(n);
+                } else {
+                    return None;
+                }
+            }
+            Suffix::Call(call) => {
+                if let full_moon::ast::Call::MethodCall(mc) = call {
+                    method_suffix = Some(ident_text(mc.name()).to_string());
+                }
+                break;
+            }
+            _ => return None,
+        }
+    }
+    // `parts` is the dotted prefix; the final segment becomes the
+    // function name unless this is a `:method()` form (then the method
+    // is appended via `:`).
+    let (callee_text, receiver_chain) = if let Some(method) = method_suffix
+        && !method.is_empty()
+    {
+        let chain = parts.clone();
+        let prefix = parts.join(".");
+        (format!("{prefix}:{method}"), chain)
+    } else if parts.len() == 1 {
+        (parts.remove(0), Vec::new())
+    } else {
+        let func = parts.pop().expect("len > 1");
+        let chain = parts.clone();
+        (format!("{}.{}", parts.join("."), func), chain)
+    };
+    Some((callee_text, receiver_chain))
+}
+
+/// IR-4-d: extract positional args from a `FunctionCall`'s single
+/// `Suffix::Call`. Handles all three Lua argument shapes:
+/// - `foo(a, b)`     → punctuated list of expressions
+/// - `foo "literal"` → single string literal arg (special syntax)
+/// - `foo {1,2,3}`   → single table-constructor arg
+///
+/// Each arg is classified via [`arg_from_expression`]; string-literal
+/// args strip surrounding quotes and set `is_string_literal=true`.
+fn args_from_function_call(fc: &FunctionCall) -> Vec<RawCallArg> {
+    use full_moon::ast::Call as FullMoonCall;
+    use full_moon::ast::FunctionArgs;
+    let mut out = Vec::new();
+    for sfx in fc.suffixes() {
+        let Suffix::Call(call) = sfx else { continue };
+        let args = match call {
+            FullMoonCall::AnonymousCall(a) => a,
+            FullMoonCall::MethodCall(mc) => mc.args(),
+            _ => continue,
+        };
+        match args {
+            FunctionArgs::Parentheses { arguments, .. } => {
+                for expr in arguments.iter() {
+                    out.push(arg_from_expression(expr));
+                }
+            }
+            FunctionArgs::String(token) => {
+                if let TokenType::StringLiteral { literal, .. } = token.token_type() {
+                    out.push(RawCallArg {
+                        value: literal.to_string(),
+                        is_string_literal: true,
+                    });
+                }
+            }
+            FunctionArgs::TableConstructor(tbl) => {
+                out.push(RawCallArg {
+                    value: tbl.to_string(),
+                    is_string_literal: false,
+                });
+            }
+            _ => {}
+        }
+        break;
+    }
+    out
+}
+
+fn arg_from_expression(expr: &Expression) -> RawCallArg {
+    if let Some(text) = string_literal_text(expr) {
+        return RawCallArg {
+            value: text,
+            is_string_literal: true,
+        };
+    }
+    if let Expression::Var(Var::Name(t)) = expr {
+        let n = ident_text(t);
+        if !n.is_empty() {
+            return RawCallArg {
+                value: n.to_string(),
+                is_string_literal: false,
+            };
+        }
+    }
+    // Fallback: use full_moon's Display impl which prints the AST node
+    // back to source-faithful text (including any pre-trivia we don't
+    // care about — `.trim()` keeps the value compact).
+    RawCallArg {
+        value: expr.to_string().trim().to_string(),
+        is_string_literal: false,
+    }
 }
 
 // --- require detection ----------------------------------------------------
@@ -1141,5 +1291,143 @@ mod tests {
             other => panic!("user dotted call must stay Unresolved, got {other:?}"),
         }
         assert!(calls[0].attributes.is_empty());
+    }
+
+    // --- IR-4-d: call_sites emission (observational, separate from edges) ---
+
+    #[test]
+    fn ir4d_free_fn_call_emits_call_site_with_classified_args() {
+        // `foo("hi", 42, x)` — three positional args. Args must classify
+        // string-literals vs identifiers/numbers correctly.
+        let src = "local function caller() local x = 0 foo(\"hi\", 42, x) end\n";
+        let r = extract(src, "main.lua", "main.lua");
+        let cs = r
+            .call_sites
+            .iter()
+            .find(|c| c.callee_text == "foo")
+            .unwrap_or_else(|| panic!("expected foo call_site, got {:?}", r.call_sites));
+        assert!(cs.receiver_chain.is_empty());
+        assert_eq!(cs.args.len(), 3);
+        assert_eq!(cs.args[0].value, "hi");
+        assert!(cs.args[0].is_string_literal);
+        assert!(!cs.args[1].is_string_literal);
+        assert!(cs.args[1].value.contains("42"));
+        assert_eq!(cs.args[2].value, "x");
+        assert!(!cs.args[2].is_string_literal);
+    }
+
+    #[test]
+    fn ir4d_dotted_call_emits_chain_and_dotted_callee_text() {
+        // `M.api.create(payload)` — chain=["M","api"], callee_text="M.api.create".
+        let src = "local function caller() M.api.create(payload) end\n";
+        let r = extract(src, "main.lua", "main.lua");
+        let cs = r
+            .call_sites
+            .iter()
+            .find(|c| c.callee_text == "M.api.create")
+            .unwrap_or_else(|| {
+                panic!("expected M.api.create call_site, got {:?}", r.call_sites)
+            });
+        assert_eq!(
+            cs.receiver_chain,
+            vec!["M".to_string(), "api".to_string()]
+        );
+        assert_eq!(cs.args.len(), 1);
+        assert_eq!(cs.args[0].value, "payload");
+    }
+
+    #[test]
+    fn ir4d_method_colon_call_uses_colon_in_callee_text() {
+        // `obj:bar(x)` — Lua method-call syntax. callee_text="obj:bar",
+        // receiver_chain=["obj"]. The colon survives into the textual
+        // record so plugins can distinguish from `obj.bar(x)`.
+        let src = "local function caller() obj:bar(x) end\n";
+        let r = extract(src, "main.lua", "main.lua");
+        let cs = r
+            .call_sites
+            .iter()
+            .find(|c| c.callee_text == "obj:bar")
+            .unwrap_or_else(|| panic!("expected obj:bar call_site, got {:?}", r.call_sites));
+        assert_eq!(cs.receiver_chain, vec!["obj".to_string()]);
+    }
+
+    #[test]
+    fn ir4d_string_call_syntax_carries_single_string_arg() {
+        // `require "modname"` — the `foo "literal"` shorthand surfaces
+        // as a single string-literal arg. (`require` is special-cased
+        // for the Imports edge BEFORE the call_site emit — so we test
+        // with a non-require fn to actually see the call_site.)
+        let src = "local function caller() greet \"world\" end\n";
+        let r = extract(src, "main.lua", "main.lua");
+        let cs = r
+            .call_sites
+            .iter()
+            .find(|c| c.callee_text == "greet")
+            .unwrap_or_else(|| panic!("expected greet call_site, got {:?}", r.call_sites));
+        assert_eq!(cs.args.len(), 1);
+        assert!(cs.args[0].is_string_literal);
+        assert_eq!(cs.args[0].value, "world");
+    }
+
+    #[test]
+    fn ir4d_table_constructor_call_carries_single_non_literal_arg() {
+        // `foo {1, 2, 3}` — table-constructor shorthand. value carries
+        // the table source text; is_string_literal=false.
+        let src = "local function caller() foo {1, 2, 3} end\n";
+        let r = extract(src, "main.lua", "main.lua");
+        let cs = r
+            .call_sites
+            .iter()
+            .find(|c| c.callee_text == "foo")
+            .unwrap_or_else(|| panic!("expected foo call_site, got {:?}", r.call_sites));
+        assert_eq!(cs.args.len(), 1);
+        assert!(!cs.args[0].is_string_literal);
+        assert!(cs.args[0].value.contains('1'));
+    }
+
+    #[test]
+    fn ir4d_builtin_call_still_emits_call_site() {
+        // `print(x)` — `print` is an Edge-tier Lua builtin (resolves
+        // to a synthetic FQDN with `via-builtin`). The call_site must
+        // still surface independently of the edge classification.
+        let src = "local function caller() print(\"hi\") end\n";
+        let r = extract(src, "main.lua", "main.lua");
+        assert!(
+            r.call_sites
+                .iter()
+                .any(|c| c.callee_text == "print"),
+            "print call_site must surface, got {:?}",
+            r.call_sites
+        );
+    }
+
+    #[test]
+    fn ir4d_require_emits_import_edge_but_no_call_site() {
+        // `require("mod")` — special-cased for the IMPORTS edge before
+        // the call_site emit. Plugins reading require usage should
+        // walk edges, not call_sites — keeping the textual record
+        // empty avoids double-counting.
+        let src = "local M = require(\"sibling\")\n";
+        let r = extract(src, "main.lua", "main.lua");
+        assert!(
+            r.call_sites.iter().all(|c| c.callee_text != "require"),
+            "require should not emit a call_site, got {:?}",
+            r.call_sites
+        );
+    }
+
+    #[test]
+    fn ir4d_call_site_from_fqdn_attributes_to_enclosing_function() {
+        // `function svc:run() helper() end` — the call_site for
+        // `helper()` must have `from_fqdn = myapp::main::svc::run`,
+        // not the module fqdn.
+        let src = "function svc:run() helper() end\n";
+        let r = extract(src, "main.lua", "main.lua");
+        let cs = r
+            .call_sites
+            .iter()
+            .find(|c| c.callee_text == "helper")
+            .unwrap_or_else(|| panic!("expected helper call_site, got {:?}", r.call_sites));
+        assert_eq!(cs.from_fqdn, "myapp::main::svc::run");
     }
 }
