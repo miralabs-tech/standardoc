@@ -9,6 +9,7 @@
 //! `BridgeKind` distinction (cf. storage::conv::unresolved_to_storage).
 
 mod similarity;
+pub mod call_sites;
 pub mod projects;
 pub mod workspace;
 

@@ -17,7 +17,11 @@ use serde::{Deserialize, Serialize};
 use standardoc_core::{
     IndexHandle, LanguageProvider, RagWatcherHandle, ResolveOutcome, ResolverRegistry,
     RevisionRelinkHandle, ScanFilters, SessionsHandle, UsagePeriod, WatcherHandle,
-    query::{self, SymbolFilter, projects as projects_query, workspace as workspace_query},
+    query::{
+        self, SymbolFilter,
+        call_sites::{self as call_sites_query, CallSiteFilters, FIND_CALL_SITES_DEFAULT_LIMIT},
+        projects as projects_query, workspace as workspace_query,
+    },
     sessions::memory_sync::{export_memory_dir, import_memory_dir},
 };
 use standardoc_ir::SourceOrigin;
@@ -1169,6 +1173,59 @@ impl StandardocMcp {
             None => Ok(success_json(&serde_json::Value::Null)),
         }
     }
+
+    /// IR-4-f follow-up — query the `call_sites` table populated since
+    /// IR-4-b/c/d. Three optional filters AND-compose: `from_fqdn`
+    /// (exact match on the enclosing FQDN — "what does X call?"),
+    /// `callee_text` (exact match on the called expression text — "who
+    /// calls Y?"), `callee_pattern` (SQLite GLOB on the callee text —
+    /// "every Tauri invocation workspace-wide" via `*tauri.invoke*`).
+    /// Calling with no filters returns the most recent N call_sites for
+    /// ops-style scanning.
+    #[tool(
+        description = "Read-only query over the `call_sites` table — every call expression emitted by the extractors (CallExpr in Rust/TS/Lua, NewExpr, OptChain call, method call). Returns a JSON array of records: `{from_fqdn, callee_text, args: [{value, is_string_literal}], receiver_chain: [..], site: {file, line, col}}`. Three optional AND-composable filters: `from_fqdn` (exact match on the enclosing fn/method FQDN — answers `what does X call?`), `callee_text` (exact match on the called expression text — answers `who calls Y?`), `callee_pattern` (SQLite GLOB on the callee text, e.g. `*tauri.invoke*` for every Tauri invocation, `M.api.*` for every call into the M.api namespace). `limit` defaults to 50, capped at 200. Use this to discover textual call patterns the symbol graph alone can't surface — bridge invocations, method-chain shapes, literal-string arg payloads."
+    )]
+    async fn find_call_sites(
+        &self,
+        Parameters(params): Parameters<FindCallSitesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !self.index_ready.load(Ordering::Acquire) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
+            )]));
+        }
+        let filters = CallSiteFilters {
+            from_fqdn: params.from_fqdn.and_then(non_empty),
+            callee_text: params.callee_text.and_then(non_empty),
+            callee_pattern: params.callee_pattern.and_then(non_empty),
+        };
+        // `find_call_sites` clamps internally to FIND_CALL_SITES_MAX_LIMIT,
+        // so we just translate the caller's optional limit (in `u8` since
+        // schemars infers from the param type) up to a u32 — the query
+        // helper handles the cap.
+        let limit = params
+            .limit
+            .map_or(FIND_CALL_SITES_DEFAULT_LIMIT, u32::from);
+        let handle = self.handle.clone();
+        let rows = tokio::task::spawn_blocking(move || {
+            call_sites_query::find_call_sites(&handle, &filters, limit)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        Ok(success_json(&rows))
+    }
+}
+
+/// Drop empty / whitespace-only strings to `None` so an MCP caller can
+/// pass `from_fqdn: ""` without smuggling a vacuous filter into the SQL.
+fn non_empty(s: String) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 #[tool_handler]
@@ -1398,6 +1455,28 @@ pub(crate) struct FindSymbolsByPatternParams {
     /// `false` to scope a query to workspace-only symbols.
     #[serde(default)]
     pub include_external: Option<bool>,
+}
+
+/// Tool input — `find_call_sites(from_fqdn?, callee_text?, callee_pattern?, limit?)`.
+/// Forwarded to `query::call_sites::find_call_sites`. All filters
+/// AND-compose; empty / whitespace-only strings normalise to `None` so
+/// `""` doesn't smuggle a vacuous predicate into the SQL.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct FindCallSitesParams {
+    /// Optional filter — exact match on the enclosing fn/method FQDN
+    /// (the "from" side of the call). Answers `what does X call?`.
+    pub from_fqdn: Option<String>,
+    /// Optional filter — exact match on the called expression text
+    /// (`tauri::invoke`, `obj.api.create`, `print`). Answers
+    /// `who calls Y?`.
+    pub callee_text: Option<String>,
+    /// Optional filter — SQLite GLOB pattern matched against the callee
+    /// text. Wildcards: `*` (any sequence), `?` (single char),
+    /// `[abc]` (char class). Case-sensitive. Example: `*tauri.invoke*`
+    /// surfaces every Tauri invocation regardless of receiver chain.
+    pub callee_pattern: Option<String>,
+    /// Maximum results to return. Defaults to 50, capped at 200 server-side.
+    pub limit: Option<u8>,
 }
 
 /// Tool input — `find_similar_symbols(reference, threshold?, limit?, kind?,
@@ -2968,5 +3047,179 @@ mod tests {
             .expect("project_for_file ok");
         let body = body_text(&result);
         assert_eq!(body.trim(), "null");
+    }
+
+    // --- IR-4-f follow-up: find_call_sites MCP tool ---
+
+    /// Write a Rust fixture under the workspace root so cold_start ends
+    /// up walking it and populating `call_sites` via the real extractor
+    /// + storage path. Cheaper than wiring around `pool()`'s pub(crate)
+    /// visibility, and validates the full IR-4-b → IR-4-f pipeline in
+    /// one shot.
+    fn seed_rust_call_sites(root: &Path) {
+        let src_dir = root.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        // `caller_a` calls `tauri_invoke` (resolves locally) and
+        // `foo`; `caller_b` also calls `tauri_invoke`; `caller_c`
+        // calls a multi-segment member-access expression. Match the
+        // call_text patterns the test queries below expect.
+        std::fs::write(
+            src_dir.join("lib.rs"),
+            r#"
+                fn tauri_invoke() {}
+                fn foo() {}
+                fn caller_a() { tauri_invoke(); foo(); }
+                fn caller_b() { tauri_invoke(); }
+                fn caller_c() { M.api.create(); }
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn find_call_sites_returns_indexing_in_progress_when_not_ready() {
+        let (_dir, mcp) = fixture();
+        let result = mcp
+            .find_call_sites(Parameters(FindCallSitesParams {
+                from_fqdn: None,
+                callee_text: None,
+                callee_pattern: None,
+                limit: None,
+            }))
+            .await
+            .expect("tool returns Ok with friendly degradation");
+        assert!(body_text(&result).contains("Workspace indexing in progress"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn find_call_sites_no_filter_returns_all_extracted_rows() {
+        // E2E pipeline check — extractor populates call_sites, storage
+        // persists them, the MCP tool reads them back.
+        let (dir, mcp) = fixture();
+        seed_rust_call_sites(dir.path());
+        cold_start_workspace(&mcp, dir.path());
+        let result = mcp
+            .find_call_sites(Parameters(FindCallSitesParams {
+                from_fqdn: None,
+                callee_text: None,
+                callee_pattern: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let body = body_text(&result);
+        let arr: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // 4 calls in the fixture: caller_a→tauri_invoke, caller_a→foo,
+        // caller_b→tauri_invoke, caller_c→M.api.create.
+        assert_eq!(
+            arr.as_array().unwrap().len(),
+            4,
+            "expected 4 extracted call_sites, got `{body}`"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn find_call_sites_filter_by_callee_text_narrows_to_matching_records() {
+        let (dir, mcp) = fixture();
+        seed_rust_call_sites(dir.path());
+        cold_start_workspace(&mcp, dir.path());
+        let result = mcp
+            .find_call_sites(Parameters(FindCallSitesParams {
+                from_fqdn: None,
+                callee_text: Some("tauri_invoke".into()),
+                callee_pattern: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let body = body_text(&result);
+        let arr: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let rows = arr.as_array().unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "two tauri_invoke calls in the fixture, got `{body}`"
+        );
+        for row in rows {
+            assert_eq!(row["callee_text"].as_str(), Some("tauri_invoke"));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn find_call_sites_filter_by_from_fqdn_returns_calls_of_one_caller() {
+        let (dir, mcp) = fixture();
+        seed_rust_call_sites(dir.path());
+        cold_start_workspace(&mcp, dir.path());
+        // The extractor stamps `from_fqdn` as the crate-relative FQDN of
+        // the enclosing fn. For our fixture: `fixture::caller_a`.
+        let result = mcp
+            .find_call_sites(Parameters(FindCallSitesParams {
+                from_fqdn: Some("fixture::caller_a".into()),
+                callee_text: None,
+                callee_pattern: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let body = body_text(&result);
+        let arr: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let rows = arr.as_array().unwrap();
+        assert_eq!(rows.len(), 2, "caller_a calls both tauri_invoke + foo, got `{body}`");
+        for row in rows {
+            assert_eq!(row["from_fqdn"].as_str(), Some("fixture::caller_a"));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn find_call_sites_filter_by_callee_pattern_matches_glob() {
+        let (dir, mcp) = fixture();
+        seed_rust_call_sites(dir.path());
+        cold_start_workspace(&mcp, dir.path());
+        // `M.api.create` is the only multi-dotted callee in the fixture.
+        let result = mcp
+            .find_call_sites(Parameters(FindCallSitesParams {
+                from_fqdn: None,
+                callee_text: None,
+                callee_pattern: Some("M.api.*".into()),
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let body = body_text(&result);
+        let arr: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let rows = arr.as_array().unwrap();
+        assert_eq!(rows.len(), 1, "only M.api.create matches the glob");
+        assert_eq!(rows[0]["callee_text"].as_str(), Some("M.api.create"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn find_call_sites_empty_string_filter_treated_as_unset() {
+        // MCP callers often serialize `Option::None` as `""` — the
+        // server-side `non_empty` normalises it back so a vacuous
+        // filter doesn't silently constrain the result set.
+        let (dir, mcp) = fixture();
+        seed_rust_call_sites(dir.path());
+        cold_start_workspace(&mcp, dir.path());
+        let result = mcp
+            .find_call_sites(Parameters(FindCallSitesParams {
+                from_fqdn: Some("".into()),
+                callee_text: Some("   ".into()),
+                callee_pattern: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let body = body_text(&result);
+        let arr: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            arr.as_array().unwrap().len(),
+            4,
+            "empty / whitespace filters must read as no filter, got `{body}`"
+        );
     }
 }
