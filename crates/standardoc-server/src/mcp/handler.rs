@@ -1036,11 +1036,29 @@ impl StandardocMcp {
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?;
         match result {
-            Ok(workspace_id) => Ok(success_json(&LinkWorkspaceJson {
-                workspace_id,
-                root_path: path_for_response,
-                direction: link_direction_label(direction).to_string(),
-            })),
+            Ok(workspace_id) => {
+                // L3d-3: register the peer with the live watcher so its
+                // source changes flow through the dispatch loop
+                // immediately (rather than waiting for the next
+                // cold_start). Skipped for `LinkDirection::Out` — Out
+                // means the peer reads us, not us reading them, so we
+                // have nothing to watch on their side. Failures here
+                // are logged but do not fail the MCP call: the catalog
+                // state is already correct and the next cold_start
+                // will catch up.
+                if direction != LinkDirection::Out {
+                    register_peer_with_watcher(
+                        &self.watcher_slot(),
+                        workspace_id.clone(),
+                        Path::new(&path_for_response),
+                    );
+                }
+                Ok(success_json(&LinkWorkspaceJson {
+                    workspace_id,
+                    root_path: path_for_response,
+                    direction: link_direction_label(direction).to_string(),
+                }))
+            }
             Err(workspace_query::LinkWorkspaceError::PathNotFound { input, suggestions }) => {
                 Err(ErrorData::invalid_params(
                     format!("path not found: {input}"),
@@ -1067,11 +1085,17 @@ impl StandardocMcp {
         Parameters(params): Parameters<UnlinkWorkspaceParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.handle.clone();
-        let workspace_id = params.workspace_id;
+        let workspace_id = params.workspace_id.clone();
+        let workspace_id_for_watcher = params.workspace_id;
         tokio::task::spawn_blocking(move || workspace_query::unlink_workspace(&handle, &workspace_id))
             .await
             .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
             .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        // L3d-3: drop the peer from the live watcher registry.
+        // Idempotent on the watcher side — safe even if the peer was
+        // never registered (e.g. linked with direction=Out, or the
+        // watcher had not booted at link time).
+        unregister_peer_from_watcher(&self.watcher_slot(), &workspace_id_for_watcher);
         Ok(success_json(&serde_json::json!({ "ok": true })))
     }
 
@@ -1844,6 +1868,51 @@ const fn link_direction_label(d: LinkDirection) -> &'static str {
         LinkDirection::In => "in",
         LinkDirection::Out => "out",
         LinkDirection::Bidirectional => "bidirectional",
+    }
+}
+
+/// L3d-3 helper: hand a freshly-linked peer to the live watcher. Lives
+/// outside the handler impl so the locking pattern is visible at the
+/// call site. Best-effort: any failure (slot empty, debouncer dropped,
+/// notify error) is logged and swallowed — the catalog write already
+/// succeeded and the next cold_start will reconcile.
+fn register_peer_with_watcher(
+    slot: &Arc<Mutex<Option<WatcherHandle>>>,
+    workspace_id: String,
+    root: &Path,
+) {
+    let mut guard = match slot.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let Some(w) = guard.as_mut() else {
+        // Watcher not booted yet (readonly mode, pre-cold-start, or
+        // already shut down). Cold_start will pick up the peer from
+        // workspace_catalog on the next boot.
+        return;
+    };
+    if let Err(e) = w.add_peer(workspace_id.clone(), root) {
+        eprintln!(
+            "standardoc mcp: watcher add_peer failed for {workspace_id} ({}): {e}",
+            root.display()
+        );
+    }
+}
+
+/// L3d-3 helper: drop a peer from the live watcher registry. Idempotent.
+fn unregister_peer_from_watcher(
+    slot: &Arc<Mutex<Option<WatcherHandle>>>,
+    workspace_id: &str,
+) {
+    let mut guard = match slot.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let Some(w) = guard.as_mut() else {
+        return;
+    };
+    if let Err(e) = w.remove_peer(workspace_id) {
+        eprintln!("standardoc mcp: watcher remove_peer failed for {workspace_id}: {e}");
     }
 }
 
@@ -2995,6 +3064,153 @@ mod tests {
         assert!(
             !list_body.contains(&workspace_id),
             "workspace must be gone after unlink, got `{list_body}`"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_workspace_in_direction_registers_peer_with_live_watcher() {
+        // L3d-3: when the live watcher is booted, linking a peer with
+        // direction=in pushes a PeerRoot into the watcher's registry so
+        // the dispatch loop starts routing the peer's events
+        // immediately (no cold_start needed).
+        use standardoc_core::spawn_watcher;
+
+        let (_dir, mcp) = fixture();
+        let peer = tempfile::tempdir().unwrap();
+
+        // Seed the watcher slot — the default fixture leaves it None.
+        let watcher = spawn_watcher(
+            mcp.handle.clone(),
+            Arc::clone(&mcp.provider),
+            Arc::clone(&mcp.filters),
+        )
+        .expect("watcher boot");
+        {
+            let slot = mcp.watcher_slot();
+            let mut guard = slot.lock().unwrap();
+            *guard = Some(watcher);
+        }
+
+        let link = mcp
+            .link_workspace(Parameters(LinkWorkspaceParams {
+                path: peer.path().to_string_lossy().into_owned(),
+                direction: "in".into(),
+                indexing_mode: None,
+            }))
+            .await
+            .expect("link ok");
+        let workspace_id = body_text(&link)
+            .split("\"workspace_id\": \"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .expect("workspace_id present")
+            .to_string();
+
+        let slot = mcp.watcher_slot();
+        let guard = slot.lock().unwrap();
+        let snapshot = guard
+            .as_ref()
+            .expect("watcher present")
+            .peers_snapshot();
+        assert_eq!(snapshot.len(), 1, "peer must be registered");
+        assert_eq!(snapshot[0].workspace_id, workspace_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_workspace_out_direction_skips_watcher_registration() {
+        // L3d-3: direction=out means the peer reads us, not us reading
+        // them — there is nothing to watch on their side, so the
+        // watcher registry stays empty even when the slot is booted.
+        use standardoc_core::spawn_watcher;
+
+        let (_dir, mcp) = fixture();
+        let peer = tempfile::tempdir().unwrap();
+
+        let watcher = spawn_watcher(
+            mcp.handle.clone(),
+            Arc::clone(&mcp.provider),
+            Arc::clone(&mcp.filters),
+        )
+        .expect("watcher boot");
+        {
+            let slot = mcp.watcher_slot();
+            let mut guard = slot.lock().unwrap();
+            *guard = Some(watcher);
+        }
+
+        let _ = mcp
+            .link_workspace(Parameters(LinkWorkspaceParams {
+                path: peer.path().to_string_lossy().into_owned(),
+                direction: "out".into(),
+                indexing_mode: None,
+            }))
+            .await
+            .expect("link ok");
+
+        let slot = mcp.watcher_slot();
+        let guard = slot.lock().unwrap();
+        let snapshot = guard
+            .as_ref()
+            .expect("watcher present")
+            .peers_snapshot();
+        assert!(
+            snapshot.is_empty(),
+            "Out direction must not register a peer; got {snapshot:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unlink_workspace_removes_peer_from_live_watcher() {
+        // L3d-3: the unlink handler drops the peer from the live
+        // watcher registry in addition to the catalog write.
+        use standardoc_core::spawn_watcher;
+
+        let (_dir, mcp) = fixture();
+        let peer = tempfile::tempdir().unwrap();
+
+        let watcher = spawn_watcher(
+            mcp.handle.clone(),
+            Arc::clone(&mcp.provider),
+            Arc::clone(&mcp.filters),
+        )
+        .expect("watcher boot");
+        {
+            let slot = mcp.watcher_slot();
+            let mut guard = slot.lock().unwrap();
+            *guard = Some(watcher);
+        }
+
+        let link = mcp
+            .link_workspace(Parameters(LinkWorkspaceParams {
+                path: peer.path().to_string_lossy().into_owned(),
+                direction: "in".into(),
+                indexing_mode: None,
+            }))
+            .await
+            .expect("link ok");
+        let workspace_id = body_text(&link)
+            .split("\"workspace_id\": \"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .expect("workspace_id present")
+            .to_string();
+
+        let _ = mcp
+            .unlink_workspace(Parameters(UnlinkWorkspaceParams {
+                workspace_id: workspace_id.clone(),
+            }))
+            .await
+            .expect("unlink ok");
+
+        let slot = mcp.watcher_slot();
+        let guard = slot.lock().unwrap();
+        let snapshot = guard
+            .as_ref()
+            .expect("watcher present")
+            .peers_snapshot();
+        assert!(
+            snapshot.is_empty(),
+            "peer must be gone from watcher after unlink"
         );
     }
 
