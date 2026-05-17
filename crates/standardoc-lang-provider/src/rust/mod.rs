@@ -12,10 +12,14 @@ mod extract_call;
 mod extract_doc;
 mod extract_type;
 mod extract_use;
+mod ffi_tagger;
 mod lookup;
 mod module_path;
 mod visibility;
 mod walk;
+
+#[allow(unused_imports)]
+pub(crate) use ffi_tagger::extract_ffi_bindings;
 
 /// Native Rust `LanguageProvider` (syn 2-based).
 ///
