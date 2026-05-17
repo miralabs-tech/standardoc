@@ -8,8 +8,9 @@ pub(crate) fn insert_edge(
     conn: &Connection,
     from_symbol_id: i64,
     edge: &RawEdge,
+    workspace_id: &str,
 ) -> Result<i64, StorageError> {
-    let (to_symbol_id, to_unresolved) = resolve_target(conn, &edge.to)?;
+    let (to_symbol_id, to_unresolved) = resolve_target(conn, &edge.to, workspace_id)?;
     let attributes_json = serde_json::to_string(&edge.attributes)?;
     let id = conn
         .query_row(
@@ -43,16 +44,21 @@ pub(crate) fn insert_edge(
 fn resolve_target(
     conn: &Connection,
     target: &ResolvedOrUnresolved,
+    workspace_id: &str,
 ) -> Result<(Option<i64>, Option<String>), StorageError> {
     match target {
-        ResolvedOrUnresolved::Resolved { fqdn } => lookup_or_fallback(conn, fqdn),
-        ResolvedOrUnresolved::Unresolved { name } => lookup_or_fallback(conn, name),
+        ResolvedOrUnresolved::Resolved { fqdn } => lookup_or_fallback(conn, fqdn, workspace_id),
+        ResolvedOrUnresolved::Unresolved { name } => lookup_or_fallback(conn, name, workspace_id),
         ResolvedOrUnresolved::UnresolvedBridge { bridge, name } => {
             // IR-1 1.0 vocabulary lock: refuse extractor-emitted slugs
             // outside `BUILTIN_BRIDGE_KINDS` that lack the `custom:`
             // prefix. Bubbles up as `StorageError::BridgeKindInvalid`.
             bridge.try_validate()?;
-            lookup_or_fallback(conn, &format!("{}::{}", bridge.as_str(), name))
+            lookup_or_fallback(
+                conn,
+                &format!("{}::{}", bridge.as_str(), name),
+                workspace_id,
+            )
         }
     }
 }
@@ -60,11 +66,14 @@ fn resolve_target(
 fn lookup_or_fallback(
     conn: &Connection,
     fqdn: &str,
+    workspace_id: &str,
 ) -> Result<(Option<i64>, Option<String>), StorageError> {
     let id: Option<i64> = conn
-        .query_row("SELECT id FROM symbols WHERE fqdn = ?1", [fqdn], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT id FROM symbols WHERE workspace_id = ?1 AND fqdn = ?2",
+            rusqlite::params![workspace_id, fqdn],
+            |row| row.get(0),
+        )
         .optional()?;
     Ok(match id {
         Some(rid) => (Some(rid), None),
@@ -74,6 +83,12 @@ fn lookup_or_fallback(
 
 /// Promotes any edge whose `to_unresolved` matches the fqdn of one of the
 /// freshly inserted symbols (DDL §3.3). Returns the number of edges promoted.
+///
+/// Workspace scoping: edges resolve to a target symbol that lives in the
+/// SAME workspace as the edge's `from_symbol_id`. This prevents an edge
+/// from one workspace silently resolving against a peer workspace's
+/// symbol that happens to share the FQDN (`UNIQUE(workspace_id, fqdn)`
+/// allows collisions across workspaces).
 pub(crate) fn promote_unresolved_batch(
     conn: &Connection,
     new_symbol_ids: &[i64],
@@ -87,11 +102,22 @@ pub(crate) fn promote_unresolved_batch(
         .join(",");
     let sql = format!(
         "UPDATE edges \
-         SET to_symbol_id = (SELECT id FROM symbols WHERE fqdn = edges.to_unresolved), \
+         SET to_symbol_id = ( \
+                 SELECT t.id FROM symbols t \
+                 JOIN symbols f ON f.id = edges.from_symbol_id \
+                 WHERE t.fqdn = edges.to_unresolved \
+                   AND t.workspace_id = f.workspace_id \
+             ), \
              to_unresolved = NULL \
          WHERE to_unresolved IN ( \
              SELECT fqdn FROM symbols WHERE id IN ({placeholders}) \
-         )"
+         ) \
+         AND ( \
+             SELECT t.id FROM symbols t \
+             JOIN symbols f ON f.id = edges.from_symbol_id \
+             WHERE t.fqdn = edges.to_unresolved \
+               AND t.workspace_id = f.workspace_id \
+         ) IS NOT NULL"
     );
     let params = rusqlite::params_from_iter(new_symbol_ids.iter().copied());
     conn.execute(&sql, params)?;
@@ -151,7 +177,7 @@ mod tests {
                 fqdn: "crate::foo".into(),
             },
         );
-        let edge_id = insert_edge(&conn, caller_id, &edge).unwrap();
+        let edge_id = insert_edge(&conn, caller_id, &edge, "primary").unwrap();
 
         let (to_id, to_unresolved): (Option<i64>, Option<String>) = conn
             .query_row(
@@ -181,7 +207,7 @@ mod tests {
                 fqdn: "crate::not_yet_inserted".into(),
             },
         );
-        let edge_id = insert_edge(&conn, caller_id, &edge).unwrap();
+        let edge_id = insert_edge(&conn, caller_id, &edge, "primary").unwrap();
 
         let (to_id, to_unresolved): (Option<i64>, Option<String>) = conn
             .query_row(
@@ -211,7 +237,7 @@ mod tests {
                 name: "do_thing".into(),
             },
         );
-        let edge_id = insert_edge(&conn, caller_id, &edge).unwrap();
+        let edge_id = insert_edge(&conn, caller_id, &edge, "primary").unwrap();
 
         let to_unresolved: Option<String> = conn
             .query_row(
@@ -241,7 +267,7 @@ mod tests {
                 name: "create_user".into(),
             },
         );
-        let edge_id = insert_edge(&conn, caller_id, &edge).unwrap();
+        let edge_id = insert_edge(&conn, caller_id, &edge, "primary").unwrap();
 
         let to_unresolved: Option<String> = conn
             .query_row(
@@ -275,7 +301,7 @@ mod tests {
                 name: "create_user".into(),
             },
         );
-        let err = insert_edge(&conn, caller_id, &edge).unwrap_err();
+        let err = insert_edge(&conn, caller_id, &edge, "primary").unwrap_err();
         assert!(
             matches!(err, StorageError::BridgeKindInvalid(_)),
             "got `{err:?}`"
@@ -302,7 +328,7 @@ mod tests {
                 name: "ping".into(),
             },
         );
-        let edge_id = insert_edge(&conn, caller_id, &edge).unwrap();
+        let edge_id = insert_edge(&conn, caller_id, &edge, "primary").unwrap();
         let to_unresolved: Option<String> = conn
             .query_row(
                 "SELECT to_unresolved FROM edges WHERE id = ?1",
@@ -391,6 +417,7 @@ mod tests {
                     name: "crate::foo".into(),
                 },
             ),
+            "primary",
         )
         .unwrap();
 
@@ -428,6 +455,7 @@ mod tests {
                     name: "crate::foo".into(),
                 },
             ),
+            "primary",
         )
         .unwrap();
 
@@ -479,6 +507,7 @@ mod tests {
                     name: "crate::foo".into(),
                 },
             ),
+            "primary",
         )
         .unwrap();
         let unrelated = insert_symbol(
@@ -523,6 +552,7 @@ mod tests {
                     EdgeKind::Calls,
                     ResolvedOrUnresolved::Unresolved { name: name.into() },
                 ),
+                "primary",
             )
             .unwrap();
         }
@@ -559,6 +589,7 @@ mod tests {
                     name: "do_it".into(),
                 },
             ),
+            "primary",
         )
         .unwrap();
         let site = Site {

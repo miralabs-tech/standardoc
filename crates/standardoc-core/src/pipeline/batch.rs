@@ -39,9 +39,15 @@ pub(crate) fn apply_upsert_file(
     apply_deletes(conn, &plan)?;
     apply_position_updates(conn, &plan, revision)?;
     let new_or_modified_ids = apply_inserts_and_modifications(conn, &plan, ctx)?;
-    apply_edges(conn, &plan, &extracted.edges)?;
+    apply_edges(conn, &plan, &extracted.edges, workspace_id)?;
     promote_unresolved_batch(conn, &new_or_modified_ids)?;
-    apply_documents(conn, &plan, &new_or_modified_ids, &extracted.documents)?;
+    apply_documents(
+        conn,
+        &plan,
+        &new_or_modified_ids,
+        &extracted.documents,
+        workspace_id,
+    )?;
     // IR-4-f: persist the call_sites vec populated by the extractors
     // since IR-4-b/c/d. Delete-then-batch-insert mirrors the documents
     // pattern — re-extraction is the common path, and a full re-write
@@ -53,7 +59,7 @@ pub(crate) fn apply_upsert_file(
     // symbol touched by this batch, then insert the freshly-extracted
     // set. Mirrors the call_sites / documents discipline so removing a
     // binding from source actually removes the row.
-    apply_ffi_bindings(conn, &extracted.ffi_bindings)?;
+    apply_ffi_bindings(conn, &extracted.ffi_bindings, workspace_id)?;
     // Stage 3 final-mile (R1) — persist the AOT ModuleLookup so
     // cross-workspace queries (resolve_cross_workspace_import,
     // list_cross_workspace_providers) can see this workspace's modules
@@ -75,6 +81,7 @@ pub(crate) fn apply_upsert_file(
 fn apply_ffi_bindings(
     conn: &Connection,
     bindings: &[standardoc_ir::RawFfiBinding],
+    workspace_id: &str,
 ) -> Result<(), StorageError> {
     if bindings.is_empty() {
         return Ok(());
@@ -86,7 +93,7 @@ fn apply_ffi_bindings(
     let mut by_symbol: std::collections::HashMap<i64, Vec<&standardoc_ir::RawFfiBinding>> =
         std::collections::HashMap::new();
     for b in bindings {
-        let Some(id) = lookup_symbol_id_by_fqdn(conn, &b.symbol_fqdn)? else {
+        let Some(id) = lookup_symbol_id_by_fqdn(conn, &b.symbol_fqdn, workspace_id)? else {
             continue;
         };
         by_symbol.entry(id).or_default().push(b);
@@ -100,11 +107,15 @@ fn apply_ffi_bindings(
     Ok(())
 }
 
-fn lookup_symbol_id_by_fqdn(conn: &Connection, fqdn: &str) -> Result<Option<i64>, StorageError> {
+fn lookup_symbol_id_by_fqdn(
+    conn: &Connection,
+    fqdn: &str,
+    workspace_id: &str,
+) -> Result<Option<i64>, StorageError> {
     let id = conn
         .query_row(
-            "SELECT id FROM symbols WHERE fqdn = ?1 LIMIT 1",
-            [fqdn],
+            "SELECT id FROM symbols WHERE workspace_id = ?1 AND fqdn = ?2",
+            rusqlite::params![workspace_id, fqdn],
             |r| r.get::<_, i64>(0),
         )
         .optional()?;
@@ -205,6 +216,7 @@ fn apply_edges(
     conn: &Connection,
     plan: &DiffPlan<'_>,
     edges: &[RawEdge],
+    workspace_id: &str,
 ) -> Result<(), StorageError> {
     if edges.is_empty() {
         return Ok(());
@@ -214,10 +226,10 @@ fn apply_edges(
         if !touched.contains(edge.from_fqdn.as_str()) {
             continue;
         }
-        let Some(from_id) = lookup_symbol_id(conn, &edge.from_fqdn)? else {
+        let Some(from_id) = lookup_symbol_id(conn, &edge.from_fqdn, workspace_id)? else {
             continue;
         };
-        let edge_id = insert_edge(conn, from_id, edge)?;
+        let edge_id = insert_edge(conn, from_id, edge, workspace_id)?;
         if !edge.sites.is_empty() {
             insert_edge_sites(conn, edge_id, &edge.sites)?;
         }
@@ -239,6 +251,7 @@ fn apply_documents(
     plan: &DiffPlan<'_>,
     new_or_modified_ids: &[i64],
     documents: &[RawDocument],
+    workspace_id: &str,
 ) -> Result<(), StorageError> {
     if new_or_modified_ids.is_empty() && documents.is_empty() {
         return Ok(());
@@ -255,7 +268,7 @@ fn apply_documents(
         if !touched.contains(doc.symbol_fqdn.as_str()) {
             continue;
         }
-        let Some(id) = lookup_symbol_id(conn, &doc.symbol_fqdn)? else {
+        let Some(id) = lookup_symbol_id(conn, &doc.symbol_fqdn, workspace_id)? else {
             continue;
         };
         upsert_document(
@@ -283,13 +296,12 @@ fn touched_fqdns<'a>(plan: &'a DiffPlan<'_>) -> HashSet<&'a str> {
     out
 }
 
-fn lookup_symbol_id(conn: &Connection, fqdn: &str) -> Result<Option<i64>, StorageError> {
-    let id = conn
-        .query_row("SELECT id FROM symbols WHERE fqdn = ?1", [fqdn], |r| {
-            r.get::<_, i64>(0)
-        })
-        .optional()?;
-    Ok(id)
+fn lookup_symbol_id(
+    conn: &Connection,
+    fqdn: &str,
+    workspace_id: &str,
+) -> Result<Option<i64>, StorageError> {
+    lookup_symbol_id_by_fqdn(conn, fqdn, workspace_id)
 }
 
 fn fetch_symbol_ids_by_file(conn: &Connection, path: &str) -> Result<Vec<i64>, StorageError> {

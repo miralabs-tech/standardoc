@@ -58,6 +58,7 @@ mod tests {
                 attributes: vec![],
                 confidence: EdgeConfidence::Ambiguous,
             },
+            "primary",
         )
         .unwrap()
     }

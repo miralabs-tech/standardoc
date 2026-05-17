@@ -106,16 +106,10 @@ where
 }
 
 pub fn symbol_by_fqdn(handle: &IndexHandle, fqdn: &str) -> Result<Option<RawSymbol>, StorageError> {
-    with_conn(handle, |conn| {
-        let raw = conn
-            .query_row(
-                &format!("SELECT {SYMBOL_COLUMNS} FROM symbols WHERE fqdn = ?1"),
-                [fqdn],
-                read_symbol_row,
-            )
-            .optional()?;
-        raw.map(build_symbol).transpose()
-    })
+    // Implicit primary-workspace scoping. Peer-workspace rows with the
+    // same fqdn (`UNIQUE(workspace_id, fqdn)`) require the explicit
+    // `symbol_by_fqdn_in_workspace` API.
+    symbol_by_fqdn_in_workspace(handle, fqdn, crate::storage::module_lookup::PRIMARY_WORKSPACE_ID)
 }
 
 /// Stage 3b-7-b Layer 2: scope-aware variant of [`symbol_by_fqdn`].
@@ -188,7 +182,7 @@ pub fn edges_from(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Stor
         };
         let rows = collect_edge_rows(
             conn,
-            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved, attributes, confidence \
+            "SELECT id, kind, to_symbol_id, to_unresolved, attributes, confidence \
              FROM edges WHERE from_symbol_id = ?1 ORDER BY id ASC",
             rusqlite::params![id],
         )?;
@@ -201,27 +195,25 @@ pub fn edges_from(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Stor
 pub fn edges_to(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, StorageError> {
     with_conn(handle, |conn| {
         let target_id = lookup_id_by_fqdn(conn, fqdn)?;
-        let rows = collect_edge_rows(
-            conn,
-            "SELECT id, from_symbol_id, kind, to_symbol_id, to_unresolved, attributes, confidence \
-             FROM edges \
-             WHERE (?1 IS NOT NULL AND to_symbol_id = ?1) \
-                OR to_unresolved = ?2 \
-             ORDER BY id ASC",
-            rusqlite::params![target_id, fqdn],
+        // Single round-trip: JOIN symbols on from_symbol_id to fetch
+        // the from_fqdn alongside the edge row. Eliminates the prior
+        // N+1 of one `lookup_fqdn_by_id` per row.
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.kind, e.to_symbol_id, e.to_unresolved, \
+                    e.attributes, e.confidence, f.fqdn \
+             FROM edges e \
+             JOIN symbols f ON f.id = e.from_symbol_id \
+             WHERE (?1 IS NOT NULL AND e.to_symbol_id = ?1) \
+                OR e.to_unresolved = ?2 \
+             ORDER BY e.id ASC",
         )?;
+        let rows: Vec<(EdgeRowRaw, String)> = stmt
+            .query_map(rusqlite::params![target_id, fqdn], |row| {
+                Ok((read_edge_row(row)?, row.get::<_, String>(6)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
-            .map(|row| {
-                let from_fqdn = lookup_fqdn_by_id(conn, row.from_symbol_id)?.ok_or_else(|| {
-                    StorageError::InvalidStoredData {
-                        detail: format!(
-                            "edges.from_symbol_id={} points to deleted symbol",
-                            row.from_symbol_id
-                        ),
-                    }
-                })?;
-                build_edge(conn, row, from_fqdn)
-            })
+            .map(|(row, from_fqdn)| build_edge(conn, row, from_fqdn))
             .collect()
     })
 }
@@ -1199,15 +1191,23 @@ pub fn last_modified_revisions_for_fqdns(
         return Ok(std::collections::HashMap::new());
     }
     with_conn(handle, |conn| {
+        // Scoped to PRIMARY_WORKSPACE_ID so peer-workspace rows that
+        // happen to share an fqdn (`UNIQUE(workspace_id, fqdn)`) can't
+        // bleed into the staleness check.
         let placeholders = (1..=fqdns.len())
-            .map(|i| format!("?{i}"))
+            .map(|i| format!("?{}", i + 1))
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT fqdn, last_modified_revision FROM symbols WHERE fqdn IN ({placeholders})"
+            "SELECT fqdn, last_modified_revision FROM symbols \
+             WHERE workspace_id = ?1 AND fqdn IN ({placeholders})"
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(fqdns.iter()), |row| {
+        let primary = crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
+        let mut all_params: Vec<&str> = Vec::with_capacity(fqdns.len() + 1);
+        all_params.push(primary);
+        all_params.extend(fqdns.iter().copied());
+        let rows = stmt.query_map(rusqlite::params_from_iter(all_params.iter()), |row| {
             let fqdn: String = row.get(0)?;
             let rev: i64 = row.get(1)?;
             #[allow(clippy::cast_sign_loss)]
@@ -1312,7 +1312,6 @@ fn position_to_u32(field: &str, value: i64) -> Result<u32, StorageError> {
 
 struct EdgeRowRaw {
     id: i64,
-    from_symbol_id: i64,
     kind_text: String,
     to_symbol_id: Option<i64>,
     to_unresolved: Option<String>,
@@ -1323,12 +1322,11 @@ struct EdgeRowRaw {
 fn read_edge_row(row: &Row<'_>) -> rusqlite::Result<EdgeRowRaw> {
     Ok(EdgeRowRaw {
         id: row.get(0)?,
-        from_symbol_id: row.get(1)?,
-        kind_text: row.get(2)?,
-        to_symbol_id: row.get(3)?,
-        to_unresolved: row.get(4)?,
-        attributes_json: row.get(5)?,
-        confidence_text: row.get(6)?,
+        kind_text: row.get(1)?,
+        to_symbol_id: row.get(2)?,
+        to_unresolved: row.get(3)?,
+        attributes_json: row.get(4)?,
+        confidence_text: row.get(5)?,
     })
 }
 
@@ -1394,11 +1392,17 @@ fn lookup_fqdn_by_id(conn: &Connection, id: i64) -> Result<Option<String>, Stora
     Ok(fqdn)
 }
 
+/// Resolve an fqdn → row id within the primary workspace. The
+/// `UNIQUE(workspace_id, fqdn)` constraint permits the same fqdn in
+/// multiple workspaces; the public `edges_from` / `edges_to` queries
+/// answer about MY workspace, so the lookup is scoped accordingly.
 fn lookup_id_by_fqdn(conn: &Connection, fqdn: &str) -> Result<Option<i64>, StorageError> {
     let id = conn
-        .query_row("SELECT id FROM symbols WHERE fqdn = ?1", [fqdn], |r| {
-            r.get::<_, i64>(0)
-        })
+        .query_row(
+            "SELECT id FROM symbols WHERE workspace_id = ?1 AND fqdn = ?2",
+            rusqlite::params![crate::storage::module_lookup::PRIMARY_WORKSPACE_ID, fqdn],
+            |r| r.get::<_, i64>(0),
+        )
         .optional()?;
     Ok(id)
 }
@@ -1951,6 +1955,7 @@ mod tests {
                     attributes: vec![],
                     confidence: EdgeConfidence::default(),
                 },
+                "primary",
             )
             .unwrap();
             insert_edge(
@@ -1966,6 +1971,7 @@ mod tests {
                     attributes: vec![],
                     confidence: EdgeConfidence::default(),
                 },
+                "primary",
             )
             .unwrap();
         }
@@ -2009,6 +2015,7 @@ mod tests {
                     attributes: vec![],
                     confidence: EdgeConfidence::default(),
                 },
+                "primary",
             )
             .unwrap();
             insert_edge_sites(
@@ -2058,6 +2065,7 @@ mod tests {
                     attributes: vec![],
                     confidence: EdgeConfidence::default(),
                 },
+                "primary",
             )
             .unwrap();
         }
@@ -2090,6 +2098,7 @@ mod tests {
                     attributes: vec![],
                     confidence: EdgeConfidence::default(),
                 },
+                "primary",
             )
             .unwrap();
         }
@@ -3203,6 +3212,7 @@ mod tests {
                 attributes: vec![],
                 confidence: EdgeConfidence::default(),
             },
+            "primary",
         )
         .unwrap();
     }
@@ -3224,6 +3234,7 @@ mod tests {
                 attributes: vec![],
                 confidence: EdgeConfidence::default(),
             },
+            "primary",
         )
         .unwrap();
     }
@@ -3428,6 +3439,7 @@ mod tests {
                     attributes: vec![],
                     confidence: EdgeConfidence::default(),
                 },
+                "primary",
             )
             .unwrap();
         }
