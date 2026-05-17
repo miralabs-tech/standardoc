@@ -3,7 +3,6 @@ mod cross_workspace_resolver;
 pub mod externals;
 mod pipeline;
 pub mod query;
-pub mod rag;
 pub mod sessions;
 mod storage;
 
@@ -21,11 +20,6 @@ pub use pipeline::{
     handle_lockfile_change, invalidate_changed_lockfiles, preview_pattern_matches,
     purge_externals_by_origin, read_stored_hashes, spawn_watcher, tracked_lockfile_paths,
     write_stored_hashes,
-};
-pub use rag::{
-    CoreSymbolLookup, FrontmatterDirective, RagPipeline, RagPipelineError, RagWatcherHandle,
-    RevisionRelinkHandle, WORKSPACE_FQDN_LIMIT, discover_prose_sources, is_convention_path,
-    read_frontmatter_directive, spawn_rag_watcher, spawn_revision_relink_watcher,
 };
 pub use sessions::{
     SessionRow, SessionStatus, SessionsError, SessionsHandle, UsagePeriod, UsageStatsRow,

@@ -5,6 +5,7 @@ target-dev/
 *.swp
 *.swo
 .vscode/
+.target-cleanup/
 
 # Refacto v1.0.0-beta.1: legacy crates parked here for cherry-pick during the
 # rewrite. Local-only — never committed.

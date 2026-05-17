@@ -18,7 +18,6 @@ path = "src/main.rs"
 standardoc-core          = { workspace = true }
 standardoc-ir            = { workspace = true }
 standardoc-lang-provider = { workspace = true }
-standardoc-rag           = { workspace = true }
 standardoc-server        = { workspace = true }
 clap                     = { workspace = true }
 ctrlc                    = { workspace = true }

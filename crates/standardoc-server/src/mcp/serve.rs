@@ -8,10 +8,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::tower::{
     StreamableHttpServerConfig, StreamableHttpService,
 };
-use standardoc_core::{
-    IndexHandle, LanguageProvider, RagPipeline, ScanFilters, spawn_rag_watcher,
-    spawn_revision_relink_watcher, spawn_watcher,
-};
+use standardoc_core::{IndexHandle, LanguageProvider, ScanFilters, spawn_watcher};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -42,13 +39,9 @@ pub async fn serve_mcp(
     handle: IndexHandle,
     provider: Arc<dyn LanguageProvider>,
     filters: Arc<RwLock<ScanFilters>>,
-    rag_pipeline: Option<Arc<RagPipeline>>,
 ) -> Result<(), ServerError> {
-    let mcp = with_rag_components(
-        StandardocMcp::new(handle.clone(), Arc::clone(&provider), Arc::clone(&filters)),
-        rag_pipeline.as_ref(),
-    );
-    kick_off_indexing(&mcp, handle, provider, filters, rag_pipeline);
+    let mcp = StandardocMcp::new(handle.clone(), Arc::clone(&provider), Arc::clone(&filters));
+    kick_off_indexing(&mcp, handle, provider, filters);
 
     let service = mcp
         .serve(stdio())
@@ -82,7 +75,6 @@ pub async fn serve_mcp_http(
     provider: Arc<dyn LanguageProvider>,
     filters: Arc<RwLock<ScanFilters>>,
     bind_addr: &str,
-    rag_pipeline: Option<Arc<RagPipeline>>,
 ) -> Result<(), ServerError> {
     // When launched as a child process (VSCode extension supervisor, etc.),
     // stdin is a pipe connected to the parent. We don't read protocol data
@@ -145,11 +137,8 @@ pub async fn serve_mcp_http(
     // Build a fresh `StandardocMcp` factory: the streamable-http server
     // calls this per session, but our handler is cheap to clone — we
     // share a single registry / index / watcher across sessions.
-    let template = with_rag_components(
-        StandardocMcp::new(handle.clone(), Arc::clone(&provider), Arc::clone(&filters)),
-        rag_pipeline.as_ref(),
-    );
-    kick_off_indexing(&template, handle, provider, filters, rag_pipeline);
+    let template = StandardocMcp::new(handle.clone(), Arc::clone(&provider), Arc::clone(&filters));
+    kick_off_indexing(&template, handle, provider, filters);
 
     // Stateless + json_response : each MCP request is self-contained,
     // the response is plain `application/json` (no SSE stream to lose).
@@ -284,29 +273,15 @@ pub fn kick_off_indexing(
     handle: IndexHandle,
     provider: Arc<dyn LanguageProvider>,
     filters: Arc<RwLock<ScanFilters>>,
-    rag_pipeline: Option<Arc<RagPipeline>>,
 ) {
     let index_ready = mcp.index_ready();
 
     if handle.is_readonly() {
         index_ready.store(true, Ordering::Release);
-        // MCP --readonly is the SECONDARY daemon in the dual-daemon
-        // setup : the LSP holds the fs4 lock and owns every write —
-        // AST AND RAG. rag.db is sidecar so SQLite WAL would
-        // technically allow concurrent writes, but two writers racing
-        // on the same `chunks` rows produced a `FOREIGN KEY constraint
-        // failed` when one daemon's relink read chunk ids that the
-        // other daemon's cold-start had already replaced. The pipeline
-        // is still wired into [`StandardocMcp`] via `with_rag_components`
-        // so query-time `chunk_refs` / `fetch_chunks` keep working ;
-        // we just don't kick off any background write tasks here.
-        drop(rag_pipeline);
         return;
     }
 
     let watcher_slot = mcp.watcher_slot();
-    let rag_watcher_slot = mcp.rag_watcher_slot();
-    let rag_relink_slot = mcp.rag_relink_watcher_slot();
     tokio::spawn(async move {
         match run_cold_start_with_progress(
             handle.clone(),
@@ -317,7 +292,7 @@ pub fn kick_off_indexing(
         {
             Ok(()) => {
                 index_ready.store(true, Ordering::Release);
-                match spawn_watcher(handle.clone(), provider, Arc::clone(&filters)) {
+                match spawn_watcher(handle, provider, filters) {
                     Ok(w) => {
                         if let Ok(mut g) = watcher_slot.lock() {
                             *g = Some(w);
@@ -325,92 +300,10 @@ pub fn kick_off_indexing(
                     }
                     Err(e) => eprintln!("standardoc mcp: watcher boot failed: {e}"),
                 }
-                if let Some(pipeline) = rag_pipeline {
-                    run_rag_relink_all(&pipeline, &handle);
-                    run_rag_cold_start(&pipeline, &handle, &filters);
-                    spawn_revision_relink_into_slot(
-                        &rag_relink_slot,
-                        handle.clone(),
-                        Arc::clone(&pipeline),
-                    );
-                    spawn_rag_watcher_into_slot(&rag_watcher_slot, handle, pipeline, filters);
-                }
             }
             Err(e) => eprintln!("standardoc mcp: cold start failed: {e}"),
         }
     });
-}
-
-pub(crate) fn run_rag_cold_start(
-    pipeline: &Arc<RagPipeline>,
-    handle: &IndexHandle,
-    filters: &Arc<RwLock<ScanFilters>>,
-) {
-    let Ok(guard) = filters.read() else {
-        eprintln!("standardoc mcp: rag cold start aborted (filters poisoned)");
-        return;
-    };
-    let workspace_root = handle.workspace_root().to_path_buf();
-    if let Err(e) = pipeline.run_cold_start(&workspace_root, &guard, handle) {
-        eprintln!("standardoc mcp: rag cold start failed: {e}");
-    }
-}
-
-pub(crate) fn spawn_rag_watcher_into_slot(
-    slot: &Arc<std::sync::Mutex<Option<standardoc_core::RagWatcherHandle>>>,
-    handle: IndexHandle,
-    pipeline: Arc<RagPipeline>,
-    filters: Arc<RwLock<ScanFilters>>,
-) {
-    match spawn_rag_watcher(handle, pipeline, filters) {
-        Ok(w) => {
-            if let Ok(mut g) = slot.lock() {
-                *g = Some(w);
-            }
-        }
-        Err(e) => eprintln!("standardoc mcp: rag watcher boot failed: {e}"),
-    }
-}
-
-/// One-shot relink pass against the current AST graph. Cheap when the
-/// workspace fqdn set hasn't changed since the previous sweep (single
-/// `SELECT value FROM schema_meta` + BLAKE3 over the sorted fqdn list).
-/// Errors are logged and swallowed — the daemon must boot even when
-/// relink fails.
-pub(crate) fn run_rag_relink_all(pipeline: &Arc<RagPipeline>, handle: &IndexHandle) {
-    if let Err(e) = pipeline.relink_all(handle.workspace_root(), handle) {
-        eprintln!("standardoc mcp: rag relink_all failed: {e}");
-    }
-}
-
-/// Spawns the revision-driven relink watcher and stashes the handle in
-/// `slot`. Errors are logged ; the absence of a revision watcher only
-/// means the daemon falls back to the boot-time relink — long-running
-/// editing sessions may drift until the next restart.
-pub(crate) fn spawn_revision_relink_into_slot(
-    slot: &Arc<std::sync::Mutex<Option<standardoc_core::RevisionRelinkHandle>>>,
-    handle: IndexHandle,
-    pipeline: Arc<RagPipeline>,
-) {
-    match spawn_revision_relink_watcher(handle, pipeline) {
-        Ok(w) => {
-            if let Ok(mut g) = slot.lock() {
-                *g = Some(w);
-            }
-        }
-        Err(e) => eprintln!("standardoc mcp: rag relink watcher boot failed: {e}"),
-    }
-}
-
-fn with_rag_components(
-    mcp: StandardocMcp,
-    rag_pipeline: Option<&Arc<RagPipeline>>,
-) -> StandardocMcp {
-    let Some(pipeline) = rag_pipeline else {
-        return mcp;
-    };
-    mcp.with_rag(pipeline.store_arc())
-        .with_embedder(pipeline.embedder_arc())
 }
 
 /// Build a [`StandardocMcp`] handler without consuming it via
@@ -423,22 +316,6 @@ pub fn build_mcp_handler(
     filters: Arc<RwLock<ScanFilters>>,
 ) -> StandardocMcp {
     StandardocMcp::new(handle, provider, filters)
-}
-
-/// RAG-aware variant of [`build_mcp_handler`] for tests / wiring that
-/// want the tool surface populated. Pipeline is wired via
-/// `with_rag`/`with_embedder` but NO cold-start / watcher is spawned —
-/// callers needing the full boot flow should go through [`serve_mcp`]
-/// or [`serve_mcp_http`].
-pub fn build_mcp_handler_with_rag(
-    handle: IndexHandle,
-    provider: Arc<dyn LanguageProvider>,
-    filters: Arc<RwLock<ScanFilters>>,
-    rag_pipeline: &Arc<RagPipeline>,
-) -> StandardocMcp {
-    StandardocMcp::new(handle, provider, filters)
-        .with_rag(rag_pipeline.store_arc())
-        .with_embedder(rag_pipeline.embedder_arc())
 }
 
 #[cfg(test)]

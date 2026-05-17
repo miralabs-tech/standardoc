@@ -12,14 +12,10 @@ use std::time::{Duration, Instant};
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use standardoc_core::{
-    IndexHandle, RagPipeline, ScanFilters, SessionsHandle, StorageError, UsagePeriod, cold_start,
-    spawn_watcher,
+    IndexHandle, ScanFilters, SessionsHandle, StorageError, UsagePeriod, cold_start, spawn_watcher,
 };
 use standardoc_ir::{RawEdge, RawSymbol, ResolvedOrUnresolved};
 use standardoc_lang_provider::WorkspaceProvider;
-use standardoc_rag::embedder::{CandleBgeSmall, Embedder, MockEmbedder, resolve_models_dir};
-use standardoc_rag::store::RagStore;
-use standardoc_rag::types::EmbedModel;
 use standardoc_server::ServerError;
 use standardoc_server::query;
 
@@ -65,19 +61,6 @@ enum Command {
         /// transport supported and is the default — this flag is ignored.
         #[arg(long, hide = true)]
         stdio: bool,
-
-        /// Enable the RAG (prose retrieval) layer alongside the LSP daemon.
-        /// The LSP daemon is the primary write-side in the ext VSCode setup,
-        /// so this is where the RAG cold-start + watcher belong. Same sidecar
-        /// `.standardoc/rag.db` as the MCP `--rag` path.
-        #[arg(long)]
-        rag: bool,
-
-        /// Embedder backend used when `--rag` is set. Same semantics as the
-        /// MCP sub-command (`mock` = deterministic stub, `candle` = BGE-small
-        /// downloaded to `~/.cache/standardoc/models/` on first run).
-        #[arg(long, default_value = "mock", value_parser = ["mock", "candle"])]
-        embedder: String,
     },
 
     /// Run the MCP daemon. Default transport: stdio. Use `--http` to serve
@@ -105,23 +88,6 @@ enum Command {
         /// per-chat stdio child-spawn cost of the default transport.
         #[arg(long)]
         http: Option<u16>,
-
-        /// Enable the RAG (prose retrieval) layer. Boots a sidecar
-        /// `.standardoc/rag.db`, exposes the `fetch_chunks` MCP tool,
-        /// and populates `chunk_refs` in `get_context` responses. Off
-        /// by default — opt-in keeps the embedding model download
-        /// (~130 MB on first run with `--embedder candle`) under user
-        /// control.
-        #[arg(long)]
-        rag: bool,
-
-        /// Embedder backend used when `--rag` is set. `mock` ships a
-        /// deterministic zero-network BLAKE3-derived stub (tests,
-        /// development, exercising the tool surface without DLing a
-        /// model). `candle` loads BGE-small-en-v1.5 from
-        /// `~/.cache/standardoc/models/`, downloading it on first run.
-        #[arg(long, default_value = "mock", value_parser = ["mock", "candle"])]
-        embedder: String,
     },
 
     /// Print the on-disk schema version of the workspace index, the schema
@@ -333,19 +299,12 @@ fn main_inner() -> Result<(), ServerError> {
         Command::Query(args) => cmd_query(&args),
         Command::Rescan { path } => cmd_rescan(&path),
         Command::PurgeExcluded { path, yes } => cmd_purge_excluded(&path, yes),
-        Command::Lsp {
-            path,
-            stdio: _,
-            rag,
-            embedder,
-        } => cmd_lsp(&path, rag, &embedder),
+        Command::Lsp { path, stdio: _ } => cmd_lsp(&path),
         Command::Mcp {
             path,
             readonly,
             http,
-            rag,
-            embedder,
-        } => cmd_mcp(&path, readonly, http, rag, &embedder),
+        } => cmd_mcp(&path, readonly, http),
         Command::SchemaVersion { path } => cmd_schema_version(&path),
         Command::ResetUsage { path, period, yes } => cmd_reset_usage(&path, &period, yes),
         Command::StdignorePreview {
@@ -541,38 +500,21 @@ fn cmd_schema_version(path: &Path) -> Result<(), ServerError> {
     Ok(())
 }
 
-fn cmd_lsp(path: &Path, rag: bool, embedder: &str) -> Result<(), ServerError> {
+fn cmd_lsp(path: &Path) -> Result<(), ServerError> {
     let provider: Arc<dyn standardoc_core::LanguageProvider> = Arc::new(WorkspaceProvider::new());
     let handle = IndexHandle::open(path)?;
     let _ = warn::boot_binary_sweep(handle.workspace_root());
     let _ = warn::boot_lockfile_invalidation_sweep(&handle, handle.workspace_root());
     let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
 
-    let rag_pipeline = if rag {
-        Some(build_rag_pipeline(handle.workspace_root(), embedder)?)
-    } else {
-        None
-    };
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(ServerError::Io)?;
-    runtime.block_on(standardoc_server::serve_lsp(
-        handle,
-        provider,
-        filters,
-        rag_pipeline,
-    ))
+    runtime.block_on(standardoc_server::serve_lsp(handle, provider, filters))
 }
 
-fn cmd_mcp(
-    path: &Path,
-    readonly: bool,
-    http: Option<u16>,
-    rag: bool,
-    embedder: &str,
-) -> Result<(), ServerError> {
+fn cmd_mcp(path: &Path, readonly: bool, http: Option<u16>) -> Result<(), ServerError> {
     let provider: Arc<dyn standardoc_core::LanguageProvider> = Arc::new(WorkspaceProvider::new());
     let handle = if readonly {
         wait_for_db_then_open_readonly(path, READONLY_DB_WAIT)?
@@ -585,12 +527,6 @@ fn cmd_mcp(
     }
     let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
 
-    let rag_pipeline = if rag {
-        Some(build_rag_pipeline(handle.workspace_root(), embedder)?)
-    } else {
-        None
-    };
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -600,76 +536,11 @@ fn cmd_mcp(
         Some(port) => {
             let bind_addr = format!("127.0.0.1:{port}");
             runtime.block_on(standardoc_server::serve_mcp_http(
-                handle,
-                provider,
-                filters,
-                &bind_addr,
-                rag_pipeline,
+                handle, provider, filters, &bind_addr,
             ))
         }
-        None => runtime.block_on(standardoc_server::serve_mcp(
-            handle,
-            provider,
-            filters,
-            rag_pipeline,
-        )),
+        None => runtime.block_on(standardoc_server::serve_mcp(handle, provider, filters)),
     }
-}
-
-fn build_rag_pipeline(
-    workspace_root: &Path,
-    embedder_choice: &str,
-) -> Result<Arc<RagPipeline>, ServerError> {
-    let model = EmbedModel::bge_small_en_v1_5();
-    let store = RagStore::open(workspace_root, model)
-        .map_err(|e| ServerError::Io(io::Error::other(format!("rag store open: {e}"))))?;
-    let embedder: Arc<dyn Embedder> = match embedder_choice {
-        "mock" => Arc::new(MockEmbedder::new()),
-        "candle" => Arc::new(load_or_download_candle()?),
-        other => {
-            return Err(ServerError::Io(io::Error::other(format!(
-                "unknown --embedder choice: {other}"
-            ))));
-        }
-    };
-    Ok(Arc::new(RagPipeline::with_defaults(
-        Arc::new(store),
-        embedder,
-    )))
-}
-
-fn load_or_download_candle() -> Result<CandleBgeSmall, ServerError> {
-    let model_dir = resolve_models_dir().join("bge-small-en-v1.5");
-    if !CandleBgeSmall::is_present(&model_dir) {
-        // Structured stderr markers so the ext supervisor knows to suspend
-        // its endpoint-file timeout while the model download is in flight
-        // (130 MB on a fresh install can take a couple of seconds on a
-        // fast pipe, much longer on residential ADSL — bracketing the
-        // network phase tells the supervisor to wait it out instead of
-        // killing the daemon mid-fetch).
-        eprintln!(
-            "STDOC_RAG_DL_START: {{\"model\":\"bge-small-en-v1.5\",\"approx_bytes\":130000000,\"target\":\"{}\"}}",
-            escape_for_json(&model_dir.display().to_string()),
-        );
-        eprintln!(
-            "standardoc rag: BGE-small not found at {} — downloading (~130 MB)...",
-            model_dir.display()
-        );
-        let dl_result = CandleBgeSmall::download(&model_dir);
-        eprintln!("STDOC_RAG_DL_DONE");
-        dl_result
-            .map_err(|e| ServerError::Io(io::Error::other(format!("rag model download: {e}"))))?;
-        eprintln!("standardoc rag: model downloaded");
-    }
-    CandleBgeSmall::load(model_dir)
-        .map_err(|e| ServerError::Io(io::Error::other(format!("rag model load: {e}"))))
-}
-
-/// Minimal JSON string escaping for the marker payload above. Only
-/// quote + backslash are escaped — the model dir is filesystem-controlled
-/// and otherwise printable.
-fn escape_for_json(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 const READONLY_DB_WAIT: Duration = Duration::from_mins(1);

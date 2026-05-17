@@ -15,8 +15,8 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use standardoc_core::{
-    IndexHandle, LanguageProvider, RagWatcherHandle, ResolveOutcome, ResolverRegistry,
-    RevisionRelinkHandle, ScanFilters, SessionsHandle, UsagePeriod, WatcherHandle,
+    IndexHandle, LanguageProvider, ResolveOutcome, ResolverRegistry, ScanFilters, SessionsHandle,
+    UsagePeriod, WatcherHandle,
     query::{
         self, SymbolFilter,
         call_sites::{self as call_sites_query, CallSiteFilters, FIND_CALL_SITES_DEFAULT_LIMIT},
@@ -30,9 +30,6 @@ use standardoc_core::{
 };
 use standardoc_ir::SourceOrigin;
 use standardoc_ir::{EdgeKind, IndexingMode, Kind, LinkDirection, RawSymbol, Visibility};
-use standardoc_rag::embedder::Embedder;
-use standardoc_rag::store::RagStore;
-use standardoc_rag::types::{Chunk, ChunkRef};
 
 use crate::mcp::error::{SessionsErr, server_error_to_rmcp, sessions_err_to_rmcp};
 use crate::mcp::usage::{
@@ -55,13 +52,6 @@ const DID_YOU_MEAN_THRESHOLD: f32 = 0.6;
 const DID_YOU_MEAN_LIMIT: usize = 5;
 const GET_CONTEXT_DEFAULT_DEPTH: u8 = 1;
 const FIND_SIMILAR_DEFAULT_THRESHOLD: f32 = 0.8;
-const CHUNK_REFS_DEFAULT_LIMIT: u32 = 10;
-/// Minimum blended confidence for a `ChunkRef` to be surfaced through the
-/// MCP layer. Chunks below this floor are filtered out — without this gate,
-/// `AutoNameSubstring` links (base 0.4) too often promote thematically
-/// irrelevant prose (generic README mentions of `open` / `load` / etc.).
-const CHUNK_REF_MIN_CONFIDENCE: f32 = 0.55;
-const FETCH_CHUNKS_MAX_INPUT: usize = 64;
 
 /// Window during which a prior `get_context(fqdn, depth=1)` is considered
 /// a "scoping pass" that justifies a follow-up `depth=2` on the same FQDN.
@@ -98,23 +88,8 @@ pub struct StandardocMcp {
     /// Constructed at `new()` time from the handle's workspace root —
     /// each resolver probes its binary then memorizes the result.
     registry: Arc<ResolverRegistry>,
-    /// Optional handle to the RAG sidecar store. When `Some`,
-    /// `get_context` includes `chunk_refs` for the queried symbol and
-    /// the `fetch_chunks` tool is functional. When `None`, both
-    /// gracefully degrade (empty refs / RAG-disabled error).
-    rag_store: Option<Arc<RagStore>>,
-    /// Optional embedder used by `get_context(fqdn, query?)` for
-    /// query-time re-rank of `chunk_refs`. When `None`, the query
-    /// argument is silently ignored (pre-computed `link × def_site_boost`
-    /// confidence drives the order). Wire via `with_embedder()`.
-    rag_embedder: Option<Arc<dyn Embedder>>,
     index_ready: Arc<AtomicBool>,
     watcher: Arc<Mutex<Option<WatcherHandle>>>,
-    rag_watcher: Arc<Mutex<Option<RagWatcherHandle>>>,
-    /// Optional revision-driven re-link watcher (track T-B). Lives
-    /// alongside `rag_watcher`. Holds the join handle so dropping the
-    /// `StandardocMcp` joins the thread on shutdown.
-    rag_relink_watcher: Arc<Mutex<Option<RevisionRelinkHandle>>>,
     /// In-memory cache of `(fqdn → ts_unix)` recording when each FQDN
     /// was last fetched at `depth=1`. Drives the "naked depth=2"
     /// routing hint: a depth=2 call with no recent depth=1 on the
@@ -143,12 +118,8 @@ impl StandardocMcp {
             provider,
             filters,
             registry,
-            rag_store: None,
-            rag_embedder: None,
             index_ready: Arc::new(AtomicBool::new(false)),
             watcher: Arc::new(Mutex::new(None)),
-            rag_watcher: Arc::new(Mutex::new(None)),
-            rag_relink_watcher: Arc::new(Mutex::new(None)),
             recent_depth1: Arc::new(Mutex::new(HashMap::new())),
             tool_router: Self::tool_router(),
         }
@@ -157,13 +128,11 @@ impl StandardocMcp {
     /// Aggregate context for a symbol: signature + descriptions + four
     /// pre-grouped neighbor lists (callers / callees / imports / imported_by).
     /// `depth` selects the shape's richness — see [`SymbolContextWithNeighbors`].
-    /// When the daemon was booted with a RAG store, the response also carries
-    /// `chunk_refs` (lightweight URI envelopes). Fetch chunk text via the
-    /// `fetch_chunks` tool. The response sets `routing_hint` when a depth=2
-    /// call is made without a recent depth=1 scoping pass — an in-band nudge
-    /// to follow the explore→cible→drill protocol.
+    /// The response sets `routing_hint` when a depth=2 call is made without a
+    /// recent depth=1 scoping pass — an in-band nudge to follow the
+    /// explore→cible→drill protocol.
     #[tool(
-        description = "Aggregate context for a symbol identified by its fully-qualified name (FQDN). Returns the symbol's signature, descriptions, four pre-grouped neighbor lists (callers, callees, imports, imported_by) AND lightweight `chunk_refs` envelopes pointing at related prose chunks (markdown docs, ADRs, design notes). \n\n**Pick `depth` deliberately:** `depth=1` returns neighbor FQDNs only — cheap, the right call to map a symbol's neighborhood. `depth=2` enriches each resolved neighbor with its full RawSymbol — only worth it when you have already used a depth=1 pass to identify which neighbors matter. Hard-clamped to 1..=2. The response carries `routing_hint` when a depth=2 call is detected without a prior depth=1 on the same FQDN within the last 5 minutes — that's a signal to map first, drill second.\n\nThe `chunk_refs` field is empty when no prose is linked or the RAG layer is not enabled — fetch their text via the `fetch_chunks` tool with the URIs (`rag://<id>`)."
+        description = "Aggregate context for a symbol identified by its fully-qualified name (FQDN). Returns the symbol's signature, descriptions, and four pre-grouped neighbor lists (callers, callees, imports, imported_by).\n\n**Pick `depth` deliberately:** `depth=1` returns neighbor FQDNs only — cheap, the right call to map a symbol's neighborhood. `depth=2` enriches each resolved neighbor with its full RawSymbol — only worth it when you have already used a depth=1 pass to identify which neighbors matter. Hard-clamped to 1..=2. The response carries `routing_hint` when a depth=2 call is detected without a prior depth=1 on the same FQDN within the last 5 minutes — that's a signal to map first, drill second."
     )]
     async fn get_context(
         &self,
@@ -220,12 +189,8 @@ impl StandardocMcp {
 
         match result {
             Some(ctx) => {
-                let chunk_refs = self
-                    .chunk_refs_for(&params.fqdn, params.query.as_deref())
-                    .await?;
                 let response = GetContextResponse {
                     ctx,
-                    chunk_refs,
                     routing_hint,
                 };
                 let files = files_from_context(&response.ctx);
@@ -277,31 +242,6 @@ impl StandardocMcp {
         };
         guard.retain(|_, ts| now - *ts <= RECENT_DEPTH1_RETENTION_SECS);
         guard.insert(fqdn.to_owned(), now);
-    }
-
-    /// Resolves a list of `rag://<id>` URIs to the underlying prose
-    /// chunks. The companion to `get_context` — call it with the URIs
-    /// surfaced in `chunk_refs` to materialise the actual chunk text.
-    /// Unknown / malformed URIs are silently skipped.
-    #[tool(
-        description = "Resolves a list of `rag://<id>` URIs to the underlying prose chunks (markdown documentation, ADRs, design notes). Pair with `get_context` — call this with URIs from the response's `chunk_refs`. Each returned chunk carries `text`, `source_path`, `section_header` (nearest H2/H3) and byte offsets. Unknown or malformed URIs are silently dropped (diff inputs vs outputs to detect them)."
-    )]
-    async fn fetch_chunks(
-        &self,
-        Parameters(params): Parameters<FetchChunksParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let Some(store) = self.rag_store.clone() else {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "RAG layer not enabled on this daemon — fetch_chunks returns nothing. Boot the daemon with a RAG store to enable prose retrieval.",
-            )]));
-        };
-        let mut uris = params.uris;
-        uris.truncate(FETCH_CHUNKS_MAX_INPUT);
-        let chunks = tokio::task::spawn_blocking(move || store.fetch_by_uris(&uris))
-            .await
-            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-            .map_err(|e| ErrorData::internal_error(format!("rag fetch_by_uris: {e}"), None))?;
-        Ok(success_json::<Vec<Chunk>>(&chunks))
     }
 
     /// FTS5 search across symbol `name` and `fqdn` columns. Returns ranked
@@ -646,22 +586,13 @@ impl StandardocMcp {
     /// Read-only snapshot of the workspace revision counter PLUS daemon
     /// capabilities. The `revision` number is monotonic — every successful
     /// write (cold-start ingest, watcher upsert, rescan) bumps it by 1. The
-    /// `rag` / `watcher` / `indexing` blocks let callers introspect what
-    /// the daemon is wired with, so an AI can pick the right tool path
-    /// (e.g. omit `query` from `get_context` when `rag.embedder` is null).
+    /// `watcher` / `indexing` blocks let callers introspect what the daemon
+    /// is wired with.
     #[tool(
-        description = "Returns the current workspace revision number AND daemon capabilities (`rag.enabled`, `rag.embedder`, `watcher.active`, `indexing.ready`, `workspace.kind`). Use the revision with `check_stale` to detect when fqdns you have already cited have been modified. Use the capabilities at session boot to decide tool flow — passing `query` to `get_context` only re-ranks chunks when `rag.embedder` is non-null. `workspace.kind` is the detected monorepo organizer (cargo/npm/pnpm/yarn/bun/deno/go/lerna/nx/turborepo/mira/single/custom:<tag>) — null before cold-start detection finishes. Cheap call; no parameters."
+        description = "Returns the current workspace revision number AND daemon capabilities (`watcher.active`, `indexing.ready`, `workspace.kind`). Use the revision with `check_stale` to detect when fqdns you have already cited have been modified. `workspace.kind` is the detected monorepo organizer (cargo/npm/pnpm/yarn/bun/deno/go/lerna/nx/turborepo/mira/single/custom:<tag>) — null before cold-start detection finishes. Cheap call; no parameters."
     )]
     async fn current_revision(&self) -> Result<CallToolResult, ErrorData> {
         let revision = self.handle.revision();
-        let rag_enabled = self.rag_store.is_some();
-        let embedder = self.rag_embedder.as_ref().map(|e| {
-            let model = e.model();
-            EmbedderInfoJson {
-                id: model.id.clone(),
-                dim: model.dim,
-            }
-        });
         let watcher_active = self
             .watcher
             .lock()
@@ -680,10 +611,6 @@ impl StandardocMcp {
             .map(|k| k.as_str().into_owned());
         Ok(success_json(&CurrentRevisionJson {
             revision,
-            rag: RagCapabilityJson {
-                enabled: rag_enabled,
-                embedder,
-            },
             watcher: WatcherCapabilityJson {
                 active: watcher_active,
             },
@@ -1426,117 +1353,24 @@ impl StandardocMcp {
     pub fn watcher_slot(&self) -> Arc<Mutex<Option<WatcherHandle>>> {
         Arc::clone(&self.watcher)
     }
-
-    pub fn rag_watcher_slot(&self) -> Arc<Mutex<Option<RagWatcherHandle>>> {
-        Arc::clone(&self.rag_watcher)
-    }
-
-    pub fn rag_relink_watcher_slot(&self) -> Arc<Mutex<Option<RevisionRelinkHandle>>> {
-        Arc::clone(&self.rag_relink_watcher)
-    }
-
-    /// Enables the RAG layer for this handler. Builder-style so existing
-    /// constructors stay backward-compatible — daemons that wire a RAG
-    /// store call this immediately after `new()` ; daemons that don't
-    /// keep `rag_store = None` and `fetch_chunks` returns the "not
-    /// enabled" message while `get_context` emits an empty `chunk_refs`.
-    #[must_use]
-    pub fn with_rag(mut self, rag_store: Arc<RagStore>) -> Self {
-        self.rag_store = Some(rag_store);
-        self
-    }
-
-    /// Wires an embedder for query-time `chunk_refs` re-ranking. Only
-    /// useful in combination with `with_rag` — the embedder is invoked
-    /// from `get_context(fqdn, query?)` when the caller passes a query
-    /// string, to recompute cosine similarity between the query and
-    /// each linked chunk's stored vector.
-    #[must_use]
-    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
-        self.rag_embedder = Some(embedder);
-        self
-    }
-
-    pub const fn rag_store(&self) -> Option<&Arc<RagStore>> {
-        self.rag_store.as_ref()
-    }
-
-    /// Looks up chunk references for `fqdn` if the RAG layer is enabled.
-    /// When `query` is provided AND an embedder is wired, the refs are
-    /// re-ranked by cosine similarity between the query embedding and
-    /// each chunk's stored vector. Returns an empty vec when RAG is
-    /// disabled or any step fails — degradation is silent so
-    /// `get_context` always succeeds for the graph data.
-    async fn chunk_refs_for(
-        &self,
-        fqdn: &str,
-        query: Option<&str>,
-    ) -> Result<Vec<ChunkRef>, ErrorData> {
-        let Some(store) = self.rag_store.clone() else {
-            return Ok(Vec::new());
-        };
-        let fqdn_owned = fqdn.to_string();
-
-        let mut refs: Vec<ChunkRef> =
-            if let (Some(q), Some(embedder)) = (query, self.rag_embedder.clone()) {
-                let q_owned = q.to_string();
-                tokio::task::spawn_blocking(move || -> Result<Vec<ChunkRef>, ErrorData> {
-                    let vector = embedder.embed(&q_owned).map_err(|e| {
-                        ErrorData::internal_error(format!("rag embed query: {e}"), None)
-                    })?;
-                    store
-                        .refs_for_symbol_with_query(&fqdn_owned, &vector, CHUNK_REFS_DEFAULT_LIMIT)
-                        .map_err(|e| ErrorData::internal_error(format!("rag re-rank: {e}"), None))
-                })
-                .await
-                .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))??
-            } else {
-                tokio::task::spawn_blocking(move || {
-                    store.refs_for_symbol(&fqdn_owned, CHUNK_REFS_DEFAULT_LIMIT)
-                })
-                .await
-                .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-                .unwrap_or_default()
-            };
-
-        refs.retain(|r| r.confidence >= CHUNK_REF_MIN_CONFIDENCE);
-        Ok(refs)
-    }
 }
 
 /// Tool output for `get_context` : the canonical neighbor-flat shape
-/// from `query::context_for_symbol_with_neighbors`, plus `chunk_refs`
-/// added via `#[serde(flatten)]` so the JSON layout stays a single flat
-/// object (consumers that don't know about RAG see an extra optional
-/// `chunk_refs` field and can ignore it). `routing_hint` is `None` for
-/// well-paced calls and emits an in-band 3-phase nudge when a depth=2
-/// call lands without a recent depth=1 scoping pass on the same FQDN.
+/// from `query::context_for_symbol_with_neighbors`. `routing_hint` is
+/// `None` for well-paced calls and emits an in-band 3-phase nudge when
+/// a depth=2 call lands without a recent depth=1 scoping pass on the
+/// same FQDN.
 #[derive(Debug, Serialize)]
 pub(crate) struct GetContextResponse {
     #[serde(flatten)]
     pub ctx: query::SymbolContextWithNeighbors,
-    pub chunk_refs: Vec<ChunkRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routing_hint: Option<String>,
 }
 
-/// Tool input — `fetch_chunks(uris)`. Resolves `rag://<id>` URIs to the
-/// underlying `Chunk` rows. Unknown / malformed entries are silently
-/// dropped. The list is hard-capped at `FETCH_CHUNKS_MAX_INPUT` to keep
-/// the response small.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct FetchChunksParams {
-    /// URIs of the form `rag://<id>`, typically copied from the
-    /// `chunk_refs` field of a previous `get_context` call.
-    pub uris: Vec<String>,
-}
-
-/// Tool input — `get_context(fqdn, depth?, query?)`. Forwarded to
+/// Tool input — `get_context(fqdn, depth?)`. Forwarded to
 /// `query::context_for_symbol_with_neighbors`. `depth` defaults to `1`
-/// and is hard-clamped to `1..=2` server-side. When `query` is
-/// supplied AND the daemon is booted with both a RAG store and an
-/// embedder, `chunk_refs` are re-ranked by cosine similarity between
-/// the query embedding and each chunk's stored vector.
+/// and is hard-clamped to `1..=2` server-side.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct GetContextParams {
     /// The fully-qualified domain name of the symbol to look up
@@ -1546,11 +1380,6 @@ pub(crate) struct GetContextParams {
     /// `2` = full RawSymbol per resolved neighbor (rich, reasoning).
     /// Defaults to `1`. Hard-clamped to `1..=2`.
     pub depth: Option<u8>,
-    /// Optional natural-language query used to re-rank `chunk_refs` by
-    /// semantic relevance. Ignored when the daemon has no RAG store or
-    /// no embedder wired.
-    #[serde(default)]
-    pub query: Option<String>,
 }
 
 /// Tool input — `find_symbol(query, limit?, kind?, visibility?, module?)`.
@@ -1890,41 +1719,16 @@ pub(crate) struct SessionSyncOutParams {
 /// Tool output for `current_revision`. The legacy `revision` field is kept
 /// as the first key so callers that only deserialize `{revision}` keep
 /// working; new fields surface daemon capabilities so an AI can decide
-/// at boot whether passing `query` to `get_context` will re-rank chunks
-/// (`rag.embedder.is_some()`), whether the live watcher is debouncing
-/// edits (`watcher.active`), whether early read calls would hit the
-/// "indexing in progress" branch (`indexing.ready`), and what monorepo
-/// organizer the workspace uses (`workspace.kind`, Stage 3e-3).
+/// at boot whether the live watcher is debouncing edits
+/// (`watcher.active`), whether early read calls would hit the "indexing
+/// in progress" branch (`indexing.ready`), and what monorepo organizer
+/// the workspace uses (`workspace.kind`, Stage 3e-3).
 #[derive(Debug, Serialize)]
 pub(crate) struct CurrentRevisionJson {
     pub revision: u64,
-    pub rag: RagCapabilityJson,
     pub watcher: WatcherCapabilityJson,
     pub indexing: IndexingCapabilityJson,
     pub workspace: WorkspaceCapabilityJson,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct RagCapabilityJson {
-    /// `true` when the daemon was booted with `--rag` and a `RagStore`
-    /// was successfully opened. Implies `fetch_chunks` is callable and
-    /// `chunk_refs` are populated on `get_context` responses.
-    pub enabled: bool,
-    /// Embedder identity. `Some` when `enabled` AND an embedder is wired
-    /// — only then does passing `query` to `get_context` re-rank
-    /// `chunk_refs` by cosine similarity. `None` with `enabled: true`
-    /// means link-confidence ordering only (the `query` arg is silently
-    /// ignored).
-    pub embedder: Option<EmbedderInfoJson>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct EmbedderInfoJson {
-    /// Short model id (e.g. `"bge-small-en-v1.5"`, `"mock-blake3-128"`).
-    /// Mirrors `EmbedModel.id` stored in the RAG schema metadata.
-    pub id: String,
-    /// Vector dimension produced by this embedder.
-    pub dim: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -2395,44 +2199,6 @@ mod tests {
         assert!(!msg.contains('/'), "got `{msg}`");
     }
 
-    #[test]
-    fn chunk_ref_min_confidence_filters_strictly_below_threshold() {
-        use standardoc_rag::ChunkRef;
-        let mut refs = vec![
-            ChunkRef {
-                uri: "rag://1".to_string(),
-                confidence: 0.80,
-                source_path: "high.md".to_string(),
-                section_header: None,
-            },
-            ChunkRef {
-                uri: "rag://2".to_string(),
-                confidence: 0.55,
-                source_path: "exact.md".to_string(),
-                section_header: None,
-            },
-            ChunkRef {
-                uri: "rag://3".to_string(),
-                confidence: 0.5499,
-                source_path: "just_below.md".to_string(),
-                section_header: None,
-            },
-            ChunkRef {
-                uri: "rag://4".to_string(),
-                confidence: 0.40,
-                source_path: "noise.md".to_string(),
-                section_header: None,
-            },
-        ];
-        refs.retain(|r| r.confidence >= CHUNK_REF_MIN_CONFIDENCE);
-        let uris: Vec<&str> = refs.iter().map(|r| r.uri.as_str()).collect();
-        assert_eq!(
-            uris,
-            vec!["rag://1", "rag://2"],
-            "must keep >= threshold (inclusive) and preserve input order",
-        );
-    }
-
     use standardoc_core::{ScanFilters, cold_start};
     use standardoc_lang_provider::WorkspaceProvider;
     use std::path::Path;
@@ -2473,7 +2239,6 @@ mod tests {
             .get_context(Parameters(GetContextParams {
                 fqdn: "crate::anything".into(),
                 depth: None,
-                query: None,
             }))
             .await
             .expect("tool returns Ok with friendly degradation");
@@ -2683,7 +2448,6 @@ mod tests {
             .get_context(Parameters(GetContextParams {
                 fqdn: "crate::ghost".into(),
                 depth: Some(1),
-                query: None,
             }))
             .await
             .unwrap();
@@ -3057,20 +2821,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn current_revision_reports_rag_disabled_on_default_fixture() {
+    async fn current_revision_omits_rag_field_post_removal() {
         let (_dir, mcp) = fixture();
         let result = mcp.current_revision().await.unwrap();
         let body = body_text(&result);
+        // RAG layer was removed — the `rag` field must no longer be
+        // surfaced. Consumers that previously read `rag.enabled` get a
+        // breaking absence rather than a stale `false`.
         assert!(
-            body.contains("\"rag\""),
-            "expected rag capability block, got `{body}`"
+            !body.contains("\"rag\""),
+            "rag capability block must be gone, got `{body}`"
         );
-        assert!(
-            body.contains("\"enabled\": false"),
-            "fixture has no RAG store, got `{body}`"
-        );
-        // embedder must be `null` when no embedder is wired.
-        assert!(body.contains("\"embedder\": null"), "got `{body}`");
     }
 
     #[tokio::test(flavor = "multi_thread")]

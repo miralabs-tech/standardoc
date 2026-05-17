@@ -18,7 +18,6 @@ standardoc-ir            = { version = "1.0.0-beta.2", path = "crates/standardoc
 standardoc-bridge-sdk    = { version = "1.0.0-beta.2", path = "crates/standardoc-bridge-sdk" }
 standardoc-lang-provider = { version = "1.0.0-beta.2", path = "crates/standardoc-lang-provider" }
 standardoc-core          = { version = "1.0.0-beta.2", path = "crates/standardoc-core" }
-standardoc-rag           = { version = "1.0.0-beta.2", path = "crates/standardoc-rag" }
 standardoc-server        = { version = "1.0.0-beta.2", path = "crates/standardoc-server" }
 standardoc-graph-viz     = { version = "1.0.0-beta.2", path = "crates/standardoc-graph-viz" }
 # Versioned independently of the core workspace per SOURCEMAP_v1.md §8 —
@@ -62,11 +61,6 @@ ctrlc       = "3"
 ignore      = "0.4"
 strsim      = "0.11"
 standarbuild-detect = "0.3"
-candle-core         = { version = "0.9", default-features = false }
-candle-nn           = { version = "0.9", default-features = false }
-candle-transformers = { version = "0.9", default-features = false }
-tokenizers          = { version = "0.21", default-features = false, features = ["onig"] }
-hf-hub              = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"] }
 wasm-bindgen              = "0.2"
 wasm-bindgen-futures      = "0.4"
 js-sys                    = "0.3"
