@@ -587,15 +587,11 @@ function handler() {
         }
 
         #[test]
-        #[ignore = "TS walker doesn't visit top-level Stmt::Expr (only Stmt::Decl). \
-                    Vue 3 script-setup idiom of top-level call statements is therefore \
-                    invisible to call_site emission. Pre-existing limitation; activates \
-                    when top-level expression walking is wired up (separate change)."]
         fn ir4e_vue_script_setup_call_sites_attributed_to_module_fqdn() {
             // `<script setup>` runs in module scope — call_sites emitted
-            // at the top level would have `from_fqdn` equal to the SFC's
-            // module fqdn. Vue 3 idiomatic shape. Ignored because the TS
-            // walker currently skips top-level expression statements.
+            // at the top level have `from_fqdn` equal to the SFC's
+            // module fqdn. Vue 3 idiomatic shape. Now reachable since
+            // `process_item_p2` walks top-level `Stmt::Expr` for calls.
             let dir = tempdir().unwrap();
             let root = dir.path();
             write(root, "package.json", r#"{"name":"@app/setup"}"#);

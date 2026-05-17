@@ -2533,4 +2533,54 @@ mod tests {
             .unwrap_or_else(|| panic!("expected helper() call_site, got {css:?}"));
         assert_eq!(cs.from_fqdn, "src::Svc::run");
     }
+
+    // --- IR-4-e: top-level Stmt::Expr emission (Vue script-setup unblock) ---
+
+    #[test]
+    fn ir4e_top_level_stmt_expr_emits_call_site_with_module_fqdn() {
+        // Top-level expression statement at module scope (Vue 3
+        // script-setup idiom). No enclosing function/method, so
+        // `from_fqdn` is the module fqdn itself.
+        let css = run_with_call_sites("foo(\"x\");");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "foo")
+            .unwrap_or_else(|| panic!("expected foo(...) call_site, got {css:?}"));
+        assert_eq!(cs.from_fqdn, "src");
+        assert!(cs.receiver_chain.is_empty());
+        assert_eq!(cs.args.len(), 1);
+        assert!(cs.args[0].is_string_literal);
+        assert_eq!(cs.args[0].value, "x");
+    }
+
+    #[test]
+    fn ir4e_top_level_new_expression_emits_call_site() {
+        // Top-level NewExpr — proves the new Stmt::Expr arm walks
+        // every callable shape (NewExpr, not just CallExpr).
+        let css = run_with_call_sites("new Foo(\"x\");");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "Foo")
+            .unwrap_or_else(|| panic!("expected new Foo(...) call_site, got {css:?}"));
+        assert_eq!(cs.from_fqdn, "src");
+        assert_eq!(cs.args.len(), 1);
+        assert!(cs.args[0].is_string_literal);
+    }
+
+    #[test]
+    fn ir4e_top_level_method_chain_receiver_walked() {
+        // Top-level member-access call — receiver_chain walker must
+        // produce `["obj", "api"]` even when the call is at module
+        // scope (no enclosing fn). Attribution = module fqdn.
+        let css = run_with_call_sites("obj.api.create();");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "obj.api.create")
+            .unwrap_or_else(|| panic!("expected obj.api.create() call_site, got {css:?}"));
+        assert_eq!(cs.from_fqdn, "src");
+        assert_eq!(
+            cs.receiver_chain,
+            vec!["obj".to_string(), "api".to_string()]
+        );
+    }
 }

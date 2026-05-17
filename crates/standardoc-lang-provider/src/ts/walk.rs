@@ -523,6 +523,17 @@ fn process_item_p2(ctx: &mut TsWalkContext<'_>, item: &ModuleItem, current_modul
         ModuleItem::Stmt(Stmt::Decl(decl)) => {
             visit_decl_bodies(ctx, decl, current_module);
         }
+        ModuleItem::Stmt(Stmt::Expr(expr_stmt)) => {
+            // Top-level expression statement (Vue 3 script-setup idiom:
+            // `onMount(() => { ... });` at module scope). No enclosing
+            // symbol — calls attribute to the module fqdn itself.
+            visit::visit_expression_for_calls(
+                ctx,
+                &expr_stmt.expr,
+                current_module,
+                current_module,
+            );
+        }
         _ => {}
     }
 }
