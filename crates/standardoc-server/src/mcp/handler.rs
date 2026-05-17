@@ -469,11 +469,13 @@ impl StandardocMcp {
     /// file at those line numbers. Use this when you need to reason about the
     /// actual code of a known FQDN (the graph tells you WHERE; this tells you
     /// WHAT). `max_lines` clamps long bodies; `strip_attrs` drops leading docs
-    /// + attribute blocks; `signature_only` truncates after the opening `{`.
-    /// The response carries `truncated`, `stripped_lines` and `signature_only`
-    /// so the caller can audit what was returned vs. the verbatim slice.
+    /// + attribute blocks; `signature_only` truncates after the opening `{`;
+    /// `strip_inline_comments` removes `// …` and `/* … */` from the returned
+    /// body (string-literal safe). The response carries `truncated`,
+    /// `stripped_lines` and `signature_only` so the caller can audit what was
+    /// returned vs. the verbatim slice.
     #[tool(
-        description = "Returns the raw source text of a symbol identified by FQDN, sliced from the file at its declared start_line..end_line. Pair with `get_context` (graph relations) when you need to actually read the function body. Optional knobs: `max_lines` caps total output (`truncated=true` flag), `strip_attrs=true` drops leading doc comments / `#[…]` attribute blocks (`stripped_lines` count), `signature_only=true` truncates after the first `{` (returns just the multi-line signature). Returns `null` when no symbol matches the FQDN — call `find_symbol` first if you only have a name fragment."
+        description = "Returns the raw source text of a symbol identified by FQDN, sliced from the file at its declared start_line..end_line. Pair with `get_context` (graph relations) when you need to actually read the function body. Optional knobs: `max_lines` caps total output (`truncated=true` flag), `strip_attrs=true` drops leading doc comments / `#[…]` attribute blocks (`stripped_lines` count), `signature_only=true` truncates after the first `{` (returns just the multi-line signature), `strip_inline_comments=true` removes inline `// …` and `/* … */` comments from the body (string-literal safe — `\"…\"`, raw strings, TS templates passed through verbatim). Returns `null` when no symbol matches the FQDN — call `find_symbol` first if you only have a name fragment."
     )]
     async fn get_body(
         &self,
@@ -493,6 +495,7 @@ impl StandardocMcp {
             max_lines: params.max_lines,
             strip_attrs: params.strip_attrs.unwrap_or(false),
             signature_only: params.signature_only.unwrap_or(false),
+            strip_inline_comments: params.strip_inline_comments.unwrap_or(false),
         };
         let raw_for_call = raw_fqdn.clone();
         let opts_clone = opts.clone();
@@ -1413,9 +1416,9 @@ pub struct ResolveExternalJson {
     pub detail: Option<String>,
 }
 
-/// Tool input — `get_body(fqdn, max_lines?, strip_attrs?, signature_only?)`.
-/// Forwarded to `query::body_for_fqdn`. Returns `null` if `fqdn` is not in
-/// the index.
+/// Tool input — `get_body(fqdn, max_lines?, strip_attrs?, signature_only?,
+/// strip_inline_comments?)`. Forwarded to `query::body_for_fqdn`. Returns
+/// `null` if `fqdn` is not in the index.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct GetBodyParams {
     /// Fully-qualified domain name of the target symbol (e.g.
@@ -1440,6 +1443,15 @@ pub(crate) struct GetBodyParams {
     /// `signature_only: true` to confirm. No-op when no `{` is present.
     #[serde(default)]
     pub signature_only: Option<bool>,
+    /// When `true`, strip inline `// …` line comments and `/* … */` block
+    /// comments from the returned body. String-literal safe — `"…"`
+    /// (including `\` escapes), Rust raw strings (`r"…"`, `r#"…"#`), and
+    /// TS template literals (`` `…` ``) pass through verbatim. Newlines
+    /// inside multi-line block comments are preserved so line-number
+    /// alignment with the source file stays intact. Layered on top of
+    /// `strip_attrs` / `signature_only` / `max_lines`.
+    #[serde(default)]
+    pub strip_inline_comments: Option<bool>,
 }
 
 /// Tool output for `current_revision`. The legacy `revision` field is kept
@@ -2401,6 +2413,7 @@ mod tests {
                 max_lines: None,
                 strip_attrs: None,
                 signature_only: None,
+                strip_inline_comments: None,
             }))
             .await
             .expect("tool returns Ok with friendly degradation");
@@ -2478,6 +2491,7 @@ mod tests {
                 max_lines: None,
                 strip_attrs: None,
                 signature_only: None,
+                strip_inline_comments: None,
             }))
             .await
             .unwrap();

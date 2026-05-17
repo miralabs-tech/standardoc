@@ -850,6 +850,19 @@ pub struct BodyOptions {
     /// signature view. No-op for languages without `{` (Python, Lua —
     /// punted to a future per-language handler).
     pub signature_only: bool,
+    /// Strip C-style inline comments from the returned body: `// …\n`
+    /// line comments and `/* … */` block comments. Operates after
+    /// `strip_attrs` / `signature_only` / `max_lines`, so the leading-
+    /// noise paragraph drop and the dedent stay independent knobs.
+    /// String-literal safe for `"…"` double-quoted strings (with `\`
+    /// escapes), Rust raw strings (`r"…"`, `r#"…"#`, …) and TS
+    /// template literals (`` `…` ``). Single-quoted strings are
+    /// passed through verbatim — this is correct for Rust char
+    /// literals + lifetimes but means TS `'string with // inside'`
+    /// would still have the `//` consumed (rare; flag it if it bites).
+    /// Lines fully consumed by a stripped comment become blank rather
+    /// than disappearing, so line-number correspondence is preserved.
+    pub strip_inline_comments: bool,
 }
 
 /// Returns the raw source text of the symbol at `fqdn`, sliced from the file
@@ -915,12 +928,17 @@ pub fn body_for_fqdn(
         _ => (after_signature, false),
     };
     let compact = compact_body_indent(taken);
+    let final_body = if opts.strip_inline_comments {
+        strip_inline_comments_in_body(&compact.body)
+    } else {
+        compact.body
+    };
     Ok(Some(BodySlice {
         fqdn: symbol.fqdn.clone(),
         file: symbol.location.file.clone(),
         start_line: symbol.location.start_line,
         end_line: symbol.location.end_line,
-        body: compact.body,
+        body: final_body,
         truncated,
         total_body_lines: total,
         stripped_lines: u32::try_from(stripped_count).unwrap_or(u32::MAX),
@@ -928,6 +946,141 @@ pub fn body_for_fqdn(
         dedented_prefix_len: compact.dedented_prefix_len,
         indent_unit: compact.indent_unit,
     }))
+}
+
+/// Strip C-style inline comments from `body` while leaving `"…"` string
+/// literals, Rust raw strings (`r"…"`, `r#"…"#`), and TS template
+/// literals (`` `…` ``) untouched.
+///
+/// `//` strips to end of line. `/* … */` strips through the closing
+/// `*/`, preserving newlines so line-number alignment is intact when
+/// the caller pairs the body with diagnostics. Single-quoted spans
+/// (`'…'`) are walked as plain code — correct for Rust lifetimes /
+/// char literals; a TS `'string'` with `//` inside is a documented
+/// edge case (the comment characters get stripped).
+///
+/// Walk is byte-level but only ASCII tokens (`/ * " ` r # \ \n`) drive
+/// state transitions — every non-token byte is included via
+/// `out.push_str(&body[copy_from..i])` slice copies, so multi-byte
+/// UTF8 sequences stay intact.
+fn strip_inline_comments_in_body(body: &str) -> String {
+    enum St {
+        Code,
+        LineComment,
+        BlockComment(u32),
+        DqString,
+        Template,
+        RawString(usize),
+    }
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut state = St::Code;
+    let mut copy_from = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match state {
+            St::Code => {
+                // Rust raw string opener: `r"` or `r#"` / `r##"` …
+                if b == b'r' {
+                    let mut j = i + 1;
+                    let mut hashes = 0usize;
+                    while j < bytes.len() && bytes[j] == b'#' {
+                        hashes += 1;
+                        j += 1;
+                    }
+                    if j < bytes.len() && bytes[j] == b'"' {
+                        state = St::RawString(hashes);
+                        i = j + 1;
+                        continue;
+                    }
+                }
+                if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                    out.push_str(&body[copy_from..i]);
+                    state = St::LineComment;
+                    i += 2;
+                    continue;
+                }
+                if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                    out.push_str(&body[copy_from..i]);
+                    state = St::BlockComment(1);
+                    i += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    state = St::DqString;
+                } else if b == b'`' {
+                    state = St::Template;
+                }
+                i += 1;
+            }
+            St::LineComment => {
+                if b == b'\n' {
+                    copy_from = i;
+                    state = St::Code;
+                }
+                i += 1;
+            }
+            St::BlockComment(depth) => {
+                if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                    state = St::BlockComment(depth + 1);
+                    i += 2;
+                    continue;
+                }
+                if b == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                    if depth == 1 {
+                        state = St::Code;
+                        copy_from = i + 2;
+                    } else {
+                        state = St::BlockComment(depth - 1);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if b == b'\n' {
+                    out.push('\n');
+                }
+                i += 1;
+            }
+            St::DqString => {
+                if b == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    state = St::Code;
+                }
+                i += 1;
+            }
+            St::Template => {
+                if b == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                if b == b'`' {
+                    state = St::Code;
+                }
+                i += 1;
+            }
+            St::RawString(hashes) => {
+                if b == b'"' {
+                    let end = i + 1 + hashes;
+                    if end <= bytes.len()
+                        && bytes[i + 1..end].iter().all(|&c| c == b'#')
+                    {
+                        state = St::Code;
+                        i = end;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+    if copy_from < bytes.len() {
+        out.push_str(&body[copy_from..]);
+    }
+    out
 }
 
 /// Counts how many leading lines of `slice` look like noise:
@@ -1600,6 +1753,63 @@ mod body_helper_tests {
 mod tests {
     use super::*;
     use crate::commands::IngestCommand;
+
+    #[test]
+    fn strip_inline_comments_rust_line() {
+        let input = "let x = 1; // trailing comment\n";
+        assert_eq!(strip_inline_comments_in_body(input), "let x = 1; \n");
+    }
+
+    #[test]
+    fn strip_inline_comments_rust_block_inline() {
+        let input = "fn foo(/* x */) {}";
+        assert_eq!(strip_inline_comments_in_body(input), "fn foo() {}");
+    }
+
+    #[test]
+    fn strip_inline_comments_block_preserves_newlines() {
+        let input = "fn foo() {\n    /* this is\n       a block */\n    x\n}";
+        // Two newlines from the block contents survive so line numbers stay
+        // aligned with the unstripped source.
+        assert_eq!(
+            strip_inline_comments_in_body(input),
+            "fn foo() {\n    \n\n    x\n}"
+        );
+    }
+
+    #[test]
+    fn strip_inline_comments_skips_inside_double_quoted_string() {
+        let input = "let s = \"// not a comment\"; // real one\n";
+        assert_eq!(
+            strip_inline_comments_in_body(input),
+            "let s = \"// not a comment\"; \n"
+        );
+    }
+
+    #[test]
+    fn strip_inline_comments_skips_inside_raw_string() {
+        let input = "let s = r#\"// not a comment\"#; // real one\n";
+        assert_eq!(
+            strip_inline_comments_in_body(input),
+            "let s = r#\"// not a comment\"#; \n"
+        );
+    }
+
+    #[test]
+    fn strip_inline_comments_skips_inside_ts_template_literal() {
+        let input = "const url = `https://example.com`; // tail\n";
+        assert_eq!(
+            strip_inline_comments_in_body(input),
+            "const url = `https://example.com`; \n"
+        );
+    }
+
+    #[test]
+    fn strip_inline_comments_handles_consecutive_line_comments() {
+        let input = "// one\n// two\nlet x = 1;\n";
+        assert_eq!(strip_inline_comments_in_body(input), "\n\nlet x = 1;\n");
+    }
+
     use crate::storage::edge_sites::insert_edge_sites;
     use crate::storage::edges::insert_edge;
     use crate::storage::files::{FileInput, upsert_file};
