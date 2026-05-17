@@ -70,7 +70,21 @@ pub(crate) fn put_module_lookup(
         params![workspace_id, &lookup.module_fqdn],
     )?;
 
+    // Dedup by the canonical workspace_imports PK before insert. The
+    // extractor doesn't prune cfg-gated branches, so the same module
+    // can carry two ImportRecord entries with identical
+    // (local_name, origin_module) — e.g.
+    //   #[cfg(unix)]    use foo::bar;
+    //   #[cfg(windows)] use foo::bar;
+    // Likewise for accidental duplicate `use` lines during refactors.
+    // First-write-wins on tie: the secondary attrs (is_type_only /
+    // is_re_export) of cfg-duals are typically identical anyway.
+    let mut seen: std::collections::HashSet<(&str, &str)> =
+        std::collections::HashSet::with_capacity(lookup.imports.len());
     for import in &lookup.imports {
+        if !seen.insert((import.local_name.as_str(), import.origin_module.as_str())) {
+            continue;
+        }
         conn.execute(
             "INSERT INTO workspace_imports
              (workspace_id, module_fqdn, local_name, origin_module, origin_symbol, \
@@ -286,6 +300,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(type_only, 1);
+    }
+
+    #[test]
+    fn put_dedupes_imports_with_identical_local_name_and_origin() {
+        // Extractor side cannot prune cfg arms; two `use foo::bar;` on
+        // different cfg gates arrive as separate ImportRecord entries
+        // with the same (local_name, origin_module). put_module_lookup
+        // collapses them so the PRIMARY KEY doesn't fire.
+        let conn = fresh_db();
+        let mut lookup = ModuleLookup::new("my_crate::dup".into(), Language::Rust);
+        for _ in 0..3 {
+            lookup.push_import(ImportRecord {
+                local_name: "bar".into(),
+                origin_module: "foo".into(),
+                origin_symbol: Some("bar".into()),
+                is_type_only: false,
+                is_re_export: false,
+            });
+        }
+        // Distinct origin must still be inserted alongside the first.
+        lookup.push_import(ImportRecord {
+            local_name: "bar".into(),
+            origin_module: "other".into(),
+            origin_symbol: Some("bar".into()),
+            is_type_only: false,
+            is_re_export: false,
+        });
+        put_module_lookup(&conn, PRIMARY_WORKSPACE_ID, &lookup).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workspace_imports WHERE module_fqdn = 'my_crate::dup'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "duplicates collapse, distinct origin survives");
     }
 
     #[test]
