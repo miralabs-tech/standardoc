@@ -34,7 +34,7 @@ fn fixture() -> ExtractedFile {
                 where_clause: None,
             },
             meta: SignatureMeta {
-                exposed_via: Some(BridgeKind::from("tauri")),
+                exposed_via: vec![BridgeKind::from("tauri")],
             },
         }),
         body_hash: Some(Blake3Hash::new([0x42; 32])),

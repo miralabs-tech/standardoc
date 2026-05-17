@@ -128,13 +128,20 @@ impl Modifiers {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SignatureMeta {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exposed_via: Option<BridgeKind>,
+    /// Bridges through which this symbol is exposed across substrate
+    /// boundaries. Multiple entries support dual-target apps
+    /// (e.g. a Tauri command also compiled to wasm — `["tauri", "wasm-bindgen"]`).
+    ///
+    /// IR-3 1.0 shape: `Vec<BridgeKind>` (was `Option<BridgeKind>` pre-3e-3).
+    /// Default is the empty vec — backward-compatible with pre-IR-3 rows
+    /// where the field was absent via `skip_serializing_if`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposed_via: Vec<BridgeKind>,
 }
 
 impl SignatureMeta {
-    const fn is_default(&self) -> bool {
-        self.exposed_via.is_none()
+    fn is_default(&self) -> bool {
+        self.exposed_via.is_empty()
     }
 }
 
@@ -165,12 +172,49 @@ mod tests {
                 where_clause: Some("T: Send".into()),
             },
             meta: SignatureMeta {
-                exposed_via: Some(BridgeKind::from("tauri")),
+                exposed_via: vec![BridgeKind::from("tauri")],
             },
         };
         let json = serde_json::to_string(&sig).unwrap();
         let back: Signature = serde_json::from_str(&json).unwrap();
         assert_eq!(sig, back);
+    }
+
+    #[test]
+    fn ir3_signature_meta_multi_bridge_round_trip() {
+        // Dual-target shape — same fn surfaced via both Tauri (Native↔Browser)
+        // and wasm-bindgen (Native↔Wasm) bridges. The Vec<BridgeKind> shape
+        // preserves order and emits a JSON array.
+        let meta = SignatureMeta {
+            exposed_via: vec![
+                BridgeKind::from("tauri"),
+                BridgeKind::from("wasm-bindgen"),
+            ],
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("\"tauri\""), "got `{json}`");
+        assert!(json.contains("\"wasm-bindgen\""), "got `{json}`");
+        let back: SignatureMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(meta, back);
+    }
+
+    #[test]
+    fn ir3_signature_meta_missing_field_deserializes_to_empty_vec() {
+        // Pre-IR-3 DB rows that omitted `exposed_via` (the field was
+        // `skip_serializing_if = Option::is_none`) must continue to load
+        // — `#[serde(default)]` falls back to `Vec::new()`.
+        let meta: SignatureMeta = serde_json::from_str("{}").unwrap();
+        assert!(meta.exposed_via.is_empty());
+    }
+
+    #[test]
+    fn ir3_signature_meta_empty_vec_is_skipped_in_serialized_output() {
+        // `skip_serializing_if = Vec::is_empty` keeps the on-disk JSON
+        // minimal so the average row stays at the same byte cost as
+        // pre-IR-3.
+        let meta = SignatureMeta::default();
+        let json = serde_json::to_string(&meta).unwrap();
+        assert_eq!(json, "{}");
     }
 
     #[test]

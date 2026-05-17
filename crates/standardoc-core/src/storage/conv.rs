@@ -6,11 +6,18 @@ use standardoc_ir::{
 use crate::storage::error::StorageError;
 
 pub(crate) fn signature_to_json(sig: &Signature) -> Result<String, StorageError> {
-    // IR-1 1.0 vocabulary lock: validate `exposed_via` before persisting
-    // the signature JSON. Refuses extractor-emitted slugs that are
-    // neither built-in nor `custom:`-prefixed, surfacing the error as
-    // `StorageError::BridgeKindInvalid` (via `From<BridgeKindError>`).
-    if let Some(bridge) = sig.meta.exposed_via.as_ref() {
+    // IR-1 1.0 vocabulary lock: validate every `exposed_via` slug before
+    // persisting the signature JSON. Refuses extractor-emitted slugs
+    // that are neither built-in nor `custom:`-prefixed, surfacing the
+    // error as `StorageError::BridgeKindInvalid` (via
+    // `From<BridgeKindError>`).
+    //
+    // IR-3: `exposed_via` is `Vec<BridgeKind>` (dual-target apps may
+    // expose the same symbol via multiple bridges, e.g. Tauri + wasm).
+    // Validation short-circuits on the first invalid slug — a second
+    // bad slug in the same vec will surface on the next walk after the
+    // first is fixed, which is the simplest contract.
+    for bridge in &sig.meta.exposed_via {
         bridge.try_validate()?;
     }
     Ok(serde_json::to_string(sig)?)
@@ -281,7 +288,7 @@ mod tests {
     fn signature_to_json_rejects_unknown_exposed_via_slug() {
         let sig = Signature {
             meta: standardoc_ir::SignatureMeta {
-                exposed_via: Some(BridgeKind::from("tauri-v2")),
+                exposed_via: vec![BridgeKind::from("tauri-v2")],
             },
             ..Default::default()
         };
@@ -296,12 +303,51 @@ mod tests {
     fn signature_to_json_accepts_builtin_exposed_via_slug() {
         let sig = Signature {
             meta: standardoc_ir::SignatureMeta {
-                exposed_via: Some(BridgeKind::from("tauri")),
+                exposed_via: vec![BridgeKind::from("tauri")],
             },
             ..Default::default()
         };
         let json = signature_to_json(&sig).unwrap();
         assert!(json.contains("\"tauri\""), "got `{json}`");
+    }
+
+    #[test]
+    fn signature_to_json_accepts_multiple_exposed_via_bridges() {
+        // IR-3 dual-target shape — same fn surfaced via both Tauri and
+        // wasm-bindgen. Both must round-trip into the JSON array.
+        let sig = Signature {
+            meta: standardoc_ir::SignatureMeta {
+                exposed_via: vec![
+                    BridgeKind::from("tauri"),
+                    BridgeKind::from("wasm-bindgen"),
+                ],
+            },
+            ..Default::default()
+        };
+        let json = signature_to_json(&sig).unwrap();
+        assert!(json.contains("\"tauri\""), "got `{json}`");
+        assert!(json.contains("\"wasm-bindgen\""), "got `{json}`");
+    }
+
+    #[test]
+    fn signature_to_json_rejects_when_any_exposed_via_bridge_is_invalid() {
+        // Short-circuits on the first invalid slug — but a partial
+        // emission (valid + invalid mixed) must still fail rather than
+        // landing only the valid slug.
+        let sig = Signature {
+            meta: standardoc_ir::SignatureMeta {
+                exposed_via: vec![
+                    BridgeKind::from("tauri"),
+                    BridgeKind::from("totally-made-up"),
+                ],
+            },
+            ..Default::default()
+        };
+        let err = signature_to_json(&sig).unwrap_err();
+        assert!(
+            matches!(err, StorageError::BridgeKindInvalid(_)),
+            "got `{err:?}`"
+        );
     }
 
     #[test]
