@@ -10,6 +10,7 @@ mod extract;
 mod extract_doc;
 mod ffi_tagger;
 mod helpers;
+mod lookup;
 mod resolver;
 mod walk;
 

@@ -94,6 +94,12 @@ pub(crate) fn extract_file(
         super::ffi_tagger::extract_ffi_bindings(&ast, &module_fqdn, workspace_relative_path);
     ctx.core.symbols.extend(ffi_symbols);
 
+    // G4-lua: build the AOT ModuleLookup so cross-workspace edge
+    // strengthening can resolve peer-Lua imports. Mirrors the
+    // c::lookup contract — root-scope bindings only, no scope-aware
+    // visitor needed for the resolver to do its job.
+    let module_lookup = super::lookup::build_lua_lookup(&ctx.core.symbols, &ctx.core.edges, &module_fqdn);
+
     Ok(ExtractedFile {
         file: workspace_relative_path.into(),
         language: Language::Lua,
@@ -110,7 +116,7 @@ pub(crate) fn extract_file(
         // counterpart) is tracked separately — those emissions live on
         // the C provider and are not part of this Lua-side extraction.
         ffi_bindings,
-        module_lookup: None,
+        module_lookup: Some(module_lookup),
     })
 }
 
