@@ -36,4 +36,4 @@ pub use lookup::{
 pub use project::{ProjectInfo, ProjectKind};
 pub use signature::{Modifiers, Param, Signature, SignatureMeta, TypeRef, compact_rust_tokens};
 pub use symbol::RawSymbol;
-pub use workspace::{LinkDirection, LinkedWorkspaceStatus};
+pub use workspace::{LinkDirection, LinkedWorkspaceStatus, WorkspaceKind};
