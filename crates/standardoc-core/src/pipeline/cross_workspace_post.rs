@@ -15,8 +15,10 @@
 //!
 //! Implemented as a post-process so language walkers stay agnostic of
 //! cross-workspace state — the resolver is purely a workspace-level
-//! concern. The pass is a no-op for languages where module_fqdn shape
-//! doesn't carry a single-segment local prefix (C, Lua, Vue, Svelte).
+//! concern. The pass is a no-op for languages where the module_fqdn
+//! doesn't carry a single-segment local prefix (Vue, Svelte — both
+//! drive their TS body through the TS extractor anyway, so the SFC
+//! shell itself stays opaque to cross-workspace resolution).
 
 use standardoc_ir::{
     BridgeKind, CrossWorkspaceLookup, CrossWorkspaceResolver, ExtractedFile, Language,
@@ -78,7 +80,11 @@ pub(crate) fn rewrite_cross_workspace_edges(
 const fn language_supports_workspace_prefix(lang: Language) -> bool {
     matches!(
         lang,
-        Language::Rust | Language::TypeScript | Language::JavaScript
+        Language::Rust
+            | Language::TypeScript
+            | Language::JavaScript
+            | Language::C
+            | Language::Lua
     )
 }
 
@@ -268,11 +274,58 @@ mod tests {
 
     #[test]
     fn skips_languages_without_workspace_prefix() {
-        let mut extracted = empty_extracted(Language::C, "lib.h");
+        // Vue / Svelte SFC shells still bail — their TS body is
+        // routed through the TS extractor which gets its own rewrite
+        // pass, so the SFC-level extraction is intentionally a no-op.
+        let mut extracted = empty_extracted(Language::Vue, "lib.vue");
         extracted.edges.push(unresolved_edge("peer::lib::Foo"));
         let resolver = FakeResolver::new(HashMap::new());
         rewrite_cross_workspace_edges(&mut extracted, &resolver);
         assert_eq!(resolver.call_count(), 0);
+    }
+
+    #[test]
+    fn c_extractions_participate_in_cross_workspace_rewrite() {
+        let mut extracted = empty_extracted(Language::C, "lurlang::runtime::vm");
+        extracted.edges.push(unresolved_edge("peer::lib::api"));
+        let mut hits = HashMap::new();
+        hits.insert(
+            ("peer::lib".to_string(), "api".to_string()),
+            CrossWorkspaceLookup::Hit {
+                workspace_id: "peer-uuid".into(),
+                fqdn: "peer::lib::api".into(),
+            },
+        );
+        let resolver = FakeResolver::new(hits);
+        rewrite_cross_workspace_edges(&mut extracted, &resolver);
+        let edge = &extracted.edges[0];
+        match &edge.to {
+            ResolvedOrUnresolved::Resolved { fqdn } => assert_eq!(fqdn, "peer::lib::api"),
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+        assert!(edge.attributes.contains(&"cross-workspace".to_string()));
+    }
+
+    #[test]
+    fn lua_extractions_participate_in_cross_workspace_rewrite() {
+        let mut extracted = empty_extracted(Language::Lua, "pkg::a");
+        extracted.edges.push(unresolved_edge("peer::lib::helpers"));
+        let mut hits = HashMap::new();
+        hits.insert(
+            ("peer::lib".to_string(), "helpers".to_string()),
+            CrossWorkspaceLookup::Hit {
+                workspace_id: "peer-uuid".into(),
+                fqdn: "peer::lib::helpers".into(),
+            },
+        );
+        let resolver = FakeResolver::new(hits);
+        rewrite_cross_workspace_edges(&mut extracted, &resolver);
+        let edge = &extracted.edges[0];
+        match &edge.to {
+            ResolvedOrUnresolved::Resolved { fqdn } => assert_eq!(fqdn, "peer::lib::helpers"),
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+        assert!(edge.attributes.contains(&"cross-workspace".to_string()));
     }
 
     #[test]
