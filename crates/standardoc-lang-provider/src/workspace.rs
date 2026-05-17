@@ -8,6 +8,7 @@ use standardoc_ir::{
 use swc_core::ecma::parser::{EsSyntax, Syntax, TsSyntax};
 
 use crate::builtins::global as global_builtin_registry;
+use crate::c::CProvider;
 use crate::lua::LuaProvider;
 use crate::rust::RustProvider;
 use crate::sfc::{self, SfcDocument, pad_until_byte_offset};
@@ -20,6 +21,7 @@ pub struct WorkspaceProvider {
     rust: RustProvider,
     ts: TsProvider,
     lua: LuaProvider,
+    c: CProvider,
 }
 
 impl WorkspaceProvider {
@@ -98,6 +100,7 @@ impl LanguageProvider for WorkspaceProvider {
             Some(Dispatch::Rust) => self.rust.extract(content, path, ctx),
             Some(Dispatch::TypeScript) => self.ts.extract(content, path, ctx),
             Some(Dispatch::Lua) => self.lua.extract(content, path, ctx),
+            Some(Dispatch::C) => self.c.extract(content, path, ctx),
             Some(Dispatch::Vue) => self.extract_sfc(content, path, ctx, Framework::Vue),
             Some(Dispatch::Svelte) => self.extract_sfc(content, path, ctx, Framework::Svelte),
             None => Err(ExtractError::UnsupportedLanguage { file: path.into() }),
@@ -134,6 +137,7 @@ enum Dispatch {
     Rust,
     TypeScript,
     Lua,
+    C,
     Vue,
     Svelte,
 }
@@ -144,6 +148,7 @@ fn dispatch(path: &str) -> Option<Dispatch> {
         "rs" => Some(Dispatch::Rust),
         "ts" | "tsx" | "js" | "jsx" => Some(Dispatch::TypeScript),
         "lua" => Some(Dispatch::Lua),
+        "c" | "h" => Some(Dispatch::C),
         "vue" => Some(Dispatch::Vue),
         "svelte" => Some(Dispatch::Svelte),
         _ => None,

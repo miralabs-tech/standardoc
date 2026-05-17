@@ -59,6 +59,7 @@ pub enum Language {
     Lua,
     Vue,
     Svelte,
+    C,
 }
 
 #[cfg(test)]
@@ -135,6 +136,7 @@ mod tests {
             serde_json::to_string(&Language::Svelte).unwrap(),
             "\"svelte\""
         );
+        assert_eq!(serde_json::to_string(&Language::C).unwrap(), "\"c\"");
     }
 
     #[test]
@@ -146,6 +148,7 @@ mod tests {
             Language::Lua,
             Language::Vue,
             Language::Svelte,
+            Language::C,
         ] {
             let s = serde_json::to_string(&lang).unwrap();
             let back: Language = serde_json::from_str(&s).unwrap();

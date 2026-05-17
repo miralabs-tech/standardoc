@@ -29,6 +29,7 @@ fn language_storage_slug(lang: Language) -> &'static str {
         Language::Lua => "lua",
         Language::Vue => "vue",
         Language::Svelte => "svelte",
+        Language::C => "c",
     }
 }
 

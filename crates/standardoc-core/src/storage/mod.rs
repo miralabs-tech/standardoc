@@ -22,6 +22,7 @@ pub(crate) mod module_lookup;
 pub(crate) mod projects;
 pub(crate) mod retry;
 pub(crate) mod schema_meta;
+pub(crate) mod symbol_decl_location;
 pub(crate) mod symbols;
 pub(crate) mod workspace_catalog;
 

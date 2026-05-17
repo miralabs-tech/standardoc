@@ -1,4 +1,5 @@
 mod batch;
+mod c_join;
 pub mod cold_start;
 mod diff;
 pub mod external_invalidation;

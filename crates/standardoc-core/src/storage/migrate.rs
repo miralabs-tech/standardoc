@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::storage::error::StorageError;
 use crate::storage::init::run_init_schema;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 13;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 14;
 
 const V1_TO_V2_SQL: &str = include_str!("../../migrations/v1_to_v2.sql");
 const V2_TO_V3_SQL: &str = include_str!("../../migrations/v2_to_v3.sql");
@@ -17,6 +17,7 @@ const V9_TO_V10_SQL: &str = include_str!("../../migrations/v9_to_v10.sql");
 const V10_TO_V11_SQL: &str = include_str!("../../migrations/v10_to_v11.sql");
 const V11_TO_V12_SQL: &str = include_str!("../../migrations/v11_to_v12.sql");
 const V12_TO_V13_SQL: &str = include_str!("../../migrations/v12_to_v13.sql");
+const V13_TO_V14_SQL: &str = include_str!("../../migrations/v13_to_v14.sql");
 
 pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), StorageError> {
     if !table_exists(conn, "schema_meta")? {
@@ -52,6 +53,7 @@ fn apply_upgrade(conn: &Connection, from: u32) -> Result<(), StorageError> {
         10 => conn.execute_batch(V10_TO_V11_SQL).map_err(StorageError::from),
         11 => conn.execute_batch(V11_TO_V12_SQL).map_err(StorageError::from),
         12 => conn.execute_batch(V12_TO_V13_SQL).map_err(StorageError::from),
+        13 => conn.execute_batch(V13_TO_V14_SQL).map_err(StorageError::from),
         other => Err(StorageError::InvalidSchemaMetadata {
             key: "schema_version".into(),
             value: format!("no upgrade path from version {other}"),
@@ -932,6 +934,116 @@ mod tests {
             [],
         )
         .expect("'extract' must be accepted by the CHECK constraint");
+
+        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn upgrade_creates_symbol_decl_location_table_on_legacy_v13_db() {
+        // Stage 1c: v13 has no `symbol_decl_location` table. After
+        // v13→v14, the table must exist with the documented 1:1
+        // PRIMARY KEY shape + ON DELETE CASCADE FK to symbols, and a
+        // `file` index to support watcher reverse-lookup.
+        let conn = fresh_conn();
+        run_init_schema(&conn).unwrap();
+        conn.execute_batch(V1_TO_V2_SQL).unwrap();
+        conn.execute_batch(V2_TO_V3_SQL).unwrap();
+        conn.execute_batch(V3_TO_V4_SQL).unwrap();
+        conn.execute_batch(V4_TO_V5_SQL).unwrap();
+        conn.execute_batch(V5_TO_V6_SQL).unwrap();
+        conn.execute_batch(V6_TO_V7_SQL).unwrap();
+        conn.execute_batch(V7_TO_V8_SQL).unwrap();
+        conn.execute_batch(V8_TO_V9_SQL).unwrap();
+        conn.execute_batch(V9_TO_V10_SQL).unwrap();
+        conn.execute_batch(V10_TO_V11_SQL).unwrap();
+        conn.execute_batch(V11_TO_V12_SQL).unwrap();
+        conn.execute_batch(V12_TO_V13_SQL).unwrap();
+        assert!(
+            !table_exists(&conn, "symbol_decl_location").unwrap(),
+            "v13 must NOT have the symbol_decl_location table"
+        );
+
+        ensure_schema(&conn).unwrap();
+
+        assert!(
+            table_exists(&conn, "symbol_decl_location").unwrap(),
+            "v13→v14 must create the symbol_decl_location table"
+        );
+
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('symbol_decl_location')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for expected in ["symbol_id", "file", "start_line", "end_line", "start_col", "end_col"] {
+            assert!(
+                cols.iter().any(|c| c == expected),
+                "v13→v14 must add column {expected}, got {cols:?}"
+            );
+        }
+
+        let indexes: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'symbol_decl_location'",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            indexes.iter().any(|i| i == "idx_symbol_decl_location_file"),
+            "v13→v14 must create idx_symbol_decl_location_file, got {indexes:?}"
+        );
+
+        // FK CASCADE: inserting a row referencing a symbol, then
+        // deleting the symbol, must drop the decl_location row too.
+        conn.execute(
+            "INSERT INTO files (path, content_hash, language, last_scanned, byte_size, is_external) \
+             VALUES ('src/x.c', 'h', 'c', 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols (\
+                fqdn, name, kind, language_kind, language, module, visibility, \
+                file_path, start_line, end_line, start_col, end_col, \
+                signature_json, body_hash, is_external, source_origin, \
+                last_modified_revision, flags, workspace_id\
+             ) VALUES ('x::foo', 'foo', 'function', 'fn', 'c', NULL, 'public', \
+                'src/x.c', 1, 5, 0, 1, NULL, NULL, 0, 'workspace', 0, '[]', 'primary')",
+            [],
+        )
+        .unwrap();
+        let sym_id: i64 = conn
+            .query_row("SELECT id FROM symbols WHERE fqdn = 'x::foo'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        conn.execute(
+            "INSERT INTO symbol_decl_location (symbol_id, file, start_line, end_line, start_col, end_col) \
+             VALUES (?1, 'include/x.h', 10, 10, 0, 30)",
+            [sym_id],
+        )
+        .unwrap();
+        let count_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM symbol_decl_location", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count_before, 1);
+
+        // Enable FK enforcement (off by default in rusqlite test conn).
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute("DELETE FROM symbols WHERE id = ?1", [sym_id])
+            .unwrap();
+        let count_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM symbol_decl_location", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count_after, 0,
+            "ON DELETE CASCADE must drop the decl_location row when its symbol is deleted"
+        );
 
         assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
     }

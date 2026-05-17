@@ -94,6 +94,10 @@ pub fn run(
     // Best-effort like the discover / reconcile steps: failures don't
     // block cold start.
     process_peers_quietly(handle, provider);
+    // Stage 1c — C provider `.h` ↔ `.c` join pass. Best-effort: a
+    // failure logs to stderr and leaves the raw fn_decl / fn rows in
+    // place, which is still a useful (if redundant) index.
+    super::c_join::apply_c_join_quietly(handle);
     clear_progress(handle)?;
     Ok(())
 }

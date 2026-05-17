@@ -56,6 +56,7 @@ pub(crate) const fn language_to_sql_text(lang: Language) -> &'static str {
         Language::Lua => "lua",
         Language::Vue => "vue",
         Language::Svelte => "svelte",
+        Language::C => "c",
     }
 }
 
@@ -67,6 +68,7 @@ pub(crate) fn language_from_sql_text(s: &str) -> Result<Language, StorageError> 
         "lua" => Ok(Language::Lua),
         "vue" => Ok(Language::Vue),
         "svelte" => Ok(Language::Svelte),
+        "c" => Ok(Language::C),
         other => Err(StorageError::InvalidStoredData {
             detail: format!("unknown language: {other:?}"),
         }),
@@ -359,6 +361,7 @@ mod tests {
             Language::Lua,
             Language::Vue,
             Language::Svelte,
+            Language::C,
         ] {
             let s = language_to_sql_text(lang);
             let back = language_from_sql_text(s).unwrap();
@@ -374,6 +377,7 @@ mod tests {
         assert_eq!(language_to_sql_text(Language::Lua), "lua");
         assert_eq!(language_to_sql_text(Language::Vue), "vue");
         assert_eq!(language_to_sql_text(Language::Svelte), "svelte");
+        assert_eq!(language_to_sql_text(Language::C), "c");
     }
 
     #[test]

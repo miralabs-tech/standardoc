@@ -1,6 +1,7 @@
 use standardoc_ir::BuiltinRegistry;
 use std::sync::OnceLock;
 
+mod c;
 mod js;
 mod lua;
 mod rust;
@@ -16,6 +17,7 @@ pub fn standard() -> BuiltinRegistry {
 	ts::register_all(&mut reg);
 	rust::register_all(&mut reg);
 	lua::register_all(&mut reg);
+	c::register_all(&mut reg);
 	reg
 }
 
@@ -42,6 +44,7 @@ mod tests {
 			Language::TypeScript,
 			Language::Rust,
 			Language::Lua,
+			Language::C,
 		] {
 			assert!(
 				reg.by_language.get(&lang).map(Vec::len).unwrap_or(0) > 0,

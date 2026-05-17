@@ -18,6 +18,8 @@ quote           = { workspace = true }
 blake3          = { workspace = true }
 swc_core        = { workspace = true }
 full_moon       = { workspace = true }
+tree-sitter     = { workspace = true }
+tree-sitter-c   = { workspace = true }
 serde_json      = { workspace = true }
 
 [dev-dependencies]
