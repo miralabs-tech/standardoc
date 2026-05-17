@@ -1,17 +1,19 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
+use axum::routing::{any, get};
 use axum::Router;
 use bytes::Bytes;
 use http::HeaderValue;
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, new_debouncer};
+use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, mpsc};
@@ -66,10 +68,16 @@ pub async fn run(cfg: ProxyConfig) -> Result<(), ProxyError> {
     }
 
     let client = build_forward_client();
+    let started_at = SystemTime::now();
     let state = Arc::new(ProxyState {
         upstream,
         client,
         retry_window: cfg.upstream_retry_window,
+        total_requests: AtomicU64::new(0),
+        successful_requests: AtomicU64::new(0),
+        upstream_503_responses: AtomicU64::new(0),
+        last_request_at: RwLock::new(None),
+        started_at,
     });
 
     let listener = TcpListener::bind(&cfg.bind_addr)
@@ -79,19 +87,45 @@ pub async fn run(cfg: ProxyConfig) -> Result<(), ProxyError> {
         .local_addr()
         .map_err(|e| ProxyError::Bind(cfg.bind_addr.clone(), e))?;
     eprintln!("standardoc-mcp-proxy: listening on http://{local}/mcp");
+    eprintln!("standardoc-mcp-proxy: health endpoint: http://{local}/health");
 
     let app = Router::new()
+        .route("/health", get(health))
         .route("/mcp", any(forward))
         .route("/{*path}", any(forward))
         .with_state(state);
 
-    axum::serve(listener, app).await.map_err(ProxyError::Serve)
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(ProxyError::Serve)
 }
 
 struct ProxyState {
     upstream: Arc<RwLock<String>>,
     client: reqwest::Client,
     retry_window: Duration,
+    /// Lifetime counter of HTTP requests landed on the proxy
+    /// (forwarder hits only — `/health` is excluded). Lets users grep
+    /// the `/health` response to confirm the MCP client is talking
+    /// to the proxy at all.
+    total_requests: AtomicU64,
+    /// Lifetime counter of forwarder responses with `< 400` status.
+    /// Together with `total_requests` gives a quick failure rate.
+    successful_requests: AtomicU64,
+    /// Lifetime counter of `503` we surfaced because the upstream
+    /// stayed unreachable past `retry_window`. Distinct from
+    /// `total_requests - successful_requests` (which also counts
+    /// upstream 4xx / 5xx that round-tripped fine).
+    upstream_503_responses: AtomicU64,
+    /// Wall-clock timestamp of the last forwarder hit. `None` means
+    /// the proxy has been idle since boot.
+    last_request_at: RwLock<Option<SystemTime>>,
+    /// Wall-clock timestamp of `run()`'s start. Used by `/health` to
+    /// surface an uptime.
+    started_at: SystemTime,
 }
 
 fn build_forward_client() -> reqwest::Client {
@@ -191,11 +225,24 @@ fn spawn_endpoint_watcher(
 /// current upstream URL, retries with exponential backoff while the
 /// daemon is restarting, and streams the response back. Buffers the
 /// request body in memory so retries can replay it (MCP payloads are
-/// small JSON — at most a few KB).
-async fn forward(State(state): State<Arc<ProxyState>>, req: Request) -> Response {
+/// small JSON — at most a few KB). Logs each incoming call so users can
+/// confirm the MCP client (Claude Code, …) is actually talking to the
+/// proxy — silence here means the client side is misconfigured or
+/// itself disconnected.
+async fn forward(
+    State(state): State<Arc<ProxyState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
     let method = req.method().clone();
     let uri = req.uri().clone();
     let headers = req.headers().clone();
+    let seq = state.total_requests.fetch_add(1, Ordering::Relaxed) + 1;
+    *state.last_request_at.write().await = Some(SystemTime::now());
+    eprintln!(
+        "standardoc-mcp-proxy: incoming #{seq} {method} {} from {peer}",
+        uri.path()
+    );
     let body_bytes = match axum::body::to_bytes(req.into_body(), 8 * 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => {
@@ -219,7 +266,12 @@ async fn forward(State(state): State<Arc<ProxyState>>, req: Request) -> Response
             let target = build_target_url(&upstream_url, &uri);
             match forward_once(&state.client, &method, &target, &headers, body_bytes.clone()).await
             {
-                Ok(resp) => return resp,
+                Ok(resp) => {
+                    if resp.status().as_u16() < 400 {
+                        state.successful_requests.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return resp;
+                }
                 Err(e) if e.is_retryable() => last_error = Some(e.into_message()),
                 Err(e) => {
                     return error_response(
@@ -231,7 +283,12 @@ async fn forward(State(state): State<Arc<ProxyState>>, req: Request) -> Response
         }
 
         if tokio::time::Instant::now() >= deadline {
+            state.upstream_503_responses.fetch_add(1, Ordering::Relaxed);
             let detail = last_error.unwrap_or_else(|| "upstream unreachable".into());
+            eprintln!(
+                "standardoc-mcp-proxy: 503 for #{seq} — upstream unreachable after {}s: {detail}",
+                state.retry_window.as_secs()
+            );
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!(
@@ -243,6 +300,41 @@ async fn forward(State(state): State<Arc<ProxyState>>, req: Request) -> Response
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(2));
     }
+}
+
+/// `GET /health` — JSON snapshot of proxy state. Used by users / scripts
+/// to confirm the proxy is alive, the upstream is reachable, and the
+/// MCP client has been hitting the proxy. Counts forwarder hits only
+/// (this endpoint itself is excluded from the totals).
+async fn health(State(state): State<Arc<ProxyState>>) -> Response {
+    let upstream = state.upstream.read().await.clone();
+    let last_request_age_ms = match *state.last_request_at.read().await {
+        Some(ts) => SystemTime::now().duration_since(ts).ok().map(|d| d.as_millis()),
+        None => None,
+    };
+    let uptime_ms = SystemTime::now()
+        .duration_since(state.started_at)
+        .ok()
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let total = state.total_requests.load(Ordering::Relaxed);
+    let ok = state.successful_requests.load(Ordering::Relaxed);
+    let upstream_503 = state.upstream_503_responses.load(Ordering::Relaxed);
+    let body = format!(
+        "{{\"upstream\":\"{upstream}\",\"upstream_known\":{upstream_known},\"uptime_ms\":{uptime_ms},\
+         \"total_requests\":{total},\"successful_requests\":{ok},\"upstream_503_responses\":{upstream_503},\
+         \"last_request_age_ms\":{age}}}",
+        upstream_known = !upstream.is_empty(),
+        age = match last_request_age_ms {
+            Some(ms) => ms.to_string(),
+            None => "null".into(),
+        },
+    );
+    let mut response = Response::new(Body::from(body));
+    response
+        .headers_mut()
+        .insert(http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response
 }
 
 /// Re-build the target URL by replacing the upstream's path with the
@@ -413,5 +505,56 @@ mod tests {
     fn read_endpoint_file_returns_none_when_missing() {
         let missing = std::path::Path::new("/nope/definitely/not/there.endpoint");
         assert!(read_endpoint_file(missing).is_none());
+    }
+
+    #[tokio::test]
+    async fn health_reports_unknown_upstream_and_zero_counters_at_boot() {
+        let state = Arc::new(ProxyState {
+            upstream: Arc::new(RwLock::new(String::new())),
+            client: build_forward_client(),
+            retry_window: Duration::from_secs(1),
+            total_requests: AtomicU64::new(0),
+            successful_requests: AtomicU64::new(0),
+            upstream_503_responses: AtomicU64::new(0),
+            last_request_at: RwLock::new(None),
+            started_at: SystemTime::now(),
+        });
+        let resp = health(State(state)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let s = std::str::from_utf8(&body).unwrap();
+        assert!(s.contains("\"upstream\":\"\""), "got {s}");
+        assert!(s.contains("\"upstream_known\":false"), "got {s}");
+        assert!(s.contains("\"total_requests\":0"), "got {s}");
+        assert!(s.contains("\"last_request_age_ms\":null"), "got {s}");
+    }
+
+    #[tokio::test]
+    async fn health_reports_counters_after_simulated_traffic() {
+        let state = Arc::new(ProxyState {
+            upstream: Arc::new(RwLock::new("http://127.0.0.1:7701/mcp".into())),
+            client: build_forward_client(),
+            retry_window: Duration::from_secs(1),
+            total_requests: AtomicU64::new(0),
+            successful_requests: AtomicU64::new(0),
+            upstream_503_responses: AtomicU64::new(0),
+            last_request_at: RwLock::new(None),
+            started_at: SystemTime::now(),
+        });
+        // Simulate three forwarder hits, two succeeding.
+        state.total_requests.fetch_add(3, Ordering::Relaxed);
+        state.successful_requests.fetch_add(2, Ordering::Relaxed);
+        state.upstream_503_responses.fetch_add(1, Ordering::Relaxed);
+        *state.last_request_at.write().await = Some(SystemTime::now());
+
+        let resp = health(State(state)).await;
+        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let s = std::str::from_utf8(&body).unwrap();
+        assert!(s.contains("\"upstream_known\":true"));
+        assert!(s.contains("\"total_requests\":3"));
+        assert!(s.contains("\"successful_requests\":2"));
+        assert!(s.contains("\"upstream_503_responses\":1"));
+        // last_request_age_ms must be a numeric (not null) value at this point.
+        assert!(!s.contains("\"last_request_age_ms\":null"), "got {s}");
     }
 }
