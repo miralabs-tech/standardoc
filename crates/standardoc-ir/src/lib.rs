@@ -16,7 +16,7 @@ mod symbol;
 mod workspace;
 
 pub use attribute::{RawAttribute, RawAttributeArg};
-pub use bridge_kind::BridgeKind;
+pub use bridge_kind::{BUILTIN_BRIDGE_KINDS, BridgeKind, BridgeKindError, CUSTOM_BRIDGE_PREFIX};
 pub use builtins::{
 	BridgeMapping, BuiltinEntry, BuiltinRegistry, BuiltinTier, SubstrateBridge,
 	make_synthetic_fqdn,

@@ -6,6 +6,13 @@ use standardoc_ir::{
 use crate::storage::error::StorageError;
 
 pub(crate) fn signature_to_json(sig: &Signature) -> Result<String, StorageError> {
+    // IR-1 1.0 vocabulary lock: validate `exposed_via` before persisting
+    // the signature JSON. Refuses extractor-emitted slugs that are
+    // neither built-in nor `custom:`-prefixed, surfacing the error as
+    // `StorageError::BridgeKindInvalid` (via `From<BridgeKindError>`).
+    if let Some(bridge) = sig.meta.exposed_via.as_ref() {
+        bridge.try_validate()?;
+    }
     Ok(serde_json::to_string(sig)?)
 }
 
@@ -17,12 +24,19 @@ pub(crate) fn json_to_signature(s: &str) -> Result<Signature, StorageError> {
 /// target is not (yet) resolved. Resolved targets return `None` — the caller
 /// must then look up the symbol id from the fqdn before binding `to_symbol_id`.
 /// `UnresolvedBridge` is encoded as `"<bridge_kind>::<name>"` per bridges lock #3.
-pub(crate) fn unresolved_to_storage(target: &ResolvedOrUnresolved) -> Option<String> {
+///
+/// IR-1: returns `Err(BridgeKindInvalid)` when an `UnresolvedBridge` carries
+/// a slug outside the 1.0 vocabulary lock (neither built-in nor
+/// `custom:`-prefixed). The two non-bridge variants are infallible.
+pub(crate) fn unresolved_to_storage(
+    target: &ResolvedOrUnresolved,
+) -> Result<Option<String>, StorageError> {
     match target {
-        ResolvedOrUnresolved::Resolved { .. } => None,
-        ResolvedOrUnresolved::Unresolved { name } => Some(name.clone()),
+        ResolvedOrUnresolved::Resolved { .. } => Ok(None),
+        ResolvedOrUnresolved::Unresolved { name } => Ok(Some(name.clone())),
         ResolvedOrUnresolved::UnresolvedBridge { bridge, name } => {
-            Some(format!("{}::{}", bridge.as_str(), name))
+            bridge.try_validate()?;
+            Ok(Some(format!("{}::{}", bridge.as_str(), name)))
         }
     }
 }
@@ -209,7 +223,7 @@ mod tests {
         let target = ResolvedOrUnresolved::Resolved {
             fqdn: "crate::a::foo".into(),
         };
-        assert_eq!(unresolved_to_storage(&target), None);
+        assert_eq!(unresolved_to_storage(&target).unwrap(), None);
     }
 
     #[test]
@@ -217,7 +231,10 @@ mod tests {
         let target = ResolvedOrUnresolved::Unresolved {
             name: "do_thing".into(),
         };
-        assert_eq!(unresolved_to_storage(&target).as_deref(), Some("do_thing"));
+        assert_eq!(
+            unresolved_to_storage(&target).unwrap().as_deref(),
+            Some("do_thing")
+        );
     }
 
     #[test]
@@ -227,9 +244,64 @@ mod tests {
             name: "create_user".into(),
         };
         assert_eq!(
-            unresolved_to_storage(&target).as_deref(),
+            unresolved_to_storage(&target).unwrap().as_deref(),
             Some("tauri::create_user")
         );
+    }
+
+    #[test]
+    fn unresolved_to_storage_bridge_custom_prefix_passes_validation() {
+        let target = ResolvedOrUnresolved::UnresolvedBridge {
+            bridge: BridgeKind::from("custom:internal-rpc"),
+            name: "ping".into(),
+        };
+        assert_eq!(
+            unresolved_to_storage(&target).unwrap().as_deref(),
+            Some("custom:internal-rpc::ping")
+        );
+    }
+
+    #[test]
+    fn unresolved_to_storage_rejects_unknown_bridge_slug() {
+        // IR-1: a slug outside BUILTIN_BRIDGE_KINDS that lacks the
+        // `custom:` prefix must be refused at the storage boundary,
+        // not silently persisted.
+        let target = ResolvedOrUnresolved::UnresolvedBridge {
+            bridge: BridgeKind::from("tauri-v2"),
+            name: "create_user".into(),
+        };
+        let err = unresolved_to_storage(&target).unwrap_err();
+        assert!(
+            matches!(err, StorageError::BridgeKindInvalid(_)),
+            "got `{err:?}`"
+        );
+    }
+
+    #[test]
+    fn signature_to_json_rejects_unknown_exposed_via_slug() {
+        let sig = Signature {
+            meta: standardoc_ir::SignatureMeta {
+                exposed_via: Some(BridgeKind::from("tauri-v2")),
+            },
+            ..Default::default()
+        };
+        let err = signature_to_json(&sig).unwrap_err();
+        assert!(
+            matches!(err, StorageError::BridgeKindInvalid(_)),
+            "got `{err:?}`"
+        );
+    }
+
+    #[test]
+    fn signature_to_json_accepts_builtin_exposed_via_slug() {
+        let sig = Signature {
+            meta: standardoc_ir::SignatureMeta {
+                exposed_via: Some(BridgeKind::from("tauri")),
+            },
+            ..Default::default()
+        };
+        let json = signature_to_json(&sig).unwrap();
+        assert!(json.contains("\"tauri\""), "got `{json}`");
     }
 
     #[test]

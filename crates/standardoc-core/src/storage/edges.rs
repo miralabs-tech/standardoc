@@ -48,6 +48,10 @@ fn resolve_target(
         ResolvedOrUnresolved::Resolved { fqdn } => lookup_or_fallback(conn, fqdn),
         ResolvedOrUnresolved::Unresolved { name } => lookup_or_fallback(conn, name),
         ResolvedOrUnresolved::UnresolvedBridge { bridge, name } => {
+            // IR-1 1.0 vocabulary lock: refuse extractor-emitted slugs
+            // outside `BUILTIN_BRIDGE_KINDS` that lack the `custom:`
+            // prefix. Bubbles up as `StorageError::BridgeKindInvalid`.
+            bridge.try_validate()?;
             lookup_or_fallback(conn, &format!("{}::{}", bridge.as_str(), name))
         }
     }
@@ -247,6 +251,69 @@ mod tests {
             )
             .unwrap();
         assert_eq!(to_unresolved.as_deref(), Some("tauri::create_user"));
+    }
+
+    #[test]
+    fn insert_edge_unresolved_bridge_rejects_unknown_slug() {
+        // IR-1 1.0 vocabulary lock: an extractor emitting `tauri-v2`
+        // (or any slug outside BUILTIN_BRIDGE_KINDS that lacks the
+        // `custom:` prefix) must fail at the storage boundary, not
+        // silently corrupt the DB.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/main.rs");
+        let caller_id = insert_symbol(
+            &conn,
+            &sample_symbol("login", "frontend::login"),
+            symbol_ctx("src/main.rs"),
+        )
+        .unwrap();
+
+        let edge = make_edge(
+            EdgeKind::Calls,
+            ResolvedOrUnresolved::UnresolvedBridge {
+                bridge: BridgeKind::from("tauri-v2"),
+                name: "create_user".into(),
+            },
+        );
+        let err = insert_edge(&conn, caller_id, &edge).unwrap_err();
+        assert!(
+            matches!(err, StorageError::BridgeKindInvalid(_)),
+            "got `{err:?}`"
+        );
+    }
+
+    #[test]
+    fn insert_edge_unresolved_bridge_accepts_custom_prefix() {
+        // Vendor-specific bridge kinds must use `custom:<slug>` post-1.0;
+        // this contract path stays open even when the slug isn't built-in.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/main.rs");
+        let caller_id = insert_symbol(
+            &conn,
+            &sample_symbol("login", "frontend::login"),
+            symbol_ctx("src/main.rs"),
+        )
+        .unwrap();
+
+        let edge = make_edge(
+            EdgeKind::Calls,
+            ResolvedOrUnresolved::UnresolvedBridge {
+                bridge: BridgeKind::from("custom:internal-rpc"),
+                name: "ping".into(),
+            },
+        );
+        let edge_id = insert_edge(&conn, caller_id, &edge).unwrap();
+        let to_unresolved: Option<String> = conn
+            .query_row(
+                "SELECT to_unresolved FROM edges WHERE id = ?1",
+                [edge_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            to_unresolved.as_deref(),
+            Some("custom:internal-rpc::ping")
+        );
     }
 
     #[test]
