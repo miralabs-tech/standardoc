@@ -21,11 +21,12 @@
 use std::path::Path;
 
 use rusqlite::Connection;
-use standarbuild_detect::{DetectorRegistry, KindId};
-use standardoc_ir::{ProjectInfo, ProjectKind};
+use standarbuild_detect::{DetectorRegistry, KindId, WorkspaceKindId};
+use standardoc_ir::{ProjectInfo, ProjectKind, WorkspaceKind};
 
 use crate::storage::error::StorageError;
 use crate::storage::projects;
+use crate::storage::schema_meta;
 
 pub use standarbuild_detect::{Detector, DetectorRegistry as ProjectDetectorRegistry};
 
@@ -52,6 +53,46 @@ fn from_kind_id(id: &KindId) -> ProjectKind {
         "unknown" => ProjectKind::Unknown,
         other => ProjectKind::Custom(other.to_string()),
     }
+}
+
+/// Stage 3e-3 — convert the detector's [`WorkspaceKindId`] to the IR's
+/// [`WorkspaceKind`]. Built-in variants map 1:1; `Custom(slug)` round-
+/// trips verbatim.
+fn from_workspace_kind_id(id: &WorkspaceKindId) -> WorkspaceKind {
+    match id {
+        WorkspaceKindId::Cargo => WorkspaceKind::Cargo,
+        WorkspaceKindId::Npm => WorkspaceKind::Npm,
+        WorkspaceKindId::Pnpm => WorkspaceKind::Pnpm,
+        WorkspaceKindId::Yarn => WorkspaceKind::Yarn,
+        WorkspaceKindId::Bun => WorkspaceKind::Bun,
+        WorkspaceKindId::Deno => WorkspaceKind::Deno,
+        WorkspaceKindId::Go => WorkspaceKind::Go,
+        WorkspaceKindId::Lerna => WorkspaceKind::Lerna,
+        WorkspaceKindId::Nx => WorkspaceKind::Nx,
+        WorkspaceKindId::Turborepo => WorkspaceKind::Turborepo,
+        WorkspaceKindId::Mira => WorkspaceKind::Mira,
+        WorkspaceKindId::Custom(s) => WorkspaceKind::Custom(s.clone()),
+    }
+}
+
+/// Stage 3e-3 — pick the primary workspace kind from a [`DetectionResult`].
+/// "Primary" = the first detected workspace manifest whose `root` equals
+/// the scan `workspace_root`. When multiple workspace kinds coexist at
+/// the same root (Tauri = Cargo + Npm), the detector's registration
+/// order determines which wins — typically the higher-priority detector
+/// fires first. Falls back to [`WorkspaceKind::Single`] when no
+/// workspace manifest is detected at the workspace root (loose project
+/// tree or single-crate layout).
+fn primary_workspace_kind(
+    detected: &standarbuild_detect::DetectionResult,
+    workspace_root: &Path,
+) -> WorkspaceKind {
+    detected
+        .workspaces
+        .iter()
+        .find(|w| w.root.as_path() == workspace_root)
+        .map(|w| from_workspace_kind_id(&w.kind))
+        .unwrap_or(WorkspaceKind::Single)
 }
 
 /// Normalise a `rel_path` from `standarbuild_detect::Discovered` for
@@ -92,6 +133,13 @@ pub fn discover_and_persist_projects_with(
     registry: &DetectorRegistry,
 ) -> Result<Vec<ProjectInfo>, StorageError> {
     let detected = discover_workspace_with(workspace_root, registry);
+    // Stage 3e-3: persist the primary workspace kind BEFORE returning so
+    // a partial early-exit (e.g. cold_start crash mid-walk) still leaves
+    // the kind recorded for next-boot diagnostics. Best-effort: an
+    // error here doesn't fail the whole discovery pass, projects are
+    // the load-bearing output.
+    let workspace_kind = primary_workspace_kind(&detected, workspace_root);
+    let _ = schema_meta::write_workspace_kind(conn, &workspace_kind);
     persist_projects(conn, detected.projects)
 }
 
@@ -259,6 +307,55 @@ mod tests {
             kinds.contains(&&ProjectKind::Bun),
             "expected Bun kind, got {kinds:?}"
         );
+    }
+
+    #[test]
+    fn stage3e3_cargo_workspace_root_persists_workspace_kind_cargo() {
+        // Root with `[workspace] members = [...]` → primary workspace
+        // kind = Cargo, persisted to `schema_meta.workspace_kind`.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        let core_dir = dir.path().join("crates").join("core");
+        fs::create_dir_all(&core_dir).unwrap();
+        fs::write(
+            core_dir.join("Cargo.toml"),
+            "[package]\nname = \"core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let conn = fresh_db();
+        discover_and_persist_projects(&conn, dir.path()).unwrap();
+
+        let persisted = crate::storage::schema_meta::read_workspace_kind(&conn)
+            .unwrap()
+            .expect("workspace_kind must be persisted post-discovery");
+        assert_eq!(persisted, standardoc_ir::WorkspaceKind::Cargo);
+    }
+
+    #[test]
+    fn stage3e3_loose_project_tree_persists_workspace_kind_single() {
+        // No workspace manifest at root — single-crate layout falls back
+        // to `WorkspaceKind::Single` (persisted explicitly so the row
+        // distinguishes "detection ran, found nothing" from "detection
+        // never ran").
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"solo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let conn = fresh_db();
+        discover_and_persist_projects(&conn, dir.path()).unwrap();
+
+        let persisted = crate::storage::schema_meta::read_workspace_kind(&conn)
+            .unwrap()
+            .expect("Single must be persisted explicitly post-discovery");
+        assert_eq!(persisted, standardoc_ir::WorkspaceKind::Single);
     }
 
     #[test]
