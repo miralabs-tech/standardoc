@@ -7,6 +7,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::commands::IngestCommand;
 use crate::pipeline::batch::{apply_delete_file, apply_upsert_file, record_parse_error};
+use crate::pipeline::peer_extract::{peer_path, scope_extracted_paths};
 use crate::storage::error::StorageError;
 use crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
 
@@ -76,6 +77,28 @@ fn dispatch(
             language,
             detail,
         } => record_parse_error(conn, &path, language, &detail),
+        IngestCommand::UpsertPeerFile {
+            workspace_id,
+            extracted,
+            ..
+        } => {
+            let mut scoped = extracted;
+            scope_extracted_paths(&mut scoped, &workspace_id);
+            apply_upsert_file(conn, &scoped, revision, &workspace_id)
+        }
+        IngestCommand::DeletePeerFile { workspace_id, path } => {
+            let scoped = peer_path(&workspace_id, &path);
+            apply_delete_file(conn, &scoped)
+        }
+        IngestCommand::RecordPeerParseError {
+            workspace_id,
+            path,
+            language,
+            detail,
+        } => {
+            let scoped = peer_path(&workspace_id, &path);
+            record_parse_error(conn, &scoped, language, &detail)
+        }
         IngestCommand::RescanFromScratch => Err(StorageError::RescanInProgress),
     }
 }
@@ -234,6 +257,142 @@ mod tests {
             final_revision, 1,
             "rescan command must not bump revision in 14a (returns Err)"
         );
+    }
+
+    #[test]
+    fn writer_dispatch_peer_upsert_scopes_path_and_workspace_id() {
+        // L3d-1: an `UpsertPeerFile` round-trips through the writer queue,
+        // gets path-scoped via `peer_path`, and its symbol row carries the
+        // peer's workspace_id (NOT the 'primary' default).
+        let dir = tempdir().unwrap();
+        let pool = boot_pool(&dir.path().join("index.db"));
+        let pool_lock = Arc::new(RwLock::new(Some(pool)));
+        let (tx, rx) = mpsc::channel(8);
+
+        let ctx = WriterContext {
+            pool: Arc::clone(&pool_lock),
+        };
+        let handle = std::thread::spawn(move || writer_loop(rx, &ctx));
+
+        tx.blocking_send(IngestCommand::UpsertPeerFile {
+            workspace_id: "peer-w1".into(),
+            path: "src/main.rs".into(),
+            extracted: sample_extracted(),
+        })
+        .unwrap();
+        wait_revision_via_pool(&pool_lock, 1, Duration::from_secs(2));
+
+        let conn = pool_lock.read().unwrap().as_ref().unwrap().get().unwrap();
+        let file_path: String = conn
+            .query_row(
+                "SELECT path FROM files WHERE path LIKE 'ws:peer-w1:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(file_path, "ws:peer-w1:src/main.rs");
+
+        let sym_ws_id: String = conn
+            .query_row(
+                "SELECT workspace_id FROM symbols WHERE fqdn = 'crate::foo'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sym_ws_id, "peer-w1");
+
+        drop(tx);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn writer_dispatch_peer_delete_scopes_path() {
+        // L3d-1: an `UpsertPeerFile` then `DeletePeerFile` on the same rel
+        // path must remove the scoped row (and only that row) — primary's
+        // unrelated `src/main.rs` would be untouched if present.
+        let dir = tempdir().unwrap();
+        let pool = boot_pool(&dir.path().join("index.db"));
+        let pool_lock = Arc::new(RwLock::new(Some(pool)));
+        let (tx, rx) = mpsc::channel(8);
+
+        let ctx = WriterContext {
+            pool: Arc::clone(&pool_lock),
+        };
+        let handle = std::thread::spawn(move || writer_loop(rx, &ctx));
+
+        tx.blocking_send(IngestCommand::UpsertPeerFile {
+            workspace_id: "peer-w2".into(),
+            path: "src/main.rs".into(),
+            extracted: sample_extracted(),
+        })
+        .unwrap();
+        wait_revision_via_pool(&pool_lock, 1, Duration::from_secs(2));
+
+        tx.blocking_send(IngestCommand::DeletePeerFile {
+            workspace_id: "peer-w2".into(),
+            path: "src/main.rs".into(),
+        })
+        .unwrap();
+        wait_revision_via_pool(&pool_lock, 2, Duration::from_secs(2));
+
+        let conn = pool_lock.read().unwrap().as_ref().unwrap().get().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'ws:peer-w2:src/main.rs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "peer delete must remove the scoped row");
+
+        drop(tx);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn writer_dispatch_peer_parse_error_scopes_path() {
+        // L3d-1: a `RecordPeerParseError` on an existing peer file row
+        // writes `last_scan_error` keyed by the scoped path. The peer file
+        // must be seeded first (record_parse_error UPDATEs by path).
+        let dir = tempdir().unwrap();
+        let pool = boot_pool(&dir.path().join("index.db"));
+        let pool_lock = Arc::new(RwLock::new(Some(pool)));
+        let (tx, rx) = mpsc::channel(8);
+
+        let ctx = WriterContext {
+            pool: Arc::clone(&pool_lock),
+        };
+        let handle = std::thread::spawn(move || writer_loop(rx, &ctx));
+
+        tx.blocking_send(IngestCommand::UpsertPeerFile {
+            workspace_id: "peer-w3".into(),
+            path: "src/main.rs".into(),
+            extracted: sample_extracted(),
+        })
+        .unwrap();
+        wait_revision_via_pool(&pool_lock, 1, Duration::from_secs(2));
+
+        tx.blocking_send(IngestCommand::RecordPeerParseError {
+            workspace_id: "peer-w3".into(),
+            path: "src/main.rs".into(),
+            language: Language::Rust,
+            detail: "boom".into(),
+        })
+        .unwrap();
+        // record_parse_error does NOT bump revision; let the writer drain
+        // by closing the channel and joining the loop.
+        drop(tx);
+        handle.join().unwrap();
+
+        let conn = pool_lock.read().unwrap().as_ref().unwrap().get().unwrap();
+        let last_error: Option<String> = conn
+            .query_row(
+                "SELECT last_scan_error FROM files WHERE path = 'ws:peer-w3:src/main.rs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(last_error.as_deref(), Some("boom"));
     }
 
     #[test]
