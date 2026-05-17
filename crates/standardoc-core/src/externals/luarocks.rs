@@ -298,6 +298,7 @@ mod tests {
             call_sites: vec![],
             documents: vec![],
             ffi_bindings: vec![],
+            module_lookup: None,
         };
         rewrite_for_external(
             &mut extracted,

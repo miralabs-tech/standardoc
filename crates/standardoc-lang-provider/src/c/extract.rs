@@ -72,5 +72,6 @@ pub(crate) fn extract_file(
         call_sites: ctx.core.call_sites,
         documents: ctx.core.documents,
         ffi_bindings: ctx.ffi_bindings,
+        module_lookup: None,
     })
 }

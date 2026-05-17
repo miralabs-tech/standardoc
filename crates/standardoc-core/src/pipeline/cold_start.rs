@@ -329,6 +329,7 @@ mod tests {
             is_external: false,
             content_hash: Blake3Hash::default(),
             byte_size: 100,
+            module_lookup: None,
             symbols: vec![RawSymbol {
                 name: fqdn.rsplit("::").next().unwrap_or(fqdn).into(),
                 fqdn: fqdn.into(),
@@ -539,6 +540,7 @@ mod tests {
             is_external: false,
             content_hash: caller_hash,
             byte_size: caller_body.len() as u64,
+            module_lookup: None,
             symbols: vec![RawSymbol {
                 name: "caller".into(),
                 fqdn: "crate::caller".into(),

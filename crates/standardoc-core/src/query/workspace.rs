@@ -520,6 +520,7 @@ mod tests {
             is_external: false,
             content_hash: Blake3Hash::new([0xab; 32]),
             byte_size: 32,
+            module_lookup: None,
             symbols: vec![RawSymbol {
                 name: "peer_only_marker".into(),
                 fqdn: "crate::peer_only_marker".into(),

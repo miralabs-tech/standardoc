@@ -61,6 +61,7 @@ mod tests {
             call_sites: vec![],
             documents: vec![],
             ffi_bindings: vec![],
+            module_lookup: None,
         };
         let json = serde_json::to_string(&f).unwrap();
         let back: ExtractedFile = serde_json::from_str(&json).unwrap();
@@ -81,6 +82,7 @@ mod tests {
             call_sites: vec![],
             documents: vec![],
             ffi_bindings: vec![],
+            module_lookup: None,
         };
         let json = serde_json::to_string(&f).unwrap();
         let back: ExtractedFile = serde_json::from_str(&json).unwrap();

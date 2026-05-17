@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use standardoc_ir::{
-    Blake3Hash, BuiltinTag, BuiltinTier, EdgeKind, Kind, Language, LanguageKind, Modifiers, Param,
-    RawCallSite, RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta,
-    Site, SymbolLocation, TypeRef, Visibility,
+    Blake3Hash, BuiltinTag, BuiltinTier, EdgeKind, Kind, Language, LanguageKind, Modifiers,
+    ModuleLookup, Param, RawCallSite, RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved,
+    Signature, SignatureMeta, Site, SymbolLocation, TypeRef, Visibility,
 };
 use swc_core::common::BytePos;
 use swc_core::common::comments::SingleThreadedComments;
@@ -206,12 +206,29 @@ impl<'a> TsWalkContext<'a> {
     }
 
     pub(crate) fn into_outputs(
+        self,
+    ) -> (
+        Vec<RawSymbol>,
+        Vec<RawEdge>,
+        Vec<RawDocument>,
+        Vec<RawCallSite>,
+    ) {
+        let (s, e, d, c, _) = self.into_outputs_with_lookup();
+        (s, e, d, c)
+    }
+
+    /// Stage 3 final-mile (R1) — same as [`Self::into_outputs`] but also
+    /// returns the AOT [`ModuleLookup`] so the pipeline can persist it via
+    /// `put_module_lookup`. The lookup is what cross-workspace queries
+    /// consult to resolve imports against this workspace's modules.
+    pub(crate) fn into_outputs_with_lookup(
         mut self,
     ) -> (
         Vec<RawSymbol>,
         Vec<RawEdge>,
         Vec<RawDocument>,
         Vec<RawCallSite>,
+        ModuleLookup,
     ) {
         // Stage 3e-1b — flush accumulated Attribute-tier flags onto the
         // symbols they belong to. Iteration order is stable (sorted by
@@ -240,6 +257,7 @@ impl<'a> TsWalkContext<'a> {
             self.core.edges,
             self.core.documents,
             self.core.call_sites,
+            self.core.lookup,
         )
     }
 }
@@ -337,6 +355,42 @@ pub(crate) fn walk(
     Vec<RawDocument>,
     Vec<RawCallSite>,
 ) {
+    let (s, e, d, c, _lookup) = walk_with_lookup(
+        module,
+        package_name,
+        file_path,
+        file_module_fqdn,
+        cm,
+        from_file_abs_path,
+        package_root,
+        tsconfig,
+        comments,
+    );
+    (s, e, d, c)
+}
+
+/// Stage 3 final-mile (R1) — same as [`walk`] but also returns the AOT
+/// [`ModuleLookup`] so callers (production `extract_file`) can stash it
+/// in [`ExtractedFile::module_lookup`] for pipeline persistence. Tests
+/// continue to use [`walk`] when they don't care about the lookup.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn walk_with_lookup(
+    module: &Module,
+    package_name: &str,
+    file_path: &str,
+    file_module_fqdn: &str,
+    cm: Lrc<SourceMap>,
+    from_file_abs_path: &Path,
+    package_root: &Path,
+    tsconfig: Option<TsConfigPaths>,
+    comments: &SingleThreadedComments,
+) -> (
+    Vec<RawSymbol>,
+    Vec<RawEdge>,
+    Vec<RawDocument>,
+    Vec<RawCallSite>,
+    ModuleLookup,
+) {
     let mut ctx = TsWalkContext::new(
         file_path.to_string(),
         package_name.to_string(),
@@ -350,7 +404,7 @@ pub(crate) fn walk(
     ctx.core.lookup = build_ts_lookup(module, file_module_fqdn);
     walk_p1(&mut ctx, &module.body, file_module_fqdn);
     walk_p2(&mut ctx, &module.body, file_module_fqdn);
-    ctx.into_outputs()
+    ctx.into_outputs_with_lookup()
 }
 
 fn walk_p1(ctx: &mut TsWalkContext<'_>, items: &[ModuleItem], current_module: &str) {

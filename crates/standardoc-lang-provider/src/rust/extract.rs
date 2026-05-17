@@ -46,8 +46,8 @@ pub(crate) fn extract_file(
     }
 
     let mut symbols = vec![module_symbol];
-    let (item_symbols, edges, item_documents, call_sites) =
-        walk::walk(&parsed, &module_fqdn, path, crate_name);
+    let (item_symbols, edges, item_documents, call_sites, lookup) =
+        walk::walk_with_lookup(&parsed, &module_fqdn, path, crate_name);
     symbols.extend(item_symbols);
     documents.extend(item_documents);
 
@@ -63,6 +63,7 @@ pub(crate) fn extract_file(
         call_sites,
         documents,
         ffi_bindings: vec![],
+        module_lookup: Some(lookup),
     })
 }
 

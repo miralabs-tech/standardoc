@@ -144,6 +144,7 @@ fn fixture() -> ExtractedFile {
         call_sites: vec![call_site],
         documents: vec![doc],
         ffi_bindings: vec![],
+        module_lookup: None,
     }
 }
 

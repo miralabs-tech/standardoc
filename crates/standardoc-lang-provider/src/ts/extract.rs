@@ -142,7 +142,7 @@ fn extract_file_inner(
     }
 
     let mut symbols = vec![module_symbol];
-    let (item_symbols, edges, item_documents, call_sites) = walk::walk(
+    let (item_symbols, edges, item_documents, call_sites, lookup) = walk::walk_with_lookup(
         &module,
         package_name,
         workspace_relative_path,
@@ -168,6 +168,7 @@ fn extract_file_inner(
         call_sites,
         documents,
         ffi_bindings: vec![],
+        module_lookup: Some(lookup),
     })
 }
 

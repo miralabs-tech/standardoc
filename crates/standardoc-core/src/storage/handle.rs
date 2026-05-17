@@ -495,6 +495,7 @@ mod tests {
             is_external: false,
             content_hash: Blake3Hash::new([0xab; 32]),
             byte_size: 100,
+            module_lookup: None,
             symbols: vec![RawSymbol {
                 name: fqdn.rsplit("::").next().unwrap_or(fqdn).into(),
                 fqdn: fqdn.into(),

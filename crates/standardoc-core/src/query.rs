@@ -2976,6 +2976,7 @@ mod tests {
             is_external: false,
             content_hash: Blake3Hash::new([0xee; 32]),
             byte_size: 100,
+            module_lookup: None,
             symbols: vec![RawSymbol {
                 name: "boot".into(),
                 fqdn: "crate::boot".into(),

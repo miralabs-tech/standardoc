@@ -310,6 +310,7 @@ mod tests {
                 call_sites: vec![],
                 documents: vec![],
                 ffi_bindings: vec![],
+                module_lookup: None,
             })
         }
 
@@ -366,6 +367,7 @@ mod tests {
             call_sites: vec![],
             documents: vec![],
             ffi_bindings: vec![],
+            module_lookup: None,
         };
         scope_extracted_paths(&mut ef, PRIMARY_WORKSPACE_ID);
         assert_eq!(ef.file, "src/lib.rs", "primary must NOT be prefixed");
@@ -380,6 +382,7 @@ mod tests {
             is_external: false,
             content_hash: standardoc_ir::Blake3Hash::default(),
             byte_size: 0,
+            module_lookup: None,
             symbols: vec![RawSymbol {
                 name: "f".into(),
                 fqdn: "x::f".into(),

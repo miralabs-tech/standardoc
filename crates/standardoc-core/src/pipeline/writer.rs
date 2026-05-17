@@ -204,6 +204,7 @@ mod tests {
             call_sites: vec![],
             documents: vec![],
             ffi_bindings: vec![],
+            module_lookup: None,
         }
     }
 

@@ -11,6 +11,7 @@ use crate::storage::edge_sites::{delete_edge_sites_by_file, insert_edge_sites};
 use crate::storage::edges::{delete_edges_from, insert_edge, promote_unresolved_batch};
 use crate::storage::error::StorageError;
 use crate::storage::files::{FileInput, delete_file, upsert_file};
+use crate::storage::module_lookup::put_module_lookup;
 use crate::storage::symbol_ffi_binding::{delete_bindings_for_symbol, upsert_binding};
 use crate::storage::symbols::{
     SymbolInsertContext, delete_symbol, insert_symbol, update_symbol_positions,
@@ -53,6 +54,16 @@ pub(crate) fn apply_upsert_file(
     // set. Mirrors the call_sites / documents discipline so removing a
     // binding from source actually removes the row.
     apply_ffi_bindings(conn, &extracted.ffi_bindings)?;
+    // Stage 3 final-mile (R1) — persist the AOT ModuleLookup so
+    // cross-workspace queries (resolve_cross_workspace_import,
+    // list_cross_workspace_providers) can see this workspace's modules
+    // when it sits on the peer side of a link. `put_module_lookup`
+    // upserts by (workspace_id, module_fqdn) so re-extracting the same
+    // file replaces the prior payload in place. `None` for languages
+    // without an AOT pass (Lua, C, externals) — nothing to persist.
+    if let Some(lookup) = extracted.module_lookup.as_ref() {
+        put_module_lookup(conn, workspace_id, lookup)?;
+    }
     Ok(())
 }
 
@@ -364,6 +375,7 @@ mod tests {
             call_sites: vec![],
             documents: vec![],
             ffi_bindings: vec![],
+            module_lookup: None,
         }
     }
 
@@ -806,6 +818,7 @@ mod tests {
             call_sites,
             documents: vec![],
             ffi_bindings: vec![],
+            module_lookup: None,
         }
     }
 

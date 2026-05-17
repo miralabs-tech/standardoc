@@ -307,6 +307,26 @@ pub(crate) fn walk(
     file_path: &str,
     crate_name: &str,
 ) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>, Vec<RawCallSite>) {
+    let (s, e, d, c, _lookup) = walk_with_lookup(parsed, module_fqdn, file_path, crate_name);
+    (s, e, d, c)
+}
+
+/// Stage 3 final-mile (R1) — same as [`walk`] but also returns the AOT
+/// [`ModuleLookup`] so callers (production `extract_file`) can stash it
+/// in [`ExtractedFile::module_lookup`] for pipeline persistence. Tests
+/// continue to use [`walk`] when they don't care about the lookup.
+pub(crate) fn walk_with_lookup(
+    parsed: &syn::File,
+    module_fqdn: &str,
+    file_path: &str,
+    crate_name: &str,
+) -> (
+    Vec<RawSymbol>,
+    Vec<RawEdge>,
+    Vec<RawDocument>,
+    Vec<RawCallSite>,
+    ModuleLookup,
+) {
     let mut ctx = WalkContext::new(file_path, crate_name, module_fqdn.to_string());
     ctx.core.lookup = super::lookup::build_rust_lookup(parsed, module_fqdn);
     walk_p1(&mut ctx, &parsed.items, module_fqdn);
@@ -317,6 +337,7 @@ pub(crate) fn walk(
         ctx.core.edges,
         ctx.core.documents,
         ctx.core.call_sites,
+        ctx.core.lookup,
     )
 }
 
