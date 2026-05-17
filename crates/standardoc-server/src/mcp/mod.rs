@@ -14,7 +14,6 @@ mod handler;
 mod progress;
 pub(crate) mod serve;
 mod session_store;
-mod usage;
 
 pub use handler::{ResolveExternalJson, ResolveExternalParams, StandardocMcp};
 pub use serve::{build_mcp_handler, kick_off_indexing, serve_mcp, serve_mcp_http};

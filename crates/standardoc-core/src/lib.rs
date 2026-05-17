@@ -3,7 +3,6 @@ mod cross_workspace_resolver;
 pub mod externals;
 mod pipeline;
 pub mod query;
-pub mod sessions;
 mod storage;
 
 pub use commands::IngestCommand;
@@ -20,9 +19,6 @@ pub use pipeline::{
     handle_lockfile_change, invalidate_changed_lockfiles, preview_pattern_matches,
     purge_externals_by_origin, read_stored_hashes, spawn_watcher, tracked_lockfile_paths,
     write_stored_hashes,
-};
-pub use sessions::{
-    SessionRow, SessionStatus, SessionsError, SessionsHandle, UsagePeriod, UsageStatsRow,
 };
 pub use storage::error::StorageError;
 pub use storage::handle::IndexHandle;

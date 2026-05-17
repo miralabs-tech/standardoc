@@ -15,8 +15,7 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use standardoc_core::{
-    IndexHandle, LanguageProvider, ResolveOutcome, ResolverRegistry, ScanFilters, SessionsHandle,
-    UsagePeriod, WatcherHandle,
+    IndexHandle, LanguageProvider, ResolveOutcome, ResolverRegistry, ScanFilters, WatcherHandle,
     query::{
         self, SymbolFilter,
         call_sites::{self as call_sites_query, CallSiteFilters, FIND_CALL_SITES_DEFAULT_LIMIT},
@@ -26,16 +25,11 @@ use standardoc_core::{
         },
         projects as projects_query, workspace as workspace_query,
     },
-    sessions::memory_sync::{export_memory_dir, import_memory_dir},
 };
 use standardoc_ir::SourceOrigin;
 use standardoc_ir::{EdgeKind, IndexingMode, Kind, LinkDirection, RawSymbol, Visibility};
 
-use crate::mcp::error::{SessionsErr, server_error_to_rmcp, sessions_err_to_rmcp};
-use crate::mcp::usage::{
-    files_from_body, files_from_context, files_from_similar, files_from_symbols,
-    log_usage_fire_and_forget, sum_distinct_file_sizes,
-};
+use crate::mcp::error::server_error_to_rmcp;
 
 const FIND_SYMBOL_DEFAULT_LIMIT: u8 = 20;
 const FIND_SYMBOL_MAX_LIMIT: u8 = 100;
@@ -193,14 +187,7 @@ impl StandardocMcp {
                     ctx,
                     routing_hint,
                 };
-                let files = files_from_context(&response.ctx);
-                Ok(success_json_with_usage(
-                    &response,
-                    self.handle.workspace_root(),
-                    "get_context",
-                    Some(params.fqdn),
-                    files,
-                ))
+                Ok(success_json(&response))
             }
             None => Ok(CallToolResult::success(vec![Content::text(
                 "no symbol found for the given FQDN",
@@ -298,27 +285,14 @@ impl StandardocMcp {
         if result.is_empty() {
             let suggestions = compute_did_you_mean(self.handle.clone(), trimmed, filter).await?;
             if !suggestions.is_empty() {
-                return Ok(success_json_with_usage(
-                    &serde_json::json!({
-                        "results": Vec::<RawSymbol>::new(),
-                        "did_you_mean": suggestions,
-                    }),
-                    self.handle.workspace_root(),
-                    "find_symbol",
-                    None,
-                    Vec::new(),
-                ));
+                return Ok(success_json(&serde_json::json!({
+                    "results": Vec::<RawSymbol>::new(),
+                    "did_you_mean": suggestions,
+                })));
             }
         }
 
-        let files = files_from_symbols(&result);
-        Ok(success_json_with_usage(
-            &result,
-            self.handle.workspace_root(),
-            "find_symbol",
-            None,
-            files,
-        ))
+        Ok(success_json(&result))
     }
 
     /// Filter-only listing — no FTS query, no glob pattern. Returns
@@ -360,18 +334,11 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
-        let files = files_from_symbols(&page.items);
         let envelope = serde_json::json!({
             "items": page.items,
             "next_cursor": page.next_cursor,
         });
-        Ok(success_json_with_usage(
-            &envelope,
-            self.handle.workspace_root(),
-            "list_symbols",
-            None,
-            files,
-        ))
+        Ok(success_json(&envelope))
     }
 
     /// Glob-pattern search over `name` and `fqdn`. Uses SQLite's `GLOB`
@@ -429,28 +396,15 @@ impl StandardocMcp {
             if !core.is_empty() {
                 let suggestions = compute_did_you_mean(self.handle.clone(), core, filter).await?;
                 if !suggestions.is_empty() {
-                    return Ok(success_json_with_usage(
-                        &serde_json::json!({
-                            "results": Vec::<RawSymbol>::new(),
-                            "did_you_mean": suggestions,
-                        }),
-                        self.handle.workspace_root(),
-                        "find_symbols_by_pattern",
-                        None,
-                        Vec::new(),
-                    ));
+                    return Ok(success_json(&serde_json::json!({
+                        "results": Vec::<RawSymbol>::new(),
+                        "did_you_mean": suggestions,
+                    })));
                 }
             }
         }
 
-        let files = files_from_symbols(&result);
-        Ok(success_json_with_usage(
-            &result,
-            self.handle.workspace_root(),
-            "find_symbols_by_pattern",
-            None,
-            files,
-        ))
+        Ok(success_json(&result))
     }
 
     /// Similarity-scored search around an anchor name. Returns symbols whose
@@ -502,18 +456,11 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
-        let files = files_from_similar(&result);
         let envelope: Vec<SimilarSymbolJson> = result
             .into_iter()
             .map(|(symbol, score)| SimilarSymbolJson { score, symbol })
             .collect();
-        Ok(success_json_with_usage(
-            &envelope,
-            self.handle.workspace_root(),
-            "find_similar_symbols",
-            None,
-            files,
-        ))
+        Ok(success_json(&envelope))
     }
 
     /// Returns the raw source text of the symbol identified by `fqdn`. This is
@@ -566,17 +513,7 @@ impl StandardocMcp {
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
         match result {
-            Some(slice) => {
-                let files = files_from_body(&slice);
-                let fqdn = slice.fqdn.clone();
-                Ok(success_json_with_usage(
-                    &slice,
-                    self.handle.workspace_root(),
-                    "get_body",
-                    Some(fqdn),
-                    files,
-                ))
-            }
+            Some(slice) => Ok(success_json(&slice)),
             None => Ok(CallToolResult::success(vec![Content::text(
                 "no symbol found for the given FQDN",
             )])),
@@ -622,177 +559,6 @@ impl StandardocMcp {
     }
 
     /// Aggregated read-path telemetry — the running tally of bytes the
-    /// standardoc tools have returned vs. the raw file bytes those same
-    /// responses pointed at. The baseline is `sum(file_sizes)` of the
-    /// distinct source files referenced by each response (the honest
-    /// "what an AI would have consumed reading the relevant sources
-    /// raw" floor — no estimation multiplier). Returns counts + bytes
-    /// totals + a compression `ratio` in `[0, +∞)`. Only successful
-    /// read-path tool calls are logged (no `indexing_in_progress`,
-    /// `no symbol found`, or blank-query early returns).
-    #[tool(
-        description = "Returns aggregated standardoc tool usage metrics: `calls`, `bytes_out_total` (what tools returned to the AI), `baseline_bytes_total` (sum of file sizes of distinct source files referenced — what an AI would have consumed reading those raw), `bytes_saved` (baseline - out, can be negative when neighbors inflate the response), and `ratio = bytes_out / baseline`. `period` accepts `day`, `week`, `all` (default). The baseline is graph-grounded — no estimation multiplier — so a ratio of 0.14 means standardoc returned 14% of the raw bytes of the relevant source files."
-    )]
-    async fn usage_stats(
-        &self,
-        Parameters(params): Parameters<UsageStatsParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let period_str = params.period.unwrap_or_else(|| "all".to_string());
-        let period = UsagePeriod::from_str_loose(&period_str).ok_or_else(|| {
-            ErrorData::invalid_params(
-                format!("unknown period `{period_str}` — expected one of: day, week, all"),
-                None,
-            )
-        })?;
-        let workspace = self.handle.workspace_root().to_path_buf();
-        let row = tokio::task::spawn_blocking(move || {
-            let h = SessionsHandle::open(&workspace).map_err(SessionsErr::from)?;
-            h.query_usage_stats(period).map_err(SessionsErr::from)
-        })
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-        .map_err(sessions_err_to_rmcp)?;
-        Ok(success_json(&row))
-    }
-
-    /// Persist a session handoff memo into `.standardoc-sessions/sessions.db`.
-    /// `slug` is the unique key (UPSERT semantics: re-saving the same slug
-    /// overwrites the body). `supersedes`, when provided, marks the named
-    /// prior session as `superseded` — useful when a refactor invalidates an
-    /// older lock. Returns the inserted row id.
-    #[tool(
-        description = "Save a session handoff memo to .standardoc-sessions/sessions.db. UPSERT by `slug`. Use this AT END of any session that locks decisions or ships meaningful work so the next chat can pick up via `session_get`. Optional `supersedes` marks a prior slug as superseded (chain semantics). Returns the row id."
-    )]
-    async fn session_save(
-        &self,
-        Parameters(params): Parameters<SessionSaveParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let workspace = self.handle.workspace_root().to_path_buf();
-        let result = tokio::task::spawn_blocking(move || {
-            let h = SessionsHandle::open(&workspace).map_err(SessionsErr::from)?;
-            let id = h
-                .save(&params.slug, &params.body_md, params.supersedes.as_deref())
-                .map_err(SessionsErr::from)?;
-            Ok::<_, SessionsErr>(id)
-        })
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-        .map_err(sessions_err_to_rmcp)?;
-        Ok(success_json(&serde_json::json!({ "id": result })))
-    }
-
-    /// List session memos newest-first. By default skips `superseded` rows.
-    #[tool(
-        description = "List session handoff memos newest-first. `active_only` (default true) filters out superseded entries. Returns the full body_md per row — use `session_get` only when you need to fetch one by slug."
-    )]
-    async fn session_list(
-        &self,
-        Parameters(params): Parameters<SessionListParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let workspace = self.handle.workspace_root().to_path_buf();
-        let active_only = params.active_only.unwrap_or(true);
-        let rows = tokio::task::spawn_blocking(move || {
-            let h = SessionsHandle::open(&workspace).map_err(SessionsErr::from)?;
-            h.list(active_only).map_err(SessionsErr::from)
-        })
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-        .map_err(sessions_err_to_rmcp)?;
-        Ok(success_json(&rows))
-    }
-
-    /// Fetch a single session memo by slug, or the most recent active one
-    /// when `slug` is omitted. Returns `null` if no row matches.
-    #[tool(
-        description = "Fetch a session handoff memo. Pass `slug` to target a specific entry; omit it to get the most recent active session (typical reentry point for a new chat). Returns null when nothing matches."
-    )]
-    async fn session_get(
-        &self,
-        Parameters(params): Parameters<SessionGetParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let workspace = self.handle.workspace_root().to_path_buf();
-        let slug = params.slug;
-        let row = tokio::task::spawn_blocking(move || {
-            let h = SessionsHandle::open(&workspace).map_err(SessionsErr::from)?;
-            match slug {
-                Some(s) => h.get_by_slug(&s).map_err(SessionsErr::from),
-                None => h.latest().map_err(SessionsErr::from),
-            }
-        })
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-        .map_err(sessions_err_to_rmcp)?;
-        match row {
-            Some(r) => Ok(success_json(&r)),
-            None => Ok(CallToolResult::success(vec![Content::text(
-                "no session found",
-            )])),
-        }
-    }
-
-    /// Bulk-import every `.md` file under `dir` into the sessions DB,
-    /// dispatching `kind` from each file's `type:` frontmatter
-    /// (`feedback` → Feedback, `user`/`reference` → Profile, `project`
-    /// → Lock, other → Session). `MEMORY.md` is skipped — the index is
-    /// regenerated on export. UPSERT by slug means re-running is safe.
-    /// The full row state (`supersedes`, `status`, `created_at`) round-trips
-    /// fidelity-complete when the source `.md` carries the extended
-    /// frontmatter written by `session_sync_out`.
-    #[tool(
-        description = "Bulk import every .md memo under `dir` into .standardoc-sessions/sessions.db. Frontmatter drives `kind` (feedback/profile/lock/session), `status`, `supersedes`, and `created_at`. MEMORY.md is skipped. UPSERT by slug — idempotent."
-    )]
-    async fn session_sync_in(
-        &self,
-        Parameters(params): Parameters<SessionSyncInParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let workspace = self.handle.workspace_root().to_path_buf();
-        let dir = std::path::PathBuf::from(params.dir);
-        let report = tokio::task::spawn_blocking(move || {
-            let h = SessionsHandle::open(&workspace).map_err(SessionsErr::from)?;
-            import_memory_dir(&h, &dir).map_err(|e| {
-                SessionsErr::from(standardoc_core::SessionsError::InvalidStoredData {
-                    detail: format!("session_sync_in: {e}"),
-                })
-            })
-        })
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-        .map_err(sessions_err_to_rmcp)?;
-        Ok(success_json(
-            &serde_json::to_value(report).unwrap_or_default(),
-        ))
-    }
-
-    /// Dump every session row to `<slug>.md` files under `dir` and rewrite
-    /// `MEMORY.md` as a one-line-per-memo index. Designed for cross-machine
-    /// portability: dump on PC1, sync the directory, reimport on PC2.
-    /// The extended frontmatter (`status`, `supersedes`, `created_at`) makes
-    /// the dump losslessly re-importable via `session_sync_in`.
-    #[tool(
-        description = "Bulk export every session memo to `<slug>.md` under `dir` and (re)write MEMORY.md as an index. Inverse of `session_sync_in`. Used for cross-machine portability."
-    )]
-    async fn session_sync_out(
-        &self,
-        Parameters(params): Parameters<SessionSyncOutParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let workspace = self.handle.workspace_root().to_path_buf();
-        let dir = std::path::PathBuf::from(params.dir);
-        let report = tokio::task::spawn_blocking(move || {
-            let h = SessionsHandle::open(&workspace).map_err(SessionsErr::from)?;
-            export_memory_dir(&h, &dir).map_err(|e| {
-                SessionsErr::from(standardoc_core::SessionsError::InvalidStoredData {
-                    detail: format!("session_sync_out: {e}"),
-                })
-            })
-        })
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-        .map_err(sessions_err_to_rmcp)?;
-        Ok(success_json(
-            &serde_json::to_value(report).unwrap_or_default(),
-        ))
-    }
-
     /// Lazy on-demand resolution of an external FQDN (Cargo crate, npm
     /// package, luarocks rock). Routes the FQDN through the registered
     /// resolvers in order; the first non-`NotInThisRegistry` answer wins.
@@ -1676,46 +1442,6 @@ pub(crate) struct GetBodyParams {
     pub signature_only: Option<bool>,
 }
 
-/// Tool input — `session_save(slug, body_md, supersedes?)`. Persists or
-/// overwrites a session memo. `slug` is a UNIQUE identifier; UPSERT semantics.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct SessionSaveParams {
-    pub slug: String,
-    pub body_md: String,
-    pub supersedes: Option<String>,
-}
-
-/// Tool input — `session_list(active_only?)`. Defaults to active-only.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct SessionListParams {
-    pub active_only: Option<bool>,
-}
-
-/// Tool input — `session_get(slug?)`. Omit `slug` to fetch the most recent
-/// active session (latest entry point).
-#[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct SessionGetParams {
-    pub slug: Option<String>,
-}
-
-/// Tool input — `session_sync_in(dir)`. Walks the given directory of
-/// session-memo `.md` files, classifies each by its frontmatter `type:`,
-/// and UPSERTs the full row state (status, supersedes, created_at) into
-/// the sessions table.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct SessionSyncInParams {
-    pub dir: String,
-}
-
-/// Tool input — `session_sync_out(dir)`. Dumps every session row to
-/// `<slug>.md` under `dir` with extended frontmatter (status, supersedes,
-/// created_at) and regenerates `MEMORY.md` as an index. Inverse of
-/// `session_sync_in`. Used to migrate sessions across machines.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct SessionSyncOutParams {
-    pub dir: String,
-}
-
 /// Tool output for `current_revision`. The legacy `revision` field is kept
 /// as the first key so callers that only deserialize `{revision}` keep
 /// working; new fields surface daemon capabilities so an AI can decide
@@ -1759,17 +1485,6 @@ pub(crate) struct WorkspaceCapabilityJson {
     /// / single-crate layout — aligns with standarbuild-detect 0.3
     /// which has no `Single` variant).
     pub kind: Option<String>,
-}
-
-/// Tool input — `usage_stats(period?)`. Accepted period strings (case-insensitive):
-/// `day` / `d` / `today`, `week` / `w` / `7d`, `all` (default).
-#[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct UsageStatsParams {
-    /// Window scope. Defaults to `"all"`. Accepts `day`, `week`, `all` (and
-    /// their aliases listed above). Anything else returns an invalid-params
-    /// error rather than silently coercing.
-    #[serde(default)]
-    pub period: Option<String>,
 }
 
 /// Tool input — `check_stale(fetched: [{fqdn, fetched_at_revision}, ...])`.
@@ -2111,38 +1826,6 @@ fn success_json<T: Serialize>(value: &T) -> CallToolResult {
             "failed to serialize tool result: {e}"
         ))]),
     }
-}
-
-/// Same as `success_json`, but also records the call in `usage_stats`
-/// (table in `sessions.db`) with the response byte count and a baseline
-/// computed from the workspace-relative `files` referenced by the
-/// response. Logging is best-effort and fire-and-forget — a SQLite or
-/// runtime hiccup will never bubble up to the caller.
-fn success_json_with_usage<T: Serialize>(
-    value: &T,
-    workspace_root: &Path,
-    tool_name: &'static str,
-    fqdn: Option<String>,
-    files: Vec<String>,
-) -> CallToolResult {
-    let json = match serde_json::to_string_pretty(value) {
-        Ok(j) => j,
-        Err(e) => {
-            return CallToolResult::error(vec![Content::text(format!(
-                "failed to serialize tool result: {e}"
-            ))]);
-        }
-    };
-    let bytes_out = u64::try_from(json.len()).unwrap_or(u64::MAX);
-    let baseline = sum_distinct_file_sizes(workspace_root, files);
-    log_usage_fire_and_forget(
-        workspace_root.to_path_buf(),
-        tool_name,
-        fqdn,
-        bytes_out,
-        baseline,
-    );
-    CallToolResult::success(vec![Content::text(json)])
 }
 
 fn clamp_limit(raw: Option<u8>) -> u8 {
@@ -2934,90 +2617,6 @@ mod tests {
             .await
             .expect("tool returns Ok with friendly degradation");
         assert!(body_text(&result).contains("Workspace indexing in progress"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn usage_stats_empty_returns_zero_counters() {
-        let (_dir, mcp) = fixture();
-        let result = mcp
-            .usage_stats(Parameters(UsageStatsParams { period: None }))
-            .await
-            .unwrap();
-        let body = body_text(&result);
-        assert!(body.contains("\"calls\": 0"), "got `{body}`");
-        assert!(body.contains("\"bytes_out_total\": 0"), "got `{body}`");
-        assert!(body.contains("\"baseline_bytes_total\": 0"), "got `{body}`");
-        assert!(body.contains("\"period\": \"all\""), "got `{body}`");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn usage_stats_unknown_period_rejected() {
-        let (_dir, mcp) = fixture();
-        let err = mcp
-            .usage_stats(Parameters(UsageStatsParams {
-                period: Some("eternity".into()),
-            }))
-            .await;
-        assert!(
-            err.is_err(),
-            "unknown period must be rejected with ErrorData"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn usage_stats_aliases_accepted() {
-        let (_dir, mcp) = fixture();
-        for alias in ["day", "Today", "week", "7d", "all", ""] {
-            let result = mcp
-                .usage_stats(Parameters(UsageStatsParams {
-                    period: Some(alias.into()),
-                }))
-                .await;
-            assert!(
-                result.is_ok(),
-                "alias `{alias}` should be accepted, got {result:?}"
-            );
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn find_symbol_logs_usage_row_for_successful_call() {
-        let (dir, mcp) = fixture();
-        cold_start_workspace(&mcp, dir.path());
-        let workspace = dir.path().to_path_buf();
-        let _ = mcp
-            .find_symbol(Parameters(FindSymbolParams {
-                query: "anything".into(),
-                limit: None,
-                kind: None,
-                visibility: None,
-                module: None,
-                include_external: None,
-                workspace_id: None,
-            }))
-            .await
-            .unwrap();
-        // log_usage_fire_and_forget hops through tokio::task::spawn ->
-        // spawn_blocking -> SessionsHandle::open + INSERT. On starved CI
-        // runners (2-vCPU Linux/macOS) the chain can take well over 1s to
-        // resolve. Poll up to ~5s before giving up so the test reflects
-        // real failures (e.g. swallowed open error) rather than scheduling
-        // jitter.
-        let h = SessionsHandle::open(&workspace).expect("open sessions");
-        let mut stats = h.query_usage_stats(UsagePeriod::All).unwrap();
-        for _ in 0..100 {
-            if stats.calls > 0 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            stats = h.query_usage_stats(UsagePeriod::All).unwrap();
-        }
-        assert!(
-            stats.calls >= 1,
-            "expected at least one logged call after ~5s of polling, got \
-             {stats:?} — fire-and-forget spawn likely failed silently \
-             (check SessionsHandle::open or the spawn_blocking chain)"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
