@@ -155,9 +155,11 @@ pub fn list_linked_workspaces(handle: &IndexHandle) -> Result<Vec<LinkedWorkspac
 }
 
 /// Stage 3e-3 — fetch the primary workspace's persisted [`WorkspaceKind`].
-/// Returns `Ok(None)` when discovery hasn't run yet at the current cold-
-/// start cycle (fresh DB, or pre-3e-3 database). MCP / LSP consumers
-/// default to [`WorkspaceKind::Single`] in that case.
+/// Returns `Ok(None)` when discovery hasn't run yet (fresh DB, pre-3e-3
+/// database, or first cold-start in progress) AND when discovery ran
+/// but no workspace manifest was detected at the root (loose project
+/// tree / single-crate layout). MCP / LSP consumers surface the `None`
+/// case as a literal `null` field rather than guessing a sentinel.
 pub fn read_primary_workspace_kind(
     handle: &IndexHandle,
 ) -> Result<Option<WorkspaceKind>, StorageError> {

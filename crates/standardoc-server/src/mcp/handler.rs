@@ -1604,9 +1604,12 @@ pub(crate) struct IndexingCapabilityJson {
 #[derive(Debug, Serialize)]
 pub(crate) struct WorkspaceCapabilityJson {
     /// Detected workspace organizer slug (`cargo`, `npm`, `pnpm`, `yarn`,
-    /// `bun`, `deno`, `go`, `lerna`, `nx`, `turborepo`, `mira`, `single`,
-    /// or `custom:<tag>`). `null` before cold-start has run discovery
-    /// (legacy DBs pre-3e-3 or first boot in progress).
+    /// `bun`, `deno`, `go`, `lerna`, `nx`, `turborepo`, `mira`, or
+    /// `custom:<tag>`). `null` when (a) discovery hasn't run yet (legacy
+    /// DBs pre-3e-3 or first boot in progress) OR (b) discovery ran but
+    /// no workspace manifest is present at the root (loose project tree
+    /// / single-crate layout — aligns with standarbuild-detect 0.3
+    /// which has no `Single` variant).
     pub kind: Option<String>,
 }
 
@@ -2649,15 +2652,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn stage3e3_current_revision_workspace_kind_after_cold_start_is_single_or_kind() {
+    async fn stage3e3_current_revision_workspace_kind_is_null_when_no_manifest() {
         let (dir, mcp) = fixture();
         cold_start_workspace(&mcp, dir.path());
         let result = mcp.current_revision().await.unwrap();
         let body = body_text(&result);
-        // Cold-start has run → kind row is persisted. The fixture has
-        // no workspace manifest at root → "single".
+        // Cold-start has run, but the fixture has no workspace manifest
+        // at root → discovery deletes the row → `kind: null`. (Post-
+        // revert of `WorkspaceKind::Single` — aligns with
+        // standarbuild-detect 0.3.)
         assert!(body.contains("\"workspace\""), "got `{body}`");
-        assert!(body.contains("\"kind\": \"single\""), "got `{body}`");
+        assert!(body.contains("\"kind\": null"), "got `{body}`");
     }
 
     #[tokio::test(flavor = "multi_thread")]

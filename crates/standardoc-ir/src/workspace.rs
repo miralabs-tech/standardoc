@@ -36,9 +36,6 @@ pub enum WorkspaceKind {
 	Turborepo,
 	/// Mira self-hosting build manifest (`*.sxb` at root).
 	Mira,
-	/// No workspace manifest detected — single-project tree or loose
-	/// collection. Default when persisted state is absent.
-	Single,
 	/// Open-ended slot for custom monorepo tools (Bazel, Pants, Buck,
 	/// custom DSLs). Mirrors `WorkspaceKindId::Custom`.
 	Custom(String),
@@ -61,7 +58,6 @@ impl WorkspaceKind {
 			Self::Nx => std::borrow::Cow::Borrowed("nx"),
 			Self::Turborepo => std::borrow::Cow::Borrowed("turborepo"),
 			Self::Mira => std::borrow::Cow::Borrowed("mira"),
-			Self::Single => std::borrow::Cow::Borrowed("single"),
 			Self::Custom(tag) => std::borrow::Cow::Owned(format!("custom:{tag}")),
 		}
 	}
@@ -82,7 +78,6 @@ impl WorkspaceKind {
 			"nx" => Self::Nx,
 			"turborepo" => Self::Turborepo,
 			"mira" => Self::Mira,
-			"single" => Self::Single,
 			other => other
 				.strip_prefix("custom:")
 				.map(|tag| Self::Custom(tag.to_string()))
@@ -223,7 +218,6 @@ mod tests {
 			WorkspaceKind::Nx,
 			WorkspaceKind::Turborepo,
 			WorkspaceKind::Mira,
-			WorkspaceKind::Single,
 		] {
 			let s = k.as_str().into_owned();
 			assert_eq!(WorkspaceKind::from_str(&s), k.clone());
@@ -246,6 +240,17 @@ mod tests {
 		// than rejected. Mirrors `WorkspaceKindId::from_slug`.
 		let k = WorkspaceKind::from_str("scala-sbt");
 		assert_eq!(k, WorkspaceKind::Custom("scala-sbt".into()));
+	}
+
+	#[test]
+	fn workspace_kind_legacy_single_slug_becomes_custom() {
+		// The `Single` variant was dropped in the 3e-3 revert to align with
+		// `standarbuild-detect 0.3` (which has no `Single`). Legacy DBs
+		// persisted with `"single"` round-trip as `Custom("single")` —
+		// `delete_workspace_kind` purges the row at the next cold-start
+		// when no workspace manifest is detected.
+		let k = WorkspaceKind::from_str("single");
+		assert_eq!(k, WorkspaceKind::Custom("single".into()));
 	}
 
 	#[test]

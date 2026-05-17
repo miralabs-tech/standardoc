@@ -80,19 +80,20 @@ fn from_workspace_kind_id(id: &WorkspaceKindId) -> WorkspaceKind {
 /// the scan `workspace_root`. When multiple workspace kinds coexist at
 /// the same root (Tauri = Cargo + Npm), the detector's registration
 /// order determines which wins — typically the higher-priority detector
-/// fires first. Falls back to [`WorkspaceKind::Single`] when no
-/// workspace manifest is detected at the workspace root (loose project
-/// tree or single-crate layout).
+/// fires first. Returns `None` when no workspace manifest is detected
+/// at the workspace root (loose project tree or single-crate layout) —
+/// the storage layer then clears the `workspace_kind` row rather than
+/// recording a sentinel, so `current_revision` can distinguish
+/// "detection ran, found no workspace organizer" from "detected as X".
 fn primary_workspace_kind(
     detected: &standarbuild_detect::DetectionResult,
     workspace_root: &Path,
-) -> WorkspaceKind {
+) -> Option<WorkspaceKind> {
     detected
         .workspaces
         .iter()
         .find(|w| w.root.as_path() == workspace_root)
         .map(|w| from_workspace_kind_id(&w.kind))
-        .unwrap_or(WorkspaceKind::Single)
 }
 
 /// Normalise a `rel_path` from `standarbuild_detect::Discovered` for
@@ -133,13 +134,22 @@ pub fn discover_and_persist_projects_with(
     registry: &DetectorRegistry,
 ) -> Result<Vec<ProjectInfo>, StorageError> {
     let detected = discover_workspace_with(workspace_root, registry);
-    // Stage 3e-3: persist the primary workspace kind BEFORE returning so
-    // a partial early-exit (e.g. cold_start crash mid-walk) still leaves
-    // the kind recorded for next-boot diagnostics. Best-effort: an
+    // Stage 3e-3: sync the persisted `workspace_kind` row to the detected
+    // state BEFORE returning so a partial early-exit (e.g. cold_start
+    // crash mid-walk) still leaves the kind recorded for next-boot
+    // diagnostics. Some → upsert ; None → delete (clears legacy
+    // `"single"` rows from pre-revert 3e-3 builds AND records the
+    // "no organizer detected" signal as row-absence). Best-effort: an
     // error here doesn't fail the whole discovery pass, projects are
     // the load-bearing output.
-    let workspace_kind = primary_workspace_kind(&detected, workspace_root);
-    let _ = schema_meta::write_workspace_kind(conn, &workspace_kind);
+    match primary_workspace_kind(&detected, workspace_root) {
+        Some(kind) => {
+            let _ = schema_meta::write_workspace_kind(conn, &kind);
+        }
+        None => {
+            let _ = schema_meta::delete_workspace_kind(conn);
+        }
+    }
     persist_projects(conn, detected.projects)
 }
 
@@ -337,11 +347,13 @@ mod tests {
     }
 
     #[test]
-    fn stage3e3_loose_project_tree_persists_workspace_kind_single() {
-        // No workspace manifest at root — single-crate layout falls back
-        // to `WorkspaceKind::Single` (persisted explicitly so the row
-        // distinguishes "detection ran, found nothing" from "detection
-        // never ran").
+    fn stage3e3_loose_project_tree_persists_no_workspace_kind() {
+        // No workspace manifest at root — single-crate layout records
+        // `None` rather than a sentinel variant. The row is intentionally
+        // absent so `current_revision.workspace.kind == null` becomes the
+        // signal "detection ran, found no organizer". (Post-revert of
+        // `WorkspaceKind::Single` — aligns with standarbuild-detect 0.3
+        // which has no `Single` variant.)
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("Cargo.toml"),
@@ -352,10 +364,37 @@ mod tests {
         let conn = fresh_db();
         discover_and_persist_projects(&conn, dir.path()).unwrap();
 
-        let persisted = crate::storage::schema_meta::read_workspace_kind(&conn)
-            .unwrap()
-            .expect("Single must be persisted explicitly post-discovery");
-        assert_eq!(persisted, standardoc_ir::WorkspaceKind::Single);
+        let persisted = crate::storage::schema_meta::read_workspace_kind(&conn).unwrap();
+        assert!(
+            persisted.is_none(),
+            "loose project tree must leave workspace_kind row absent, got {persisted:?}"
+        );
+    }
+
+    #[test]
+    fn stage3e3_legacy_single_row_is_purged_on_rediscovery() {
+        // Simulates a pre-revert DB carrying `workspace_kind = "single"`.
+        // Re-running discovery against a loose tree must DELETE the row
+        // (not leave it stuck as `Custom("single")`).
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"solo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let conn = fresh_db();
+        conn.execute(
+            "INSERT INTO schema_meta (key, value) VALUES ('workspace_kind', 'single')",
+            [],
+        )
+        .unwrap();
+        discover_and_persist_projects(&conn, dir.path()).unwrap();
+        let persisted = crate::storage::schema_meta::read_workspace_kind(&conn).unwrap();
+        assert!(
+            persisted.is_none(),
+            "legacy `single` row must be purged on rediscovery, got {persisted:?}"
+        );
     }
 
     #[test]

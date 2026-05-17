@@ -21,8 +21,9 @@ const WORKSPACE_KIND_KEY: &str = "workspace_kind";
 
 /// Read the primary workspace's persisted [`WorkspaceKind`]. Returns
 /// `Ok(None)` when the key has never been written (legacy databases
-/// pre-3e-3 or first cold-start in progress). Callers wanting a
-/// non-`Option` default to [`WorkspaceKind::Single`].
+/// pre-3e-3, first cold-start in progress, or workspaces where no
+/// manifest was detected — the kind row is intentionally absent for
+/// the latter, see [`delete_workspace_kind`]).
 pub fn read_workspace_kind(conn: &Connection) -> Result<Option<WorkspaceKind>, StorageError> {
     let value: Option<String> = conn
         .query_row(
@@ -45,6 +46,21 @@ pub fn write_workspace_kind(conn: &Connection, kind: &WorkspaceKind) -> Result<(
         "INSERT INTO schema_meta (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![WORKSPACE_KIND_KEY, kind.as_str().as_ref()],
+    )
+    .map_err(StorageError::from)?;
+    Ok(())
+}
+
+/// Remove the persisted `workspace_kind` row. Idempotent — a no-op when
+/// the row is absent. Called at cold-start when no workspace manifest
+/// is detected at the root, so the slot reads back as `None` (the
+/// distinguishing signal "detection ran, found no workspace organizer")
+/// AND purges legacy `"single"` rows left behind by pre-revert 3e-3
+/// builds.
+pub fn delete_workspace_kind(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute(
+        "DELETE FROM schema_meta WHERE key = ?1",
+        params![WORKSPACE_KIND_KEY],
     )
     .map_err(StorageError::from)?;
     Ok(())
@@ -96,10 +112,43 @@ mod tests {
     }
 
     #[test]
-    fn write_then_read_roundtrips_single() {
+    fn delete_workspace_kind_clears_existing_row() {
         let conn = fresh_db();
-        write_workspace_kind(&conn, &WorkspaceKind::Single).unwrap();
-        let kind = read_workspace_kind(&conn).unwrap();
-        assert_eq!(kind, Some(WorkspaceKind::Single));
+        write_workspace_kind(&conn, &WorkspaceKind::Cargo).unwrap();
+        assert_eq!(
+            read_workspace_kind(&conn).unwrap(),
+            Some(WorkspaceKind::Cargo)
+        );
+        delete_workspace_kind(&conn).unwrap();
+        assert!(read_workspace_kind(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_workspace_kind_is_idempotent_when_row_absent() {
+        let conn = fresh_db();
+        delete_workspace_kind(&conn).unwrap();
+        delete_workspace_kind(&conn).unwrap();
+        assert!(read_workspace_kind(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_single_slug_reads_back_as_custom_then_purged() {
+        // Pre-revert 3e-3 builds persisted `"single"` as the fallback
+        // value. After the revert that slug is no longer a built-in
+        // variant, so it round-trips as `Custom("single")`. Cold-start
+        // then calls `delete_workspace_kind` (when no workspace manifest
+        // is detected) and the row is cleared.
+        let conn = fresh_db();
+        conn.execute(
+            "INSERT INTO schema_meta (key, value) VALUES (?1, 'single')",
+            params![WORKSPACE_KIND_KEY],
+        )
+        .unwrap();
+        assert_eq!(
+            read_workspace_kind(&conn).unwrap(),
+            Some(WorkspaceKind::Custom("single".into()))
+        );
+        delete_workspace_kind(&conn).unwrap();
+        assert!(read_workspace_kind(&conn).unwrap().is_none());
     }
 }
