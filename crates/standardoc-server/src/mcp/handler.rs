@@ -333,6 +333,7 @@ impl StandardocMcp {
             params.visibility.as_deref(),
             params.module,
             params.include_external,
+            params.workspace_id,
         )?;
         let limit = clamp_limit(params.limit);
         let handle = self.handle.clone();
@@ -403,6 +404,7 @@ impl StandardocMcp {
             params.visibility.as_deref(),
             params.module,
             params.include_external,
+            params.workspace_id,
         )?;
         let limit = clamp_limit(params.limit);
         let cursor = params.cursor;
@@ -460,6 +462,7 @@ impl StandardocMcp {
             params.visibility.as_deref(),
             params.module,
             params.include_external,
+            params.workspace_id,
         )?;
         let limit = clamp_limit(params.limit);
         let handle = self.handle.clone();
@@ -535,11 +538,16 @@ impl StandardocMcp {
         }
 
         let threshold = parse_threshold(params.threshold)?;
+        // find_similar_symbols is intentionally NOT in L3e's MCP surface
+        // (per user "just the three primary tools"). The core filter
+        // still defaults to primary; passing None preserves that — no
+        // workspace override is exposed at the tool level here.
         let filter = parse_filter(
             params.kind.as_deref(),
             params.visibility.as_deref(),
             params.module,
             params.include_external,
+            None,
         )?;
         let limit = clamp_limit(params.limit);
         let handle = self.handle.clone();
@@ -1429,6 +1437,13 @@ pub(crate) struct FindSymbolParams {
     /// `false` to scope a query to workspace-only symbols.
     #[serde(default)]
     pub include_external: Option<bool>,
+    /// Optional — scope the query to a single workspace by its UUID
+    /// (as returned by `link_workspace`). Defaults to the primary
+    /// workspace ("MY symbols"). Pass a peer's workspace_id to query
+    /// that peer's source. There is no "all workspaces" mode — call
+    /// once per workspace.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 /// Tool input — `list_symbols(kind?, visibility?, module?, limit?,
@@ -1456,6 +1471,11 @@ pub(crate) struct ListSymbolsParams {
     /// strict `fqdn > cursor` filter; ordering is always by `fqdn`.
     #[serde(default)]
     pub cursor: Option<String>,
+    /// Optional — scope the listing to a single workspace by its UUID.
+    /// Defaults to the primary workspace. Pass a peer's workspace_id
+    /// to list that peer's source.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 /// Tool input — `find_symbols_by_pattern(pattern, kind?, visibility?,
@@ -1480,6 +1500,10 @@ pub(crate) struct FindSymbolsByPatternParams {
     /// `false` to scope a query to workspace-only symbols.
     #[serde(default)]
     pub include_external: Option<bool>,
+    /// Optional — scope the query to a single workspace by its UUID.
+    /// Defaults to the primary workspace.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 /// Tool input — `find_call_sites(from_fqdn?, callee_text?, callee_pattern?, limit?)`.
@@ -1823,6 +1847,7 @@ fn parse_filter(
     visibility: Option<&str>,
     module: Option<String>,
     include_external: Option<bool>,
+    workspace_id: Option<String>,
 ) -> Result<SymbolFilter, ErrorData> {
     let kind = kind.map(parse_kind).transpose()?;
     let visibility = visibility.map(parse_visibility).transpose()?;
@@ -1832,6 +1857,7 @@ fn parse_filter(
         visibility,
         module,
         include_external,
+        workspace_id,
     })
 }
 
@@ -2219,6 +2245,7 @@ mod tests {
                 visibility: None,
                 module: None,
                 include_external: None,
+                workspace_id: None,
             }))
             .await
             .expect("tool returns Ok with friendly degradation");
@@ -2240,6 +2267,7 @@ mod tests {
                 limit: None,
                 include_external: None,
                 cursor: None,
+                workspace_id: None,
             }))
             .await
             .expect("tool returns Ok with friendly degradation");
@@ -2261,6 +2289,7 @@ mod tests {
                 limit: None,
                 include_external: Some(false),
                 cursor: None,
+                workspace_id: None,
             }))
             .await
             .unwrap();
@@ -2297,6 +2326,7 @@ mod tests {
                 limit: Some(2),
                 include_external: Some(false),
                 cursor: Some("crate::anchor".into()),
+                workspace_id: None,
             }))
             .await
             .unwrap();
@@ -2316,6 +2346,7 @@ mod tests {
                 module: None,
                 limit: None,
                 include_external: None,
+                workspace_id: None,
             }))
             .await
             .expect("tool returns Ok with friendly degradation");
@@ -2358,6 +2389,7 @@ mod tests {
             Some("private"),
             Some("crate::a".into()),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(f.kind, Some(Kind::Function));
@@ -2371,13 +2403,23 @@ mod tests {
 
     #[test]
     fn parse_filter_all_none_yields_empty_filter() {
-        let f = parse_filter(None, None, None, None).unwrap();
+        let f = parse_filter(None, None, None, None, None).unwrap();
         assert_eq!(f, SymbolFilter::default());
     }
 
     #[test]
+    fn parse_filter_propagates_workspace_id_when_supplied() {
+        // L3e-2: workspace_id flows through parse_filter unchanged so
+        // downstream SQL narrows to that peer's rows.
+        let f = parse_filter(None, None, None, None, Some("peer-uuid-xyz".into()))
+            .unwrap();
+        assert_eq!(f.workspace_id.as_deref(), Some("peer-uuid-xyz"));
+        assert_eq!(f.effective_workspace_id(), "peer-uuid-xyz");
+    }
+
+    #[test]
     fn parse_filter_propagates_include_external_false() {
-        let f = parse_filter(None, None, None, Some(false)).unwrap();
+        let f = parse_filter(None, None, None, Some(false), None).unwrap();
         assert!(
             !f.include_external,
             "explicit false must scope queries to workspace-only symbols"
@@ -2415,6 +2457,7 @@ mod tests {
                 visibility: None,
                 module: None,
                 include_external: None,
+                workspace_id: None,
             }))
             .await
             .unwrap();
@@ -2437,6 +2480,7 @@ mod tests {
                 module: None,
                 limit: None,
                 include_external: None,
+                workspace_id: None,
             }))
             .await
             .unwrap();
@@ -2641,6 +2685,7 @@ mod tests {
                 visibility: None,
                 module: None,
                 include_external: None,
+                workspace_id: None,
             }))
             .await;
         // Invalid filter is a parameter error — surfaces as Err on the
@@ -2938,6 +2983,7 @@ mod tests {
                 visibility: None,
                 module: None,
                 include_external: None,
+                workspace_id: None,
             }))
             .await
             .unwrap();
@@ -2961,6 +3007,68 @@ mod tests {
             "expected at least one logged call after ~5s of polling, got \
              {stats:?} — fire-and-forget spawn likely failed silently \
              (check SessionsHandle::open or the spawn_blocking chain)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn find_symbol_workspace_id_param_narrows_to_named_peer() {
+        // L3e-2: passing `workspace_id` through the MCP tool reaches
+        // the SQL filter. We don't need to seed peer rows here — the
+        // core tests already cover that path. A non-existent peer
+        // workspace_id must yield an empty result (proves the filter
+        // is wired and primary rows aren't leaking through).
+        use std::fs;
+        let (dir, mcp) = fixture();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(
+            dir.path().join("src").join("lib.rs"),
+            "pub fn hello_marker() {}",
+        )
+        .unwrap();
+        cold_start_workspace(&mcp, dir.path());
+
+        let default_scope = mcp
+            .find_symbol(Parameters(FindSymbolParams {
+                query: "hello_marker".into(),
+                limit: None,
+                kind: None,
+                visibility: None,
+                module: None,
+                include_external: None,
+                workspace_id: None,
+            }))
+            .await
+            .unwrap();
+        let body = body_text(&default_scope);
+        assert!(
+            body.contains("hello_marker"),
+            "default scope must surface the primary symbol, got `{body}`"
+        );
+
+        let peer_scope = mcp
+            .find_symbol(Parameters(FindSymbolParams {
+                query: "hello_marker".into(),
+                limit: None,
+                kind: None,
+                visibility: None,
+                module: None,
+                include_external: None,
+                workspace_id: Some("nonexistent-peer-uuid".into()),
+            }))
+            .await
+            .unwrap();
+        let body = body_text(&peer_scope);
+        // The empty-result envelope is `did_you_mean` (DYM kicks in when
+        // results vector is empty), not a leaked primary row.
+        assert!(
+            !body.contains("hello_marker") || body.contains("did_you_mean"),
+            "peer scope must NOT leak the primary hello_marker symbol \
+             (DYM is fine — it operates on names, not workspace), got `{body}`"
         );
     }
 
