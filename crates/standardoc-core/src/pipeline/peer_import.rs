@@ -253,7 +253,7 @@ mod tests {
     use crate::storage::module_lookup::put_module_lookup;
     use crate::storage::workspace_catalog::register_linked_workspace;
     use rusqlite::Connection;
-    use standardoc_ir::{ImportRecord, Language, LinkDirection, ModuleLookup};
+    use standardoc_ir::{ImportRecord, IndexingMode, Language, LinkDirection, ModuleLookup};
     use tempfile::TempDir;
 
     fn fresh_db_at(path: &Path) -> Connection {
@@ -305,6 +305,7 @@ mod tests {
             &primary,
             peer_dir.path().to_string_lossy().as_ref(),
             LinkDirection::In,
+            IndexingMode::BlobImport,
         )
         .unwrap();
 
@@ -326,6 +327,7 @@ mod tests {
             &primary,
             peer.path().to_string_lossy().as_ref(),
             LinkDirection::In,
+            IndexingMode::BlobImport,
         )
         .unwrap();
 
@@ -368,6 +370,7 @@ mod tests {
             &primary,
             peer.path().to_string_lossy().as_ref(),
             LinkDirection::In,
+            IndexingMode::BlobImport,
         )
         .unwrap();
 
@@ -424,6 +427,7 @@ mod tests {
             &primary,
             peer.path().to_string_lossy().as_ref(),
             LinkDirection::In,
+            IndexingMode::BlobImport,
         )
         .unwrap();
         import_active_peer_workspaces(&mut primary).unwrap();
@@ -449,6 +453,7 @@ mod tests {
             &primary,
             peer.path().to_string_lossy().as_ref(),
             LinkDirection::In,
+            IndexingMode::BlobImport,
         )
         .unwrap();
 

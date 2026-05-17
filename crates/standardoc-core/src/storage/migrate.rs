@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::storage::error::StorageError;
 use crate::storage::init::run_init_schema;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 12;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 13;
 
 const V1_TO_V2_SQL: &str = include_str!("../../migrations/v1_to_v2.sql");
 const V2_TO_V3_SQL: &str = include_str!("../../migrations/v2_to_v3.sql");
@@ -16,6 +16,7 @@ const V8_TO_V9_SQL: &str = include_str!("../../migrations/v8_to_v9.sql");
 const V9_TO_V10_SQL: &str = include_str!("../../migrations/v9_to_v10.sql");
 const V10_TO_V11_SQL: &str = include_str!("../../migrations/v10_to_v11.sql");
 const V11_TO_V12_SQL: &str = include_str!("../../migrations/v11_to_v12.sql");
+const V12_TO_V13_SQL: &str = include_str!("../../migrations/v12_to_v13.sql");
 
 pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), StorageError> {
     if !table_exists(conn, "schema_meta")? {
@@ -50,6 +51,7 @@ fn apply_upgrade(conn: &Connection, from: u32) -> Result<(), StorageError> {
         9 => conn.execute_batch(V9_TO_V10_SQL).map_err(StorageError::from),
         10 => conn.execute_batch(V10_TO_V11_SQL).map_err(StorageError::from),
         11 => conn.execute_batch(V11_TO_V12_SQL).map_err(StorageError::from),
+        12 => conn.execute_batch(V12_TO_V13_SQL).map_err(StorageError::from),
         other => Err(StorageError::InvalidSchemaMetadata {
             key: "schema_version".into(),
             value: format!("no upgrade path from version {other}"),
@@ -842,6 +844,96 @@ mod tests {
                 "v11→v12 rebuild must recreate {expected}, got {indexes:?}"
             );
         }
+    }
+
+    #[test]
+    fn upgrade_adds_indexing_mode_column_to_workspace_catalog_on_legacy_v12_db() {
+        // Stage 3b-7-b Layer 3c: v12 has workspace_catalog without
+        // indexing_mode. The v12→v13 migration adds the column with
+        // CHECK ('blob_import', 'extract') and default 'blob_import'
+        // so legacy rows preserve 3b-7-a behaviour until users opt
+        // a peer into autonomous extraction.
+        let conn = fresh_conn();
+        run_init_schema(&conn).unwrap();
+        conn.execute_batch(V1_TO_V2_SQL).unwrap();
+        conn.execute_batch(V2_TO_V3_SQL).unwrap();
+        conn.execute_batch(V3_TO_V4_SQL).unwrap();
+        conn.execute_batch(V4_TO_V5_SQL).unwrap();
+        conn.execute_batch(V5_TO_V6_SQL).unwrap();
+        conn.execute_batch(V6_TO_V7_SQL).unwrap();
+        conn.execute_batch(V7_TO_V8_SQL).unwrap();
+        conn.execute_batch(V8_TO_V9_SQL).unwrap();
+        conn.execute_batch(V9_TO_V10_SQL).unwrap();
+        conn.execute_batch(V10_TO_V11_SQL).unwrap();
+        conn.execute_batch(V11_TO_V12_SQL).unwrap();
+
+        // Seed a legacy v12 workspace_catalog row.
+        conn.execute(
+            "INSERT INTO workspace_catalog (workspace_id, root_path, link_direction, linked_at) \
+             VALUES ('legacy-peer-uuid', '/some/path', 0, 0)",
+            [],
+        )
+        .unwrap();
+
+        let pre: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('workspace_catalog')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            !pre.iter().any(|c| c == "indexing_mode"),
+            "v12 must NOT have the indexing_mode column"
+        );
+
+        ensure_schema(&conn).unwrap();
+
+        let post: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('workspace_catalog')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            post.iter().any(|c| c == "indexing_mode"),
+            "v12→v13 must add the indexing_mode column, got {post:?}"
+        );
+
+        // Legacy row defaults to blob_import.
+        let mode: String = conn
+            .query_row(
+                "SELECT indexing_mode FROM workspace_catalog WHERE workspace_id = ?1",
+                ["legacy-peer-uuid"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            mode, "blob_import",
+            "legacy v12 rows must default to 'blob_import' post-upgrade"
+        );
+
+        // CHECK constraint rejects unknown modes.
+        let bad = conn.execute(
+            "INSERT INTO workspace_catalog (workspace_id, root_path, link_direction, linked_at, indexing_mode) \
+             VALUES ('bad-peer', '/other/path', 0, 0, 'magic')",
+            [],
+        );
+        assert!(
+            bad.is_err(),
+            "indexing_mode CHECK must reject values outside ('blob_import', 'extract')"
+        );
+
+        // 'extract' is accepted.
+        conn.execute(
+            "INSERT INTO workspace_catalog (workspace_id, root_path, link_direction, linked_at, indexing_mode) \
+             VALUES ('opt-in-peer', '/other/path', 0, 0, 'extract')",
+            [],
+        )
+        .expect("'extract' must be accepted by the CHECK constraint");
+
+        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
     }
 
     #[test]

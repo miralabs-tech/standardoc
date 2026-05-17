@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
-use standardoc_ir::{LinkDirection, LinkedWorkspaceStatus};
+use standardoc_ir::{IndexingMode, LinkDirection, LinkedWorkspaceStatus};
 use uuid::Uuid;
 
 use crate::storage::error::StorageError;
@@ -26,6 +26,11 @@ pub struct LinkedWorkspace {
 	pub linked_at_epoch_ms: i64,
 	pub last_indexed_at_epoch_ms: Option<i64>,
 	pub status: LinkedWorkspaceStatus,
+	/// Stage 3b-7-b Layer 3c: which extraction pipeline cold_start
+	/// (and explicit refresh hooks) routes this peer through —
+	/// `BlobImport` (3b-7-a, cheap blob copy) or `Extract` (3b-7-b,
+	/// autonomous source walk via `pipeline::peer_extract`).
+	pub indexing_mode: IndexingMode,
 }
 
 fn epoch_ms_now() -> i64 {
@@ -45,6 +50,7 @@ fn row_to_linked_workspace(
 	linked_at: i64,
 	last_indexed_at: Option<i64>,
 	status_raw: String,
+	indexing_mode_raw: String,
 ) -> Result<LinkedWorkspace, StorageError> {
 	let link_direction =
 		LinkDirection::from_i64(direction_raw).ok_or_else(|| StorageError::InvalidStoredData {
@@ -55,6 +61,11 @@ fn row_to_linked_workspace(
 			detail: format!("unknown workspace status '{status_raw}'"),
 		}
 	})?;
+	let indexing_mode = IndexingMode::from_str(&indexing_mode_raw).ok_or_else(|| {
+		StorageError::InvalidStoredData {
+			detail: format!("unknown indexing_mode '{indexing_mode_raw}'"),
+		}
+	})?;
 	Ok(LinkedWorkspace {
 		workspace_id,
 		root_path,
@@ -62,6 +73,7 @@ fn row_to_linked_workspace(
 		linked_at_epoch_ms: linked_at,
 		last_indexed_at_epoch_ms: last_indexed_at,
 		status,
+		indexing_mode,
 	})
 }
 
@@ -73,14 +85,21 @@ pub(crate) fn register_linked_workspace(
 	conn: &Connection,
 	root_path: &str,
 	direction: LinkDirection,
+	indexing_mode: IndexingMode,
 ) -> Result<String, StorageError> {
 	let workspace_id = Uuid::new_v4().to_string();
 	let now = epoch_ms_now();
 	conn.execute(
 		"INSERT INTO workspace_catalog \
-		 (workspace_id, root_path, link_direction, linked_at, last_indexed_at, status) \
-		 VALUES (?1, ?2, ?3, ?4, NULL, 'active')",
-		params![&workspace_id, root_path, direction.as_i64(), now],
+		 (workspace_id, root_path, link_direction, linked_at, last_indexed_at, status, indexing_mode) \
+		 VALUES (?1, ?2, ?3, ?4, NULL, 'active', ?5)",
+		params![
+			&workspace_id,
+			root_path,
+			direction.as_i64(),
+			now,
+			indexing_mode.as_str()
+		],
 	)?;
 	Ok(workspace_id)
 }
@@ -89,9 +108,9 @@ pub(crate) fn get_linked_workspace(
 	conn: &Connection,
 	workspace_id: &str,
 ) -> Result<Option<LinkedWorkspace>, StorageError> {
-	let row: Option<(String, i64, i64, Option<i64>, String)> = conn
+	let row: Option<(String, i64, i64, Option<i64>, String, String)> = conn
 		.query_row(
-			"SELECT root_path, link_direction, linked_at, last_indexed_at, status \
+			"SELECT root_path, link_direction, linked_at, last_indexed_at, status, indexing_mode \
 			 FROM workspace_catalog WHERE workspace_id = ?1",
 			params![workspace_id],
 			|row| {
@@ -101,12 +120,21 @@ pub(crate) fn get_linked_workspace(
 					row.get::<_, i64>(2)?,
 					row.get::<_, Option<i64>>(3)?,
 					row.get::<_, String>(4)?,
+					row.get::<_, String>(5)?,
 				))
 			},
 		)
 		.optional()?;
-	row.map(|(root_path, dir, linked, indexed, status)| {
-		row_to_linked_workspace(workspace_id.to_string(), root_path, dir, linked, indexed, status)
+	row.map(|(root_path, dir, linked, indexed, status, mode)| {
+		row_to_linked_workspace(
+			workspace_id.to_string(),
+			root_path,
+			dir,
+			linked,
+			indexed,
+			status,
+			mode,
+		)
 	})
 	.transpose()
 }
@@ -115,7 +143,7 @@ pub(crate) fn list_linked_workspaces(
 	conn: &Connection,
 ) -> Result<Vec<LinkedWorkspace>, StorageError> {
 	let mut stmt = conn.prepare(
-		"SELECT workspace_id, root_path, link_direction, linked_at, last_indexed_at, status \
+		"SELECT workspace_id, root_path, link_direction, linked_at, last_indexed_at, status, indexing_mode \
 		 FROM workspace_catalog ORDER BY linked_at ASC",
 	)?;
 	let rows = stmt.query_map([], |row| {
@@ -126,12 +154,13 @@ pub(crate) fn list_linked_workspaces(
 			row.get::<_, i64>(3)?,
 			row.get::<_, Option<i64>>(4)?,
 			row.get::<_, String>(5)?,
+			row.get::<_, String>(6)?,
 		))
 	})?;
 	let mut out = Vec::new();
 	for row in rows {
-		let (id, root, dir, linked, indexed, status) = row?;
-		out.push(row_to_linked_workspace(id, root, dir, linked, indexed, status)?);
+		let (id, root, dir, linked, indexed, status, mode) = row?;
+		out.push(row_to_linked_workspace(id, root, dir, linked, indexed, status, mode)?);
 	}
 	Ok(out)
 }
@@ -144,7 +173,7 @@ pub(crate) fn find_by_root_path(
 	root_path: &str,
 ) -> Result<Vec<LinkedWorkspace>, StorageError> {
 	let mut stmt = conn.prepare(
-		"SELECT workspace_id, link_direction, linked_at, last_indexed_at, status \
+		"SELECT workspace_id, link_direction, linked_at, last_indexed_at, status, indexing_mode \
 		 FROM workspace_catalog WHERE root_path = ?1 ORDER BY linked_at ASC",
 	)?;
 	let rows = stmt.query_map(params![root_path], |row| {
@@ -154,11 +183,12 @@ pub(crate) fn find_by_root_path(
 			row.get::<_, i64>(2)?,
 			row.get::<_, Option<i64>>(3)?,
 			row.get::<_, String>(4)?,
+			row.get::<_, String>(5)?,
 		))
 	})?;
 	let mut out = Vec::new();
 	for row in rows {
-		let (id, dir, linked, indexed, status) = row?;
+		let (id, dir, linked, indexed, status, mode) = row?;
 		out.push(row_to_linked_workspace(
 			id,
 			root_path.to_string(),
@@ -166,6 +196,7 @@ pub(crate) fn find_by_root_path(
 			linked,
 			indexed,
 			status,
+			mode,
 		)?);
 	}
 	Ok(out)
@@ -218,6 +249,18 @@ pub(crate) fn set_status(
 	Ok(())
 }
 
+pub(crate) fn set_indexing_mode(
+	conn: &Connection,
+	workspace_id: &str,
+	mode: IndexingMode,
+) -> Result<(), StorageError> {
+	conn.execute(
+		"UPDATE workspace_catalog SET indexing_mode = ?1 WHERE workspace_id = ?2",
+		params![mode.as_str(), workspace_id],
+	)?;
+	Ok(())
+}
+
 pub(crate) fn touch_last_indexed(
 	conn: &Connection,
 	workspace_id: &str,
@@ -246,7 +289,7 @@ mod tests {
 	fn register_then_get_roundtrips() {
 		let conn = fresh_db();
 		let id =
-			register_linked_workspace(&conn, "/path/to/peer", LinkDirection::In).unwrap();
+			register_linked_workspace(&conn, "/path/to/peer", LinkDirection::In, IndexingMode::default()).unwrap();
 		let got = get_linked_workspace(&conn, &id).unwrap().expect("present");
 		assert_eq!(got.workspace_id, id);
 		assert_eq!(got.root_path, "/path/to/peer");
@@ -264,8 +307,8 @@ mod tests {
 	#[test]
 	fn register_generates_unique_ids_for_same_root_path() {
 		let conn = fresh_db();
-		let id1 = register_linked_workspace(&conn, "/peer", LinkDirection::Out).unwrap();
-		let id2 = register_linked_workspace(&conn, "/peer", LinkDirection::Out).unwrap();
+		let id1 = register_linked_workspace(&conn, "/peer", LinkDirection::Out, IndexingMode::default()).unwrap();
+		let id2 = register_linked_workspace(&conn, "/peer", LinkDirection::Out, IndexingMode::default()).unwrap();
 		assert_ne!(id1, id2);
 		let matches = find_by_root_path(&conn, "/peer").unwrap();
 		assert_eq!(matches.len(), 2);
@@ -275,12 +318,12 @@ mod tests {
 	fn list_orders_by_linked_at_ascending() {
 		let conn = fresh_db();
 		let _id1 =
-			register_linked_workspace(&conn, "/first", LinkDirection::In).unwrap();
+			register_linked_workspace(&conn, "/first", LinkDirection::In, IndexingMode::default()).unwrap();
 		// Tiny sleep would let linked_at differ, but a strict ASC sort over
 		// equal timestamps is still well-defined per the SQLite implementation
 		// of stable sort; we just verify both rows are returned.
 		let _id2 =
-			register_linked_workspace(&conn, "/second", LinkDirection::Bidirectional).unwrap();
+			register_linked_workspace(&conn, "/second", LinkDirection::Bidirectional, IndexingMode::default()).unwrap();
 		let all = list_linked_workspaces(&conn).unwrap();
 		assert_eq!(all.len(), 2);
 	}
@@ -288,7 +331,7 @@ mod tests {
 	#[test]
 	fn set_link_direction_updates_value() {
 		let conn = fresh_db();
-		let id = register_linked_workspace(&conn, "/p", LinkDirection::In).unwrap();
+		let id = register_linked_workspace(&conn, "/p", LinkDirection::In, IndexingMode::default()).unwrap();
 		set_link_direction(&conn, &id, LinkDirection::Bidirectional).unwrap();
 		let got = get_linked_workspace(&conn, &id).unwrap().unwrap();
 		assert_eq!(got.link_direction, LinkDirection::Bidirectional);
@@ -297,7 +340,7 @@ mod tests {
 	#[test]
 	fn set_status_transitions() {
 		let conn = fresh_db();
-		let id = register_linked_workspace(&conn, "/p", LinkDirection::In).unwrap();
+		let id = register_linked_workspace(&conn, "/p", LinkDirection::In, IndexingMode::default()).unwrap();
 		set_status(&conn, &id, LinkedWorkspaceStatus::Paused).unwrap();
 		let got = get_linked_workspace(&conn, &id).unwrap().unwrap();
 		assert_eq!(got.status, LinkedWorkspaceStatus::Paused);
@@ -309,7 +352,7 @@ mod tests {
 	#[test]
 	fn touch_last_indexed_sets_timestamp() {
 		let conn = fresh_db();
-		let id = register_linked_workspace(&conn, "/p", LinkDirection::In).unwrap();
+		let id = register_linked_workspace(&conn, "/p", LinkDirection::In, IndexingMode::default()).unwrap();
 		touch_last_indexed(&conn, &id).unwrap();
 		let got = get_linked_workspace(&conn, &id).unwrap().unwrap();
 		assert!(
@@ -321,7 +364,7 @@ mod tests {
 	#[test]
 	fn unregister_cleans_dependent_tables() {
 		let conn = fresh_db();
-		let id = register_linked_workspace(&conn, "/p", LinkDirection::In).unwrap();
+		let id = register_linked_workspace(&conn, "/p", LinkDirection::In, IndexingMode::default()).unwrap();
 		// Seed a workspace_imports row keyed by that id.
 		conn.execute(
 			"INSERT INTO workspace_imports \
@@ -358,6 +401,37 @@ mod tests {
 			)
 			.unwrap();
 		assert_eq!(lookup_count, 0, "module_lookups rows must be cleaned");
+	}
+
+	#[test]
+	fn register_defaults_indexing_mode_to_blob_import() {
+		let conn = fresh_db();
+		let id =
+			register_linked_workspace(&conn, "/p", LinkDirection::In, IndexingMode::BlobImport)
+				.unwrap();
+		let got = get_linked_workspace(&conn, &id).unwrap().unwrap();
+		assert_eq!(got.indexing_mode, IndexingMode::BlobImport);
+	}
+
+	#[test]
+	fn register_with_extract_mode_round_trips() {
+		let conn = fresh_db();
+		let id =
+			register_linked_workspace(&conn, "/p", LinkDirection::In, IndexingMode::Extract)
+				.unwrap();
+		let got = get_linked_workspace(&conn, &id).unwrap().unwrap();
+		assert_eq!(got.indexing_mode, IndexingMode::Extract);
+	}
+
+	#[test]
+	fn set_indexing_mode_transitions() {
+		let conn = fresh_db();
+		let id =
+			register_linked_workspace(&conn, "/p", LinkDirection::In, IndexingMode::BlobImport)
+				.unwrap();
+		set_indexing_mode(&conn, &id, IndexingMode::Extract).unwrap();
+		let got = get_linked_workspace(&conn, &id).unwrap().unwrap();
+		assert_eq!(got.indexing_mode, IndexingMode::Extract);
 	}
 
 	#[test]

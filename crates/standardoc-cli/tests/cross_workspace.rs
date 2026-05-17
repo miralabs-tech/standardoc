@@ -18,7 +18,8 @@ use standardoc_core::{
     },
 };
 use standardoc_ir::{
-    BindingSource, IdentResolution, Language, LinkDirection, LocalDeclKind, ModuleLookup,
+    BindingSource, IdentResolution, IndexingMode, Language, LinkDirection, LocalDeclKind,
+    ModuleLookup,
 };
 
 #[test]
@@ -31,7 +32,7 @@ fn primary_resolves_symbol_against_registered_peer_workspace() {
     // Register the peer workspace — canonicalised path, "in" direction
     // (we consume the peer's symbols).
     let peer_path = peer_dir.path().to_string_lossy().into_owned();
-    let peer_id = link_workspace(&handle, &peer_path, LinkDirection::In)
+    let peer_id = link_workspace(&handle, &peer_path, LinkDirection::In, IndexingMode::default())
         .expect("link peer workspace");
 
     // Catalog must list the peer now.
@@ -107,8 +108,13 @@ fn link_workspace_rejects_missing_path_with_did_you_mean() {
     let handle = IndexHandle::open(primary_dir.path()).expect("open primary IndexHandle");
     let typo = parent.path().join("projcts");
 
-    let err = link_workspace(&handle, &typo.to_string_lossy(), LinkDirection::In)
-        .expect_err("typo path must fail");
+    let err = link_workspace(
+        &handle,
+        &typo.to_string_lossy(),
+        LinkDirection::In,
+        IndexingMode::default(),
+    )
+    .expect_err("typo path must fail");
     match err {
         standardoc_core::query::workspace::LinkWorkspaceError::PathNotFound {
             input,

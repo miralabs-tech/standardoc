@@ -163,6 +163,43 @@ impl LinkedWorkspaceStatus {
 	}
 }
 
+/// How primary indexes a linked peer workspace. Stored as TEXT in the
+/// `workspace_catalog.indexing_mode` column (CHECK constraint enforces,
+/// schema v13).
+///
+/// - `BlobImport` — Stage 3b-7-a path: primary copies the peer's
+///   pre-built `module_lookups` + `workspace_imports` blobs. Cheap,
+///   but assumes the peer's DB is fresh and schema-compatible. Default
+///   for legacy rows + new links unless the caller opts in.
+/// - `Extract` — Stage 3b-7-b path: primary walks the peer's source
+///   files directly via `pipeline::peer_extract` and indexes them
+///   under the peer's `workspace_id`. Authoritative, no schema-version
+///   assumption on the peer side, but more expensive at cold_start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexingMode {
+	#[default]
+	BlobImport,
+	Extract,
+}
+
+impl IndexingMode {
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::BlobImport => "blob_import",
+			Self::Extract => "extract",
+		}
+	}
+
+	pub fn from_str(value: &str) -> Option<Self> {
+		match value {
+			"blob_import" => Some(Self::BlobImport),
+			"extract" => Some(Self::Extract),
+			_ => None,
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

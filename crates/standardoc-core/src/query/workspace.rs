@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use standardoc_ir::{LinkDirection, ModuleLookup, WorkspaceKind};
+use standardoc_ir::{IndexingMode, LinkDirection, ModuleLookup, WorkspaceKind};
 use strsim::jaro_winkler;
 
 use crate::storage::cross_workspace::{CrossWorkspaceResolution, list_cross_workspace_providers};
@@ -122,10 +122,19 @@ pub fn path_did_you_mean(input: &Path) -> Vec<String> {
 /// Register a linked workspace. Canonicalises `root_path` before storing;
 /// on filesystem error returns [`LinkWorkspaceError::PathNotFound`] with
 /// did-you-mean suggestions.
+///
+/// `indexing_mode` controls which extraction pipeline `cold_start`
+/// (and future explicit refresh hooks) routes this peer through —
+/// [`IndexingMode::BlobImport`] (Stage 3b-7-a, cheap blob copy of the
+/// peer's pre-built DB) or [`IndexingMode::Extract`] (Stage 3b-7-b,
+/// primary walks the peer's source files autonomously). Callers that
+/// pre-date the choice can pass `IndexingMode::default()`
+/// (= `BlobImport`).
 pub fn link_workspace(
     handle: &IndexHandle,
     root_path: &str,
     direction: LinkDirection,
+    indexing_mode: IndexingMode,
 ) -> Result<String, LinkWorkspaceError> {
     let raw = Path::new(root_path);
     let canonical = std::fs::canonicalize(raw).map_err(|_| LinkWorkspaceError::PathNotFound {
@@ -139,6 +148,7 @@ pub fn link_workspace(
         &conn,
         &canon_str,
         direction,
+        indexing_mode,
     )?)
 }
 

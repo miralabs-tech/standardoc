@@ -332,6 +332,7 @@ mod tests {
             linked_at_epoch_ms: 0,
             last_indexed_at_epoch_ms: None,
             status: LinkedWorkspaceStatus::Active,
+            indexing_mode: standardoc_ir::IndexingMode::Extract,
         }
     }
 

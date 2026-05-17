@@ -25,7 +25,7 @@ use standardoc_core::{
     sessions::memory_sync::{export_memory_dir, import_memory_dir},
 };
 use standardoc_ir::SourceOrigin;
-use standardoc_ir::{Kind, LinkDirection, RawSymbol, Visibility};
+use standardoc_ir::{IndexingMode, Kind, LinkDirection, RawSymbol, Visibility};
 use standardoc_rag::embedder::Embedder;
 use standardoc_rag::store::RagStore;
 use standardoc_rag::types::{Chunk, ChunkRef};
@@ -1019,18 +1019,19 @@ impl StandardocMcp {
     /// the tool returns `invalid_params` with a `did_you_mean` list
     /// built from sibling directories of the closest existing ancestor.
     #[tool(
-        description = "Register a linked peer workspace (cross-workspace import resolution). `path` is canonicalised. `direction` is one of `in` (peer feeds us), `out` (we feed peer), `bidirectional`. Returns the freshly-minted UUID workspace_id. Missing path returns invalid_params with a `did_you_mean` list."
+        description = "Register a linked peer workspace (cross-workspace import resolution). `path` is canonicalised. `direction` is one of `in` (peer feeds us), `out` (we feed peer), `bidirectional`. `indexing_mode` is optional and defaults to `blob_import` (Stage 3b-7-a — peer's pre-built DB is copied wholesale); pass `extract` to opt this peer into the Stage 3b-7-b autonomous source-walk pipeline. Returns the freshly-minted UUID workspace_id. Missing path returns invalid_params with a `did_you_mean` list."
     )]
     async fn link_workspace(
         &self,
         Parameters(params): Parameters<LinkWorkspaceParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let direction = parse_link_direction(&params.direction)?;
+        let indexing_mode = parse_indexing_mode(params.indexing_mode.as_deref())?;
         let path_for_response = params.path.clone();
         let handle = self.handle.clone();
         let path = params.path;
         let result = tokio::task::spawn_blocking(move || {
-            workspace_query::link_workspace(&handle, &path, direction)
+            workspace_query::link_workspace(&handle, &path, direction, indexing_mode)
         })
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?;
@@ -1729,13 +1730,19 @@ pub(crate) struct StaleEntryJson {
     pub status: String,
 }
 
-/// Tool input — `link_workspace(path, direction)`. `direction` is one of
-/// `"in"`, `"out"`, `"bidirectional"` (snake_case to match the IR enum's
-/// serde shape). Path is canonicalised server-side.
+/// Tool input — `link_workspace(path, direction, indexing_mode?)`.
+/// `direction` is one of `"in"`, `"out"`, `"bidirectional"` (snake_case
+/// to match the IR enum's serde shape). `indexing_mode` is optional;
+/// when omitted it defaults to `"blob_import"` (Stage 3b-7-a behaviour
+/// — cheap copy of peer's pre-built DB). Pass `"extract"` to opt the
+/// peer into the Stage 3b-7-b autonomous source-walk pipeline instead.
+/// Path is canonicalised server-side.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct LinkWorkspaceParams {
     pub path: String,
     pub direction: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing_mode: Option<String>,
 }
 
 /// Tool input — `unlink_workspace(workspace_id)`.
@@ -1812,6 +1819,20 @@ fn parse_link_direction(s: &str) -> Result<LinkDirection, ErrorData> {
         other => Err(ErrorData::invalid_params(
             format!(
                 "unknown direction `{other}` — expected one of: in, out, bidirectional"
+            ),
+            None,
+        )),
+    }
+}
+
+fn parse_indexing_mode(s: Option<&str>) -> Result<IndexingMode, ErrorData> {
+    match s {
+        None => Ok(IndexingMode::default()),
+        Some("blob_import") => Ok(IndexingMode::BlobImport),
+        Some("extract") => Ok(IndexingMode::Extract),
+        Some(other) => Err(ErrorData::invalid_params(
+            format!(
+                "unknown indexing_mode `{other}` — expected one of: blob_import, extract"
             ),
             None,
         )),
@@ -2882,6 +2903,7 @@ mod tests {
             .link_workspace(Parameters(LinkWorkspaceParams {
                 path: peer.path().to_string_lossy().into_owned(),
                 direction: "in".into(),
+                indexing_mode: None,
             }))
             .await
             .expect("link_workspace ok");
@@ -2901,6 +2923,7 @@ mod tests {
             .link_workspace(Parameters(LinkWorkspaceParams {
                 path: typo.to_string_lossy().into_owned(),
                 direction: "in".into(),
+                indexing_mode: None,
             }))
             .await
             .expect_err("missing path must surface invalid_params");
@@ -2917,6 +2940,7 @@ mod tests {
             .link_workspace(Parameters(LinkWorkspaceParams {
                 path: peer.path().to_string_lossy().into_owned(),
                 direction: "sideways".into(),
+                indexing_mode: None,
             }))
             .await
             .expect_err("bogus direction must be rejected");
@@ -2944,6 +2968,7 @@ mod tests {
             .link_workspace(Parameters(LinkWorkspaceParams {
                 path: peer.path().to_string_lossy().into_owned(),
                 direction: "out".into(),
+                indexing_mode: None,
             }))
             .await
             .expect("link ok");

@@ -4,16 +4,20 @@ use rayon::prelude::*;
 use rusqlite::TransactionBehavior;
 use walkdir::{DirEntry, WalkDir};
 
+use standardoc_ir::IndexingMode;
+
 use crate::pipeline::batch::apply_delete_file;
 use crate::pipeline::filters::ScanFilters;
 use crate::pipeline::paths::{has_supported_extension, to_workspace_relative};
-use crate::pipeline::peer_import::import_active_peer_workspaces;
+use crate::pipeline::peer_extract;
+use crate::pipeline::peer_import;
 use crate::pipeline::projects::{discover_and_persist_projects, reconcile_files_project_id};
 use crate::pipeline::provider::LanguageProvider;
 use crate::pipeline::reindex::{Outcome, commit_outcomes, process_one};
 use crate::pipeline::seed_builtins;
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
+use crate::storage::workspace_catalog::list_linked_workspaces;
 
 pub use crate::pipeline::reindex::ColdStartError;
 
@@ -83,12 +87,13 @@ pub fn run(
 
     cleanup_unseen(handle, &seen)?;
     reconcile_projects_quietly(handle);
-    // Stage 3b-7-a — import linked peer workspaces' module_lookups +
-    // workspace_imports rows. Runs AFTER primary indexing is done so the
-    // primary's data is always load-bearing ; peer imports enrich
-    // cross-workspace resolution as a bonus. Best-effort like the
-    // discover / reconcile steps : failures don't block cold start.
-    import_peers_quietly(handle);
+    // Stage 3b-7-b Layer 3c — per-peer dispatch. Runs AFTER primary
+    // indexing is done so primary's data is always load-bearing; peer
+    // ingestion (whether via 3b-7-a blob import or 3b-7-b source
+    // extraction) enriches cross-workspace resolution as a bonus.
+    // Best-effort like the discover / reconcile steps: failures don't
+    // block cold start.
+    process_peers_quietly(handle, provider);
     clear_progress(handle)?;
     Ok(())
 }
@@ -122,26 +127,45 @@ fn reconcile_projects_quietly(handle: &IndexHandle) {
     let _ = reconcile_files_project_id(&conn);
 }
 
-/// Stage 3b-7-a — best-effort peer workspace import. Iterates every active
-/// linked workspace registered in `workspace_catalog` and copies its
-/// `module_lookups` + `workspace_imports` rows into the primary DB tagged
-/// with the peer's UUID. Cross-workspace resolution
-/// (`storage::cross_workspace::resolve_cross_workspace_import`) then
-/// walks all workspace_ids naturally without further plumbing.
+/// Stage 3b-7-b Layer 3c — best-effort per-peer dispatch.
 ///
-/// Best-effort : a peer whose DB is missing / unreadable / out-of-version
-/// gets logged as a no-op for that peer ; other peers and the primary's
-/// cold-start finish untouched.
-fn import_peers_quietly(handle: &IndexHandle) {
-    let pool = match handle.pool() {
-        Ok(p) => p,
-        Err(_) => return,
+/// Walks every linked workspace registered in `workspace_catalog` and
+/// routes each peer through the pipeline its `indexing_mode` selects:
+///
+/// - [`IndexingMode::BlobImport`] (Stage 3b-7-a, default for legacy
+///   rows) — copies the peer's pre-built `module_lookups` +
+///   `workspace_imports` blobs into primary's DB. Cheap, assumes the
+///   peer's DB is fresh + schema-compatible.
+/// - [`IndexingMode::Extract`] (Stage 3b-7-b) — primary walks the
+///   peer's source files via `peer_extract::extract_peer_workspace`
+///   and indexes them autonomously under the peer's `workspace_id`.
+///   Authoritative, no peer-side schema-version assumption.
+///
+/// Best-effort: a peer whose DB / source is missing or unreadable
+/// gets logged as a no-op for that peer; other peers and the primary's
+/// cold_start finish untouched.
+fn process_peers_quietly(handle: &IndexHandle, provider: &dyn LanguageProvider) {
+    let peers = {
+        let Ok(pool) = handle.pool() else { return };
+        let Ok(conn) = pool.get() else { return };
+        match list_linked_workspaces(&conn) {
+            Ok(p) => p,
+            Err(_) => return,
+        }
     };
-    let mut conn = match pool.get() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let _ = import_active_peer_workspaces(&mut conn);
+
+    for peer in peers {
+        match peer.indexing_mode {
+            IndexingMode::BlobImport => {
+                let Ok(pool) = handle.pool() else { continue };
+                let Ok(mut conn) = pool.get() else { continue };
+                let _ = peer_import::import_peer_workspace(&mut conn, &peer);
+            }
+            IndexingMode::Extract => {
+                let _ = peer_extract::extract_peer_workspace(handle, &peer, provider);
+            }
+        }
+    }
 }
 
 fn u64_of(n: usize) -> u64 {
