@@ -101,23 +101,39 @@ pub async fn serve_mcp_http(
         spawn_parent_death_watch();
     }
 
-    let listener = match TcpListener::bind(bind_addr).await {
-        Ok(l) => l,
-        Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+    // Port-stability shortcut for ephemeral-bind callers (typically the
+    // VSCode supervisor that passes `127.0.0.1:0`): when a previous
+    // daemon left an `mcp.endpoint` behind, try to bind the SAME port
+    // first. If the previous process is properly dead the port is free
+    // and we reuse it transparently — Claude Code's cached MCP URL
+    // stays valid across restart, no manual reconnect dance. If the
+    // port is taken (concurrent daemon, OS hasn't released it yet) we
+    // fall through to the caller's requested bind_addr.
+    let listener = match maybe_reuse_previous_port(handle.workspace_root(), bind_addr).await {
+        Some(l) => {
             eprintln!(
-                "standardoc mcp http: {bind_addr} already in use, falling back to an ephemeral port"
+                "standardoc mcp http: reused previous port from mcp.endpoint (CC reconnect-safe)"
             );
-            TcpListener::bind("127.0.0.1:0").await.map_err(|e| {
-                ServerError::Io(io::Error::other(format!(
-                    "bind 127.0.0.1:0 (ephemeral fallback): {e}"
-                )))
-            })?
+            l
         }
-        Err(e) => {
-            return Err(ServerError::Io(io::Error::other(format!(
-                "bind {bind_addr}: {e}"
-            ))));
-        }
+        None => match TcpListener::bind(bind_addr).await {
+            Ok(l) => l,
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+                eprintln!(
+                    "standardoc mcp http: {bind_addr} already in use, falling back to an ephemeral port"
+                );
+                TcpListener::bind("127.0.0.1:0").await.map_err(|e| {
+                    ServerError::Io(io::Error::other(format!(
+                        "bind 127.0.0.1:0 (ephemeral fallback): {e}"
+                    )))
+                })?
+            }
+            Err(e) => {
+                return Err(ServerError::Io(io::Error::other(format!(
+                    "bind {bind_addr}: {e}"
+                ))));
+            }
+        },
     };
     let local_addr = listener
         .local_addr()
@@ -223,6 +239,44 @@ fn write_endpoint_file(
         std::fs::create_dir_all(parent).map_err(ServerError::Io)?;
     }
     std::fs::write(&path, endpoint).map_err(ServerError::Io)
+}
+
+/// When the caller requested an ephemeral port (`...:0`), try to bind the
+/// port left behind by the previous daemon process (recorded in
+/// `mcp.endpoint`). Returns `Some(listener)` on success — Claude Code's
+/// cached MCP URL keeps working across the restart with no manual
+/// reconnect needed. Returns `None` when (a) the caller wants a specific
+/// port, (b) no previous endpoint exists, (c) the endpoint is malformed,
+/// or (d) the previous port is now busy.
+async fn maybe_reuse_previous_port(
+    workspace_root: &std::path::Path,
+    bind_addr: &str,
+) -> Option<TcpListener> {
+    if !wants_ephemeral_port(bind_addr) {
+        return None;
+    }
+    let port = read_previous_port(workspace_root)?;
+    TcpListener::bind(("127.0.0.1", port)).await.ok()
+}
+
+fn wants_ephemeral_port(bind_addr: &str) -> bool {
+    bind_addr
+        .parse::<std::net::SocketAddr>()
+        .map(|sa| sa.port() == 0)
+        .unwrap_or(false)
+}
+
+/// Parse the `port` out of `http://<host>:<port>/mcp` recorded in the
+/// previous boot's `mcp.endpoint` file. Best-effort — any read / parse
+/// failure returns `None` and the caller falls through to a fresh bind.
+fn read_previous_port(workspace_root: &std::path::Path) -> Option<u16> {
+    let path = workspace_root.join(".standardoc").join("mcp.endpoint");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let trimmed = content.trim();
+    let after_scheme = trimmed.strip_prefix("http://")?;
+    let authority = after_scheme.split('/').next()?;
+    let (_host, port_str) = authority.rsplit_once(':')?;
+    port_str.parse::<u16>().ok()
 }
 
 /// Boot the indexing pipeline behind an MCP handler. Synchronous flip of
@@ -390,4 +444,95 @@ pub fn build_mcp_handler_with_rag(
     StandardocMcp::new(handle, provider, filters)
         .with_rag(rag_pipeline.store_arc())
         .with_embedder(rag_pipeline.embedder_arc())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn wants_ephemeral_port_recognizes_zero() {
+        assert!(wants_ephemeral_port("127.0.0.1:0"));
+        assert!(wants_ephemeral_port("0.0.0.0:0"));
+    }
+
+    #[test]
+    fn wants_ephemeral_port_rejects_specific_port() {
+        assert!(!wants_ephemeral_port("127.0.0.1:8765"));
+        assert!(!wants_ephemeral_port("127.0.0.1:443"));
+    }
+
+    #[test]
+    fn wants_ephemeral_port_rejects_unparseable() {
+        assert!(!wants_ephemeral_port("not-a-socket-addr"));
+        assert!(!wants_ephemeral_port(""));
+    }
+
+    #[test]
+    fn read_previous_port_parses_endpoint_file() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".standardoc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mcp.endpoint"), "http://127.0.0.1:56831/mcp").unwrap();
+        assert_eq!(read_previous_port(tmp.path()), Some(56831));
+    }
+
+    #[test]
+    fn read_previous_port_trims_trailing_newline() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".standardoc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mcp.endpoint"), "http://127.0.0.1:9000/mcp\n").unwrap();
+        assert_eq!(read_previous_port(tmp.path()), Some(9000));
+    }
+
+    #[test]
+    fn read_previous_port_missing_file_is_none() {
+        let tmp = TempDir::new().unwrap();
+        assert_eq!(read_previous_port(tmp.path()), None);
+    }
+
+    #[test]
+    fn read_previous_port_malformed_is_none() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".standardoc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mcp.endpoint"), "not a url").unwrap();
+        assert_eq!(read_previous_port(tmp.path()), None);
+    }
+
+    #[tokio::test]
+    async fn maybe_reuse_skips_when_caller_wants_specific_port() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".standardoc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mcp.endpoint"), "http://127.0.0.1:56831/mcp").unwrap();
+        // Caller asked for a SPECIFIC port — reuse must be a no-op so
+        // the caller's intent wins.
+        let result = maybe_reuse_previous_port(tmp.path(), "127.0.0.1:7777").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn maybe_reuse_returns_listener_when_port_is_free() {
+        // First, bind an ephemeral listener and capture its address —
+        // dropping it frees the port. Then write that as the previous
+        // endpoint and verify the reuse path re-binds it cleanly.
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".standardoc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mcp.endpoint"),
+            format!("http://127.0.0.1:{port}/mcp"),
+        )
+        .unwrap();
+        let listener = maybe_reuse_previous_port(tmp.path(), "127.0.0.1:0")
+            .await
+            .expect("port should be reusable after probe drop");
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+    }
 }
