@@ -459,6 +459,7 @@ mod tests {
             edges: vec![],
             call_sites: vec![],
             documents: vec![],
+            ffi_bindings: vec![],
         };
         rewrite_for_external(
             &mut extracted,

@@ -98,6 +98,7 @@ pub(crate) fn extract_file(
         edges: ctx.core.edges,
         call_sites: ctx.core.call_sites,
         documents: ctx.core.documents,
+        ffi_bindings: vec![],
     })
 }
 

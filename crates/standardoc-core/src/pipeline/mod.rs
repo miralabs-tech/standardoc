@@ -2,6 +2,7 @@ mod batch;
 mod c_join;
 pub mod cold_start;
 mod diff;
+mod ffi_resolve;
 pub mod external_invalidation;
 mod filters;
 pub mod manifest_invalidation;

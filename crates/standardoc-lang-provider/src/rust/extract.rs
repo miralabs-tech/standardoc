@@ -62,6 +62,7 @@ pub(crate) fn extract_file(
         edges,
         call_sites,
         documents,
+        ffi_bindings: vec![],
     })
 }
 

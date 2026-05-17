@@ -309,6 +309,7 @@ mod tests {
                 edges: vec![],
                 call_sites: vec![],
                 documents: vec![],
+                ffi_bindings: vec![],
             })
         }
 
@@ -364,6 +365,7 @@ mod tests {
             edges: vec![],
             call_sites: vec![],
             documents: vec![],
+            ffi_bindings: vec![],
         };
         scope_extracted_paths(&mut ef, PRIMARY_WORKSPACE_ID);
         assert_eq!(ef.file, "src/lib.rs", "primary must NOT be prefixed");
@@ -400,6 +402,7 @@ mod tests {
             edges: vec![],
             call_sites: vec![],
             documents: vec![],
+            ffi_bindings: vec![],
         };
         scope_extracted_paths(&mut ef, "peer-1");
         assert_eq!(ef.file, "ws:peer-1:src/lib.rs");

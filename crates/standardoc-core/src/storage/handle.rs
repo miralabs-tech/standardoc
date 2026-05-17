@@ -517,6 +517,7 @@ mod tests {
             edges: vec![],
             call_sites: vec![],
             documents: vec![],
+            ffi_bindings: vec![],
         }
     }
 

@@ -98,6 +98,10 @@ pub fn run(
     // failure logs to stderr and leaves the raw fn_decl / fn rows in
     // place, which is still a useful (if redundant) index.
     super::c_join::apply_c_join_quietly(handle);
+    // Stage 2 — cross-language FFI resolve pass. Reads
+    // `symbol_ffi_binding` rows seeded by per-provider taggers and
+    // emits IMPORTS edges across exact `(abi, abi_name)` matches.
+    super::ffi_resolve::apply_ffi_resolve_quietly(handle);
     clear_progress(handle)?;
     Ok(())
 }
@@ -347,6 +351,7 @@ mod tests {
             edges: vec![],
             call_sites: vec![],
             documents: vec![],
+            ffi_bindings: vec![],
         }
     }
 
@@ -565,6 +570,7 @@ mod tests {
             }],
             call_sites: vec![],
             documents: vec![],
+            ffi_bindings: vec![],
         };
         let target = sample_extracted("src/target.rs", "crate::target");
         {

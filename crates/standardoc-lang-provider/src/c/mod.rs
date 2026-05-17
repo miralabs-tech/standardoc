@@ -42,7 +42,9 @@ impl LanguageProvider for CProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use standardoc_ir::{EdgeKind, Kind, Language, ResolvedOrUnresolved, Visibility};
+    use standardoc_ir::{
+        EdgeKind, FfiAbi, FfiDirection, Kind, Language, ResolvedOrUnresolved, Visibility,
+    };
     use std::path::Path;
 
     fn run(source: &str, path: &str) -> ExtractedFile {
@@ -202,6 +204,51 @@ mod tests {
             .filter(|e| e.kind == EdgeKind::Imports)
             .collect();
         assert_eq!(imports.len(), 3);
+    }
+
+    #[test]
+    fn non_static_fn_emits_c_abi_export_binding() {
+        let src = "int lur_vm_init(void) { return 0; }\n";
+        let file = run(src, "runtime/vm.c");
+        assert_eq!(file.ffi_bindings.len(), 1);
+        let b = &file.ffi_bindings[0];
+        assert_eq!(b.abi, FfiAbi::C);
+        assert_eq!(b.direction, FfiDirection::Export);
+        assert_eq!(b.abi_name, "lur_vm_init");
+        assert_eq!(b.symbol_fqdn, "lurlang::runtime::vm::lur_vm_init");
+    }
+
+    #[test]
+    fn static_fn_does_not_emit_ffi_binding() {
+        let src = "static int internal(void) { return 0; }\n";
+        let file = run(src, "runtime/vm.c");
+        assert!(
+            file.ffi_bindings.is_empty(),
+            "`static` functions are file-local and must not be tagged for FFI"
+        );
+    }
+
+    #[test]
+    fn header_prototype_emits_c_abi_import_binding() {
+        let src = "int lur_compile(const char* src);\n";
+        let file = run(src, "include/lur.h");
+        assert_eq!(file.ffi_bindings.len(), 1);
+        let b = &file.ffi_bindings[0];
+        assert_eq!(b.direction, FfiDirection::Import);
+        assert_eq!(b.abi_name, "lur_compile");
+    }
+
+    #[test]
+    fn mixed_fn_def_and_static_fn_only_def_is_tagged() {
+        let src = "static void helper(void) {}\nint exported(int x) { return x; }\n";
+        let file = run(src, "runtime/vm.c");
+        let exports: Vec<_> = file
+            .ffi_bindings
+            .iter()
+            .filter(|b| b.direction == FfiDirection::Export)
+            .collect();
+        assert_eq!(exports.len(), 1);
+        assert_eq!(exports[0].abi_name, "exported");
     }
 }
 

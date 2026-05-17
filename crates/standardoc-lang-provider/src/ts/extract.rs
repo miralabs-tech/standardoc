@@ -167,6 +167,7 @@ fn extract_file_inner(
         edges,
         call_sites,
         documents,
+        ffi_bindings: vec![],
     })
 }
 

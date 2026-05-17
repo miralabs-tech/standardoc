@@ -143,6 +143,7 @@ fn fixture() -> ExtractedFile {
         edges: vec![calls_edge, unresolved_edge, bridge_edge],
         call_sites: vec![call_site],
         documents: vec![doc],
+        ffi_bindings: vec![],
     }
 }
 

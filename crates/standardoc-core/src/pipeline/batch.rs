@@ -11,6 +11,7 @@ use crate::storage::edge_sites::{delete_edge_sites_by_file, insert_edge_sites};
 use crate::storage::edges::{delete_edges_from, insert_edge, promote_unresolved_batch};
 use crate::storage::error::StorageError;
 use crate::storage::files::{FileInput, delete_file, upsert_file};
+use crate::storage::symbol_ffi_binding::{delete_bindings_for_symbol, upsert_binding};
 use crate::storage::symbols::{
     SymbolInsertContext, delete_symbol, insert_symbol, update_symbol_positions,
 };
@@ -46,7 +47,60 @@ pub(crate) fn apply_upsert_file(
     // is cheaper than diffing per-call-site identity (which would need
     // a stable id we don't currently carry on the IR side).
     apply_call_sites(conn, path, &extracted.call_sites)?;
+    // Stage 2 — persist FFI bindings emitted by the language tagger.
+    // Delete-then-upsert pattern: drop every binding owned by any
+    // symbol touched by this batch, then insert the freshly-extracted
+    // set. Mirrors the call_sites / documents discipline so removing a
+    // binding from source actually removes the row.
+    apply_ffi_bindings(conn, &extracted.ffi_bindings)?;
     Ok(())
+}
+
+/// Stage 2 — re-sync `symbol_ffi_binding` rows for every symbol
+/// referenced by `bindings`. For each binding, resolves
+/// `symbol_fqdn` → `symbols.id` via a point lookup; symbols that
+/// haven't materialised yet (cold_start ordering edge case) are
+/// skipped silently — the next extraction batch will pick them up.
+fn apply_ffi_bindings(
+    conn: &Connection,
+    bindings: &[standardoc_ir::RawFfiBinding],
+) -> Result<(), StorageError> {
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    // Group by symbol_id so we delete-once-then-insert-all per symbol
+    // (cheaper than N delete-one-then-insert-one and gives the right
+    // semantics: a re-extraction with zero bindings on a symbol drops
+    // its prior bindings).
+    let mut by_symbol: std::collections::HashMap<i64, Vec<&standardoc_ir::RawFfiBinding>> =
+        std::collections::HashMap::new();
+    for b in bindings {
+        let Some(id) = lookup_symbol_id_by_fqdn(conn, &b.symbol_fqdn)? else {
+            continue;
+        };
+        by_symbol.entry(id).or_default().push(b);
+    }
+    for (sym_id, group) in by_symbol {
+        delete_bindings_for_symbol(conn, sym_id)?;
+        for b in group {
+            upsert_binding(conn, sym_id, b)?;
+        }
+    }
+    Ok(())
+}
+
+fn lookup_symbol_id_by_fqdn(
+    conn: &Connection,
+    fqdn: &str,
+) -> Result<Option<i64>, StorageError> {
+    let id = conn
+        .query_row(
+            "SELECT id FROM symbols WHERE fqdn = ?1 LIMIT 1",
+            [fqdn],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(id)
 }
 
 /// IR-4-f — re-sync the `call_sites` rows for `file_path` with the
@@ -309,6 +363,7 @@ mod tests {
             edges,
             call_sites: vec![],
             documents: vec![],
+            ffi_bindings: vec![],
         }
     }
 
@@ -750,6 +805,7 @@ mod tests {
             edges: vec![],
             call_sites,
             documents: vec![],
+            ffi_bindings: vec![],
         }
     }
 

@@ -1,6 +1,6 @@
 use standardoc_ir::{
-    EdgeKind, Kind, Language, LanguageKind, RawEdge, RawSymbol, ResolvedOrUnresolved, Site,
-    SymbolLocation, Visibility,
+    EdgeKind, FfiAbi, FfiDirection, Kind, Language, LanguageKind, RawEdge, RawFfiBinding,
+    RawSymbol, ResolvedOrUnresolved, Site, SymbolLocation, Visibility,
 };
 use tree_sitter::{Node, TreeCursor};
 
@@ -15,12 +15,14 @@ use super::helpers::{
 /// Per-file walker state for the C provider.
 pub(crate) struct CWalkContext {
     pub(crate) core: WalkContextCore,
+    pub(crate) ffi_bindings: Vec<RawFfiBinding>,
 }
 
 impl CWalkContext {
     pub(crate) fn new(file_path: String, file_module_fqdn: String) -> Self {
         Self {
             core: WalkContextCore::new(file_path, file_module_fqdn, Language::C),
+            ffi_bindings: Vec::new(),
         }
     }
 }
@@ -118,7 +120,8 @@ fn emit_function_definition(node: Node, src: &str, ctx: &mut CWalkContext) {
     let Some(name) = declarator_name(declarator, src) else {
         return;
     };
-    let visibility = if storage_class_is_static(node, src) {
+    let is_static = storage_class_is_static(node, src);
+    let visibility = if is_static {
         Visibility::Private
     } else {
         Visibility::Public
@@ -127,6 +130,7 @@ fn emit_function_definition(node: Node, src: &str, ctx: &mut CWalkContext) {
         .child_by_field_name("body")
         .map(|b| hash_bytes(node_text(b, src).as_bytes()));
 
+    let fqdn = format!("{}::{}", ctx.core.file_module_fqdn, name);
     push_symbol(
         ctx,
         name,
@@ -136,6 +140,21 @@ fn emit_function_definition(node: Node, src: &str, ctx: &mut CWalkContext) {
         location_from_node(&ctx.core.file_path.clone(), node),
         body_hash,
     );
+
+    // Stage 2 — C ABI export. Every non-`static` function in a C
+    // translation unit is exposed to the linker under its source name.
+    // `static` functions stay file-local and are intentionally NOT
+    // tagged: they cannot participate in cross-language FFI by C ABI
+    // semantics.
+    if !is_static {
+        ctx.ffi_bindings.push(RawFfiBinding {
+            symbol_fqdn: fqdn,
+            abi: FfiAbi::C,
+            direction: FfiDirection::Export,
+            abi_name: name.to_string(),
+            convention: None,
+        });
+    }
 }
 
 fn emit_declaration(node: Node, src: &str, ctx: &mut CWalkContext) {
@@ -150,7 +169,8 @@ fn emit_declaration(node: Node, src: &str, ctx: &mut CWalkContext) {
     let Some(name) = declarator_name(declarator, src) else {
         return;
     };
-    let visibility = if storage_class_is_static(node, src) {
+    let is_static = storage_class_is_static(node, src);
+    let visibility = if is_static {
         Visibility::Private
     } else {
         Visibility::Public
@@ -167,6 +187,24 @@ fn emit_declaration(node: Node, src: &str, ctx: &mut CWalkContext) {
             loc,
             None,
         );
+        // Stage 2 — a `.h` prototype that does NOT match a `.c`
+        // definition in the same workspace is an Import (the linker
+        // expects the symbol to come from somewhere else: a sibling
+        // language's compilation unit, a system library, …). The
+        // post-extraction `c_join` pass deletes the fn_decl row when
+        // a local match exists — its FFI binding cascades away with
+        // it. Surviving fn_decl rows therefore correctly stand as
+        // imports at resolve time.
+        if !is_static {
+            let fqdn = format!("{}::{}", ctx.core.file_module_fqdn, name);
+            ctx.ffi_bindings.push(RawFfiBinding {
+                symbol_fqdn: fqdn,
+                abi: FfiAbi::C,
+                direction: FfiDirection::Import,
+                abi_name: name.to_string(),
+                convention: None,
+            });
+        }
     } else {
         push_symbol(
             ctx,
