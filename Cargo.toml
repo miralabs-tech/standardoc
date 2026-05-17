@@ -37,6 +37,9 @@ tokio-util  = { version = "0.7", default-features = false }
 tower-lsp-server = "0.23"
 rmcp        = "1.7"
 async-trait = "0.1"
+reqwest     = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json", "stream"] }
+http        = "1"
+bytes       = "1"
 axum        = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 schemars    = "1"
 notify      = "8"

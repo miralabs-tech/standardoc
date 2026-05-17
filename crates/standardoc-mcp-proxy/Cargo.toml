@@ -1,0 +1,35 @@
+[package]
+name = "standardoc-mcp-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Tiny long-lived HTTP proxy between an MCP client (Claude Code, Copilot Chat, …) and the standardoc daemon. Survives daemon restarts / rebuilds so the client never sees a dead transport — file-watches `.standardoc/mcp.endpoint` to track the daemon's moving URL, retries on connection refused, never exits on its own."
+default-run = "standardoc-mcp-proxy"
+
+[[bin]]
+name = "standardoc-mcp-proxy"
+path = "src/main.rs"
+
+[dependencies]
+axum       = { workspace = true }
+reqwest    = { workspace = true }
+http       = { workspace = true }
+bytes      = { workspace = true }
+tokio      = { workspace = true }
+tokio-util = { workspace = true }
+notify     = { workspace = true }
+notify-debouncer-full = { workspace = true }
+clap       = { workspace = true }
+ctrlc      = { workspace = true }
+thiserror  = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tower    = "0.5"
+
+[lints]
+workspace = true
