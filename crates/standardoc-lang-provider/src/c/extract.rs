@@ -62,6 +62,14 @@ pub(crate) fn extract_file(
 
     walk_translation_unit(tree.root_node(), content, &mut ctx);
 
+    // G4-c: build the AOT ModuleLookup from the just-extracted symbols
+    // + edges so cross-workspace edge strengthening
+    // (cross_workspace_post) has a peer-queryable bindings table. C
+    // doesn't need scope-aware resolution like Rust/TS — root-scope
+    // bindings are enough for the resolver.
+    let module_lookup =
+        super::lookup::build_c_lookup(&ctx.core.symbols, &ctx.core.edges, &ctx.core.file_module_fqdn);
+
     Ok(ExtractedFile {
         file: workspace_relative_path.into(),
         language: Language::C,
@@ -74,6 +82,6 @@ pub(crate) fn extract_file(
         call_sites: ctx.core.call_sites,
         documents: ctx.core.documents,
         ffi_bindings: ctx.ffi_bindings,
-        module_lookup: None,
+        module_lookup: Some(module_lookup),
     })
 }

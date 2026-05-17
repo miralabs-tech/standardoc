@@ -4,6 +4,7 @@ use standardoc_ir::ExtractedFile;
 mod call_sites;
 mod extract;
 mod helpers;
+mod lookup;
 mod walk;
 
 /// Native C `LanguageProvider` (tree-sitter-c based).
