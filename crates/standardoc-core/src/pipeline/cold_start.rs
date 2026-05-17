@@ -7,6 +7,7 @@ use walkdir::{DirEntry, WalkDir};
 use crate::pipeline::batch::apply_delete_file;
 use crate::pipeline::filters::ScanFilters;
 use crate::pipeline::paths::{has_supported_extension, to_workspace_relative};
+use crate::pipeline::peer_import::import_active_peer_workspaces;
 use crate::pipeline::projects::{discover_and_persist_projects, reconcile_files_project_id};
 use crate::pipeline::provider::LanguageProvider;
 use crate::pipeline::reindex::{Outcome, commit_outcomes, process_one};
@@ -82,6 +83,12 @@ pub fn run(
 
     cleanup_unseen(handle, &seen)?;
     reconcile_projects_quietly(handle);
+    // Stage 3b-7-a — import linked peer workspaces' module_lookups +
+    // workspace_imports rows. Runs AFTER primary indexing is done so the
+    // primary's data is always load-bearing ; peer imports enrich
+    // cross-workspace resolution as a bonus. Best-effort like the
+    // discover / reconcile steps : failures don't block cold start.
+    import_peers_quietly(handle);
     clear_progress(handle)?;
     Ok(())
 }
@@ -113,6 +120,28 @@ fn reconcile_projects_quietly(handle: &IndexHandle) {
         Err(_) => return,
     };
     let _ = reconcile_files_project_id(&conn);
+}
+
+/// Stage 3b-7-a — best-effort peer workspace import. Iterates every active
+/// linked workspace registered in `workspace_catalog` and copies its
+/// `module_lookups` + `workspace_imports` rows into the primary DB tagged
+/// with the peer's UUID. Cross-workspace resolution
+/// (`storage::cross_workspace::resolve_cross_workspace_import`) then
+/// walks all workspace_ids naturally without further plumbing.
+///
+/// Best-effort : a peer whose DB is missing / unreadable / out-of-version
+/// gets logged as a no-op for that peer ; other peers and the primary's
+/// cold-start finish untouched.
+fn import_peers_quietly(handle: &IndexHandle) {
+    let pool = match handle.pool() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let mut conn = match pool.get() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let _ = import_active_peer_workspaces(&mut conn);
 }
 
 fn u64_of(n: usize) -> u64 {

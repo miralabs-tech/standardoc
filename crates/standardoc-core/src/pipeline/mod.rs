@@ -4,6 +4,7 @@ mod diff;
 pub mod external_invalidation;
 mod filters;
 mod paths;
+pub mod peer_import;
 pub mod projects;
 mod provider;
 mod reindex;
