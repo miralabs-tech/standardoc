@@ -14,6 +14,7 @@ use walkdir::{DirEntry, WalkDir};
 use crate::commands::IngestCommand;
 use crate::pipeline::external_invalidation;
 use crate::pipeline::filters::{GitignoreStack, STDIGNORE_FILENAME, ScanFilters};
+use crate::pipeline::manifest_invalidation;
 use crate::pipeline::paths::{guess_language, has_supported_extension, to_workspace_relative};
 use crate::pipeline::provider::{ExtractContext, ExtractError, LanguageProvider};
 use crate::pipeline::reindex::reindex_paths;
@@ -163,6 +164,20 @@ fn process_path(
         Ok(None) => {}
         Err(e) => {
             eprintln!("standardoc watcher: lockfile invalidation failed: {e}");
+            return;
+        }
+    }
+
+    // Stage 3d-5: workspace manifest re-detection. When a manifest file
+    // (`Cargo.toml`, `package.json`, `pnpm-workspace.yaml`, `*.sxb`, …)
+    // changes, re-run `discover_and_persist_projects` so the `projects`
+    // table + `schema_meta.workspace_kind` stay in sync. Returns early
+    // because manifest files are not indexed as workspace source.
+    match manifest_invalidation::handle_manifest_change(handle, workspace_root, abs_path) {
+        Ok(Some(_)) => return,
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("standardoc watcher: manifest re-detection failed: {e}");
             return;
         }
     }
