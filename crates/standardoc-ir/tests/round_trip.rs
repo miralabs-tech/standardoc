@@ -119,6 +119,7 @@ fn fixture() -> ExtractedFile {
             value: "create_user".into(),
             is_string_literal: true,
         }],
+        receiver_chain: vec!["tauri".into()],
         site: Site {
             file: "src/login.ts".into(),
             line: 5,
