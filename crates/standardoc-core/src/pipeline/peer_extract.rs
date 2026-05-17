@@ -27,6 +27,7 @@
 use std::path::Path;
 
 use rusqlite::{OptionalExtension, TransactionBehavior};
+use serde::Serialize;
 use standardoc_ir::{Blake3Hash, ExtractedFile};
 
 use standardoc_ir::LinkedWorkspaceStatus;
@@ -46,7 +47,7 @@ use crate::storage::workspace_catalog::LinkedWorkspace;
 /// the shape of `peer_import::PeerImportStats` so future consumers
 /// (cold_start aggregator, MCP responses) can present a unified view
 /// of both extraction paths.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PeerExtractStats {
     pub workspace_id: String,
     pub root_path: String,
@@ -56,7 +57,8 @@ pub struct PeerExtractStats {
     pub files_parse_errors: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum PeerExtractStatus {
     Ok,
     SkippedInactive,

@@ -8,6 +8,8 @@ use std::path::Path;
 use standardoc_ir::{IndexingMode, LinkDirection, ModuleLookup, WorkspaceKind};
 use strsim::jaro_winkler;
 
+use crate::pipeline::peer_extract::{self, PeerExtractStats};
+use crate::pipeline::{ColdStartError, LanguageProvider};
 use crate::storage::cross_workspace::{CrossWorkspaceResolution, list_cross_workspace_providers};
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
@@ -156,6 +158,40 @@ pub fn unlink_workspace(handle: &IndexHandle, workspace_id: &str) -> Result<(), 
     let pool = handle.pool()?;
     let conn = pool.get()?;
     workspace_catalog::unregister_linked_workspace(&conn, workspace_id)
+}
+
+/// Stage 3b-7-b L3-bis: explicit re-extraction of a single linked peer.
+/// Looks up the peer by `workspace_id`, then delegates to
+/// [`peer_extract::extract_peer_workspace`] — same code path cold_start
+/// uses, but scoped to one peer rather than the full sweep. Intended
+/// as the user-facing escape hatch for the Q4 staleness gap: peer
+/// source can drift between cold_starts, and the watcher (L3d) only
+/// catches changes that occur while the daemon is up.
+pub fn refresh_peer(
+    handle: &IndexHandle,
+    provider: &dyn LanguageProvider,
+    workspace_id: &str,
+) -> Result<PeerExtractStats, RefreshPeerError> {
+    let peer = {
+        let pool = handle.pool().map_err(StorageError::from)?;
+        let conn = pool.get().map_err(StorageError::from)?;
+        workspace_catalog::get_linked_workspace(&conn, workspace_id)?
+            .ok_or_else(|| RefreshPeerError::NotFound(workspace_id.to_string()))?
+    };
+    Ok(peer_extract::extract_peer_workspace(handle, &peer, provider)?)
+}
+
+/// Error variants for [`refresh_peer`]. `NotFound` is its own variant
+/// (vs. being wrapped in StorageError) so MCP / LSP callers can map
+/// it to an `invalid_params` response with the offending workspace_id.
+#[derive(Debug, thiserror::Error)]
+pub enum RefreshPeerError {
+    #[error("workspace_id not found: {0}")]
+    NotFound(String),
+    #[error("storage: {0}")]
+    Storage(#[from] StorageError),
+    #[error("extract: {0}")]
+    Extract(#[from] ColdStartError),
 }
 
 pub fn list_linked_workspaces(handle: &IndexHandle) -> Result<Vec<LinkedWorkspace>, StorageError> {
@@ -309,5 +345,101 @@ mod tests {
         let rendered = format!("{err}");
         assert!(!rendered.contains("did you mean"));
         assert!(rendered.contains("/no/such/path"));
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // L3-bis-1: refresh_peer
+    // ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn refresh_peer_returns_not_found_for_unknown_workspace_id() {
+        let dir = tempdir().unwrap();
+        let handle = IndexHandle::open(dir.path()).unwrap();
+        let provider = crate::pipeline::provider::mock::MockProvider::new();
+        let err = refresh_peer(&handle, &provider, "no-such-uuid").unwrap_err();
+        match err {
+            RefreshPeerError::NotFound(id) => assert_eq!(id, "no-such-uuid"),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refresh_peer_round_trips_link_then_extracts_peer_source() {
+        // Happy path: link a peer with direction=in + mode=extract, then
+        // call refresh_peer with a stub provider that emits one symbol
+        // per file. Check the returned stats AND that the peer row is
+        // tagged with the peer's workspace_id (NOT 'primary').
+        use crate::pipeline::provider::mock::{MockProvider, MockResponse};
+        use standardoc_ir::{
+            Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawSymbol,
+            SourceOrigin, SymbolLocation, Visibility,
+        };
+
+        let primary = tempdir().unwrap();
+        let peer = tempdir().unwrap();
+        fs::create_dir_all(peer.path().join("src")).unwrap();
+        fs::write(
+            peer.path().join("src").join("lib.rs"),
+            "pub fn peer_only_marker() {}",
+        )
+        .unwrap();
+
+        let handle = IndexHandle::open(primary.path()).unwrap();
+        let workspace_id = link_workspace(
+            &handle,
+            &peer.path().to_string_lossy(),
+            LinkDirection::In,
+            IndexingMode::Extract,
+        )
+        .expect("link ok");
+
+        let mock = MockProvider::new();
+        let extracted = ExtractedFile {
+            file: "src/lib.rs".into(),
+            language: Language::Rust,
+            source_origin: SourceOrigin::Workspace,
+            is_external: false,
+            content_hash: Blake3Hash::new([0xab; 32]),
+            byte_size: 32,
+            symbols: vec![RawSymbol {
+                name: "peer_only_marker".into(),
+                fqdn: "crate::peer_only_marker".into(),
+                kind: Kind::Function,
+                language_kind: LanguageKind::from("fn_item"),
+                module: None,
+                visibility: Visibility::Public,
+                location: SymbolLocation {
+                    file: "src/lib.rs".into(),
+                    start_line: 1,
+                    end_line: 1,
+                    start_col: 0,
+                    end_col: 0,
+                },
+                signature: None,
+                body_hash: Some(Blake3Hash::new([0x01; 32])),
+                attributes: vec![],
+                flags: vec![],
+            }],
+            edges: vec![],
+            call_sites: vec![],
+            documents: vec![],
+        };
+        mock.set("src/lib.rs", MockResponse::Ok(extracted));
+
+        let stats = refresh_peer(&handle, &mock, &workspace_id).expect("refresh_peer ok");
+        assert_eq!(stats.workspace_id, workspace_id);
+        assert_eq!(stats.status, peer_extract::PeerExtractStatus::Ok);
+        assert_eq!(stats.files_extracted, 1);
+
+        // Confirm the row landed under the peer's workspace_id, not 'primary'.
+        let conn = handle.pool().unwrap().get().unwrap();
+        let sym_workspace_id: String = conn
+            .query_row(
+                "SELECT workspace_id FROM symbols WHERE fqdn = 'crate::peer_only_marker'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sym_workspace_id, workspace_id);
     }
 }

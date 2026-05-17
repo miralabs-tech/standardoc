@@ -8,7 +8,7 @@ mod paths;
 pub mod peer_extract;
 pub mod peer_import;
 pub mod projects;
-mod provider;
+pub(crate) mod provider;
 mod reindex;
 mod seed_builtins;
 mod watcher;
