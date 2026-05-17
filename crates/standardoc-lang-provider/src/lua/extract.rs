@@ -87,6 +87,13 @@ pub(crate) fn extract_file(
     // the typed pieces into the structured Signature.
     enrich_signatures_from_emmylua(&mut ctx.core.symbols, &ctx.core.documents);
 
+    // G6: extract LuaJIT `ffi.cdef[[...]]` declarations as virtual
+    // `RawSymbol` + `RawFfiBinding` pairs so cross-language `ffi_resolve`
+    // can pair them with C-side exports.
+    let (ffi_symbols, ffi_bindings) =
+        super::ffi_tagger::extract_ffi_bindings(&ast, &module_fqdn, workspace_relative_path);
+    ctx.core.symbols.extend(ffi_symbols);
+
     Ok(ExtractedFile {
         file: workspace_relative_path.into(),
         language: Language::Lua,
@@ -98,19 +105,11 @@ pub(crate) fn extract_file(
         edges: ctx.core.edges,
         call_sites: ctx.core.call_sites,
         documents: ctx.core.documents,
-        // TODO(viz-readiness-G6): extract Lua FFI surfaces and populate
-        // this vec. Today Lua emits no `RawFfiBinding`, so the cross-
-        // language `ffi_resolve` pass can't pair Lua imports with C
-        // exports. Detect:
-        //  - LuaJIT `ffi.cdef("...")` blocks: parse the embedded C
-        //    declarations and emit one import binding per declared
-        //    function with C ABI.
-        //  - `ffi.load(libname)` + bound names captured into a local
-        //    table -> attach the loaded library context to imports.
-        //  - C-side `lua_register` / `luaL_register` / `luaL_setfuncs`
-        //    in companion C files emit Lua-callable EXPORTS (matches
-        //    on the Lua import side).
-        ffi_bindings: vec![],
+        // G6 covers the Lua-side cdef extraction. C-side `lua_register`
+        // / `luaL_register` / `luaL_setfuncs` detection (the Export
+        // counterpart) is tracked separately — those emissions live on
+        // the C provider and are not part of this Lua-side extraction.
+        ffi_bindings,
         module_lookup: None,
     })
 }

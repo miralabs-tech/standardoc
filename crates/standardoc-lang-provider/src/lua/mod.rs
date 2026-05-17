@@ -8,6 +8,7 @@ use standardoc_ir::ExtractedFile;
 mod emmylua;
 mod extract;
 mod extract_doc;
+mod ffi_tagger;
 mod helpers;
 mod resolver;
 mod walk;
