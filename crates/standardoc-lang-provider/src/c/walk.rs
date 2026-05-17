@@ -171,6 +171,17 @@ fn emit_function_definition(node: Node, src: &str, ctx: &mut CWalkContext) {
     // consumer's job.
     if let Some(body) = body_node {
         super::call_sites::emit_intra_fn_call_sites(body, src, &mut ctx.core, &fqdn);
+        // G6 follow-up — Lua C API export tagger. Walks the same
+        // body for `lua_register(L, "name", c_impl)` calls and
+        // emits one `RawFfiBinding { abi: Lua, direction: Export }`
+        // per match, attached to the C-impl symbol. Closes the
+        // Lua-side cdef import bridge (G6) on the C export side.
+        super::lua_export_tagger::extract_lua_exports(
+            body,
+            src,
+            &ctx.core.file_module_fqdn,
+            &mut ctx.ffi_bindings,
+        );
     }
 }
 

@@ -5,6 +5,7 @@ mod call_sites;
 mod extract;
 mod helpers;
 mod lookup;
+mod lua_export_tagger;
 mod walk;
 
 /// Native C `LanguageProvider` (tree-sitter-c based).
