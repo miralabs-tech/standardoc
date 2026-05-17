@@ -62,11 +62,7 @@ impl WalkContext {
     /// effort : duplicates collapse into a `HashSet` so the same flag
     /// never lands twice on the same symbol regardless of how many
     /// times the Attribute-tier builtin is touched in the symbol body.
-    pub(crate) fn register_attribute_flag(
-        &mut self,
-        source_fqdn: &str,
-        tag: &BuiltinTag,
-    ) {
+    pub(crate) fn register_attribute_flag(&mut self, source_fqdn: &str, tag: &BuiltinTag) {
         self.attribute_flags
             .entry(source_fqdn.to_string())
             .or_default()
@@ -169,18 +165,6 @@ impl WalkContext {
         }
     }
 
-    // TODO(stage3-r3): cross-workspace fall-through at extract time.
-    // When `resolve_path` falls into `ResolvedOrUnresolved::Unresolved`
-    // AND the leftmost segment matches a known peer import (via the
-    // alias_table or a `use crate::<peer>` path), consult the lazy
-    // in-memory `CrossWorkspaceResolver` (designed in session memo
-    // `stage3-r1-shipped-r3-handoff`) and rewrite the target to the
-    // peer's FQDN with `cross-workspace` + `peer-<ws_id>` attrs, or to
-    // `UnresolvedBridge` when the peer is known but the symbol can't
-    // bind. Today any peer-targeting ident falls through to
-    // `Unresolved`, so cross-workspace edges only materialise at MCP
-    // query time via `resolve_cross_workspace`, not in the extraction
-    // payload that the viz consumes.
     /// Stage 3e-2 — resolve a name read in value position. Pipeline mirrors
     /// the TS-side `ts::visit::CallVisitor::resolve_name`:
     ///
@@ -211,8 +195,7 @@ impl WalkContext {
         if segments.len() == 1 {
             if let Some(res) = self.core.lookup.resolve_local(segments[0], scope_idx) {
                 if res.scope_idx != ModuleLookup::ROOT_SCOPE {
-                    if let (Some(alias_str), Some(m)) =
-                        (res.aliases_to.as_deref(), res.mutability)
+                    if let (Some(alias_str), Some(m)) = (res.aliases_to.as_deref(), res.mutability)
                     {
                         return self.resolve_module_level(alias_str, current_module, Some(m));
                     }
@@ -318,7 +301,12 @@ pub(crate) fn walk(
     module_fqdn: &str,
     file_path: &str,
     crate_name: &str,
-) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>, Vec<RawCallSite>) {
+) -> (
+    Vec<RawSymbol>,
+    Vec<RawEdge>,
+    Vec<RawDocument>,
+    Vec<RawCallSite>,
+) {
     let (s, e, d, c, _lookup) = walk_with_lookup(parsed, module_fqdn, file_path, crate_name);
     (s, e, d, c)
 }
@@ -555,8 +543,8 @@ fn extract_fn(item: &syn::ItemFn, parent_fqdn: &str, path: &str) -> RawSymbol {
         signature: Some(sig),
         body_hash: Some(body_hash::hash_tokens(&item.to_token_stream())),
         attributes: extract_attributes(&item.attrs, path),
-            flags: vec![],
-}
+        flags: vec![],
+    }
 }
 
 /// Bug C-2 — push the struct symbol AND one `RawSymbol` per field.
@@ -587,7 +575,14 @@ fn extract_struct(ctx: &mut WalkContext, item: &syn::ItemStruct, parent_fqdn: &s
     // struct's lookup scope. resolve_local filters `T` in `<T: …>`
     // body refs naturally.
     let scope_idx = lookup_scope_for(ctx, item.span());
-    push_struct_fields(ctx, &item.fields, &struct_fqdn, &path, parent_fqdn, scope_idx);
+    push_struct_fields(
+        ctx,
+        &item.fields,
+        &struct_fqdn,
+        &path,
+        parent_fqdn,
+        scope_idx,
+    );
     extract_type::visit_generics(ctx, &item.generics, parent_fqdn, &struct_fqdn, scope_idx);
 }
 
@@ -630,8 +625,8 @@ fn extract_enum(ctx: &mut WalkContext, item: &syn::ItemEnum, parent_fqdn: &str) 
                 signature: None,
                 body_hash: Some(body_hash::hash_tokens(&variant.to_token_stream())),
                 attributes: extract_attributes(&variant.attrs, &path),
-                            flags: vec![],
-},
+                flags: vec![],
+            },
             &variant.attrs,
         );
         // Bug C-3: walk the variant's inner field types
@@ -747,8 +742,8 @@ fn push_field(
             signature: Some(signature),
             body_hash: Some(body_hash::hash_tokens(&field.to_token_stream())),
             attributes: extract_attributes(&field.attrs, path),
-                    flags: vec![],
-},
+            flags: vec![],
+        },
         &field.attrs,
     );
     // Bug C-3: emit UsesType from the field fqdn for every named type
@@ -812,8 +807,8 @@ fn type_def_symbol(
         signature: None,
         body_hash: Some(body_hash::hash_tokens(tokens)),
         attributes: extract_attributes(attrs, path),
-            flags: vec![],
-}
+        flags: vec![],
+    }
 }
 
 fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str) {
@@ -834,8 +829,8 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
             signature: None,
             body_hash: Some(body_hash::hash_tokens(&item.to_token_stream())),
             attributes: extract_attributes(&item.attrs, &path),
-                    flags: vec![],
-},
+            flags: vec![],
+        },
         &item.attrs,
     );
 
@@ -873,21 +868,15 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
                     signature: Some(sig),
                     body_hash: Some(body_hash::hash_tokens(&item_fn.to_token_stream())),
                     attributes: extract_attributes(&item_fn.attrs, &path),
-                                    flags: vec![],
-},
+                    flags: vec![],
+                },
                 &item_fn.attrs,
             );
             // The method's own scope_idx has the trait scope as parent;
             // resolve_local from the method scope sees both fn-level
             // and trait-level generics naturally.
             let fn_scope = lookup_scope_for(ctx, item_fn.span());
-            extract_type::visit_signature(
-                ctx,
-                &item_fn.sig,
-                parent_fqdn,
-                &fn_fqdn,
-                fn_scope,
-            );
+            extract_type::visit_signature(ctx, &item_fn.sig, parent_fqdn, &fn_fqdn, fn_scope);
         }
     }
 }
@@ -967,20 +956,14 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
                     signature: Some(sig),
                     body_hash: Some(body_hash::hash_tokens(&item_fn.to_token_stream())),
                     attributes: extract_attributes(&item_fn.attrs, &path),
-                                    flags: vec![],
-},
+                    flags: vec![],
+                },
                 &item_fn.attrs,
             );
             // Same as trait method: fn's own scope_idx has impl scope
             // as parent, so resolve_local sees both layers' generics.
             let fn_scope = lookup_scope_for(ctx, item_fn.span());
-            extract_type::visit_signature(
-                ctx,
-                &item_fn.sig,
-                parent_fqdn,
-                &fn_fqdn,
-                fn_scope,
-            );
+            extract_type::visit_signature(ctx, &item_fn.sig, parent_fqdn, &fn_fqdn, fn_scope);
         }
     }
 }
@@ -1034,8 +1017,8 @@ fn value_def_symbol(
         signature: None,
         body_hash: Some(body_hash::hash_tokens(tokens)),
         attributes: extract_attributes(attrs, path),
-            flags: vec![],
-}
+        flags: vec![],
+    }
 }
 
 fn extract_macro_def(item: &syn::ItemMacro, parent_fqdn: &str, path: &str) -> Option<RawSymbol> {
@@ -1058,8 +1041,8 @@ fn extract_macro_def(item: &syn::ItemMacro, parent_fqdn: &str, path: &str) -> Op
         signature: None,
         body_hash: Some(body_hash::hash_tokens(&item.to_token_stream())),
         attributes: extract_attributes(&item.attrs, path),
-            flags: vec![],
-})
+        flags: vec![],
+    })
 }
 
 fn extract_signature(sig: &syn::Signature) -> Signature {
@@ -1304,7 +1287,14 @@ mod tests {
         assert_eq!(field.module.as_deref(), Some("c::Foo"));
         // Type captured on signature.returns as a TypeRef.
         assert_eq!(
-            field.signature.as_ref().unwrap().returns.as_ref().unwrap().display,
+            field
+                .signature
+                .as_ref()
+                .unwrap()
+                .returns
+                .as_ref()
+                .unwrap()
+                .display,
             "u32",
         );
     }
@@ -1318,11 +1308,23 @@ mod tests {
         assert_eq!(f0.language_kind.as_str(), "tuple_field");
         assert_eq!(f1.language_kind.as_str(), "tuple_field");
         assert_eq!(
-            f0.signature.as_ref().unwrap().returns.as_ref().unwrap().display,
+            f0.signature
+                .as_ref()
+                .unwrap()
+                .returns
+                .as_ref()
+                .unwrap()
+                .display,
             "u32",
         );
         assert_eq!(
-            f1.signature.as_ref().unwrap().returns.as_ref().unwrap().display,
+            f1.signature
+                .as_ref()
+                .unwrap()
+                .returns
+                .as_ref()
+                .unwrap()
+                .display,
             "String",
         );
     }
@@ -1869,16 +1871,12 @@ mod tests {
                 _ => false,
             })
             .collect();
-        assert!(
-            leaked.is_empty(),
-            "struct-level T leaked: {leaked:?}",
-        );
+        assert!(leaked.is_empty(), "struct-level T leaked: {leaked:?}",);
     }
 
     #[test]
     fn bug_c3_generic_constraint_emits_type_constraint() {
-        let parsed =
-            parse("pub trait Foo {} pub fn process<T: Foo>(x: T) -> T { x }");
+        let parsed = parse("pub trait Foo {} pub fn process<T: Foo>(x: T) -> T { x }");
         let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-constraint"]);
         let targets = resolved_targets(&refs);
@@ -1890,8 +1888,7 @@ mod tests {
 
     #[test]
     fn bug_c3_where_clause_emits_type_constraint() {
-        let parsed =
-            parse("pub trait Foo {} pub fn process<T>(x: T) where T: Foo { let _ = x; }");
+        let parsed = parse("pub trait Foo {} pub fn process<T>(x: T) where T: Foo { let _ = x; }");
         let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-constraint"]);
         let targets = resolved_targets(&refs);
@@ -1916,14 +1913,11 @@ mod tests {
 
     #[test]
     fn bug_c3_const_static_type_emits_uses_type() {
-        let parsed =
-            parse("pub struct Cfg; pub const K: Cfg = Cfg; pub static M: Cfg = Cfg;");
+        let parsed = parse("pub struct Cfg; pub const K: Cfg = Cfg; pub static M: Cfg = Cfg;");
         let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
-        let const_edges: Vec<_> =
-            refs.iter().filter(|e| e.from_fqdn == "c::K").collect();
-        let static_edges: Vec<_> =
-            refs.iter().filter(|e| e.from_fqdn == "c::M").collect();
+        let const_edges: Vec<_> = refs.iter().filter(|e| e.from_fqdn == "c::K").collect();
+        let static_edges: Vec<_> = refs.iter().filter(|e| e.from_fqdn == "c::M").collect();
         assert!(!const_edges.is_empty(), "expected const K → Cfg edge");
         assert!(!static_edges.is_empty(), "expected static M → Cfg edge");
     }
@@ -2051,11 +2045,7 @@ mod tests {
             .iter()
             .find(|s| s.fqdn == "c::pipe")
             .expect("c::pipe must be indexed");
-        let iter_count = pipe_sym
-            .flags
-            .iter()
-            .filter(|f| *f == "iter")
-            .count();
+        let iter_count = pipe_sym.flags.iter().filter(|f| *f == "iter").count();
         assert_eq!(
             iter_count, 1,
             "iter flag must dedup, got flags = {:?}",
@@ -2096,16 +2086,16 @@ mod tests {
             })
             .collect();
         assert!(
-            unresolved_names.iter().any(|n| n.ends_with("::SomeUnknown")),
+            unresolved_names
+                .iter()
+                .any(|n| n.ends_with("::SomeUnknown")),
             "expected unresolved canonical name, got {unresolved_names:?}",
         );
     }
 
     #[test]
     fn bug_c3_enum_variant_inner_field_types_emit_from_variant_fqdn() {
-        let parsed = parse(
-            "pub struct Foo; pub struct Bar; pub enum E { V(Foo, Bar) }",
-        );
+        let parsed = parse("pub struct Foo; pub struct Bar; pub enum E { V(Foo, Bar) }");
         let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type", "type-annotation"]);
         let from_variant: Vec<&RawEdge> = refs
@@ -2115,8 +2105,7 @@ mod tests {
             .collect();
         let targets = resolved_targets(&from_variant);
         assert!(
-            targets.contains(&"c::Foo".to_string())
-                && targets.contains(&"c::Bar".to_string()),
+            targets.contains(&"c::Foo".to_string()) && targets.contains(&"c::Bar".to_string()),
             "expected variant V → Foo, Bar (got {targets:?})",
         );
     }
@@ -2130,9 +2119,8 @@ mod tests {
 
     #[test]
     fn stage3c_impl_method_filters_impl_level_generic() {
-        let parsed = parse(
-            "pub struct S<T>(T); impl<T> S<T> { pub fn m(&self) -> T { unimplemented!() } }",
-        );
+        let parsed =
+            parse("pub struct S<T>(T); impl<T> S<T> { pub fn m(&self) -> T { unimplemented!() } }");
         let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let leaked: Vec<&RawEdge> = uses_type_edges(&edges)
             .into_iter()
@@ -2174,9 +2162,7 @@ mod tests {
 
     #[test]
     fn stage3c_impl_method_inner_generic_combined_with_outer_generic() {
-        let parsed = parse(
-            "pub struct S<T>(T); impl<T> S<T> { pub fn m<U>(_x: T, _y: U) {} }",
-        );
+        let parsed = parse("pub struct S<T>(T); impl<T> S<T> { pub fn m<U>(_x: T, _y: U) {} }");
         let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let m_refs: Vec<&RawEdge> = uses_type_edges(&edges)
             .into_iter()
@@ -2188,9 +2174,7 @@ mod tests {
                 ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "c::T" || fqdn == "c::U" => {
                     Some(fqdn.clone())
                 }
-                ResolvedOrUnresolved::Unresolved { name }
-                    if name == "c::T" || name == "c::U" =>
-                {
+                ResolvedOrUnresolved::Unresolved { name } if name == "c::T" || name == "c::U" => {
                     Some(name.clone())
                 }
                 _ => None,

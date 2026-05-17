@@ -62,7 +62,8 @@ export default { name: 'App' };
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-    };
+            cross_workspace: None,
+        };
     let extracted = provider.extract(sfc, "src/App.vue", &ctx).expect("ok");
 
     assert_eq!(extracted.language, Language::Vue);
@@ -86,7 +87,8 @@ const message = 'hi';
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-    };
+            cross_workspace: None,
+        };
     let extracted = provider.extract(sfc, "src/Hello.vue", &ctx).unwrap();
 
     let interp = refs_with_attr(&extracted.edges, "template-interpolation");
@@ -109,7 +111,8 @@ const visible = true;
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-    };
+            cross_workspace: None,
+        };
     let extracted = provider.extract(sfc, "src/Toggle.vue", &ctx).unwrap();
 
     let dirs = refs_with_attr(&extracted.edges, "template-directive");
@@ -132,7 +135,8 @@ function handleClick() {}
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-    };
+            cross_workspace: None,
+        };
     let extracted = provider.extract(sfc, "src/Button.vue", &ctx).unwrap();
 
     let events = refs_with_attr(&extracted.edges, "template-event");
@@ -155,7 +159,8 @@ import UserCard from './UserCard.vue';
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-    };
+            cross_workspace: None,
+        };
     let extracted = provider.extract(sfc, "src/App.vue", &ctx).unwrap();
 
     let comps = refs_with_attr(&extracted.edges, "template-component-ref");
@@ -179,7 +184,8 @@ function increment() { /* ... */ }
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-    };
+            cross_workspace: None,
+        };
     let extracted = provider.extract(sfc, "src/Counter.vue", &ctx).unwrap();
 
     let names: Vec<&str> = extracted.symbols.iter().map(|s| s.name.as_str()).collect();
@@ -201,7 +207,8 @@ let count = 0;
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-    };
+            cross_workspace: None,
+        };
     let extracted = provider.extract(sfc, "src/Counter.svelte", &ctx).unwrap();
 
     assert_eq!(extracted.language, Language::Svelte);
@@ -223,7 +230,8 @@ function handleClick() {}
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-    };
+            cross_workspace: None,
+        };
     let extracted = provider.extract(sfc, "src/Btn.svelte", &ctx).unwrap();
 
     let events = refs_with_attr(&extracted.edges, "template-event");
@@ -246,7 +254,8 @@ let users = [];
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-    };
+            cross_workspace: None,
+        };
     let extracted = provider.extract(sfc, "src/List.svelte", &ctx).unwrap();
 
     let dirs = refs_with_attr(&extracted.edges, "template-directive");
@@ -267,7 +276,8 @@ import Header from './Header.svelte';
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-    };
+            cross_workspace: None,
+        };
     let extracted = provider.extract(sfc, "src/App.svelte", &ctx).unwrap();
 
     let comps = refs_with_attr(&extracted.edges, "template-component-ref");

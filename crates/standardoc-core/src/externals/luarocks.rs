@@ -174,6 +174,7 @@ fn walk_and_submit_rock(
     let mut submitted = 0usize;
     let ctx = ExtractContext {
         workspace_root: rock_dir,
+        cross_workspace: None,
     };
 
     for entry in WalkDir::new(rock_dir).into_iter().filter_map(Result::ok) {

@@ -52,7 +52,8 @@ export function App() {
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-    };
+            cross_workspace: None,
+        };
     let extracted = provider.extract(src, "src/App.tsx", &ctx).unwrap();
 
     assert_eq!(extracted.language, Language::TypeScript);
@@ -85,7 +86,8 @@ fn tsx_attribute_expression_emits_template_bind() {
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-    };
+            cross_workspace: None,
+        };
     let extracted = provider.extract(src, "src/App.tsx", &ctx).unwrap();
 
     let bind = refs_with_attr(&extracted.edges, "template-bind");
@@ -107,7 +109,8 @@ fn jsx_child_interpolation_emits_template_interpolation() {
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-    };
+            cross_workspace: None,
+        };
     let extracted = provider.extract(src, "src/App.jsx", &ctx).unwrap();
 
     assert_eq!(extracted.language, Language::JavaScript);

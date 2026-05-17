@@ -109,10 +109,18 @@ pub(crate) fn process_one(
         return Ok(None);
     };
 
-    let ctx = ExtractContext { workspace_root };
+    let resolver = crate::cross_workspace_resolver::DbCrossWorkspaceResolver::new(handle);
+    let ctx = ExtractContext {
+        workspace_root,
+        cross_workspace: Some(&resolver),
+    };
     match provider.extract(&content, &rel, &ctx) {
         Ok(mut extracted) => {
             extracted.content_hash = hash;
+            crate::pipeline::cross_workspace_post::rewrite_cross_workspace_edges(
+                &mut extracted,
+                &resolver,
+            );
             Ok(Some(Outcome::Upsert { rel, extracted }))
         }
         Err(ExtractError::Parse { detail, .. }) => {

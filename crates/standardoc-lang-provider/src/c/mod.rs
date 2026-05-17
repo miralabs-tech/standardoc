@@ -51,6 +51,7 @@ mod tests {
         let provider = CProvider::new();
         let ctx = ExtractContext {
             workspace_root: Path::new("/tmp/lurlang"),
+            cross_workspace: None,
         };
         provider.extract(source, path, &ctx).expect("extract ok")
     }
@@ -251,4 +252,3 @@ mod tests {
         assert_eq!(exports[0].abi_name, "exported");
     }
 }
-

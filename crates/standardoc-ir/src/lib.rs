@@ -2,6 +2,7 @@ mod attribute;
 mod bridge_kind;
 mod builtins;
 mod call_site;
+mod cross_workspace;
 mod document;
 mod edge;
 mod extracted;
@@ -19,9 +20,9 @@ mod workspace;
 pub use attribute::{RawAttribute, RawAttributeArg};
 pub use bridge_kind::{BUILTIN_BRIDGE_KINDS, BridgeKind, BridgeKindError, CUSTOM_BRIDGE_PREFIX};
 pub use builtins::{
-	BridgeMapping, BuiltinEntry, BuiltinRegistry, BuiltinTier, SubstrateBridge,
-	make_synthetic_fqdn,
+    BridgeMapping, BuiltinEntry, BuiltinRegistry, BuiltinTier, SubstrateBridge, make_synthetic_fqdn,
 };
+pub use cross_workspace::{CrossWorkspaceLookup, CrossWorkspaceResolver};
 pub use call_site::{RawCallArg, RawCallSite};
 pub use document::RawDocument;
 pub use edge::{RawEdge, ResolvedOrUnresolved};
@@ -32,8 +33,8 @@ pub use kinds::{EdgeConfidence, EdgeKind, Kind, Language, SourceOrigin, Visibili
 pub use language_kind::LanguageKind;
 pub use location::{Site, SymbolLocation};
 pub use lookup::{
-	AliasMutability, BindingSource, BuiltinTag, IdentResolution, ImportRecord, LocalDeclKind,
-	ModuleLookup, ScopeKind, ScopeRange, Substrate,
+    AliasMutability, BindingSource, BuiltinTag, IdentResolution, ImportRecord, LocalDeclKind,
+    ModuleLookup, ScopeKind, ScopeRange, Substrate,
 };
 pub use project::{ProjectInfo, ProjectKind};
 pub use signature::{Modifiers, Param, Signature, SignatureMeta, TypeRef, compact_rust_tokens};

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use standardoc_ir::{BuiltinEntry, ExtractedFile};
+use standardoc_ir::{BuiltinEntry, CrossWorkspaceResolver, ExtractedFile};
 
 pub trait LanguageProvider: Send + Sync {
     fn extract(
@@ -22,9 +22,31 @@ pub trait LanguageProvider: Send + Sync {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Per-extract context handed to every [`LanguageProvider::extract`]
+/// call. Kept `Copy` so providers can fan it out cheaply — the
+/// `cross_workspace` slot is a borrowed trait object, not an owned
+/// handle, so the resolver's cache lives for the whole extract pass.
+#[derive(Clone, Copy)]
 pub struct ExtractContext<'a> {
     pub workspace_root: &'a Path,
+    /// Stage 3 R3 — when `Some`, providers consult this resolver to
+    /// strengthen imports that target a peer workspace. `None` for
+    /// tests and entry points that don't have an [`IndexHandle`]
+    /// (mocks, parsing-only paths). Visitors must tolerate `None`
+    /// (fall through to local-unresolved).
+    pub cross_workspace: Option<&'a (dyn CrossWorkspaceResolver + 'a)>,
+}
+
+impl<'a> std::fmt::Debug for ExtractContext<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtractContext")
+            .field("workspace_root", &self.workspace_root)
+            .field(
+                "cross_workspace",
+                &self.cross_workspace.map(|_| "<resolver>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -127,6 +149,7 @@ mod tests {
         let root = PathBuf::from("/ws");
         let ctx = ExtractContext {
             workspace_root: &root,
+            cross_workspace: None,
         };
         let out = provider.extract("", "src/lib.rs", &ctx).unwrap();
         assert_eq!(out.file, "src/lib.rs");
@@ -138,6 +161,7 @@ mod tests {
         let root = PathBuf::from("/ws");
         let ctx = ExtractContext {
             workspace_root: &root,
+            cross_workspace: None,
         };
         let err = provider.extract("", "nope.rs", &ctx).unwrap_err();
         assert!(matches!(err, ExtractError::UnsupportedLanguage { .. }));
@@ -153,6 +177,7 @@ mod tests {
         let root = PathBuf::from("/ws");
         let ctx = ExtractContext {
             workspace_root: &root,
+            cross_workspace: None,
         };
         let err = provider.extract("", "src/bad.rs", &ctx).unwrap_err();
         assert!(matches!(err, ExtractError::Parse { .. }));

@@ -72,10 +72,10 @@ pub enum PeerExtractStatus {
 /// without any scoping awareness. Peer files are prefixed with
 /// `ws:<workspace_id>:` to dodge the `files.path` PK collision when
 /// peer + primary share rel-paths.
-pub fn peer_path(workspace_id: &str, rel: &str) -> String {
+pub(crate) fn peer_path(workspace_id: &str, rel: &str) -> String {
     if workspace_id == PRIMARY_WORKSPACE_ID {
         rel.to_string()
-    } else {
+    } else {    
         format!("ws:{workspace_id}:{rel}")
     }
 }
@@ -119,7 +119,7 @@ pub(crate) fn scope_extracted_paths(extracted: &mut ExtractedFile, workspace_id:
 ///   checked; both failure modes are captured as `PeerExtractStatus`
 ///   variants rather than errors so a caller iterating linked peers
 ///   doesn't abort the whole sweep on one bad peer.
-pub fn extract_peer_workspace(
+pub(crate) fn extract_peer_workspace(
     primary_handle: &IndexHandle,
     peer: &LinkedWorkspace,
     provider: &dyn LanguageProvider,
@@ -187,6 +187,7 @@ pub fn extract_peer_workspace(
 
         let ctx = ExtractContext {
             workspace_root: peer_root,
+            cross_workspace: None,
         };
         match provider.extract(&content, &rel, &ctx) {
             Ok(mut extracted) => {
@@ -290,7 +291,7 @@ mod tests {
                     end_col: 0,
                 },
                 signature: None,
-                body_hash: Some(standardoc_ir::Blake3Hash::new(
+                body_hash: Some(Blake3Hash::new(
                     *blake3::hash(content.as_bytes()).as_bytes(),
                 )),
                 attributes: vec![],
@@ -301,7 +302,7 @@ mod tests {
                 language: standardoc_ir::Language::Rust,
                 source_origin: SourceOrigin::Workspace,
                 is_external: false,
-                content_hash: standardoc_ir::Blake3Hash::new(
+                content_hash: Blake3Hash::new(
                     *blake3::hash(content.as_bytes()).as_bytes(),
                 ),
                 byte_size: content.len() as u64,
@@ -360,7 +361,7 @@ mod tests {
             language: standardoc_ir::Language::Rust,
             source_origin: SourceOrigin::Workspace,
             is_external: false,
-            content_hash: standardoc_ir::Blake3Hash::default(),
+            content_hash: Blake3Hash::default(),
             byte_size: 0,
             symbols: vec![],
             edges: vec![],
@@ -380,7 +381,7 @@ mod tests {
             language: standardoc_ir::Language::Rust,
             source_origin: SourceOrigin::Workspace,
             is_external: false,
-            content_hash: standardoc_ir::Blake3Hash::default(),
+            content_hash: Blake3Hash::default(),
             byte_size: 0,
             module_lookup: None,
             symbols: vec![RawSymbol {
@@ -508,7 +509,8 @@ mod tests {
                     "src/lib.rs",
                     &ExtractContext {
                         workspace_root: primary_dir.path(),
-                    },
+            cross_workspace: None,
+        },
                 )
                 .unwrap();
             let conn = handle.pool().unwrap().get().unwrap();

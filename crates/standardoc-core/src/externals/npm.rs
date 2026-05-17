@@ -231,6 +231,7 @@ fn walk_and_submit_package(
     let mut submitted = 0usize;
     let ctx = ExtractContext {
         workspace_root: package_dir,
+        cross_workspace: None,
     };
 
     for entry in WalkDir::new(package_dir)

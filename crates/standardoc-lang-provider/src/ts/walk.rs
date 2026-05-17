@@ -108,18 +108,6 @@ impl<'a> TsWalkContext<'a> {
         self.import_aliases.insert(local_name, resolved);
     }
 
-    // TODO(stage3-r3): cross-workspace fall-through at extract time.
-    // When `import_aliases.get(name)` returns a `Resolved { fqdn }`
-    // whose target lives outside `defined_fqdns` AND matches a known
-    // peer workspace import path, consult the lazy in-memory
-    // `CrossWorkspaceResolver` (designed in session memo
-    // `stage3-r1-shipped-r3-handoff`) and rewrite the target to the
-    // peer's FQDN with `cross-workspace` + `peer-<ws_id>` attrs, or to
-    // `UnresolvedBridge` when the peer is known but the symbol can't
-    // bind. Today any peer-targeting ident falls through to
-    // `Unresolved`, so cross-workspace edges only materialise at MCP
-    // query time via `resolve_cross_workspace`, not in the extraction
-    // payload that the viz consumes.
     /// Resolve a single-ident call target through the alias-table, then through
     /// `<current_module_fqdn>::<name>` against `defined_fqdns`, then through
     /// the language's [`BuiltinRegistry`] (Stage 3a-6b chain). Multi-segment
@@ -141,19 +129,15 @@ impl<'a> TsWalkContext<'a> {
     /// - [`ResolutionOutcome::Emit(target)`] — emit the edge.
     ///   `target.via_builtin` is `Some(tag)` for Edge-tier builtins
     ///   so callers can stamp `via-builtin` / `builtin-<slug>` attrs.
-    pub(crate) fn resolve_call(
-        &self,
-        name: &str,
-        current_module_fqdn: &str,
-    ) -> ResolutionOutcome {
+    pub(crate) fn resolve_call(&self, name: &str, current_module_fqdn: &str) -> ResolutionOutcome {
         if let Some(import) = self.import_aliases.get(name) {
             return ResolutionOutcome::Emit(CallTarget::plain(import.target.clone()));
         }
         let local = format!("{current_module_fqdn}::{name}");
         if self.core.defined_fqdns.contains(&local) {
-            return ResolutionOutcome::Emit(CallTarget::plain(
-                ResolvedOrUnresolved::Resolved { fqdn: local },
-            ));
+            return ResolutionOutcome::Emit(CallTarget::plain(ResolvedOrUnresolved::Resolved {
+                fqdn: local,
+            }));
         }
         if let Some(entry) = global_builtin_registry().lookup(name, self.core.lookup.language) {
             return match entry.tier {
@@ -593,12 +577,7 @@ fn process_item_p2(ctx: &mut TsWalkContext<'_>, item: &ModuleItem, current_modul
             // Top-level expression statement (Vue 3 script-setup idiom:
             // `onMount(() => { ... });` at module scope). No enclosing
             // symbol — calls attribute to the module fqdn itself.
-            visit::visit_expression_for_calls(
-                ctx,
-                &expr_stmt.expr,
-                current_module,
-                current_module,
-            );
+            visit::visit_expression_for_calls(ctx, &expr_stmt.expr, current_module, current_module);
         }
         _ => {}
     }
@@ -659,12 +638,7 @@ fn visit_class_methods(
                     continue;
                 };
                 let method_fqdn = format!("{class_fqdn}::{method_name}");
-                visit::visit_function_body(
-                    ctx,
-                    &method.function,
-                    current_module,
-                    &method_fqdn,
-                );
+                visit::visit_function_body(ctx, &method.function, current_module, &method_fqdn);
             }
             ClassMember::Constructor(ctor) => {
                 // FQDN must match `extract_constructor`'s Pass-1 shape.
@@ -1719,7 +1693,9 @@ fn interface_member_key_name(expr: &swc_core::ecma::ast::Expr) -> Option<String>
         swc_core::ecma::ast::Expr::Lit(swc_core::ecma::ast::Lit::Str(s)) => {
             Some(s.value.to_string_lossy().into_owned())
         }
-        swc_core::ecma::ast::Expr::Lit(swc_core::ecma::ast::Lit::Num(n)) => Some(n.value.to_string()),
+        swc_core::ecma::ast::Expr::Lit(swc_core::ecma::ast::Lit::Num(n)) => {
+            Some(n.value.to_string())
+        }
         _ => None,
     }
 }

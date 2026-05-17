@@ -239,6 +239,7 @@ fn walk_and_submit_crate(
     let mut submitted = 0usize;
     let ctx = ExtractContext {
         workspace_root: manifest_dir,
+        cross_workspace: None,
     };
 
     for entry in WalkDir::new(&src_dir).into_iter().filter_map(Result::ok) {

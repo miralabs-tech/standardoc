@@ -1,4 +1,5 @@
 mod commands;
+mod cross_workspace_resolver;
 pub mod externals;
 mod pipeline;
 pub mod query;
@@ -7,6 +8,7 @@ pub mod sessions;
 mod storage;
 
 pub use commands::IngestCommand;
+pub use cross_workspace_resolver::DbCrossWorkspaceResolver;
 pub use externals::{
     BinaryAvailability, ENV_CARGO_PATH, ENV_LUAROCKS_PATH, ENV_NODE_PATH, ExternalsError,
     ResolveOutcome, Resolver, ResolverRegistry,

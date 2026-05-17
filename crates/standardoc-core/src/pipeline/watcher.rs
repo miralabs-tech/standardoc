@@ -71,11 +71,7 @@ impl WatcherHandle {
     /// `workspace_id` twice is a no-op (avoids double-watching). Returns
     /// `Err` if the path cannot be canonicalised or if `notify` refuses
     /// the new watch (e.g. exceeded inotify limits on Linux).
-    pub fn add_peer(
-        &mut self,
-        workspace_id: String,
-        root: &Path,
-    ) -> Result<(), WatcherError> {
+    pub fn add_peer(&mut self, workspace_id: String, root: &Path) -> Result<(), WatcherError> {
         let Some(d) = self.debouncer.as_mut() else {
             return Err(WatcherError::Storage(StorageError::InvalidStoredData {
                 detail: "watcher debouncer already dropped".into(),
@@ -498,15 +494,25 @@ fn upsert_path(
             return;
         }
     };
-    let ctx = ExtractContext { workspace_root };
+    let resolver = crate::cross_workspace_resolver::DbCrossWorkspaceResolver::new(handle);
+    let ctx = ExtractContext {
+        workspace_root,
+        cross_workspace: Some(&resolver),
+    };
     match provider.extract(&content, rel, &ctx) {
-        Ok(extracted) => try_send_command(
-            handle,
-            IngestCommand::UpsertFile {
-                path: rel.to_string(),
-                extracted,
-            },
-        ),
+        Ok(mut extracted) => {
+            crate::pipeline::cross_workspace_post::rewrite_cross_workspace_edges(
+                &mut extracted,
+                &resolver,
+            );
+            try_send_command(
+                handle,
+                IngestCommand::UpsertFile {
+                    path: rel.to_string(),
+                    extracted,
+                },
+            )
+        }
         Err(ExtractError::Parse { detail, .. }) => {
             if let Some(language) = guess_language(rel) {
                 try_send_command(
@@ -558,6 +564,7 @@ fn upsert_peer_path(
     };
     let ctx = ExtractContext {
         workspace_root: peer_root,
+        cross_workspace: None,
     };
     match provider.extract(&content, rel, &ctx) {
         Ok(extracted) => try_send_command(
