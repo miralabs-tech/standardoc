@@ -1,12 +1,11 @@
 use proc_macro2::Span;
-use standardoc_ir::{BuiltinTier, EdgeKind, Language, RawEdge, ResolvedOrUnresolved, Site};
+use standardoc_ir::{EdgeKind, RawEdge, ResolvedOrUnresolved, Site};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 use super::walk::{
     NameResolution, WalkContext, col_from_span, line_from_span, lookup_scope_for, path_to_string,
 };
-use crate::builtins::global as global_builtin_registry;
 
 pub(crate) fn visit_block(
     ctx: &mut WalkContext,
@@ -64,6 +63,45 @@ impl CallVisitor<'_> {
             attributes,
             confidence,
         });
+    }
+
+    /// Stage 3e-2-ter — emit a `Calls` edge for a `path` in call
+    /// position. Pipeline mirrors [`Self::emit_value_ref`] but tags the
+    /// edge as `EdgeKind::Calls` (no `value-read` attribute). Routed
+    /// through [`WalkContext::resolve_name`] so the scope chain is
+    /// honored: `let f = bar; f();` propagates the alias to `bar` with
+    /// `via-alias`, fn-pointer parameters are skipped as Locals, etc.
+    ///
+    /// Self-reference is NOT skipped here — `fn foo() { foo(); }` is a
+    /// legitimate recursion signal (different from value-position self-
+    /// reads which are structural artifacts).
+    fn emit_call_via_resolve_name(&mut self, path: &str, span: Span) {
+        let (target, alias_mut, via_builtin) =
+            match self
+                .ctx
+                .resolve_name(path, self.current_scope_idx, &self.current_module)
+            {
+                NameResolution::Drop | NameResolution::Local => return,
+                NameResolution::Attribute(tag) => {
+                    self.ctx
+                        .register_attribute_flag(&self.enclosing_fqdn, &tag);
+                    return;
+                }
+                NameResolution::Target {
+                    to,
+                    alias_mut,
+                    via_builtin,
+                } => (to, alias_mut, via_builtin),
+            };
+        let mut attributes = Vec::new();
+        if let Some(m) = alias_mut {
+            attributes.push(m.as_slug().to_string());
+        }
+        if let Some(tag) = &via_builtin {
+            attributes.push("via-builtin".to_string());
+            attributes.push(format!("builtin-{}", tag.slug()));
+        }
+        self.emit_call_with_attributes(target, span, attributes);
     }
 
     /// Stage 3e-2 — emit a `References` edge for a `path` read in value
@@ -141,41 +179,13 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
         if let syn::Expr::Path(expr_path) = &*node.func {
             let path_str = path_to_string(&expr_path.path);
             if !path_str.is_empty() {
-                let span = expr_path.span();
-                let leftmost = path_str.split("::").next().unwrap_or("");
-                match global_builtin_registry().lookup(leftmost, Language::Rust) {
-                    // Stage 3e-1: Drop = structural noise (`Vec::new`,
-                    // `Box::new`, `Some(x)`, `Ok(x)`, `String::from`).
-                    // Silently skipped — inner args still walked below.
-                    Some(entry) if matches!(entry.tier, BuiltinTier::Drop) => {}
-                    // Stage 3e-1b: Attribute = source-flag promotion
-                    // target. Rare in call position (most Iterator /
-                    // Future hits happen via type bounds in
-                    // `extract_type`), but covered for symmetry —
-                    // e.g. `Future::poll(...)` would surface as a
-                    // `"async"` flag on the enclosing fn.
-                    Some(entry) if matches!(entry.tier, BuiltinTier::Attribute) => {
-                        self.ctx
-                            .register_attribute_flag(&self.enclosing_fqdn, &entry.tag);
-                    }
-                    // Edge-tier call (e.g. `Error::source(...)`) — emit
-                    // straight to the synthetic builtin FQDN with the
-                    // standard `via-builtin` / `builtin-<slug>` attrs.
-                    Some(entry) => {
-                        let to = ResolvedOrUnresolved::Resolved {
-                            fqdn: entry.synthetic_fqdn.clone(),
-                        };
-                        let attrs = vec![
-                            "via-builtin".to_string(),
-                            format!("builtin-{}", entry.tag.slug()),
-                        ];
-                        self.emit_call_with_attributes(to, span, attrs);
-                    }
-                    None => {
-                        let to = self.ctx.resolve_path(&path_str, &self.current_module);
-                        self.emit_call(to, span);
-                    }
-                }
+                // Stage 3e-2-ter: routed through `resolve_name` so the
+                // scope chain is honored. Drop/Attribute tier dispatch
+                // happens inside `resolve_name`; aliases propagate as
+                // `via-alias[-mutable]`; Locals (fn-pointer params,
+                // closure-typed lets) are silently skipped (mirror of
+                // TS Bug B Stage 2 — calling a local emits no edge).
+                self.emit_call_via_resolve_name(&path_str, expr_path.span());
             }
             // Stage 3e-2: we consumed `node.func` as the Calls target
             // above. Recurse only into args — letting the default
@@ -742,6 +752,132 @@ mod tests {
             1,
             "type-annotated let must still alias, got {:?}",
             value_reads(&edges)
+        );
+    }
+
+    // --- Stage 3e-2-ter: scope-aware visit_expr_call ---
+
+    #[test]
+    fn stage3e2ter_let_alias_call_propagates_via_alias() {
+        // `let f = bar; f();` — Stage 3e-2-bis registered `f` as alias
+        // for `bar` (Const mutability). Stage 3e-2-ter routes the call
+        // through resolve_name → emits Calls to c::bar with `via-alias`.
+        let parsed = parse("fn bar() {} fn caller() { let f = bar; f(); }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let alias_calls: Vec<_> = calls(&edges)
+            .into_iter()
+            .filter(|e| e.attributes.iter().any(|a| a == "via-alias"))
+            .collect();
+        assert_eq!(
+            alias_calls.len(),
+            1,
+            "exactly one via-alias Calls edge expected, got {:?}",
+            calls(&edges)
+        );
+        match &alias_calls[0].to {
+            ResolvedOrUnresolved::Resolved { fqdn } => assert_eq!(fqdn, "c::bar"),
+            other => panic!("expected resolved c::bar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage3e2ter_let_mut_alias_call_via_alias_mutable() {
+        let parsed = parse("fn bar() {} fn caller() { let mut f = bar; f(); }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let mutable_calls: Vec<_> = calls(&edges)
+            .into_iter()
+            .filter(|e| e.attributes.iter().any(|a| a == "via-alias-mutable"))
+            .collect();
+        assert_eq!(
+            mutable_calls.len(),
+            1,
+            "expected one via-alias-mutable call, got {:?}",
+            calls(&edges)
+        );
+    }
+
+    #[test]
+    fn stage3e2ter_fn_pointer_param_call_is_skipped() {
+        // `fn caller(cb: fn()) { cb(); }` — `cb` is a Local (Param) in
+        // the caller's scope. Calling it emits NO edge (mirror of TS
+        // Bug B Stage 2 — locals in call position are skipped).
+        let parsed = parse("fn caller(cb: fn()) { cb(); }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert!(
+            calls(&edges).is_empty(),
+            "fn-pointer param call must not emit a Calls edge, got {:?}",
+            calls(&edges)
+        );
+    }
+
+    #[test]
+    fn stage3e2ter_closure_typed_local_call_is_skipped() {
+        // `let f = || {}; f();` — RHS is a closure (not Expr::Path), so
+        // no alias is registered for `f`. Reading `f` in call position
+        // resolves to a Local without alias → skip.
+        let parsed = parse("fn caller() { let f = || {}; f(); }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let non_macro: Vec<_> = calls(&edges)
+            .into_iter()
+            .filter(|e| !e.attributes.iter().any(|a| a == "macro"))
+            .collect();
+        assert!(
+            non_macro.is_empty(),
+            "closure-typed local call must not emit a Calls edge, got {non_macro:?}"
+        );
+    }
+
+    #[test]
+    fn stage3e2ter_module_level_fn_call_still_resolves_post_refactor() {
+        // Regression guard: routing through resolve_name MUST preserve
+        // the pre-3e-2-ter behavior for plain module-local fn calls.
+        let parsed = parse("fn bar() {} fn caller() { bar(); }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let cs = calls(&edges);
+        assert_eq!(cs.len(), 1);
+        // No alias/builtin attrs on a direct module-local call.
+        assert!(
+            cs[0].attributes.is_empty(),
+            "direct call must carry no attrs, got {:?}",
+            cs[0].attributes
+        );
+        match &cs[0].to {
+            ResolvedOrUnresolved::Resolved { fqdn } => assert_eq!(fqdn, "c::bar"),
+            other => panic!("expected resolved c::bar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage3e2ter_self_recursion_still_emits_calls_edge() {
+        // Self-reference exclusion applies to References (value-position),
+        // NOT to Calls — `fn foo() { foo(); }` is a legitimate recursion
+        // signal that must surface as a Calls edge.
+        let parsed = parse("fn foo() { foo(); }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let self_calls: Vec<_> = calls(&edges)
+            .into_iter()
+            .filter(|e| {
+                e.from_fqdn == "c::foo"
+                    && matches!(&e.to, ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "c::foo")
+            })
+            .collect();
+        assert_eq!(
+            self_calls.len(),
+            1,
+            "recursion must emit a self-loop Calls edge, got {:?}",
+            calls(&edges)
+        );
+    }
+
+    #[test]
+    fn stage3e2ter_drop_tier_call_still_skipped_via_resolve_name() {
+        // Regression: Drop tier dispatch must still work post-refactor.
+        let parsed = parse("fn caller() { Vec::<u8>::new(); }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert!(
+            calls(&edges).is_empty(),
+            "Drop-tier builtin call must be skipped, got {:?}",
+            calls(&edges)
         );
     }
 
