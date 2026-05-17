@@ -21,7 +21,7 @@
 use std::path::Path;
 
 use rusqlite::Connection;
-use standarbuild_detect::{DetectorRegistry, KindId, WorkspaceKindId};
+use standarbuild_detect::{Detector, DetectorHit, DetectorRegistry, KindId, WorkspaceKindId};
 use standardoc_ir::{ProjectInfo, ProjectKind, WorkspaceKind};
 
 use crate::storage::error::StorageError;
@@ -112,13 +112,126 @@ fn normalise_rel_path(rel: &str) -> String {
 /// Idempotent: re-running picks up new projects + updates label/kind
 /// drift on existing roots without losing project_id continuity.
 /// Run discovery with the built-in detector registry (Rust / Node /
-/// Bun / Deno / Python / Lua / C / Cpp). Shortcut for
-/// [`discover_and_persist_projects_with`].
+/// Bun / Deno / Python / Lua / C / Cpp) plus our locally-registered
+/// [`CMakeSubdirDetector`] that recognises canonical CMake layouts
+/// (`CMakeLists.txt` + sources under `src/`, `include/`, `tests/`,
+/// `lib/`). Shortcut for [`discover_and_persist_projects_with`].
 pub(crate) fn discover_and_persist_projects(
     conn: &Connection,
     workspace_root: &Path,
 ) -> Result<Vec<ProjectInfo>, StorageError> {
-    discover_and_persist_projects_with(conn, workspace_root, &DetectorRegistry::with_builtins())
+    discover_and_persist_projects_with(conn, workspace_root, &default_registry())
+}
+
+/// The detector registry used by [`discover_and_persist_projects`] —
+/// built-ins plus our [`CMakeSubdirDetector`] overlay. Exposed so peer-
+/// extraction can reuse the exact same detection space.
+pub(crate) fn default_registry() -> DetectorRegistry {
+    let mut r = DetectorRegistry::with_builtins();
+    r.add(CMakeSubdirDetector);
+    r
+}
+
+/// Custom CMake detector covering the canonical layout that the
+/// built-in `CDetector` / `CppDetector` miss:
+///
+/// ```text
+/// project/
+/// ├── CMakeLists.txt
+/// ├── include/    ← .h / .hpp
+/// ├── src/        ← .c / .cpp / .cc / .cxx
+/// └── tests/      ← .c / .cpp
+/// ```
+///
+/// Built-in C/Cpp detectors call `has_extension(dir, ext)` which only
+/// scans `dir`'s immediate children. A project whose `.c` / `.cpp`
+/// sources live exclusively in `src/` (the dominant CMake convention)
+/// is therefore invisible to them. This detector peeks the standard
+/// subdirectories and emits `KindId::CPP` if any C++ source is seen,
+/// `KindId::C` otherwise.
+///
+/// Priority 25 — beats built-in CppDetector (20) and CDetector (10) so
+/// the canonical-layout path wins when both fire; loses to higher-tier
+/// language detectors (Rust=100, Bun=80, ...) so a `Cargo.toml +
+/// CMakeLists.txt` repo stays primarily Rust.
+pub(crate) struct CMakeSubdirDetector;
+
+const CMAKE_CONVENTIONAL_SUBDIRS: &[&str] = &["src", "source", "sources", "include", "lib", "tests", "test"];
+const CPP_EXTS: &[&str] = &["cpp", "cc", "cxx", "C", "c++", "hpp", "hxx", "h++"];
+const C_EXTS: &[&str] = &["c", "h"];
+
+impl Detector for CMakeSubdirDetector {
+    fn name(&self) -> &str {
+        "cmake-subdir"
+    }
+
+    fn priority(&self) -> i32 {
+        25
+    }
+
+    fn detect(&self, dir: &Path) -> Option<DetectorHit> {
+        if !dir.join("CMakeLists.txt").is_file() {
+            return None;
+        }
+        let mut signals = vec!["CMakeLists.txt".to_string()];
+        let mut has_cpp = false;
+        let mut has_c = false;
+        for sub in CMAKE_CONVENTIONAL_SUBDIRS {
+            let p = dir.join(sub);
+            if !p.is_dir() {
+                continue;
+            }
+            if subtree_has_any_ext(&p, CPP_EXTS) {
+                has_cpp = true;
+                signals.push(format!("{sub}/<*.cpp|cc|cxx|hpp>"));
+            }
+            if subtree_has_any_ext(&p, C_EXTS) {
+                has_c = true;
+                if !signals.iter().any(|s| s.starts_with(&format!("{sub}/<*.c"))) {
+                    signals.push(format!("{sub}/<*.c|h>"));
+                }
+            }
+        }
+        if !(has_cpp || has_c) {
+            return None;
+        }
+        let kind = if has_cpp { KindId::CPP } else { KindId::C };
+        Some(DetectorHit::Project { kind, signals })
+    }
+}
+
+/// Recursive scan of `dir`'s subtree (bounded depth) for any file
+/// whose extension matches one of `exts`. Used by
+/// [`CMakeSubdirDetector`] to recognise CMake projects that nest
+/// sources under `src/` / `include/` / `tests/`.
+fn subtree_has_any_ext(dir: &Path, exts: &[&str]) -> bool {
+    // Bounded depth: 4 levels under each canonical subdir keeps the
+    // probe cheap even on very large include trees. Most CMake
+    // projects nest at most 2 levels (`src/foo/bar.cpp`).
+    fn walk(dir: &Path, exts: &[&str], depth: u32) -> bool {
+        if depth == 0 {
+            return false;
+        }
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if walk(&path, exts, depth - 1) {
+                    return true;
+                }
+                continue;
+            }
+            if let Some(ext) = path.extension().and_then(|e| e.to_str())
+                && exts.iter().any(|w| *w == ext)
+            {
+                return true;
+            }
+        }
+        false
+    }
+    walk(dir, exts, 4)
 }
 
 /// Run discovery against a custom [`DetectorRegistry`], UPSERTing every
@@ -493,6 +606,88 @@ mod tests {
             .unwrap()
             .expect("row present");
         assert_eq!(row.kind, ProjectKind::Custom("wgsl".into()));
+    }
+
+    #[test]
+    fn cmake_detector_recognises_runtime_layout_with_sources_under_src() {
+        // The canonical LurLang runtime/ layout: CMakeLists.txt at
+        // root + sources nested under src/include/tests. The built-in
+        // C/Cpp detectors miss this (their has_extension is
+        // immediate-children-only); the local CMakeSubdirDetector
+        // wired into default_registry() picks it up.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("runtime");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("include")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(root.join("CMakeLists.txt"), "project(runtime C)").unwrap();
+        fs::write(root.join("src").join("vm.c"), "int main(){return 0;}").unwrap();
+        fs::write(root.join("include").join("vm.h"), "#pragma once").unwrap();
+        fs::write(root.join("tests").join("smoke.c"), "int main(){return 0;}").unwrap();
+
+        let conn = fresh_db();
+        let projects = discover_and_persist_projects(&conn, dir.path()).unwrap();
+        let runtime = projects
+            .iter()
+            .find(|p| p.rel_path == "runtime")
+            .unwrap_or_else(|| panic!("runtime/ not detected: {projects:?}"));
+        assert_eq!(runtime.kind, ProjectKind::C);
+    }
+
+    #[test]
+    fn cmake_detector_picks_cpp_when_any_cpp_source_present() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("engine");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("CMakeLists.txt"), "project(engine CXX)").unwrap();
+        fs::write(root.join("src").join("renderer.cpp"), "int main(){return 0;}").unwrap();
+        fs::write(root.join("src").join("util.c"), "int x;").unwrap();
+
+        let conn = fresh_db();
+        let projects = discover_and_persist_projects(&conn, dir.path()).unwrap();
+        let engine = projects
+            .iter()
+            .find(|p| p.rel_path == "engine")
+            .unwrap_or_else(|| panic!("engine/ not detected: {projects:?}"));
+        assert_eq!(engine.kind, ProjectKind::Cpp);
+    }
+
+    #[test]
+    fn cmake_detector_does_not_fire_without_cmakelists() {
+        // src/ with .c files but no CMakeLists.txt at root => not a
+        // CMake project. The built-in C detector also requires the
+        // manifest, so this stays Unknown / unmatched.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("loose");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src").join("orphan.c"), "int x;").unwrap();
+
+        let conn = fresh_db();
+        let projects = discover_and_persist_projects(&conn, dir.path()).unwrap();
+        assert!(
+            !projects.iter().any(|p| p.rel_path == "loose"),
+            "loose/ must not be detected as a project without CMakeLists.txt: {projects:?}"
+        );
+    }
+
+    #[test]
+    fn cmake_detector_does_not_fire_when_no_sources_in_canonical_subdirs() {
+        // CMakeLists.txt but nothing in src/include/tests => header-
+        // only library with weird layout, or stale scaffolding. We
+        // intentionally don't claim it: the built-in detectors won't
+        // either, so the project stays unknown rather than producing a
+        // mis-typed C/Cpp row.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("empty");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("CMakeLists.txt"), "project(empty)").unwrap();
+
+        let conn = fresh_db();
+        let projects = discover_and_persist_projects(&conn, dir.path()).unwrap();
+        assert!(
+            !projects.iter().any(|p| p.rel_path == "empty"),
+            "empty CMake project must not be detected as C or Cpp: {projects:?}"
+        );
     }
 
     #[test]
