@@ -121,14 +121,6 @@ fn emit_include(node: Node, src: &str, ctx: &mut CWalkContext) {
     });
 }
 
-// TODO(viz-readiness-G2): emit `RawCallSite` for tree-sitter
-// `call_expression` nodes found inside this function's body so the C
-// intra-fn call graph materialises in the viz. Today the body is walked
-// only for FFI binding emission (export side) — calls between C
-// functions stay invisible to `find_call_sites` / graph payloads.
-// Needs a `CallVisitor`-style descent through the `compound_statement`
-// child, collecting `call_expression` -> RawCallSite { from_fqdn,
-// callee_text, args, site } via `ctx.core.push_call_site`.
 fn emit_function_definition(node: Node, src: &str, ctx: &mut CWalkContext) {
     let Some(declarator) = node.child_by_field_name("declarator") else {
         return;
@@ -142,9 +134,8 @@ fn emit_function_definition(node: Node, src: &str, ctx: &mut CWalkContext) {
     } else {
         Visibility::Public
     };
-    let body_hash = node
-        .child_by_field_name("body")
-        .map(|b| hash_bytes(node_text(b, src).as_bytes()));
+    let body_node = node.child_by_field_name("body");
+    let body_hash = body_node.map(|b| hash_bytes(node_text(b, src).as_bytes()));
 
     let fqdn = format!("{}::{}", ctx.core.file_module_fqdn, name);
     push_symbol(
@@ -164,12 +155,22 @@ fn emit_function_definition(node: Node, src: &str, ctx: &mut CWalkContext) {
     // semantics.
     if !is_static {
         ctx.ffi_bindings.push(RawFfiBinding {
-            symbol_fqdn: fqdn,
+            symbol_fqdn: fqdn.clone(),
             abi: FfiAbi::C,
             direction: FfiDirection::Export,
             abi_name: name.to_string(),
             convention: None,
         });
+    }
+
+    // G2 — observational call_sites for the plugin layer / viz.
+    // Walks every `call_expression` inside the function body
+    // (compound_statement) and pushes one RawCallSite per call. Macro
+    // invocations parse as call_expression in tree-sitter-c and are
+    // captured uniformly — dedup against `#define` rows is the
+    // consumer's job.
+    if let Some(body) = body_node {
+        super::call_sites::emit_intra_fn_call_sites(body, src, &mut ctx.core, &fqdn);
     }
 }
 

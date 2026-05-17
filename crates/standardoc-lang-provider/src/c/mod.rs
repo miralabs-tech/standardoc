@@ -1,6 +1,7 @@
 use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
 use standardoc_ir::ExtractedFile;
 
+mod call_sites;
 mod extract;
 mod helpers;
 mod walk;
@@ -250,5 +251,148 @@ mod tests {
             .collect();
         assert_eq!(exports.len(), 1);
         assert_eq!(exports[0].abi_name, "exported");
+    }
+
+    // ------------------------------------------------------------------
+    // G2 — intra-function call_sites
+    // ------------------------------------------------------------------
+
+    fn calls_in<'a>(
+        file: &'a ExtractedFile,
+        from_fqdn: &str,
+    ) -> Vec<&'a standardoc_ir::RawCallSite> {
+        file.call_sites
+            .iter()
+            .filter(|c| c.from_fqdn == from_fqdn)
+            .collect()
+    }
+
+    #[test]
+    fn call_site_simple_call_inside_function_body() {
+        let src = "void caller(void) { callee(); }\n";
+        let file = run(src, "runtime/vm.c");
+        let calls = calls_in(&file, "lurlang::runtime::vm::caller");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].callee_text, "callee");
+        assert!(calls[0].receiver_chain.is_empty());
+        assert!(calls[0].args.is_empty());
+    }
+
+    #[test]
+    fn call_site_emitted_inside_for_and_if_bodies() {
+        let src = "void f(int n) {\n\
+                   \tfor (int i = 0; i < n; i++) { loop_body(i); }\n\
+                   \tif (n > 0) { branch_taken(); } else { branch_not_taken(); }\n\
+                   }\n";
+        let file = run(src, "runtime/vm.c");
+        let callees: Vec<&str> = calls_in(&file, "lurlang::runtime::vm::f")
+            .into_iter()
+            .map(|c| c.callee_text.as_str())
+            .collect();
+        assert!(callees.contains(&"loop_body"));
+        assert!(callees.contains(&"branch_taken"));
+        assert!(callees.contains(&"branch_not_taken"));
+    }
+
+    #[test]
+    fn call_site_via_dot_member_records_receiver_chain() {
+        let src = "void f(struct S obj) { obj.method(1); }\n";
+        let file = run(src, "runtime/vm.c");
+        let calls = calls_in(&file, "lurlang::runtime::vm::f");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].callee_text, "obj.method");
+        assert_eq!(calls[0].receiver_chain, vec!["obj".to_string()]);
+    }
+
+    #[test]
+    fn call_site_via_arrow_pointer_member_records_receiver_chain() {
+        let src = "void f(struct S* p) { p->handler(42); }\n";
+        let file = run(src, "runtime/vm.c");
+        let calls = calls_in(&file, "lurlang::runtime::vm::f");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].callee_text, "p->handler");
+        assert_eq!(calls[0].receiver_chain, vec!["p".to_string()]);
+    }
+
+    #[test]
+    fn call_site_macro_like_invocation_is_captured() {
+        // `printf` parses as `call_expression` in tree-sitter-c whether
+        // it is a real fn or a `#define`-style macro. The plugin layer
+        // dedups against the symbol table; the extractor stays uniform.
+        let src = "void f(int n) { printf(\"got %d\", n); }\n";
+        let file = run(src, "runtime/vm.c");
+        let calls = calls_in(&file, "lurlang::runtime::vm::f");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].callee_text, "printf");
+        assert_eq!(calls[0].args.len(), 2);
+        assert!(calls[0].args[0].is_string_literal);
+        assert_eq!(calls[0].args[0].value, "\"got %d\"");
+        assert!(!calls[0].args[1].is_string_literal);
+        assert_eq!(calls[0].args[1].value, "n");
+    }
+
+    #[test]
+    fn call_site_function_pointer_call_keeps_verbatim_callee_text() {
+        let src = "void f(void (*fp)(int)) { (*fp)(7); }\n";
+        let file = run(src, "runtime/vm.c");
+        let calls = calls_in(&file, "lurlang::runtime::vm::f");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].callee_text, "(*fp)");
+        // Function-pointer indirection has no owning receiver.
+        assert!(calls[0].receiver_chain.is_empty());
+        assert_eq!(calls[0].args.len(), 1);
+        assert_eq!(calls[0].args[0].value, "7");
+    }
+
+    #[test]
+    fn call_site_nested_call_in_argument_emits_both() {
+        let src = "void f(void) { outer(inner()); }\n";
+        let file = run(src, "runtime/vm.c");
+        let callees: Vec<&str> = calls_in(&file, "lurlang::runtime::vm::f")
+            .into_iter()
+            .map(|c| c.callee_text.as_str())
+            .collect();
+        assert!(callees.contains(&"outer"));
+        assert!(callees.contains(&"inner"));
+    }
+
+    #[test]
+    fn call_site_static_function_emits_calls_with_static_fqdn() {
+        // `static` functions still need call_sites — the plugin layer
+        // wants to track intra-file call graphs for refactor warnings,
+        // etc. The from_fqdn carries the static fn's module-qualified
+        // name regardless of visibility.
+        let src = "static void helper(void) { do_work(); }\n";
+        let file = run(src, "runtime/vm.c");
+        let calls = calls_in(&file, "lurlang::runtime::vm::helper");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].callee_text, "do_work");
+    }
+
+    #[test]
+    fn call_site_prototype_in_header_emits_nothing() {
+        // Function prototypes have no body, so no calls. Sanity check
+        // that the body-less branch in `emit_function_definition`
+        // doesn't accidentally fire the descent.
+        let src = "int compile(const char* src);\n";
+        let file = run(src, "include/lur.h");
+        assert!(file.call_sites.is_empty());
+    }
+
+    #[test]
+    fn call_site_records_correct_line_and_file() {
+        let src = "void f(void) {\n\
+                   \tno_op();\n\
+                   \ttarget();\n\
+                   }\n";
+        let file = run(src, "runtime/vm.c");
+        let calls = calls_in(&file, "lurlang::runtime::vm::f");
+        let target = calls
+            .iter()
+            .find(|c| c.callee_text == "target")
+            .expect("target call_site");
+        assert_eq!(target.site.file, "runtime/vm.c");
+        // Source layout: line 1 = signature, 2 = no_op, 3 = target.
+        assert_eq!(target.site.line, 3);
     }
 }
