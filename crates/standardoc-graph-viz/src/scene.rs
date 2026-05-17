@@ -100,10 +100,18 @@ impl Bounds {
     }
 
     pub(crate) fn extend_rect(&mut self, x: f64, y: f64, w: f64, h: f64) {
-        if x < self.min_x { self.min_x = x; }
-        if y < self.min_y { self.min_y = y; }
-        if x + w > self.max_x { self.max_x = x + w; }
-        if y + h > self.max_y { self.max_y = y + h; }
+        if x < self.min_x {
+            self.min_x = x;
+        }
+        if y < self.min_y {
+            self.min_y = y;
+        }
+        if x + w > self.max_x {
+            self.max_x = x + w;
+        }
+        if y + h > self.max_y {
+            self.max_y = y + h;
+        }
     }
 }
 

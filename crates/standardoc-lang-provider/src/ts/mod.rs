@@ -210,6 +210,7 @@ mod tests {
         let provider = TsProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
         let extracted = provider
             .extract(src, "src/index.ts", &ctx)
@@ -235,6 +236,7 @@ mod tests {
         let provider = TsProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
         let err = provider
             .extract(src, "src/index.ts", &ctx)
@@ -259,6 +261,7 @@ mod tests {
         let provider = TsProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
         let err = provider
             .extract(src, "src/index.ts", &ctx)
@@ -283,6 +286,7 @@ mod tests {
         let provider = TsProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
 
         let _ = provider
@@ -321,6 +325,7 @@ mod tests {
         let provider = TsProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
         let extracted = provider.extract(src, "src/caller.ts", &ctx).expect("ok");
 

@@ -178,7 +178,9 @@ pub fn refresh_peer(
         workspace_catalog::get_linked_workspace(&conn, workspace_id)?
             .ok_or_else(|| RefreshPeerError::NotFound(workspace_id.to_string()))?
     };
-    Ok(peer_extract::extract_peer_workspace(handle, &peer, provider)?)
+    Ok(peer_extract::extract_peer_workspace(
+        handle, &peer, provider,
+    )?)
 }
 
 /// Error variants for [`refresh_peer`]. `NotFound` is its own variant
@@ -419,8 +421,7 @@ mod tests {
     fn set_link_direction_returns_not_found_for_unknown_workspace_id() {
         let dir = tempdir().unwrap();
         let handle = IndexHandle::open(dir.path()).unwrap();
-        let err = set_link_direction(&handle, "no-such-uuid", LinkDirection::Out)
-            .unwrap_err();
+        let err = set_link_direction(&handle, "no-such-uuid", LinkDirection::Out).unwrap_err();
         match err {
             SetLinkDirectionError::NotFound(id) => assert_eq!(id, "no-such-uuid"),
             other => panic!("expected NotFound, got {other:?}"),
@@ -443,16 +444,19 @@ mod tests {
         )
         .expect("link ok");
 
-        let outcome =
-            set_link_direction(&handle, &workspace_id, LinkDirection::Out).unwrap();
+        let outcome = set_link_direction(&handle, &workspace_id, LinkDirection::Out).unwrap();
         assert_eq!(outcome.workspace_id, workspace_id);
         assert_eq!(outcome.previous_direction, LinkDirection::In);
         assert_eq!(outcome.new_direction, LinkDirection::Out);
         assert!(
-            outcome
-                .root_path
-                .ends_with(&peer.path().file_name().unwrap().to_string_lossy().to_string())
-                || outcome.root_path.contains(&*peer.path().to_string_lossy()),
+            outcome.root_path.ends_with(
+                &peer
+                    .path()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            ) || outcome.root_path.contains(&*peer.path().to_string_lossy()),
             "root_path must surface canonical peer path, got {outcome:?}"
         );
     }
@@ -472,12 +476,8 @@ mod tests {
         )
         .expect("link ok");
 
-        let outcome = set_link_direction(
-            &handle,
-            &workspace_id,
-            LinkDirection::Bidirectional,
-        )
-        .unwrap();
+        let outcome =
+            set_link_direction(&handle, &workspace_id, LinkDirection::Bidirectional).unwrap();
         assert_eq!(outcome.previous_direction, LinkDirection::Bidirectional);
         assert_eq!(outcome.new_direction, LinkDirection::Bidirectional);
     }
@@ -490,8 +490,8 @@ mod tests {
         // tagged with the peer's workspace_id (NOT 'primary').
         use crate::pipeline::provider::mock::{MockProvider, MockResponse};
         use standardoc_ir::{
-            Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawSymbol,
-            SourceOrigin, SymbolLocation, Visibility,
+            Blake3Hash, ExtractedFile, Kind, Language, LanguageKind, RawSymbol, SourceOrigin,
+            SymbolLocation, Visibility,
         };
 
         let primary = tempdir().unwrap();

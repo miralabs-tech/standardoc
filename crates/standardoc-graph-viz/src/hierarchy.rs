@@ -131,11 +131,7 @@ impl Hierarchy {
 /// intermediate nodes. Returns the index of the **terminal** node
 /// (the deepest segment of `path`). Idempotent: paths that share a
 /// prefix reuse the existing nodes.
-fn ensure_path(
-    h: &mut Hierarchy,
-    path_to_idx: &mut HashMap<String, u32>,
-    path: &str,
-) -> u32 {
+fn ensure_path(h: &mut Hierarchy, path_to_idx: &mut HashMap<String, u32>, path: &str) -> u32 {
     if let Some(&idx) = path_to_idx.get(path) {
         return idx;
     }

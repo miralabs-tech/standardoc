@@ -267,7 +267,12 @@ impl WebGpuBackend {
             instance_capacity: INITIAL_INSTANCE_CAPACITY,
             instance_count: 0,
             uniform_buffer,
-            clear_color: wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+            clear_color: wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
         })
     }
 

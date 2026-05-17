@@ -350,7 +350,11 @@ impl GraphEngine {
 
     /// Update the device pixel ratio (called on the rare `devicePixelRatio` change event).
     pub fn set_device_pixel_ratio(&mut self, dpr: f64) {
-        let safe = if dpr.is_finite() && dpr > 0.0 { dpr } else { 1.0 };
+        let safe = if dpr.is_finite() && dpr > 0.0 {
+            dpr
+        } else {
+            1.0
+        };
         self.device_pixel_ratio = safe;
         apply_canvas_size(&self.canvas, self.width as u32, self.height as u32, safe);
         self.needs_redraw = true;
@@ -358,7 +362,8 @@ impl GraphEngine {
 
     /// Recenter and scale so the entire scene fits in the viewport.
     pub fn fit(&mut self) {
-        self.viewport.fit_to(self.scene.bounds(), self.width, self.height);
+        self.viewport
+            .fit_to(self.scene.bounds(), self.width, self.height);
         self.needs_redraw = true;
     }
 
@@ -428,7 +433,8 @@ impl GraphEngine {
 
     pub fn on_wheel(&mut self, x: f32, y: f32, delta_y: f32) {
         let factor = if delta_y < 0.0 { 1.15 } else { 1.0 / 1.15 };
-        self.viewport.zoom_around(f64::from(x), f64::from(y), factor);
+        self.viewport
+            .zoom_around(f64::from(x), f64::from(y), factor);
         self.needs_redraw = true;
     }
 

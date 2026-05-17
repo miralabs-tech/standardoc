@@ -1,14 +1,13 @@
 use standardoc_ir::{
     AliasMutability, BuiltinTag, EdgeKind, ModuleLookup, RawCallArg, RawCallSite, RawEdge,
-    ResolvedOrUnresolved, Site,
+    ResolvedOrUnresolved,
 };
 use swc_core::common::{Span, Spanned};
 use swc_core::ecma::ast::{
     ArrowExpr, BlockStmt, BlockStmtOrExpr, CallExpr, Callee, CatchClause, Expr, ExprOrSpread,
     ForInStmt, ForOfStmt, ForStmt, Function, Ident, JSXAttrOrSpread, JSXAttrValue, JSXElement,
-    JSXElementChild, JSXElementName, JSXExpr, Lit, MemberProp, NewExpr, OptChainBase,
-    OptChainExpr, Pat, TsAsExpr, TsEntityName, TsTypeAnn, TsTypeAssertion,
-    TsTypeParamInstantiation, TsTypeRef,
+    JSXElementChild, JSXElementName, JSXExpr, Lit, MemberProp, NewExpr, OptChainBase, OptChainExpr,
+    Pat, TsAsExpr, TsEntityName, TsTypeAnn, TsTypeAssertion, TsTypeParamInstantiation, TsTypeRef,
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
 
@@ -20,7 +19,10 @@ use crate::template::JS_GLOBALS;
 /// Drop / Attribute pass through unchanged ; Emit becomes a `Target`
 /// stamped with the optional `AliasMutability` the caller derived from
 /// the scope walk.
-fn outcome_to_resolution(outcome: ResolutionOutcome, alias_mut: Option<AliasMutability>) -> NameResolution {
+fn outcome_to_resolution(
+    outcome: ResolutionOutcome,
+    alias_mut: Option<AliasMutability>,
+) -> NameResolution {
     match outcome {
         ResolutionOutcome::Drop => NameResolution::Drop,
         ResolutionOutcome::Attribute(tag) => NameResolution::Attribute(tag),
@@ -342,10 +344,7 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
     }
 
     fn exit_scope(&mut self) {
-        self.current_scope_idx = self
-            .scope_stack
-            .pop()
-            .unwrap_or(ModuleLookup::ROOT_SCOPE);
+        self.current_scope_idx = self.scope_stack.pop().unwrap_or(ModuleLookup::ROOT_SCOPE);
     }
 
     /// Resolve `name` against the AOT lookup, then fall through to
@@ -422,12 +421,7 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
     /// calls (and know to discount mutable-alias edges). Edge-tier
     /// builtins shadowed by an alias still carry `via-builtin` since the
     /// resolution propagates through the alias chain.
-    fn emit_call_via_alias(
-        &mut self,
-        target: CallTarget,
-        span: Span,
-        mutability: AliasMutability,
-    ) {
+    fn emit_call_via_alias(&mut self, target: CallTarget, span: Span, mutability: AliasMutability) {
         let mut attrs: Vec<String> = vec![alias_mut_slug(mutability).to_string()];
         append_via_builtin(&mut attrs, target.via_builtin.as_ref());
         self.emit_call_raw(target.to, span, attrs);
@@ -693,11 +687,7 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
                 if let OptChainBase::Member(member) = opt.base.as_ref()
                     && let Some(name) = member_prop_name(&member.prop)
                 {
-                    self.emit_call_raw(
-                        ResolvedOrUnresolved::Unresolved { name },
-                        opt.span,
-                        vec![],
-                    );
+                    self.emit_call_raw(ResolvedOrUnresolved::Unresolved { name }, opt.span, vec![]);
                 }
             }
             _ => {}
@@ -1140,13 +1130,16 @@ fn callee_text_of(expr: &Expr) -> String {
         Expr::Member(m) => {
             let base = callee_text_of(&m.obj);
             let prop = member_prop_name(&m.prop).unwrap_or_else(|| "<computed>".to_string());
-            if base.is_empty() { prop } else { format!("{base}.{prop}") }
+            if base.is_empty() {
+                prop
+            } else {
+                format!("{base}.{prop}")
+            }
         }
         Expr::OptChain(opt) => match opt.base.as_ref() {
             OptChainBase::Member(m) => {
                 let base = callee_text_of(&m.obj);
-                let prop =
-                    member_prop_name(&m.prop).unwrap_or_else(|| "<computed>".to_string());
+                let prop = member_prop_name(&m.prop).unwrap_or_else(|| "<computed>".to_string());
                 if base.is_empty() {
                     prop
                 } else {
@@ -1179,8 +1172,7 @@ fn receiver_chain_of(receiver: &Expr) -> Vec<String> {
             }
             Expr::OptChain(opt) => match opt.base.as_ref() {
                 OptChainBase::Member(m) => {
-                    let seg =
-                        member_prop_name(&m.prop).unwrap_or_else(|| "<computed>".to_string());
+                    let seg = member_prop_name(&m.prop).unwrap_or_else(|| "<computed>".to_string());
                     out.push(seg);
                     cursor = &m.obj;
                 }
@@ -1227,12 +1219,10 @@ fn receiver_chain_for_callee(callee: &Expr) -> Vec<String> {
 /// a `...` prefix in `value` and never count as a string literal.
 /// Non-literal/non-ident expressions fall back to the source-span
 /// snippet — best-effort textual representation for the plugin layer.
-fn arg_from_swc(ctx: &super::walk::TsWalkContext<'_>, arg: &ExprOrSpread) -> RawCallArg {
+fn arg_from_swc(ctx: &TsWalkContext<'_>, arg: &ExprOrSpread) -> RawCallArg {
     let is_spread = arg.spread.is_some();
     let prefix = if is_spread { "..." } else { "" };
-    if !is_spread
-        && let Expr::Lit(Lit::Str(s)) = arg.expr.as_ref()
-    {
+    if !is_spread && let Expr::Lit(Lit::Str(s)) = arg.expr.as_ref() {
         return RawCallArg {
             value: s.value.to_string_lossy().into_owned(),
             is_string_literal: true,
@@ -1253,10 +1243,7 @@ fn arg_from_swc(ctx: &super::walk::TsWalkContext<'_>, arg: &ExprOrSpread) -> Raw
     }
 }
 
-fn args_from_swc(
-    ctx: &super::walk::TsWalkContext<'_>,
-    args: &[ExprOrSpread],
-) -> Vec<RawCallArg> {
+fn args_from_swc(ctx: &TsWalkContext<'_>, args: &[ExprOrSpread]) -> Vec<RawCallArg> {
     args.iter().map(|a| arg_from_swc(ctx, a)).collect()
 }
 
@@ -1586,10 +1573,8 @@ mod tests {
 
     #[test]
     fn stage2_const_alias_propagates_to_aliased_value_read() {
-        let (_, edges) = run(
-            "function FOO() {} function takesArg(x) {} \
-             function f() { const x = FOO; takesArg(x); }",
-        );
+        let (_, edges) = run("function FOO() {} function takesArg(x) {} \
+             function f() { const x = FOO; takesArg(x); }");
         let refs = refs_with_all_attrs(&edges, &["value-read", "via-alias"]);
         let targets: Vec<&str> = refs
             .iter()
@@ -1606,10 +1591,8 @@ mod tests {
 
     #[test]
     fn stage2_let_alias_tagged_via_alias_mutable() {
-        let (_, edges) = run(
-            "function FOO() {} function takesArg(x) {} \
-             function f() { let x = FOO; takesArg(x); }",
-        );
+        let (_, edges) = run("function FOO() {} function takesArg(x) {} \
+             function f() { let x = FOO; takesArg(x); }");
         let refs = refs_with_all_attrs(&edges, &["value-read", "via-alias-mutable"]);
         let targets: Vec<&str> = refs
             .iter()
@@ -1628,9 +1611,7 @@ mod tests {
     fn stage2_aliased_call_carries_via_alias_attribute() {
         // Imported FOO → alias `fn` → `fn()` emits Calls{Unresolved{canonical}}
         // tagged `via-alias`.
-        let (_, edges) = run(
-            "import { FOO } from './m'; function f() { const fn = FOO; fn(); }",
-        );
+        let (_, edges) = run("import { FOO } from './m'; function f() { const fn = FOO; fn(); }");
         let cs = calls_with_attr(&edges, "via-alias");
         let names: Vec<&str> = cs
             .iter()
@@ -1650,9 +1631,8 @@ mod tests {
     fn stage2_local_function_decl_shadows_import_and_suppresses_call() {
         // Inner `function FOO() {}` shadows the import; inner FOO()
         // is a local call → no Calls edge to the imported symbol.
-        let (_, edges) = run(
-            "import { FOO } from './m'; function f() { function FOO() {} FOO(); }",
-        );
+        let (_, edges) =
+            run("import { FOO } from './m'; function f() { function FOO() {} FOO(); }");
         let names: Vec<&str> = calls(&edges)
             .iter()
             .filter_map(|e| match &e.to {
@@ -1713,10 +1693,8 @@ mod tests {
     fn stage2_chained_alias_resolves_through_scope() {
         // const x = FOO; const y = x; takesArg(y)
         //  → y's alias chains through x to src::FOO.
-        let (_, edges) = run(
-            "function FOO() {} function takesArg(z) {} \
-             function f() { const x = FOO; const y = x; takesArg(y); }",
-        );
+        let (_, edges) = run("function FOO() {} function takesArg(z) {} \
+             function f() { const x = FOO; const y = x; takesArg(y); }");
         let refs = refs_with_all_attrs(&edges, &["value-read", "via-alias"]);
         let foo_refs: usize = refs
             .iter()
@@ -1736,10 +1714,8 @@ mod tests {
         // `const ns = FOO; consume(ns)` — alias seeded on FOO's
         // resolution. (`FOO.bar.baz` would chain through the same
         // leftmost-base extraction in `resolve_alias_rhs`.)
-        let (_, edges) = run(
-            "function FOO() {} function consume(z) {} \
-             function f() { const ns = FOO; consume(ns); }",
-        );
+        let (_, edges) = run("function FOO() {} function consume(z) {} \
+             function f() { const ns = FOO; consume(ns); }");
         let refs = refs_with_all_attrs(&edges, &["value-read", "via-alias"]);
         assert!(
             refs.iter().any(|e| matches!(
@@ -1755,20 +1731,20 @@ mod tests {
         // `if` block introduces a fresh scope. Alias seeded inside is
         // invisible outside — `consume(x)` in the outer scope should
         // NOT carry a via-alias attribute on the param-named `x`.
-        let (_, edges) = run(
-            "function FOO() {} function consume(z) {} \
-             function f(x) { if (true) { const x = FOO; } consume(x); }",
-        );
+        let (_, edges) = run("function FOO() {} function consume(z) {} \
+             function f(x) { if (true) { const x = FOO; } consume(x); }");
         // The outer `x` is a function param → local → no edge.
         // The inner `const x = FOO` shadows it inside the if-block,
         // but that scope is popped before consume(x).
         let on_foo = refs_with_all_attrs(&edges, &["value-read", "via-alias"]);
         let leaked: Vec<_> = on_foo
             .iter()
-            .filter(|e| matches!(
-                &e.to,
-                ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "src::FOO"
-            ))
+            .filter(|e| {
+                matches!(
+                    &e.to,
+                    ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "src::FOO"
+                )
+            })
             .collect();
         assert!(
             leaked.is_empty(),
@@ -1780,9 +1756,8 @@ mod tests {
     fn stage2_call_via_resolved_alias_keeps_via_alias_attribute() {
         // const helper = ACTUAL; helper();
         //   → Calls{Resolved{src::ACTUAL}} tagged via-alias.
-        let (_, edges) = run(
-            "function ACTUAL() {} function f() { const helper = ACTUAL; helper(); }",
-        );
+        let (_, edges) =
+            run("function ACTUAL() {} function f() { const helper = ACTUAL; helper(); }");
         let cs = calls_with_attr(&edges, "via-alias");
         let resolved_targets: Vec<&str> = cs
             .iter()
@@ -1854,7 +1829,9 @@ mod tests {
         let refs = uses_type_with_attrs(&edges, &["via-type", "type-annotation"]);
         let foo_edges: Vec<_> = refs
             .iter()
-            .filter(|e| matches!(&e.to, ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "src::Foo"))
+            .filter(
+                |e| matches!(&e.to, ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "src::Foo"),
+            )
             .collect();
         assert!(
             !foo_edges.is_empty(),
@@ -1974,10 +1951,8 @@ mod tests {
     #[test]
     fn stage2b_ts_builtin_wrapper_filtered_inner_args_still_emit() {
         // `Map<Foo, Bar>` — outer Map filtered, inner Foo + Bar emit.
-        let (_, edges) = run(
-            "interface Foo {} interface Bar {} \
-             function f(): Map<Foo, Bar> { return new Map(); }",
-        );
+        let (_, edges) = run("interface Foo {} interface Bar {} \
+             function f(): Map<Foo, Bar> { return new Map(); }");
         let refs = uses_type_with_attrs(&edges, &["via-type"]);
         let targets = resolved_fqdns(&refs);
         assert!(
@@ -1996,9 +1971,8 @@ mod tests {
 
     #[test]
     fn stage2b_class_extends_generic_args_emit_uses_type() {
-        let (_, edges) = run(
-            "interface Foo {} class Base<T> {} class Derived extends Base<Foo> {}",
-        );
+        let (_, edges) =
+            run("interface Foo {} class Base<T> {} class Derived extends Base<Foo> {}");
         let refs = uses_type_with_attrs(&edges, &["via-type", "type-extends"]);
         let targets = resolved_fqdns(&refs);
         assert!(
@@ -2009,9 +1983,8 @@ mod tests {
 
     #[test]
     fn stage2b_class_implements_generic_args_emit_uses_type() {
-        let (_, edges) = run(
-            "interface Foo {} interface Iface<T> {} class C implements Iface<Foo> {}",
-        );
+        let (_, edges) =
+            run("interface Foo {} interface Iface<T> {} class C implements Iface<Foo> {}");
         let refs = uses_type_with_attrs(&edges, &["via-type", "type-implements"]);
         let targets = resolved_fqdns(&refs);
         assert!(
@@ -2040,7 +2013,9 @@ mod tests {
             })
             .collect();
         assert!(
-            unresolved_names.iter().any(|n| n.ends_with("::BareUnknown")),
+            unresolved_names
+                .iter()
+                .any(|n| n.ends_with("::BareUnknown")),
             "expected unresolved target ending in ::BareUnknown, got {unresolved_names:?}",
         );
     }
@@ -2138,10 +2113,8 @@ mod tests {
 
     #[test]
     fn bug_c1_interface_member_type_edges_originate_from_member_fqdn() {
-        let (symbols, edges) = run(
-            "interface Foo {} interface Bar {} \
-             interface Combo { x: Foo; m(p: Bar): void; }",
-        );
+        let (symbols, edges) = run("interface Foo {} interface Bar {} \
+             interface Combo { x: Foo; m(p: Bar): void; }");
         let fqdns = symbol_fqdns(&symbols);
         assert!(fqdns.contains(&"src::Combo::x"));
         assert!(fqdns.contains(&"src::Combo::m"));
@@ -2217,19 +2190,15 @@ mod tests {
 
     #[test]
     fn stage3c_class_method_filters_class_level_generic() {
-        let (_, edges) = run(
-            "class Box<T> { take(x: T): T { return x; } }",
-        );
+        let (_, edges) = run("class Box<T> { take(x: T): T { return x; } }");
         let refs = uses_type_with_attrs(&edges, &["via-type", "type-annotation"]);
         let leaked: Vec<&RawEdge> = refs
             .iter()
             .copied()
-            .filter(|e| {
-                match &e.to {
-                    ResolvedOrUnresolved::Resolved { fqdn } => fqdn.ends_with("::T"),
-                    ResolvedOrUnresolved::Unresolved { name } => name.ends_with("::T"),
-                    _ => false,
-                }
+            .filter(|e| match &e.to {
+                ResolvedOrUnresolved::Resolved { fqdn } => fqdn.ends_with("::T"),
+                ResolvedOrUnresolved::Unresolved { name } => name.ends_with("::T"),
+                _ => false,
             })
             .collect();
         assert!(
@@ -2240,9 +2209,7 @@ mod tests {
 
     #[test]
     fn stage3c_class_method_inner_generic_combined_with_outer() {
-        let (_, edges) = run(
-            "class Box<T> { take<U>(x: T, y: U): T { return x; } }",
-        );
+        let (_, edges) = run("class Box<T> { take<U>(x: T, y: U): T { return x; } }");
         let refs = uses_type_with_attrs(&edges, &["via-type", "type-annotation"]);
         let leaked: Vec<String> = refs
             .iter()
@@ -2268,13 +2235,8 @@ mod tests {
 
     #[test]
     fn stage3c_interface_method_inner_generic_combined_with_outer() {
-        let (_, edges) = run(
-            "interface Box<T> { take<U>(x: T, y: U): T; }",
-        );
-        let refs = uses_type_with_attrs(
-            &edges,
-            &["via-type", "type-interface-member"],
-        );
+        let (_, edges) = run("interface Box<T> { take<U>(x: T, y: U): T; }");
+        let refs = uses_type_with_attrs(&edges, &["via-type", "type-interface-member"]);
         let leaked: Vec<String> = refs
             .iter()
             .filter_map(|e| match &e.to {
@@ -2411,9 +2373,7 @@ mod tests {
         // string "super"; receiver_chain stays empty. Attributed to
         // the constructor's FQDN now that `visit_constructor_body`
         // walks the constructor body in `walk::visit_class_methods`.
-        let css = run_with_call_sites(
-            "class Foo extends Bar { constructor() { super(\"x\"); } }",
-        );
+        let css = run_with_call_sites("class Foo extends Bar { constructor() { super(\"x\"); } }");
         let cs = css
             .iter()
             .find(|c| c.callee_text == "super")
@@ -2460,15 +2420,11 @@ mod tests {
         // walker should produce `["this", "api"]` and attribute the
         // call to the ctor FQDN. Proves the scope push/pop of the
         // new `visit_constructor` override doesn't break member-walk.
-        let css = run_with_call_sites(
-            "class Foo { constructor() { this.api.create(); } }",
-        );
+        let css = run_with_call_sites("class Foo { constructor() { this.api.create(); } }");
         let cs = css
             .iter()
             .find(|c| c.callee_text == "this.api.create")
-            .unwrap_or_else(|| {
-                panic!("expected this.api.create() call_site, got {css:?}")
-            });
+            .unwrap_or_else(|| panic!("expected this.api.create() call_site, got {css:?}"));
         assert_eq!(cs.from_fqdn, "src::Foo::constructor");
         assert_eq!(
             cs.receiver_chain,
@@ -2494,8 +2450,7 @@ mod tests {
         // `arr.push(x)` — `Array.push` is a Drop-tier builtin in the
         // edge layer (gets suppressed), but the call_site must still
         // surface so plugins reading textual patterns aren't blinded.
-        let css =
-            run_with_call_sites("function caller() { const arr = [1]; arr.push(2); }");
+        let css = run_with_call_sites("function caller() { const arr = [1]; arr.push(2); }");
         let cs = css
             .iter()
             .find(|c| c.callee_text == "arr.push")

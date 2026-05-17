@@ -3,12 +3,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
-use axum::Router;
 use bytes::Bytes;
 use http::HeaderValue;
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
@@ -51,10 +51,7 @@ pub enum ProxyError {
 /// block until shutdown. Does NOT exit on upstream failures — the whole
 /// point of the proxy is to outlive every daemon process it forwards to.
 pub async fn run(cfg: ProxyConfig) -> Result<(), ProxyError> {
-    let endpoint_path = cfg
-        .workspace_root
-        .join(".standardoc")
-        .join("mcp.endpoint");
+    let endpoint_path = cfg.workspace_root.join(".standardoc").join("mcp.endpoint");
     let initial = read_endpoint_file(&endpoint_path).unwrap_or_default();
     let upstream = Arc::new(RwLock::new(initial.clone()));
     spawn_endpoint_watcher(endpoint_path.clone(), Arc::clone(&upstream))?;
@@ -148,7 +145,11 @@ fn build_forward_client() -> reqwest::Client {
 fn read_endpoint_file(path: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(path).ok()?;
     let trimmed = raw.trim().to_string();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 /// Spawns a debounced file watcher on `mcp.endpoint`. Whenever the file
@@ -264,7 +265,14 @@ async fn forward(
             last_error = Some("upstream endpoint not yet known (waiting for daemon)".into());
         } else {
             let target = build_target_url(&upstream_url, &uri);
-            match forward_once(&state.client, &method, &target, &headers, body_bytes.clone()).await
+            match forward_once(
+                &state.client,
+                &method,
+                &target,
+                &headers,
+                body_bytes.clone(),
+            )
+            .await
             {
                 Ok(resp) => {
                     if resp.status().as_u16() < 400 {
@@ -309,7 +317,10 @@ async fn forward(
 async fn health(State(state): State<Arc<ProxyState>>) -> Response {
     let upstream = state.upstream.read().await.clone();
     let last_request_age_ms = match *state.last_request_at.read().await {
-        Some(ts) => SystemTime::now().duration_since(ts).ok().map(|d| d.as_millis()),
+        Some(ts) => SystemTime::now()
+            .duration_since(ts)
+            .ok()
+            .map(|d| d.as_millis()),
         None => None,
     };
     let uptime_ms = SystemTime::now()
@@ -331,9 +342,10 @@ async fn health(State(state): State<Arc<ProxyState>>) -> Response {
         },
     );
     let mut response = Response::new(Body::from(body));
-    response
-        .headers_mut()
-        .insert(http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     response
 }
 
@@ -390,8 +402,8 @@ async fn forward_once(
     headers: &HeaderMap<HeaderValue>,
     body: Bytes,
 ) -> Result<Response, ForwardError> {
-    let method_owned = Method::from_bytes(method.as_str().as_bytes())
-        .map_err(|e| ForwardError {
+    let method_owned =
+        Method::from_bytes(method.as_str().as_bytes()).map_err(|e| ForwardError {
             kind: ForwardErrorKind::Build,
             message: format!("invalid method `{method}`: {e}"),
         })?;
@@ -452,10 +464,7 @@ mod tests {
 
     #[test]
     fn build_target_strips_upstream_path() {
-        let url = build_target_url(
-            "http://127.0.0.1:7701/mcp",
-            &"/mcp".parse::<Uri>().unwrap(),
-        );
+        let url = build_target_url("http://127.0.0.1:7701/mcp", &"/mcp".parse::<Uri>().unwrap());
         assert_eq!(url, "http://127.0.0.1:7701/mcp");
     }
 
@@ -479,10 +488,7 @@ mod tests {
 
     #[test]
     fn build_target_handles_upstream_without_path() {
-        let url = build_target_url(
-            "http://127.0.0.1:7701",
-            &"/mcp".parse::<Uri>().unwrap(),
-        );
+        let url = build_target_url("http://127.0.0.1:7701", &"/mcp".parse::<Uri>().unwrap());
         assert_eq!(url, "http://127.0.0.1:7701/mcp");
     }
 
@@ -521,7 +527,9 @@ mod tests {
         });
         let resp = health(State(state)).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+            .await
+            .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
         assert!(s.contains("\"upstream\":\"\""), "got {s}");
         assert!(s.contains("\"upstream_known\":false"), "got {s}");
@@ -548,7 +556,9 @@ mod tests {
         *state.last_request_at.write().await = Some(SystemTime::now());
 
         let resp = health(State(state)).await;
-        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+            .await
+            .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
         assert!(s.contains("\"upstream_known\":true"));
         assert!(s.contains("\"total_requests\":3"));

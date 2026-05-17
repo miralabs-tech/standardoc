@@ -45,7 +45,10 @@ impl Viewport {
     }
 
     pub(crate) fn screen_to_world(&self, sx: f64, sy: f64) -> (f64, f64) {
-        ((sx - self.offset_x) / self.scale, (sy - self.offset_y) / self.scale)
+        (
+            (sx - self.offset_x) / self.scale,
+            (sy - self.offset_y) / self.scale,
+        )
     }
 
     /// Pick scale + offset such that `bounds` fits in `viewport_w *

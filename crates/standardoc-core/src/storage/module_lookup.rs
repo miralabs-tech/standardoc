@@ -56,7 +56,13 @@ pub(crate) fn put_module_lookup(
         "INSERT OR REPLACE INTO module_lookups
          (module_fqdn, workspace_id, language, built_at, payload)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![&lookup.module_fqdn, workspace_id, language, built_at, payload],
+        params![
+            &lookup.module_fqdn,
+            workspace_id,
+            language,
+            built_at,
+            payload
+        ],
     )?;
 
     conn.execute(

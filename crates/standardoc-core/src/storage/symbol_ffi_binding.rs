@@ -216,7 +216,9 @@ mod tests {
         assert_eq!(exports[0].abi, "c");
         assert_eq!(exports[1].fqdn, "x::b");
         assert!(
-            fetch_all_sides(&conn, FfiDirection::Import).unwrap().is_empty(),
+            fetch_all_sides(&conn, FfiDirection::Import)
+                .unwrap()
+                .is_empty(),
             "imports table empty since we only inserted exports"
         );
     }

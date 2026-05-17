@@ -27,10 +27,7 @@ use syn::{Abi, ForeignItem, Item, Lit, Meta};
 /// Walk every top-level item in `parsed` and emit the FFI bindings it
 /// participates in. `module_fqdn` is the file-level module FQDN — used
 /// to construct `symbol_fqdn` for each binding (no nested-mod support).
-pub(crate) fn extract_ffi_bindings(
-    parsed: &syn::File,
-    module_fqdn: &str,
-) -> Vec<RawFfiBinding> {
+pub(crate) fn extract_ffi_bindings(parsed: &syn::File, module_fqdn: &str) -> Vec<RawFfiBinding> {
     let mut out = Vec::new();
     for item in &parsed.items {
         match item {
@@ -41,8 +38,7 @@ pub(crate) fn extract_ffi_bindings(
                         continue;
                     };
                     let name = fitem.sig.ident.to_string();
-                    let abi_name =
-                        link_name_override(&fitem.attrs).unwrap_or_else(|| name.clone());
+                    let abi_name = link_name_override(&fitem.attrs).unwrap_or_else(|| name.clone());
                     out.push(RawFfiBinding {
                         symbol_fqdn: format!("{module_fqdn}::{name}"),
                         abi: abi.clone(),
@@ -61,8 +57,7 @@ pub(crate) fn extract_ffi_bindings(
                 }
                 let abi = abi_from_abi_node(Some(abi));
                 let name = item_fn.sig.ident.to_string();
-                let abi_name =
-                    link_name_override(&item_fn.attrs).unwrap_or_else(|| name.clone());
+                let abi_name = link_name_override(&item_fn.attrs).unwrap_or_else(|| name.clone());
                 out.push(RawFfiBinding {
                     symbol_fqdn: format!("{module_fqdn}::{name}"),
                     abi,

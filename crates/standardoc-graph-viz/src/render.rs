@@ -175,7 +175,11 @@ fn draw_clusters(
         let title_width = title.chars().count() as f64 * 7.0;
         ctx.set_font(count_font);
         ctx.set_fill_style_str(&palette.description);
-        let _ = ctx.fill_text(&format!("({count})"), x + 12.0 + title_width + 6.0, y + 14.0);
+        let _ = ctx.fill_text(
+            &format!("({count})"),
+            x + 12.0 + title_width + 6.0,
+            y + 14.0,
+        );
 
         // Subtitle (full module path) — second line, description
         // style. Skipped when subtitle is empty (root nodes whose
@@ -318,7 +322,8 @@ fn draw_node(
         ctx.set_line_width(stroke_world_px(if hovered { 1.8 } else { 1.0 }, scale));
         if n.is_external {
             ctx.set_global_alpha(0.65);
-            ctx.set_line_dash(&js_sys::Array::of2(&3.0.into(), &2.0.into())).ok();
+            ctx.set_line_dash(&js_sys::Array::of2(&3.0.into(), &2.0.into()))
+                .ok();
         }
         stroke_round_rect(ctx, n.x, n.y, n.w, n.h, CHIP_RADIUS);
         if n.is_external {
@@ -366,7 +371,9 @@ fn draw_edges_for_hovered(
     hovered_fqdn: Option<&str>,
 ) {
     let Some(fqdn) = hovered_fqdn else { return };
-    let Some(&from_idx) = scene.node_by_fqdn.get(fqdn) else { return };
+    let Some(&from_idx) = scene.node_by_fqdn.get(fqdn) else {
+        return;
+    };
     ctx.set_line_width(stroke_world_px(2.0, scale));
     ctx.set_global_alpha(0.85);
     for e in &scene.edges {
@@ -374,8 +381,12 @@ fn draw_edges_for_hovered(
         if !touches {
             continue;
         }
-        let Some(from) = scene.nodes.get(e.from_node) else { continue };
-        let Some(to) = scene.nodes.get(e.to_node) else { continue };
+        let Some(from) = scene.nodes.get(e.from_node) else {
+            continue;
+        };
+        let Some(to) = scene.nodes.get(e.to_node) else {
+            continue;
+        };
         let (fx, fy) = (from.x + from.w * 0.5, from.y + from.h * 0.5);
         let (tx, ty) = (to.x + to.w * 0.5, to.y + to.h * 0.5);
         let dx = tx - fx;
@@ -424,7 +435,8 @@ fn draw_edges_for_hovered(
         let right_y = base_y - perp_y * arrow_half_w;
 
         if e.kind == "REFERENCES" {
-            ctx.set_line_dash(&js_sys::Array::of2(&4.0.into(), &3.0.into())).ok();
+            ctx.set_line_dash(&js_sys::Array::of2(&4.0.into(), &3.0.into()))
+                .ok();
         } else {
             ctx.set_line_dash(&js_sys::Array::new()).ok();
         }
@@ -465,11 +477,7 @@ fn draw_empty_message(
     ctx.set_text_align("center");
     ctx.set_text_baseline("middle");
     ctx.set_font("14px system-ui, sans-serif");
-    let _ = ctx.fill_text(
-        "Load a graph payload to render.",
-        width * 0.5,
-        height * 0.5,
-    );
+    let _ = ctx.fill_text("Load a graph payload to render.", width * 0.5, height * 0.5);
 }
 
 fn fill_round_rect(ctx: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f64, r: f64) {
@@ -534,10 +542,5 @@ pub(crate) fn truncate_to_width(
             hi = mid - 1;
         }
     }
-    if best.is_empty() {
-        "…".into()
-    } else {
-        best
-    }
+    if best.is_empty() { "…".into() } else { best }
 }
-

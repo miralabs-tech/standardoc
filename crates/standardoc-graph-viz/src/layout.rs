@@ -84,7 +84,9 @@ pub(crate) fn pack(symbols: Vec<SymbolEntry>) -> (Hierarchy, Vec<Node>) {
     // terminal for the `Read` trait AND a parent of `std::io::BufReader`).
     let mut node_symbols: HashMap<u32, Vec<SymbolEntry>> = HashMap::new();
     for (path, group) in groups {
-        let idx = *path_to_idx.get(&path).expect("hierarchy::build inserted path");
+        let idx = *path_to_idx
+            .get(&path)
+            .expect("hierarchy::build inserted path");
         node_symbols.insert(idx, group);
     }
 
@@ -120,14 +122,11 @@ pub(crate) fn pack(symbols: Vec<SymbolEntry>) -> (Hierarchy, Vec<Node>) {
             // Primary: SECTIONS_ORDER position so the iteration order
             // matches the visual section order (Modules → Type → …).
             // Secondary: alpha by name within a kind.
-            a.kind
-                .cmp(&b.kind)
-                .then_with(|| a.name.cmp(&b.name))
+            a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name))
         });
         let cols = leaf_cols(group.len());
         owner_cols.insert(owner_idx, cols);
-        hierarchy.nodes[owner_idx as usize].sections =
-            build_sections(group, cols);
+        hierarchy.nodes[owner_idx as usize].sections = build_sections(group, cols);
     }
     // Re-order each group so chips are emitted in the iteration order
     // of `SECTIONS_ORDER` (Modules first, etc.), then alpha within a
@@ -182,8 +181,7 @@ pub(crate) fn pack(symbols: Vec<SymbolEntry>) -> (Hierarchy, Vec<Node>) {
                 }
                 let col = chip_in_section % cols;
                 let row = chip_in_section / cols;
-                let chip_x = chips_origin_x
-                    + col as f64 * (CHIP_W as f64 + CHIP_HSPACING as f64);
+                let chip_x = chips_origin_x + col as f64 * (CHIP_W as f64 + CHIP_HSPACING as f64);
                 let chip_y = chips_origin_y
                     + section.y_offset as f64
                     + SECTION_HEADER_H as f64
@@ -414,7 +412,13 @@ fn position_layout(h: &mut Hierarchy) {
             chips_origin_y
         };
 
-        shelf_pack_positions(h, &children, children_origin_x, children_origin_y, inner_target);
+        shelf_pack_positions(
+            h,
+            &children,
+            children_origin_x,
+            children_origin_y,
+            inner_target,
+        );
     }
 }
 

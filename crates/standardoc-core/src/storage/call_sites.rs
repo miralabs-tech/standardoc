@@ -40,23 +40,22 @@ pub(crate) fn insert_call_site(
 ) -> Result<i64, StorageError> {
     let args_json = serde_json::to_string(&cs.args)?;
     let receiver_chain_json = serde_json::to_string(&cs.receiver_chain)?;
-    let id = conn
-        .query_row(
-            "INSERT INTO call_sites \
+    let id = conn.query_row(
+        "INSERT INTO call_sites \
              (from_fqdn, callee_text, args_json, receiver_chain_json, file_path, line, col) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
              RETURNING id",
-            rusqlite::params![
-                cs.from_fqdn,
-                cs.callee_text,
-                args_json,
-                receiver_chain_json,
-                file_path,
-                cs.site.line,
-                cs.site.col,
-            ],
-            |row| row.get::<_, i64>(0),
-        )?;
+        rusqlite::params![
+            cs.from_fqdn,
+            cs.callee_text,
+            args_json,
+            receiver_chain_json,
+            file_path,
+            cs.site.line,
+            cs.site.col,
+        ],
+        |row| row.get::<_, i64>(0),
+    )?;
     Ok(id)
 }
 
@@ -69,10 +68,7 @@ pub(crate) fn delete_call_sites_by_file(
     conn: &Connection,
     file_path: &str,
 ) -> Result<u64, StorageError> {
-    conn.execute(
-        "DELETE FROM call_sites WHERE file_path = ?1",
-        [file_path],
-    )?;
+    conn.execute("DELETE FROM call_sites WHERE file_path = ?1", [file_path])?;
     Ok(conn.changes())
 }
 

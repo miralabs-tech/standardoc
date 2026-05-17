@@ -24,7 +24,9 @@ const WORKSPACE_KIND_KEY: &str = "workspace_kind";
 /// pre-3e-3, first cold-start in progress, or workspaces where no
 /// manifest was detected — the kind row is intentionally absent for
 /// the latter, see [`delete_workspace_kind`]).
-pub fn read_workspace_kind(conn: &Connection) -> Result<Option<WorkspaceKind>, StorageError> {
+pub(crate) fn read_workspace_kind(
+    conn: &Connection,
+) -> Result<Option<WorkspaceKind>, StorageError> {
     let value: Option<String> = conn
         .query_row(
             "SELECT value FROM schema_meta WHERE key = ?1",
@@ -41,7 +43,10 @@ pub fn read_workspace_kind(conn: &Connection) -> Result<Option<WorkspaceKind>, S
 /// at cold-start after project discovery (and again whenever the
 /// manifest watcher Stage 3d-5 re-runs detection on root-manifest
 /// changes).
-pub fn write_workspace_kind(conn: &Connection, kind: &WorkspaceKind) -> Result<(), StorageError> {
+pub(crate) fn write_workspace_kind(
+    conn: &Connection,
+    kind: &WorkspaceKind,
+) -> Result<(), StorageError> {
     conn.execute(
         "INSERT INTO schema_meta (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -57,7 +62,7 @@ pub fn write_workspace_kind(conn: &Connection, kind: &WorkspaceKind) -> Result<(
 /// distinguishing signal "detection ran, found no workspace organizer")
 /// AND purges legacy `"single"` rows left behind by pre-revert 3e-3
 /// builds.
-pub fn delete_workspace_kind(conn: &Connection) -> Result<(), StorageError> {
+pub(crate) fn delete_workspace_kind(conn: &Connection) -> Result<(), StorageError> {
     conn.execute(
         "DELETE FROM schema_meta WHERE key = ?1",
         params![WORKSPACE_KIND_KEY],

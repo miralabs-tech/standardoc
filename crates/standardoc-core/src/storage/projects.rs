@@ -212,8 +212,14 @@ mod tests {
     #[test]
     fn insert_then_get_roundtrips() {
         let conn = fresh_db();
-        let id = insert_project(&conn, "standardoc-core", &ProjectKind::Rust, "/r/crates/core", "./crates/core")
-            .unwrap();
+        let id = insert_project(
+            &conn,
+            "standardoc-core",
+            &ProjectKind::Rust,
+            "/r/crates/core",
+            "./crates/core",
+        )
+        .unwrap();
         let got = get_project(&conn, id).unwrap().unwrap();
         assert_eq!(got.project_id, id);
         assert_eq!(got.label, "standardoc-core");
@@ -246,14 +252,7 @@ mod tests {
     #[test]
     fn find_for_file_path_picks_deepest_ancestor() {
         let conn = fresh_db();
-        let _root_id = insert_project(
-            &conn,
-            "root",
-            &ProjectKind::Rust,
-            "/r",
-            ".",
-        )
-        .unwrap();
+        let _root_id = insert_project(&conn, "root", &ProjectKind::Rust, "/r", ".").unwrap();
         let inner_id = insert_project(
             &conn,
             "ext-vscode",

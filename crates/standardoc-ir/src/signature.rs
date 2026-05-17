@@ -186,10 +186,7 @@ mod tests {
         // and wasm-bindgen (Native↔Wasm) bridges. The Vec<BridgeKind> shape
         // preserves order and emits a JSON array.
         let meta = SignatureMeta {
-            exposed_via: vec![
-                BridgeKind::from("tauri"),
-                BridgeKind::from("wasm-bindgen"),
-            ],
+            exposed_via: vec![BridgeKind::from("tauri"), BridgeKind::from("wasm-bindgen")],
         };
         let json = serde_json::to_string(&meta).unwrap();
         assert!(json.contains("\"tauri\""), "got `{json}`");

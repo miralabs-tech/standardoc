@@ -147,6 +147,7 @@ mod tests {
         let provider = RustProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
         let extracted = provider
             .extract("pub fn foo() {}\n", "src/lib.rs", &ctx)
@@ -172,6 +173,7 @@ mod tests {
         let provider = RustProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
         let err = provider
             .extract("fn foo() {}\n", "src/lib.rs", &ctx)
@@ -199,6 +201,7 @@ mod tests {
         let provider = RustProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
         let err = provider
             .extract("fn foo() {}\n", "src/lib.rs", &ctx)
@@ -223,6 +226,7 @@ mod tests {
         let provider = RustProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
 
         let _ = provider

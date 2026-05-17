@@ -40,7 +40,7 @@ use crate::storage::handle::IndexHandle;
 /// Manifest filenames (exact match) that trigger workspace re-detection.
 /// Sourced from `standarbuild-detect 0.3` built-in detectors + workspace
 /// orchestrators.
-pub const MANIFEST_FILENAMES: &[&str] = &[
+pub(crate) const MANIFEST_FILENAMES: &[&str] = &[
     // Rust — workspace + project marker (same file, both roles).
     "Cargo.toml",
     // JS/TS — npm / pnpm / yarn / bun project + workspace markers.
@@ -69,13 +69,13 @@ pub const MANIFEST_FILENAMES: &[&str] = &[
 
 /// Suffix patterns for manifests with variable basenames. Currently:
 /// `*.sxb` (Mira `standarbuild` manifest, ID Stage 3e-3-bis).
-pub const MANIFEST_EXTENSIONS: &[&str] = &["sxb"];
+pub(crate) const MANIFEST_EXTENSIONS: &[&str] = &["sxb"];
 
 /// `true` when `path`'s file-name matches one of [`MANIFEST_FILENAMES`]
 /// or its extension matches one of [`MANIFEST_EXTENSIONS`]. The caller
 /// owns the path-resolution + IO; this is pure name inspection.
 #[must_use]
-pub fn is_manifest_file(path: &Path) -> bool {
+pub(crate) fn is_manifest_file(path: &Path) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str())
         && MANIFEST_FILENAMES.contains(&name)
     {
@@ -100,7 +100,7 @@ pub fn is_manifest_file(path: &Path) -> bool {
 ///   poisoned — the caller logs and returns; the watcher loop continues.
 /// - `Err(StorageError::Sqlite)` from the underlying re-detection SQL
 ///   (UPSERT into `projects`, schema_meta write). Same handling.
-pub fn handle_manifest_change(
+pub(crate) fn handle_manifest_change(
     handle: &IndexHandle,
     workspace_root: &Path,
     abs_path: &Path,
@@ -196,8 +196,7 @@ mod tests {
         // `None` so the watcher falls through to source upsert.
         let (dir, handle) = fresh_handle();
         let abs_path = dir.path().join("src/lib.rs");
-        let result =
-            handle_manifest_change(&handle, dir.path(), &abs_path).unwrap();
+        let result = handle_manifest_change(&handle, dir.path(), &abs_path).unwrap();
         assert!(result.is_none());
         // Nothing got written — workspace_kind is still absent.
         let conn = handle.pool().unwrap().get().unwrap();
@@ -226,8 +225,7 @@ mod tests {
         )
         .unwrap();
 
-        let result =
-            handle_manifest_change(&handle, &root, &root.join("Cargo.toml")).unwrap();
+        let result = handle_manifest_change(&handle, &root, &root.join("Cargo.toml")).unwrap();
         assert_eq!(result, Some(()));
 
         let conn = handle.pool().unwrap().get().unwrap();
@@ -300,9 +298,7 @@ mod tests {
         let (dir, handle) = fresh_handle();
         let root = dir.path();
         fs::write(root.join("standardoc.sxb"), b"# stub Mira manifest\n").unwrap();
-        let result =
-            handle_manifest_change(&handle, root, &root.join("standardoc.sxb"))
-                .unwrap();
+        let result = handle_manifest_change(&handle, root, &root.join("standardoc.sxb")).unwrap();
         // The handler fires; whether `standarbuild-detect` actually
         // recognises this synthetic .sxb stub is detector-side. We
         // just assert the routing decision.
@@ -319,7 +315,9 @@ mod tests {
         let root = dir.path();
         let cargo_lock = root.join("Cargo.lock");
         assert!(
-            handle_manifest_change(&handle, root, &cargo_lock).unwrap().is_none()
+            handle_manifest_change(&handle, root, &cargo_lock)
+                .unwrap()
+                .is_none()
         );
     }
 }

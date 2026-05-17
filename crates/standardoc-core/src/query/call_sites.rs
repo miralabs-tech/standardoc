@@ -46,9 +46,7 @@ pub struct CallSiteFilters {
 impl CallSiteFilters {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.from_fqdn.is_none()
-            && self.callee_text.is_none()
-            && self.callee_pattern.is_none()
+        self.from_fqdn.is_none() && self.callee_text.is_none() && self.callee_pattern.is_none()
     }
 }
 
@@ -177,7 +175,6 @@ fn hydrate(row: RawRow) -> Result<CallSiteRow, StorageError> {
 mod tests {
     use super::*;
     use crate::storage::call_sites::insert_call_site;
-    use rusqlite::Connection;
     use standardoc_ir::Site as IrSite;
     use tempfile::tempdir;
 
@@ -221,7 +218,11 @@ mod tests {
         let (_d, h) = fresh_handle();
         seed_file(&h, "src/a.rs");
         for i in 0..5 {
-            insert(&h, "src/a.rs", &cs("c::caller", &format!("foo_{i}"), "src/a.rs", i));
+            insert(
+                &h,
+                "src/a.rs",
+                &cs("c::caller", &format!("foo_{i}"), "src/a.rs", i),
+            );
         }
         let rows = find_call_sites(&h, &CallSiteFilters::default(), 3).unwrap();
         assert_eq!(rows.len(), 3);

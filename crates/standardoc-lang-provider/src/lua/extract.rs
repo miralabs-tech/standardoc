@@ -476,10 +476,7 @@ fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &Functi
                 ],
             ),
         },
-        None => (
-            ResolvedOrUnresolved::Unresolved { name: call_name },
-            vec![],
-        ),
+        None => (ResolvedOrUnresolved::Unresolved { name: call_name }, vec![]),
     };
     let confidence = to.default_confidence();
     ctx.push_edge(RawEdge {
@@ -1232,11 +1229,7 @@ mod tests {
             other => panic!("expected Resolved synthetic, got {other:?}"),
         }
         assert!(calls[0].attributes.contains(&"via-builtin".to_string()));
-        assert!(
-            calls[0]
-                .attributes
-                .contains(&"builtin-console".to_string())
-        );
+        assert!(calls[0].attributes.contains(&"builtin-console".to_string()));
     }
 
     #[test]
@@ -1339,13 +1332,8 @@ mod tests {
             .call_sites
             .iter()
             .find(|c| c.callee_text == "M.api.create")
-            .unwrap_or_else(|| {
-                panic!("expected M.api.create call_site, got {:?}", r.call_sites)
-            });
-        assert_eq!(
-            cs.receiver_chain,
-            vec!["M".to_string(), "api".to_string()]
-        );
+            .unwrap_or_else(|| panic!("expected M.api.create call_site, got {:?}", r.call_sites));
+        assert_eq!(cs.receiver_chain, vec!["M".to_string(), "api".to_string()]);
         assert_eq!(cs.args.len(), 1);
         assert_eq!(cs.args[0].value, "payload");
     }
@@ -1407,9 +1395,7 @@ mod tests {
         let src = "local function caller() print(\"hi\") end\n";
         let r = extract(src, "main.lua", "main.lua");
         assert!(
-            r.call_sites
-                .iter()
-                .any(|c| c.callee_text == "print"),
+            r.call_sites.iter().any(|c| c.callee_text == "print"),
             "print call_site must surface, got {:?}",
             r.call_sites
         );

@@ -28,13 +28,11 @@ use crate::storage::error::StorageError;
 use crate::storage::projects;
 use crate::storage::schema_meta;
 
-pub use standarbuild_detect::{Detector, DetectorRegistry as ProjectDetectorRegistry};
-
 /// Re-export of 0.3's [`standarbuild_detect::DetectionResult`] for
 /// callers that want both the project list and the workspace-manifest
 /// list from a single discovery scan. Stage 3e-3 consumes `.workspaces`
 /// at cold-start to persist the primary workspace kind in `schema_meta`.
-pub use standarbuild_detect::DetectionResult;
+pub(crate) use standarbuild_detect::DetectionResult;
 
 /// Convert the detector's opaque [`KindId`] to the IR's `ProjectKind`.
 /// Built-in slugs map to their named variants; anything else becomes
@@ -86,7 +84,7 @@ fn from_workspace_kind_id(id: &WorkspaceKindId) -> WorkspaceKind {
 /// recording a sentinel, so `current_revision` can distinguish
 /// "detection ran, found no workspace organizer" from "detected as X".
 fn primary_workspace_kind(
-    detected: &standarbuild_detect::DetectionResult,
+    detected: &DetectionResult,
     workspace_root: &Path,
 ) -> Option<WorkspaceKind> {
     detected
@@ -116,7 +114,7 @@ fn normalise_rel_path(rel: &str) -> String {
 /// Run discovery with the built-in detector registry (Rust / Node /
 /// Bun / Deno / Python / Lua / C / Cpp). Shortcut for
 /// [`discover_and_persist_projects_with`].
-pub fn discover_and_persist_projects(
+pub(crate) fn discover_and_persist_projects(
     conn: &Connection,
     workspace_root: &Path,
 ) -> Result<Vec<ProjectInfo>, StorageError> {
@@ -128,7 +126,7 @@ pub fn discover_and_persist_projects(
 /// space with user-registered detectors (e.g. a WGSL detector that
 /// matches on `shaders/` directories with `priority() > 100` to
 /// override built-ins).
-pub fn discover_and_persist_projects_with(
+pub(crate) fn discover_and_persist_projects_with(
     conn: &Connection,
     workspace_root: &Path,
     registry: &DetectorRegistry,
@@ -159,12 +157,12 @@ pub fn discover_and_persist_projects_with(
 /// `workspace_kind` in `schema_meta`. The plain
 /// [`discover_and_persist_projects`] flow ignores it and only persists
 /// the project list.
-pub fn discover_workspace(workspace_root: &Path) -> DetectionResult {
-    discover_workspace_with(workspace_root, &DetectorRegistry::with_builtins())
-}
+// pub(crate) fn discover_workspace(workspace_root: &Path) -> DetectionResult {
+//     discover_workspace_with(workspace_root, &DetectorRegistry::with_builtins())
+// }
 
 /// Same as [`discover_workspace`] but against a custom registry.
-pub fn discover_workspace_with(
+pub(crate) fn discover_workspace_with(
     workspace_root: &Path,
     registry: &DetectorRegistry,
 ) -> DetectionResult {
@@ -194,8 +192,7 @@ fn persist_projects(
         let kind = from_kind_id(&d.kind);
         let root_path = d.absolute_path.to_string_lossy().into_owned();
         let rel_path = normalise_rel_path(&d.rel_path);
-        let project_id =
-            projects::upsert_project(conn, &d.label, &kind, &root_path, &rel_path)?;
+        let project_id = projects::upsert_project(conn, &d.label, &kind, &root_path, &rel_path)?;
         out.push(ProjectInfo {
             project_id,
             label: d.label,
@@ -217,7 +214,7 @@ fn persist_projects(
 /// workspace-root project, `"crates/foo"` for sub-projects). The match
 /// picks the longest `rel_path` so a file under `ext/vscode/src/` lands
 /// on the `ext/vscode` Bun project, not the workspace-root Rust one.
-pub fn reconcile_files_project_id(conn: &Connection) -> Result<usize, StorageError> {
+pub(crate) fn reconcile_files_project_id(conn: &Connection) -> Result<usize, StorageError> {
     // Two SQL statements: clear first (so unlinked projects' files
     // become NULL again), then re-assign by deepest match.
     conn.execute("UPDATE files SET project_id = NULL", [])?;
@@ -340,10 +337,10 @@ mod tests {
         let conn = fresh_db();
         discover_and_persist_projects(&conn, dir.path()).unwrap();
 
-        let persisted = crate::storage::schema_meta::read_workspace_kind(&conn)
+        let persisted = schema_meta::read_workspace_kind(&conn)
             .unwrap()
             .expect("workspace_kind must be persisted post-discovery");
-        assert_eq!(persisted, standardoc_ir::WorkspaceKind::Cargo);
+        assert_eq!(persisted, WorkspaceKind::Cargo);
     }
 
     #[test]
@@ -364,7 +361,7 @@ mod tests {
         let conn = fresh_db();
         discover_and_persist_projects(&conn, dir.path()).unwrap();
 
-        let persisted = crate::storage::schema_meta::read_workspace_kind(&conn).unwrap();
+        let persisted = schema_meta::read_workspace_kind(&conn).unwrap();
         assert!(
             persisted.is_none(),
             "loose project tree must leave workspace_kind row absent, got {persisted:?}"
@@ -390,7 +387,7 @@ mod tests {
         )
         .unwrap();
         discover_and_persist_projects(&conn, dir.path()).unwrap();
-        let persisted = crate::storage::schema_meta::read_workspace_kind(&conn).unwrap();
+        let persisted = schema_meta::read_workspace_kind(&conn).unwrap();
         assert!(
             persisted.is_none(),
             "legacy `single` row must be purged on rediscovery, got {persisted:?}"
@@ -400,14 +397,8 @@ mod tests {
     #[test]
     fn reconcile_assigns_deepest_project_to_each_file() {
         let conn = fresh_db();
-        let root_id = projects::insert_project(
-            &conn,
-            "root",
-            &ProjectKind::Rust,
-            "/r",
-            "",
-        )
-        .unwrap();
+        let root_id =
+            projects::insert_project(&conn, "root", &ProjectKind::Rust, "/r", "").unwrap();
         let ext_id = projects::insert_project(
             &conn,
             "ext-vscode",
@@ -463,10 +454,7 @@ mod tests {
         fn priority(&self) -> i32 {
             120 // beats every built-in (max is Rust=100)
         }
-        fn detect(
-            &self,
-            dir: &std::path::Path,
-        ) -> Option<standarbuild_detect::DetectorHit> {
+        fn detect(&self, dir: &Path) -> Option<standarbuild_detect::DetectorHit> {
             dir.join("shaders")
                 .is_dir()
                 .then(|| standarbuild_detect::DetectorHit::Project {
@@ -493,8 +481,7 @@ mod tests {
         registry.add(ShadersDetector);
 
         let conn = fresh_db();
-        let projects =
-            discover_and_persist_projects_with(&conn, dir.path(), &registry).unwrap();
+        let projects = discover_and_persist_projects_with(&conn, dir.path(), &registry).unwrap();
         let kinds: Vec<&ProjectKind> = projects.iter().map(|p| &p.kind).collect();
         assert!(
             kinds.contains(&&ProjectKind::Custom("wgsl".into())),
@@ -502,26 +489,17 @@ mod tests {
         );
         // Round-trip through storage: re-read by root_path should also
         // carry the Custom variant.
-        let row = projects::find_by_root_path(
-            &conn,
-            &dir.path().to_string_lossy(),
-        )
-        .unwrap()
-        .expect("row present");
+        let row = projects::find_by_root_path(&conn, &dir.path().to_string_lossy())
+            .unwrap()
+            .expect("row present");
         assert_eq!(row.kind, ProjectKind::Custom("wgsl".into()));
     }
 
     #[test]
     fn reconcile_clears_stale_project_ids_when_projects_removed() {
         let conn = fresh_db();
-        let pid = projects::insert_project(
-            &conn,
-            "old",
-            &ProjectKind::Rust,
-            "/r/old",
-            "old",
-        )
-        .unwrap();
+        let pid =
+            projects::insert_project(&conn, "old", &ProjectKind::Rust, "/r/old", "old").unwrap();
         seed_file(&conn, "old/lib.rs");
         reconcile_files_project_id(&conn).unwrap();
         // Sanity — the file points at `old` now.

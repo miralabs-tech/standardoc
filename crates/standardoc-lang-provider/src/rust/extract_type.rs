@@ -117,7 +117,13 @@ pub(crate) fn visit_signature(
             scope_idx,
         );
     }
-    visit_generics(ctx, &sig.generics, current_module, enclosing_fqdn, scope_idx);
+    visit_generics(
+        ctx,
+        &sig.generics,
+        current_module,
+        enclosing_fqdn,
+        scope_idx,
+    );
 }
 
 /// Walk a `syn::Generics`' bounds + where-clause predicates and emit

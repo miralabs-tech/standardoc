@@ -310,10 +310,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(
-            to_unresolved.as_deref(),
-            Some("custom:internal-rpc::ping")
-        );
+        assert_eq!(to_unresolved.as_deref(), Some("custom:internal-rpc::ping"));
     }
 
     #[test]

@@ -122,7 +122,9 @@ fn find_defs_by_name(
         "SELECT id FROM symbols \
          WHERE language = 'c' AND language_kind = 'fn' AND name = ?1 AND workspace_id = ?2",
     )?;
-    let mapped = stmt.query_map(rusqlite::params![name, workspace_id], |r| r.get::<_, i64>(0))?;
+    let mapped = stmt.query_map(rusqlite::params![name, workspace_id], |r| {
+        r.get::<_, i64>(0)
+    })?;
     let mut out = Vec::new();
     for row in mapped {
         out.push(row?);

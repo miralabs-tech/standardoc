@@ -244,7 +244,10 @@ mod tests {
         assert!(BridgeKind::from("custom:bazel").is_custom());
         assert!(BridgeKind::from("custom:vendor:internal-rpc").is_custom());
         assert!(!BridgeKind::from("tauri").is_custom());
-        assert!(!BridgeKind::from("customary").is_custom(), "needs the colon");
+        assert!(
+            !BridgeKind::from("customary").is_custom(),
+            "needs the colon"
+        );
         assert!(
             !BridgeKind::from("Custom:bazel").is_custom(),
             "prefix is case-sensitive"

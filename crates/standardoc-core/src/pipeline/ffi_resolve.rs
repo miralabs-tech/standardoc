@@ -31,9 +31,7 @@ use crate::storage::edges::insert_edge;
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
 use crate::storage::symbol_ffi_binding::{BindingSide, fetch_all_sides};
-use standardoc_ir::{
-    EdgeConfidence, EdgeKind, FfiDirection, RawEdge, ResolvedOrUnresolved,
-};
+use standardoc_ir::{EdgeConfidence, EdgeKind, FfiDirection, RawEdge, ResolvedOrUnresolved};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FfiResolveReport {
@@ -209,7 +207,13 @@ mod tests {
     fn unique_export_unique_import_emits_one_edge() {
         let conn = fresh_conn();
         let exporter = seed_sym(&conn, "lurlang::vm::lur_init", "lur_init", "vm.c", "c");
-        let importer = seed_sym(&conn, "lurlang::lib::lur_init", "lur_init", "lib.rs", "rust");
+        let importer = seed_sym(
+            &conn,
+            "lurlang::lib::lur_init",
+            "lur_init",
+            "lib.rs",
+            "rust",
+        );
         upsert_binding(&conn, exporter, &binding(FfiDirection::Export, "lur_init")).unwrap();
         upsert_binding(&conn, importer, &binding(FfiDirection::Import, "lur_init")).unwrap();
 

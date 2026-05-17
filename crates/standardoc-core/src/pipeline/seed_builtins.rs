@@ -134,7 +134,13 @@ mod tests {
     use standardoc_ir::{BuiltinTag, BuiltinTier, Kind};
 
     fn sample_edge_entry(name: &str, lang: Language) -> BuiltinEntry {
-        BuiltinEntry::new(name, lang, Kind::Function, BuiltinTag::Console, BuiltinTier::Edge)
+        BuiltinEntry::new(
+            name,
+            lang,
+            Kind::Function,
+            BuiltinTag::Console,
+            BuiltinTier::Edge,
+        )
     }
 
     #[test]

@@ -319,10 +319,7 @@ mod tests {
         // wasm-bindgen. Both must round-trip into the JSON array.
         let sig = Signature {
             meta: standardoc_ir::SignatureMeta {
-                exposed_via: vec![
-                    BridgeKind::from("tauri"),
-                    BridgeKind::from("wasm-bindgen"),
-                ],
+                exposed_via: vec![BridgeKind::from("tauri"), BridgeKind::from("wasm-bindgen")],
             },
             ..Default::default()
         };

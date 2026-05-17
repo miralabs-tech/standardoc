@@ -32,8 +32,13 @@ fn primary_resolves_symbol_against_registered_peer_workspace() {
     // Register the peer workspace — canonicalised path, "in" direction
     // (we consume the peer's symbols).
     let peer_path = peer_dir.path().to_string_lossy().into_owned();
-    let peer_id = link_workspace(&handle, &peer_path, LinkDirection::In, IndexingMode::default())
-        .expect("link peer workspace");
+    let peer_id = link_workspace(
+        &handle,
+        &peer_path,
+        LinkDirection::In,
+        IndexingMode::default(),
+    )
+    .expect("link peer workspace");
 
     // Catalog must list the peer now.
     let listed = list_linked_workspaces(&handle).expect("list peers");
@@ -67,8 +72,8 @@ fn primary_resolves_symbol_against_registered_peer_workspace() {
     assert!(fetched.bindings.contains_key("Foo"));
 
     // Resolver hit: `peer::lib::Foo` is reachable cross-workspace.
-    let providers = resolve_cross_workspace(&handle, "peer::lib", "Foo")
-        .expect("resolve_cross_workspace");
+    let providers =
+        resolve_cross_workspace(&handle, "peer::lib", "Foo").expect("resolve_cross_workspace");
     assert_eq!(providers.len(), 1, "exactly one provider");
     let hit = &providers[0];
     assert_eq!(hit.workspace_id, peer_id);

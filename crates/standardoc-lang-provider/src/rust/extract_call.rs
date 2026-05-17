@@ -175,8 +175,7 @@ impl CallVisitor<'_> {
             {
                 NameResolution::Drop | NameResolution::Local => return,
                 NameResolution::Attribute(tag) => {
-                    self.ctx
-                        .register_attribute_flag(&self.enclosing_fqdn, &tag);
+                    self.ctx.register_attribute_flag(&self.enclosing_fqdn, &tag);
                     return;
                 }
                 NameResolution::Target {
@@ -224,8 +223,7 @@ impl CallVisitor<'_> {
             {
                 NameResolution::Drop | NameResolution::Local => return,
                 NameResolution::Attribute(tag) => {
-                    self.ctx
-                        .register_attribute_flag(&self.enclosing_fqdn, &tag);
+                    self.ctx.register_attribute_flag(&self.enclosing_fqdn, &tag);
                     return;
                 }
                 NameResolution::Target {
@@ -747,9 +745,7 @@ mod tests {
         // `MyType::CONST` — multi-segment value-read. The leftmost
         // segment isn't a builtin, so the full path goes through
         // `resolve_path` which canonicalizes against alias_table.
-        let parsed = parse(
-            "use other::MyType; fn caller() { let _ = MyType::CONST; }",
-        );
+        let parsed = parse("use other::MyType; fn caller() { let _ = MyType::CONST; }");
         let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         // `MyType::CONST` resolves to canonical `other::MyType::CONST`
         // which isn't in defined_fqdns → Unresolved → no edge emitted
@@ -775,7 +771,9 @@ mod tests {
         // `foo` reads as `c::foo` (Resolved).
         let foo_refs: Vec<_> = vr
             .iter()
-            .filter(|e| matches!(&e.to, ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "c::foo"))
+            .filter(
+                |e| matches!(&e.to, ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "c::foo"),
+            )
             .collect();
         assert_eq!(
             foo_refs.len(),

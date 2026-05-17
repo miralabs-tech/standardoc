@@ -85,19 +85,51 @@ impl Palette {
     }
 }
 
-fn default_background() -> String { "#1e1e1e".into() }
-fn default_foreground() -> String { "#cccccc".into() }
-fn default_description() -> String { "#9d9d9d".into() }
-fn default_panel_border() -> String { "#454545".into() }
-fn default_focus_border() -> String { "#007fd4".into() }
-fn default_widget_background() -> String { "#252526".into() }
-fn default_list_hover() -> String { "#2a2d2e".into() }
-fn default_text_link() -> String { "#3794ff".into() }
-fn default_edge_calls() -> String { "#3794ff".into() }
-fn default_edge_imports() -> String { "#b180d7".into() }
-fn default_edge_extends() -> String { "#d18616".into() }
-fn default_edge_implements() -> String { "#cca700".into() }
-fn default_edge_references() -> String { "#cccccc".into() }
-fn default_edge_defines() -> String { "#89d185".into() }
-fn default_edge_uses_type() -> String { "#f48771".into() }
-fn default_edge_exposes_api() -> String { "#b180d7".into() }
+fn default_background() -> String {
+    "#1e1e1e".into()
+}
+fn default_foreground() -> String {
+    "#cccccc".into()
+}
+fn default_description() -> String {
+    "#9d9d9d".into()
+}
+fn default_panel_border() -> String {
+    "#454545".into()
+}
+fn default_focus_border() -> String {
+    "#007fd4".into()
+}
+fn default_widget_background() -> String {
+    "#252526".into()
+}
+fn default_list_hover() -> String {
+    "#2a2d2e".into()
+}
+fn default_text_link() -> String {
+    "#3794ff".into()
+}
+fn default_edge_calls() -> String {
+    "#3794ff".into()
+}
+fn default_edge_imports() -> String {
+    "#b180d7".into()
+}
+fn default_edge_extends() -> String {
+    "#d18616".into()
+}
+fn default_edge_implements() -> String {
+    "#cca700".into()
+}
+fn default_edge_references() -> String {
+    "#cccccc".into()
+}
+fn default_edge_defines() -> String {
+    "#89d185".into()
+}
+fn default_edge_uses_type() -> String {
+    "#f48771".into()
+}
+fn default_edge_exposes_api() -> String {
+    "#b180d7".into()
+}

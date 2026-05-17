@@ -1,14 +1,14 @@
 use standardoc_ir::{
-	AliasMutability, BindingSource, IdentResolution, ImportRecord, Language, LocalDeclKind,
-	ModuleLookup, ScopeKind, ScopeRange,
+    AliasMutability, BindingSource, IdentResolution, ImportRecord, Language, LocalDeclKind,
+    ModuleLookup, ScopeKind, ScopeRange,
 };
 use swc_core::common::BytePos;
 use swc_core::ecma::ast::{
-	ArrowExpr, BlockStmt, CatchClause, Class, ClassDecl, Constructor, Decl, DefaultDecl,
-	ExportDecl, ExportDefaultDecl, ExportSpecifier, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt,
-	Function, ImportDecl, ImportSpecifier, MemberExpr, Module, ModuleDecl, ModuleExportName,
-	ModuleItem, NamedExport, ObjectPatProp, ParamOrTsParamProp, Pat, Stmt, TsEnumDecl,
-	TsInterfaceDecl, TsParamPropParam, TsTypeAliasDecl, VarDecl, VarDeclKind, VarDeclarator,
+    ArrowExpr, BlockStmt, CatchClause, Class, ClassDecl, Constructor, Decl, DefaultDecl,
+    ExportDecl, ExportDefaultDecl, ExportSpecifier, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt,
+    Function, ImportDecl, ImportSpecifier, MemberExpr, Module, ModuleDecl, ModuleExportName,
+    ModuleItem, NamedExport, ObjectPatProp, ParamOrTsParamProp, Pat, Stmt, TsEnumDecl,
+    TsInterfaceDecl, TsParamPropParam, TsTypeAliasDecl, VarDecl, VarDeclKind, VarDeclarator,
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
 
@@ -27,584 +27,558 @@ use swc_core::ecma::visit::{Visit, VisitWith};
 /// Imports are also flattened into `ModuleLookup.imports` for the Stage
 /// 3b cross-workspace SQL join.
 pub(crate) fn build_ts_lookup(module: &Module, module_fqdn: &str) -> ModuleLookup {
-	let mut lookup = ModuleLookup::new(module_fqdn.to_string(), Language::TypeScript);
-	let mut builder = LookupBuilder {
-		lookup: &mut lookup,
-		scope_stack: vec![ModuleLookup::ROOT_SCOPE],
-	};
-	builder.hoist_module_items(&module.body);
-	module.visit_with(&mut builder);
-	lookup
+    let mut lookup = ModuleLookup::new(module_fqdn.to_string(), Language::TypeScript);
+    let mut builder = LookupBuilder {
+        lookup: &mut lookup,
+        scope_stack: vec![ModuleLookup::ROOT_SCOPE],
+    };
+    builder.hoist_module_items(&module.body);
+    module.visit_with(&mut builder);
+    lookup
 }
 
 struct LookupBuilder<'a> {
-	lookup: &'a mut ModuleLookup,
-	scope_stack: Vec<u32>,
+    lookup: &'a mut ModuleLookup,
+    scope_stack: Vec<u32>,
 }
 
 impl<'a> LookupBuilder<'a> {
-	fn current_scope(&self) -> u32 {
-		*self.scope_stack.last().unwrap_or(&ModuleLookup::ROOT_SCOPE)
-	}
+    fn current_scope(&self) -> u32 {
+        *self.scope_stack.last().unwrap_or(&ModuleLookup::ROOT_SCOPE)
+    }
 
-	fn push_scope(&mut self, kind: ScopeKind, lo: BytePos, hi: BytePos) {
-		let parent = Some(self.current_scope());
-		let idx = self.lookup.push_scope_with_span(
-			ScopeRange {
-				start_line: lo.0,
-				end_line: hi.0,
-				parent,
-				kind,
-			},
-			lo.0,
-			hi.0,
-		);
-		self.scope_stack.push(idx);
-	}
+    fn push_scope(&mut self, kind: ScopeKind, lo: BytePos, hi: BytePos) {
+        let parent = Some(self.current_scope());
+        let idx = self.lookup.push_scope_with_span(
+            ScopeRange {
+                start_line: lo.0,
+                end_line: hi.0,
+                parent,
+                kind,
+            },
+            lo.0,
+            hi.0,
+        );
+        self.scope_stack.push(idx);
+    }
 
-	fn pop_scope(&mut self) {
-		self.scope_stack.pop();
-	}
+    fn pop_scope(&mut self) {
+        self.scope_stack.pop();
+    }
 
-	fn add_binding(&mut self, name: String, source: BindingSource, attributes: Vec<String>) {
-		let scope_idx = self.current_scope();
-		self.lookup.push_binding(IdentResolution {
-			name,
-			source,
-			resolved_fqdn: None,
-			aliases_to: None,
-			mutability: None,
-			scope_idx,
-			attributes,
-			ir_kind: None,
-		});
-	}
+    fn add_binding(&mut self, name: String, source: BindingSource, attributes: Vec<String>) {
+        let scope_idx = self.current_scope();
+        self.lookup.push_binding(IdentResolution {
+            name,
+            source,
+            resolved_fqdn: None,
+            aliases_to: None,
+            mutability: None,
+            scope_idx,
+            attributes,
+            ir_kind: None,
+        });
+    }
 
-	fn add_aliased_binding(
-		&mut self,
-		name: String,
-		decl_kind: LocalDeclKind,
-		mutability: AliasMutability,
-		aliases_to: String,
-	) {
-		let scope_idx = self.current_scope();
-		self.lookup.push_binding(IdentResolution {
-			name,
-			source: BindingSource::LocalDecl { decl_kind },
-			resolved_fqdn: None,
-			aliases_to: Some(aliases_to),
-			mutability: Some(mutability),
-			scope_idx,
-			attributes: vec![mutability.as_slug().to_string()],
-			ir_kind: None,
-		});
-	}
+    fn add_aliased_binding(
+        &mut self,
+        name: String,
+        decl_kind: LocalDeclKind,
+        mutability: AliasMutability,
+        aliases_to: String,
+    ) {
+        let scope_idx = self.current_scope();
+        self.lookup.push_binding(IdentResolution {
+            name,
+            source: BindingSource::LocalDecl { decl_kind },
+            resolved_fqdn: None,
+            aliases_to: Some(aliases_to),
+            mutability: Some(mutability),
+            scope_idx,
+            attributes: vec![mutability.as_slug().to_string()],
+            ir_kind: None,
+        });
+    }
 
-	fn hoist_module_items(&mut self, items: &[ModuleItem]) {
-		for item in items {
-			match item {
-				ModuleItem::Stmt(stmt) => self.hoist_stmt(stmt),
-				ModuleItem::ModuleDecl(decl) => match decl {
-					ModuleDecl::Import(import) => self.add_import(import),
-					ModuleDecl::ExportDecl(ExportDecl { decl, .. }) => self.hoist_decl(decl),
-					ModuleDecl::ExportDefaultDecl(ExportDefaultDecl { decl, .. }) => {
-						self.hoist_default_decl(decl);
-					}
-					ModuleDecl::ExportNamed(named) => self.record_export_named(named),
-					_ => {}
-				},
-			}
-		}
-	}
+    fn hoist_module_items(&mut self, items: &[ModuleItem]) {
+        for item in items {
+            match item {
+                ModuleItem::Stmt(stmt) => self.hoist_stmt(stmt),
+                ModuleItem::ModuleDecl(decl) => match decl {
+                    ModuleDecl::Import(import) => self.add_import(import),
+                    ModuleDecl::ExportDecl(ExportDecl { decl, .. }) => self.hoist_decl(decl),
+                    ModuleDecl::ExportDefaultDecl(ExportDefaultDecl { decl, .. }) => {
+                        self.hoist_default_decl(decl);
+                    }
+                    ModuleDecl::ExportNamed(named) => self.record_export_named(named),
+                    _ => {}
+                },
+            }
+        }
+    }
 
-	fn hoist_stmt(&mut self, stmt: &Stmt) {
-		if let Stmt::Decl(decl) = stmt {
-			self.hoist_decl(decl);
-		}
-	}
+    fn hoist_stmt(&mut self, stmt: &Stmt) {
+        if let Stmt::Decl(decl) = stmt {
+            self.hoist_decl(decl);
+        }
+    }
 
-	fn hoist_decl(&mut self, decl: &Decl) {
-		match decl {
-			Decl::Fn(fn_decl) => {
-				self.add_binding(
-					fn_decl.ident.sym.to_string(),
-					BindingSource::LocalDecl {
-						decl_kind: LocalDeclKind::Function,
-					},
-					vec![],
-				);
-			}
-			Decl::Class(class_decl) => {
-				self.add_binding(
-					class_decl.ident.sym.to_string(),
-					BindingSource::LocalDecl {
-						decl_kind: LocalDeclKind::Class,
-					},
-					vec![],
-				);
-			}
-			Decl::TsInterface(decl) => {
-				self.add_binding(
-					decl.id.sym.to_string(),
-					BindingSource::LocalDecl {
-						decl_kind: LocalDeclKind::Interface,
-					},
-					vec![],
-				);
-			}
-			Decl::TsEnum(decl) => {
-				self.add_binding(
-					decl.id.sym.to_string(),
-					BindingSource::LocalDecl {
-						decl_kind: LocalDeclKind::Enum,
-					},
-					vec![],
-				);
-			}
-			Decl::TsTypeAlias(decl) => {
-				self.add_binding(
-					decl.id.sym.to_string(),
-					BindingSource::LocalDecl {
-						decl_kind: LocalDeclKind::TypeAlias,
-					},
-					vec![],
-				);
-			}
-			Decl::Var(var_decl) => self.hoist_var_decl(var_decl),
-			Decl::TsModule(_) | Decl::Using(_) => {
-				// MVP: namespaces + using decls not hoisted in depth here —
-				// Stage 4 refinement once we see them in concrete codebases.
-			}
-		}
-	}
+    fn hoist_decl(&mut self, decl: &Decl) {
+        match decl {
+            Decl::Fn(fn_decl) => {
+                self.add_binding(
+                    fn_decl.ident.sym.to_string(),
+                    BindingSource::LocalDecl {
+                        decl_kind: LocalDeclKind::Function,
+                    },
+                    vec![],
+                );
+            }
+            Decl::Class(class_decl) => {
+                self.add_binding(
+                    class_decl.ident.sym.to_string(),
+                    BindingSource::LocalDecl {
+                        decl_kind: LocalDeclKind::Class,
+                    },
+                    vec![],
+                );
+            }
+            Decl::TsInterface(decl) => {
+                self.add_binding(
+                    decl.id.sym.to_string(),
+                    BindingSource::LocalDecl {
+                        decl_kind: LocalDeclKind::Interface,
+                    },
+                    vec![],
+                );
+            }
+            Decl::TsEnum(decl) => {
+                self.add_binding(
+                    decl.id.sym.to_string(),
+                    BindingSource::LocalDecl {
+                        decl_kind: LocalDeclKind::Enum,
+                    },
+                    vec![],
+                );
+            }
+            Decl::TsTypeAlias(decl) => {
+                self.add_binding(
+                    decl.id.sym.to_string(),
+                    BindingSource::LocalDecl {
+                        decl_kind: LocalDeclKind::TypeAlias,
+                    },
+                    vec![],
+                );
+            }
+            Decl::Var(var_decl) => self.hoist_var_decl(var_decl),
+            Decl::TsModule(_) | Decl::Using(_) => {
+                // MVP: namespaces + using decls not hoisted in depth here —
+                // Stage 4 refinement once we see them in concrete codebases.
+            }
+        }
+    }
 
-	fn hoist_default_decl(&mut self, decl: &DefaultDecl) {
-		match decl {
-			DefaultDecl::Class(class_expr) => {
-				if let Some(ident) = &class_expr.ident {
-					self.add_binding(
-						ident.sym.to_string(),
-						BindingSource::LocalDecl {
-							decl_kind: LocalDeclKind::Class,
-						},
-						vec![],
-					);
-				}
-			}
-			DefaultDecl::Fn(fn_expr) => {
-				if let Some(ident) = &fn_expr.ident {
-					self.add_binding(
-						ident.sym.to_string(),
-						BindingSource::LocalDecl {
-							decl_kind: LocalDeclKind::Function,
-						},
-						vec![],
-					);
-				}
-			}
-			DefaultDecl::TsInterfaceDecl(decl) => {
-				self.add_binding(
-					decl.id.sym.to_string(),
-					BindingSource::LocalDecl {
-						decl_kind: LocalDeclKind::Interface,
-					},
-					vec![],
-				);
-			}
-		}
-	}
+    fn hoist_default_decl(&mut self, decl: &DefaultDecl) {
+        match decl {
+            DefaultDecl::Class(class_expr) => {
+                if let Some(ident) = &class_expr.ident {
+                    self.add_binding(
+                        ident.sym.to_string(),
+                        BindingSource::LocalDecl {
+                            decl_kind: LocalDeclKind::Class,
+                        },
+                        vec![],
+                    );
+                }
+            }
+            DefaultDecl::Fn(fn_expr) => {
+                if let Some(ident) = &fn_expr.ident {
+                    self.add_binding(
+                        ident.sym.to_string(),
+                        BindingSource::LocalDecl {
+                            decl_kind: LocalDeclKind::Function,
+                        },
+                        vec![],
+                    );
+                }
+            }
+            DefaultDecl::TsInterfaceDecl(decl) => {
+                self.add_binding(
+                    decl.id.sym.to_string(),
+                    BindingSource::LocalDecl {
+                        decl_kind: LocalDeclKind::Interface,
+                    },
+                    vec![],
+                );
+            }
+        }
+    }
 
-	fn hoist_var_decl(&mut self, var_decl: &VarDecl) {
-		let decl_kind = var_decl_kind_to_local(var_decl.kind);
-		for declarator in &var_decl.decls {
-			self.bind_var_declarator(declarator, &decl_kind);
-		}
-	}
+    fn hoist_var_decl(&mut self, var_decl: &VarDecl) {
+        let decl_kind = var_decl_kind_to_local(var_decl.kind);
+        for declarator in &var_decl.decls {
+            self.bind_var_declarator(declarator, &decl_kind);
+        }
+    }
 
-	fn bind_var_declarator(&mut self, declarator: &VarDeclarator, decl_kind: &LocalDeclKind) {
-		// Alias detection: `const x = FOO` or `const x = obj.prop` captures
-		// the leftmost base identifier as the aliased target.
-		if let Some(init) = declarator.init.as_deref() {
-			if let Some(base) = resolve_alias_rhs(init) {
-				if let Pat::Ident(ident) = &declarator.name {
-					let mutability = match decl_kind {
-						LocalDeclKind::Const => AliasMutability::Const,
-						_ => AliasMutability::Mutable,
-					};
-					self.add_aliased_binding(
-						ident.id.sym.to_string(),
-						decl_kind.clone(),
-						mutability,
-						base,
-					);
-					return;
-				}
-			}
-		}
-		self.bind_pat(
-			&declarator.name,
-			BindingSource::LocalDecl {
-				decl_kind: decl_kind.clone(),
-			},
-			vec![],
-		);
-	}
+    fn bind_var_declarator(&mut self, declarator: &VarDeclarator, decl_kind: &LocalDeclKind) {
+        // Alias detection: `const x = FOO` or `const x = obj.prop` captures
+        // the leftmost base identifier as the aliased target.
+        if let Some(init) = declarator.init.as_deref() {
+            if let Some(base) = resolve_alias_rhs(init) {
+                if let Pat::Ident(ident) = &declarator.name {
+                    let mutability = match decl_kind {
+                        LocalDeclKind::Const => AliasMutability::Const,
+                        _ => AliasMutability::Mutable,
+                    };
+                    self.add_aliased_binding(
+                        ident.id.sym.to_string(),
+                        decl_kind.clone(),
+                        mutability,
+                        base,
+                    );
+                    return;
+                }
+            }
+        }
+        self.bind_pat(
+            &declarator.name,
+            BindingSource::LocalDecl {
+                decl_kind: decl_kind.clone(),
+            },
+            vec![],
+        );
+    }
 
-	fn bind_pat(&mut self, pat: &Pat, source: BindingSource, extra_attrs: Vec<String>) {
-		match pat {
-			Pat::Ident(ident) => {
-				self.add_binding(ident.id.sym.to_string(), source, extra_attrs);
-			}
-			Pat::Array(array) => {
-				let mut attrs = extra_attrs.clone();
-				attrs.push("unhandled-destructuring".into());
-				for elem in array.elems.iter().flatten() {
-					self.bind_pat(elem, source.clone(), attrs.clone());
-				}
-			}
-			Pat::Object(obj) => {
-				let mut attrs = extra_attrs.clone();
-				attrs.push("unhandled-destructuring".into());
-				for prop in &obj.props {
-					match prop {
-						ObjectPatProp::KeyValue(kv) => {
-							self.bind_pat(&kv.value, source.clone(), attrs.clone());
-						}
-						ObjectPatProp::Assign(assign) => {
-							self.add_binding(
-								assign.key.sym.to_string(),
-								source.clone(),
-								attrs.clone(),
-							);
-						}
-						ObjectPatProp::Rest(rest) => {
-							self.bind_pat(&rest.arg, source.clone(), attrs.clone());
-						}
-					}
-				}
-			}
-			Pat::Rest(rest) => {
-				self.bind_pat(&rest.arg, source, extra_attrs);
-			}
-			Pat::Assign(assign) => {
-				self.bind_pat(&assign.left, source, extra_attrs);
-			}
-			Pat::Invalid(_) | Pat::Expr(_) => {}
-		}
-	}
+    fn bind_pat(&mut self, pat: &Pat, source: BindingSource, extra_attrs: Vec<String>) {
+        match pat {
+            Pat::Ident(ident) => {
+                self.add_binding(ident.id.sym.to_string(), source, extra_attrs);
+            }
+            Pat::Array(array) => {
+                let mut attrs = extra_attrs.clone();
+                attrs.push("unhandled-destructuring".into());
+                for elem in array.elems.iter().flatten() {
+                    self.bind_pat(elem, source.clone(), attrs.clone());
+                }
+            }
+            Pat::Object(obj) => {
+                let mut attrs = extra_attrs.clone();
+                attrs.push("unhandled-destructuring".into());
+                for prop in &obj.props {
+                    match prop {
+                        ObjectPatProp::KeyValue(kv) => {
+                            self.bind_pat(&kv.value, source.clone(), attrs.clone());
+                        }
+                        ObjectPatProp::Assign(assign) => {
+                            self.add_binding(
+                                assign.key.sym.to_string(),
+                                source.clone(),
+                                attrs.clone(),
+                            );
+                        }
+                        ObjectPatProp::Rest(rest) => {
+                            self.bind_pat(&rest.arg, source.clone(), attrs.clone());
+                        }
+                    }
+                }
+            }
+            Pat::Rest(rest) => {
+                self.bind_pat(&rest.arg, source, extra_attrs);
+            }
+            Pat::Assign(assign) => {
+                self.bind_pat(&assign.left, source, extra_attrs);
+            }
+            Pat::Invalid(_) | Pat::Expr(_) => {}
+        }
+    }
 
-	fn add_import(&mut self, decl: &ImportDecl) {
-		let module_path = decl.src.value.to_string_lossy().into_owned();
-		let decl_type_only = decl.type_only;
-		for spec in &decl.specifiers {
-			let (local_name, original_name, spec_type_only) = match spec {
-				ImportSpecifier::Named(named) => {
-					let original = named
-						.imported
-						.as_ref()
-						.map(|module_export| match module_export {
-							ModuleExportName::Ident(ident) => ident.sym.to_string(),
-							ModuleExportName::Str(s) => s.value.to_string_lossy().into_owned(),
-						})
-						.or_else(|| Some(named.local.sym.to_string()));
-					(named.local.sym.to_string(), original, named.is_type_only)
-				}
-				ImportSpecifier::Default(default) => (default.local.sym.to_string(), None, false),
-				ImportSpecifier::Namespace(ns) => (ns.local.sym.to_string(), None, false),
-			};
-			let is_type_only = decl_type_only || spec_type_only;
-			self.add_binding(
-				local_name.clone(),
-				BindingSource::Import {
-					module_path: module_path.clone(),
-					original_name: original_name.clone(),
-					is_type_only,
-					is_re_export: false,
-				},
-				if is_type_only {
-					vec!["type-only".into()]
-				} else {
-					vec![]
-				},
-			);
-			self.lookup.push_import(ImportRecord {
-				local_name,
-				origin_module: module_path.clone(),
-				origin_symbol: original_name,
-				is_type_only,
-				is_re_export: false,
-			});
-		}
-	}
+    fn add_import(&mut self, decl: &ImportDecl) {
+        let module_path = decl.src.value.to_string_lossy().into_owned();
+        let decl_type_only = decl.type_only;
+        for spec in &decl.specifiers {
+            let (local_name, original_name, spec_type_only) = match spec {
+                ImportSpecifier::Named(named) => {
+                    let original = named
+                        .imported
+                        .as_ref()
+                        .map(|module_export| match module_export {
+                            ModuleExportName::Ident(ident) => ident.sym.to_string(),
+                            ModuleExportName::Str(s) => s.value.to_string_lossy().into_owned(),
+                        })
+                        .or_else(|| Some(named.local.sym.to_string()));
+                    (named.local.sym.to_string(), original, named.is_type_only)
+                }
+                ImportSpecifier::Default(default) => (default.local.sym.to_string(), None, false),
+                ImportSpecifier::Namespace(ns) => (ns.local.sym.to_string(), None, false),
+            };
+            let is_type_only = decl_type_only || spec_type_only;
+            self.add_binding(
+                local_name.clone(),
+                BindingSource::Import {
+                    module_path: module_path.clone(),
+                    original_name: original_name.clone(),
+                    is_type_only,
+                    is_re_export: false,
+                },
+                if is_type_only {
+                    vec!["type-only".into()]
+                } else {
+                    vec![]
+                },
+            );
+            self.lookup.push_import(ImportRecord {
+                local_name,
+                origin_module: module_path.clone(),
+                origin_symbol: original_name,
+                is_type_only,
+                is_re_export: false,
+            });
+        }
+    }
 
-	fn record_export_named(&mut self, named: &NamedExport) {
-		// Re-exports (`export { x } from "..."`) introduce bindings that
-		// originate from another module — record both the import-like
-		// binding (so the resolver can chase the origin) and the flat
-		// ImportRecord for Stage 3b.
-		let Some(src) = named.src.as_deref() else {
-			return;
-		};
-		let module_path = src.value.to_string_lossy().into_owned();
-		let decl_type_only = named.type_only;
-		for spec in &named.specifiers {
-			if let ExportSpecifier::Named(named_spec) = spec {
-				let local_export_name = match &named_spec.orig {
-					ModuleExportName::Ident(i) => i.sym.to_string(),
-					ModuleExportName::Str(s) => s.value.to_string_lossy().into_owned(),
-				};
-				let local_alias = named_spec
-					.exported
-					.as_ref()
-					.map(|m| match m {
-						ModuleExportName::Ident(i) => i.sym.to_string(),
-						ModuleExportName::Str(s) => s.value.to_string_lossy().into_owned(),
-					})
-					.unwrap_or_else(|| local_export_name.clone());
-				let is_type_only = decl_type_only || named_spec.is_type_only;
-				self.add_binding(
-					local_alias.clone(),
-					BindingSource::Import {
-						module_path: module_path.clone(),
-						original_name: Some(local_export_name.clone()),
-						is_type_only,
-						is_re_export: true,
-					},
-					if is_type_only {
-						vec!["type-only".into(), "re-export".into()]
-					} else {
-						vec!["re-export".into()]
-					},
-				);
-				self.lookup.push_import(ImportRecord {
-					local_name: local_alias,
-					origin_module: module_path.clone(),
-					origin_symbol: Some(local_export_name),
-					is_type_only,
-					is_re_export: true,
-				});
-			}
-		}
-	}
+    fn record_export_named(&mut self, named: &NamedExport) {
+        // Re-exports (`export { x } from "..."`) introduce bindings that
+        // originate from another module — record both the import-like
+        // binding (so the resolver can chase the origin) and the flat
+        // ImportRecord for Stage 3b.
+        let Some(src) = named.src.as_deref() else {
+            return;
+        };
+        let module_path = src.value.to_string_lossy().into_owned();
+        let decl_type_only = named.type_only;
+        for spec in &named.specifiers {
+            if let ExportSpecifier::Named(named_spec) = spec {
+                let local_export_name = match &named_spec.orig {
+                    ModuleExportName::Ident(i) => i.sym.to_string(),
+                    ModuleExportName::Str(s) => s.value.to_string_lossy().into_owned(),
+                };
+                let local_alias = named_spec
+                    .exported
+                    .as_ref()
+                    .map(|m| match m {
+                        ModuleExportName::Ident(i) => i.sym.to_string(),
+                        ModuleExportName::Str(s) => s.value.to_string_lossy().into_owned(),
+                    })
+                    .unwrap_or_else(|| local_export_name.clone());
+                let is_type_only = decl_type_only || named_spec.is_type_only;
+                self.add_binding(
+                    local_alias.clone(),
+                    BindingSource::Import {
+                        module_path: module_path.clone(),
+                        original_name: Some(local_export_name.clone()),
+                        is_type_only,
+                        is_re_export: true,
+                    },
+                    if is_type_only {
+                        vec!["type-only".into(), "re-export".into()]
+                    } else {
+                        vec!["re-export".into()]
+                    },
+                );
+                self.lookup.push_import(ImportRecord {
+                    local_name: local_alias,
+                    origin_module: module_path.clone(),
+                    origin_symbol: Some(local_export_name),
+                    is_type_only,
+                    is_re_export: true,
+                });
+            }
+        }
+    }
 }
 
 impl<'a> Visit for LookupBuilder<'a> {
-	fn visit_function(&mut self, node: &Function) {
-		self.push_scope(ScopeKind::Function, node.span.lo, node.span.hi);
-		bind_type_params_from_function(self, node);
-		for param in &node.params {
-			self.bind_pat(&param.pat, BindingSource::Param, vec![]);
-		}
-		node.visit_children_with(self);
-		self.pop_scope();
-	}
+    fn visit_function(&mut self, node: &Function) {
+        self.push_scope(ScopeKind::Function, node.span.lo, node.span.hi);
+        bind_type_params_from_function(self, node);
+        for param in &node.params {
+            self.bind_pat(&param.pat, BindingSource::Param, vec![]);
+        }
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
 
-	fn visit_arrow_expr(&mut self, node: &ArrowExpr) {
-		self.push_scope(ScopeKind::Function, node.span.lo, node.span.hi);
-		for tp in node.type_params.iter().flat_map(|t| &t.params) {
-			self.add_binding(
-				tp.name.sym.to_string(),
-				BindingSource::TypeParam,
-				vec![],
-			);
-		}
-		for param in &node.params {
-			self.bind_pat(param, BindingSource::Param, vec![]);
-		}
-		node.visit_children_with(self);
-		self.pop_scope();
-	}
+    fn visit_arrow_expr(&mut self, node: &ArrowExpr) {
+        self.push_scope(ScopeKind::Function, node.span.lo, node.span.hi);
+        for tp in node.type_params.iter().flat_map(|t| &t.params) {
+            self.add_binding(tp.name.sym.to_string(), BindingSource::TypeParam, vec![]);
+        }
+        for param in &node.params {
+            self.bind_pat(param, BindingSource::Param, vec![]);
+        }
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
 
-	fn visit_block_stmt(&mut self, node: &BlockStmt) {
-		self.push_scope(ScopeKind::Block, node.span.lo, node.span.hi);
-		node.visit_children_with(self);
-		self.pop_scope();
-	}
+    fn visit_block_stmt(&mut self, node: &BlockStmt) {
+        self.push_scope(ScopeKind::Block, node.span.lo, node.span.hi);
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
 
-	fn visit_class(&mut self, node: &Class) {
-		self.push_scope(ScopeKind::TypeContainer, node.span.lo, node.span.hi);
-		for tp in node.type_params.iter().flat_map(|t| &t.params) {
-			self.add_binding(
-				tp.name.sym.to_string(),
-				BindingSource::TypeParam,
-				vec![],
-			);
-		}
-		node.visit_children_with(self);
-		self.pop_scope();
-	}
+    fn visit_class(&mut self, node: &Class) {
+        self.push_scope(ScopeKind::TypeContainer, node.span.lo, node.span.hi);
+        for tp in node.type_params.iter().flat_map(|t| &t.params) {
+            self.add_binding(tp.name.sym.to_string(), BindingSource::TypeParam, vec![]);
+        }
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
 
-	/// Constructor envelope — mirror of `visit_function` for SWC's
-	/// `Constructor` node (distinct AST type from `Function`, no
-	/// `return_type`, no `type_params`). Params are `ParamOrTsParamProp`:
-	/// plain `Param` follows the usual `bind_pat` path, while the
-	/// `TsParamProp` shorthand (`constructor(private readonly db: Db)`)
-	/// also seeds a binding for the ident — tagged with the
-	/// `"param-property"` attribute so consumers can recognise the
-	/// double-duty (param + implicit `this.db = db` assignment).
-	fn visit_constructor(&mut self, node: &Constructor) {
-		self.push_scope(ScopeKind::Function, node.span.lo, node.span.hi);
-		for param in &node.params {
-			match param {
-				ParamOrTsParamProp::Param(p) => {
-					self.bind_pat(&p.pat, BindingSource::Param, vec![]);
-				}
-				ParamOrTsParamProp::TsParamProp(prop) => {
-					match &prop.param {
-						TsParamPropParam::Ident(id) => self.add_binding(
-							id.id.sym.to_string(),
-							BindingSource::Param,
-							vec!["param-property".into()],
-						),
-						TsParamPropParam::Assign(assign) => self.bind_pat(
-							&assign.left,
-							BindingSource::Param,
-							vec!["param-property".into()],
-						),
-					}
-				}
-			}
-		}
-		node.visit_children_with(self);
-		self.pop_scope();
-	}
+    /// Constructor envelope — mirror of `visit_function` for SWC's
+    /// `Constructor` node (distinct AST type from `Function`, no
+    /// `return_type`, no `type_params`). Params are `ParamOrTsParamProp`:
+    /// plain `Param` follows the usual `bind_pat` path, while the
+    /// `TsParamProp` shorthand (`constructor(private readonly db: Db)`)
+    /// also seeds a binding for the ident — tagged with the
+    /// `"param-property"` attribute so consumers can recognise the
+    /// double-duty (param + implicit `this.db = db` assignment).
+    fn visit_constructor(&mut self, node: &Constructor) {
+        self.push_scope(ScopeKind::Function, node.span.lo, node.span.hi);
+        for param in &node.params {
+            match param {
+                ParamOrTsParamProp::Param(p) => {
+                    self.bind_pat(&p.pat, BindingSource::Param, vec![]);
+                }
+                ParamOrTsParamProp::TsParamProp(prop) => match &prop.param {
+                    TsParamPropParam::Ident(id) => self.add_binding(
+                        id.id.sym.to_string(),
+                        BindingSource::Param,
+                        vec!["param-property".into()],
+                    ),
+                    TsParamPropParam::Assign(assign) => self.bind_pat(
+                        &assign.left,
+                        BindingSource::Param,
+                        vec!["param-property".into()],
+                    ),
+                },
+            }
+        }
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
 
-	fn visit_class_decl(&mut self, node: &ClassDecl) {
-		// Class name is hoisted at module level by `hoist_module_items`.
-		// Just descend so `visit_class` handles type params + body scope.
-		node.visit_children_with(self);
-	}
+    fn visit_class_decl(&mut self, node: &ClassDecl) {
+        // Class name is hoisted at module level by `hoist_module_items`.
+        // Just descend so `visit_class` handles type params + body scope.
+        node.visit_children_with(self);
+    }
 
-	fn visit_for_stmt(&mut self, node: &ForStmt) {
-		self.push_scope(ScopeKind::Loop, node.span.lo, node.span.hi);
-		node.visit_children_with(self);
-		self.pop_scope();
-	}
+    fn visit_for_stmt(&mut self, node: &ForStmt) {
+        self.push_scope(ScopeKind::Loop, node.span.lo, node.span.hi);
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
 
-	fn visit_for_in_stmt(&mut self, node: &ForInStmt) {
-		self.push_scope(ScopeKind::Loop, node.span.lo, node.span.hi);
-		node.visit_children_with(self);
-		self.pop_scope();
-	}
+    fn visit_for_in_stmt(&mut self, node: &ForInStmt) {
+        self.push_scope(ScopeKind::Loop, node.span.lo, node.span.hi);
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
 
-	fn visit_for_of_stmt(&mut self, node: &ForOfStmt) {
-		self.push_scope(ScopeKind::Loop, node.span.lo, node.span.hi);
-		node.visit_children_with(self);
-		self.pop_scope();
-	}
+    fn visit_for_of_stmt(&mut self, node: &ForOfStmt) {
+        self.push_scope(ScopeKind::Loop, node.span.lo, node.span.hi);
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
 
-	fn visit_catch_clause(&mut self, node: &CatchClause) {
-		self.push_scope(ScopeKind::Catch, node.span.lo, node.span.hi);
-		if let Some(pat) = &node.param {
-			self.bind_pat(pat, BindingSource::Param, vec![]);
-		}
-		node.visit_children_with(self);
-		self.pop_scope();
-	}
+    fn visit_catch_clause(&mut self, node: &CatchClause) {
+        self.push_scope(ScopeKind::Catch, node.span.lo, node.span.hi);
+        if let Some(pat) = &node.param {
+            self.bind_pat(pat, BindingSource::Param, vec![]);
+        }
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
 
-	fn visit_var_decl(&mut self, node: &VarDecl) {
-		// Top-level (ROOT_SCOPE) var/let/const were already hoisted in the
-		// first pass — skip re-binding to avoid duplicates. Nested ones
-		// bind at the current scope at the point of declaration.
-		if self.current_scope() != ModuleLookup::ROOT_SCOPE {
-			let decl_kind = var_decl_kind_to_local(node.kind);
-			for declarator in &node.decls {
-				self.bind_var_declarator(declarator, &decl_kind);
-			}
-		}
-		node.visit_children_with(self);
-	}
+    fn visit_var_decl(&mut self, node: &VarDecl) {
+        // Top-level (ROOT_SCOPE) var/let/const were already hoisted in the
+        // first pass — skip re-binding to avoid duplicates. Nested ones
+        // bind at the current scope at the point of declaration.
+        if self.current_scope() != ModuleLookup::ROOT_SCOPE {
+            let decl_kind = var_decl_kind_to_local(node.kind);
+            for declarator in &node.decls {
+                self.bind_var_declarator(declarator, &decl_kind);
+            }
+        }
+        node.visit_children_with(self);
+    }
 
-	fn visit_fn_decl(&mut self, node: &FnDecl) {
-		// Nested fn decls bind at the current scope (their name); top-level
-		// is hoisted already.
-		if self.current_scope() != ModuleLookup::ROOT_SCOPE {
-			self.add_binding(
-				node.ident.sym.to_string(),
-				BindingSource::LocalDecl {
-					decl_kind: LocalDeclKind::Function,
-				},
-				vec![],
-			);
-		}
-		node.visit_children_with(self);
-	}
+    fn visit_fn_decl(&mut self, node: &FnDecl) {
+        // Nested fn decls bind at the current scope (their name); top-level
+        // is hoisted already.
+        if self.current_scope() != ModuleLookup::ROOT_SCOPE {
+            self.add_binding(
+                node.ident.sym.to_string(),
+                BindingSource::LocalDecl {
+                    decl_kind: LocalDeclKind::Function,
+                },
+                vec![],
+            );
+        }
+        node.visit_children_with(self);
+    }
 
-	fn visit_ts_type_alias_decl(&mut self, node: &TsTypeAliasDecl) {
-		// Top-level already hoisted; nested would land here. Type params
-		// bind in the alias's own scope.
-		self.push_scope(ScopeKind::TypeContainer, node.span.lo, node.span.hi);
-		for tp in node.type_params.iter().flat_map(|t| &t.params) {
-			self.add_binding(
-				tp.name.sym.to_string(),
-				BindingSource::TypeParam,
-				vec![],
-			);
-		}
-		node.visit_children_with(self);
-		self.pop_scope();
-	}
+    fn visit_ts_type_alias_decl(&mut self, node: &TsTypeAliasDecl) {
+        // Top-level already hoisted; nested would land here. Type params
+        // bind in the alias's own scope.
+        self.push_scope(ScopeKind::TypeContainer, node.span.lo, node.span.hi);
+        for tp in node.type_params.iter().flat_map(|t| &t.params) {
+            self.add_binding(tp.name.sym.to_string(), BindingSource::TypeParam, vec![]);
+        }
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
 
-	fn visit_ts_interface_decl(&mut self, node: &TsInterfaceDecl) {
-		self.push_scope(ScopeKind::TypeContainer, node.span.lo, node.span.hi);
-		for tp in node.type_params.iter().flat_map(|t| &t.params) {
-			self.add_binding(
-				tp.name.sym.to_string(),
-				BindingSource::TypeParam,
-				vec![],
-			);
-		}
-		node.visit_children_with(self);
-		self.pop_scope();
-	}
+    fn visit_ts_interface_decl(&mut self, node: &TsInterfaceDecl) {
+        self.push_scope(ScopeKind::TypeContainer, node.span.lo, node.span.hi);
+        for tp in node.type_params.iter().flat_map(|t| &t.params) {
+            self.add_binding(tp.name.sym.to_string(), BindingSource::TypeParam, vec![]);
+        }
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
 
-	fn visit_ts_enum_decl(&mut self, node: &TsEnumDecl) {
-		// Enum members are sub-symbols (Bug C-1) — they are bindings inside
-		// the enum's own scope so qualified refs `Color.Red` can resolve.
-		self.push_scope(ScopeKind::TypeContainer, node.span.lo, node.span.hi);
-		for member in &node.members {
-			if let Some(name) = ts_enum_member_id_name(&member.id) {
-				self.add_binding(
-					name,
-					BindingSource::LocalDecl {
-						decl_kind: LocalDeclKind::Const,
-					},
-					vec!["enum-member".into()],
-				);
-			}
-		}
-		node.visit_children_with(self);
-		self.pop_scope();
-	}
+    fn visit_ts_enum_decl(&mut self, node: &TsEnumDecl) {
+        // Enum members are sub-symbols (Bug C-1) — they are bindings inside
+        // the enum's own scope so qualified refs `Color.Red` can resolve.
+        self.push_scope(ScopeKind::TypeContainer, node.span.lo, node.span.hi);
+        for member in &node.members {
+            if let Some(name) = ts_enum_member_id_name(&member.id) {
+                self.add_binding(
+                    name,
+                    BindingSource::LocalDecl {
+                        decl_kind: LocalDeclKind::Const,
+                    },
+                    vec!["enum-member".into()],
+                );
+            }
+        }
+        node.visit_children_with(self);
+        self.pop_scope();
+    }
 }
 
 fn bind_type_params_from_function(builder: &mut LookupBuilder<'_>, node: &Function) {
-	for tp in node.type_params.iter().flat_map(|t| &t.params) {
-		builder.add_binding(
-			tp.name.sym.to_string(),
-			BindingSource::TypeParam,
-			vec![],
-		);
-	}
+    for tp in node.type_params.iter().flat_map(|t| &t.params) {
+        builder.add_binding(tp.name.sym.to_string(), BindingSource::TypeParam, vec![]);
+    }
 }
 
 fn var_decl_kind_to_local(kind: VarDeclKind) -> LocalDeclKind {
-	match kind {
-		VarDeclKind::Var => LocalDeclKind::Var,
-		VarDeclKind::Let => LocalDeclKind::Let,
-		VarDeclKind::Const => LocalDeclKind::Const,
-	}
+    match kind {
+        VarDeclKind::Var => LocalDeclKind::Var,
+        VarDeclKind::Let => LocalDeclKind::Let,
+        VarDeclKind::Const => LocalDeclKind::Const,
+    }
 }
 
-fn ts_enum_member_id_name(
-	id: &swc_core::ecma::ast::TsEnumMemberId,
-) -> Option<String> {
-	match id {
-		swc_core::ecma::ast::TsEnumMemberId::Ident(i) => Some(i.sym.to_string()),
-		swc_core::ecma::ast::TsEnumMemberId::Str(s) => {
-			Some(s.value.to_string_lossy().into_owned())
-		}
-	}
+fn ts_enum_member_id_name(id: &swc_core::ecma::ast::TsEnumMemberId) -> Option<String> {
+    match id {
+        swc_core::ecma::ast::TsEnumMemberId::Ident(i) => Some(i.sym.to_string()),
+        swc_core::ecma::ast::TsEnumMemberId::Str(s) => Some(s.value.to_string_lossy().into_owned()),
+    }
 }
 
 /// Leftmost-base ident of an alias RHS expression. Mirrors the Stage 2
@@ -612,289 +586,288 @@ fn ts_enum_member_id_name(
 /// `obj[x]` all alias to `FOO` / `obj` / `obj` / `obj`. Returns `None`
 /// for non-aliasable RHS (calls, literals, function expressions, etc.).
 fn resolve_alias_rhs(expr: &Expr) -> Option<String> {
-	match expr {
-		Expr::Ident(ident) => Some(ident.sym.to_string()),
-		Expr::Member(MemberExpr { obj, .. }) => resolve_alias_rhs(obj),
-		_ => None,
-	}
+    match expr {
+        Expr::Ident(ident) => Some(ident.sym.to_string()),
+        Expr::Member(MemberExpr { obj, .. }) => resolve_alias_rhs(obj),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use swc_core::common::{FileName, SourceMap, sync::Lrc};
-	use swc_core::ecma::parser::{Parser, StringInput, Syntax, TsSyntax};
+    use super::*;
+    use swc_core::common::{FileName, SourceMap, sync::Lrc};
+    use swc_core::ecma::parser::{Parser, StringInput, Syntax, TsSyntax};
 
-	fn parse(src: &str) -> Module {
-		let cm: Lrc<SourceMap> = Default::default();
-		let fm = cm.new_source_file(
-			Lrc::new(FileName::Custom("test.ts".into())),
-			src.to_string(),
-		);
-		let mut parser = Parser::new(
-			Syntax::Typescript(TsSyntax {
-				tsx: false,
-				..Default::default()
-			}),
-			StringInput::from(&*fm),
-			None,
-		);
-		parser.parse_module().expect("parse ok")
-	}
+    fn parse(src: &str) -> Module {
+        let cm: Lrc<SourceMap> = Default::default();
+        let fm = cm.new_source_file(
+            Lrc::new(FileName::Custom("test.ts".into())),
+            src.to_string(),
+        );
+        let mut parser = Parser::new(
+            Syntax::Typescript(TsSyntax {
+                tsx: false,
+                ..Default::default()
+            }),
+            StringInput::from(&*fm),
+            None,
+        );
+        parser.parse_module().expect("parse ok")
+    }
 
-	#[test]
-	fn module_lookup_carries_module_fqdn_and_language() {
-		let module = parse("export const x = 1;\n");
-		let lookup = build_ts_lookup(&module, "pkg::src::index");
-		assert_eq!(lookup.module_fqdn, "pkg::src::index");
-		assert_eq!(lookup.language, Language::TypeScript);
-	}
+    #[test]
+    fn module_lookup_carries_module_fqdn_and_language() {
+        let module = parse("export const x = 1;\n");
+        let lookup = build_ts_lookup(&module, "pkg::src::index");
+        assert_eq!(lookup.module_fqdn, "pkg::src::index");
+        assert_eq!(lookup.language, Language::TypeScript);
+    }
 
-	#[test]
-	fn top_level_function_and_class_hoisted_to_root() {
-		let module = parse("function f() {}\nclass C {}\n");
-		let lookup = build_ts_lookup(&module, "m");
-		let f = lookup
-			.bindings
-			.get("f")
-			.and_then(|v| v.first())
-			.expect("f binding");
-		assert_eq!(f.scope_idx, ModuleLookup::ROOT_SCOPE);
-		assert!(matches!(
-			f.source,
-			BindingSource::LocalDecl {
-				decl_kind: LocalDeclKind::Function
-			}
-		));
-		let c = lookup
-			.bindings
-			.get("C")
-			.and_then(|v| v.first())
-			.expect("C binding");
-		assert_eq!(c.scope_idx, ModuleLookup::ROOT_SCOPE);
-		assert!(matches!(
-			c.source,
-			BindingSource::LocalDecl {
-				decl_kind: LocalDeclKind::Class
-			}
-		));
-	}
+    #[test]
+    fn top_level_function_and_class_hoisted_to_root() {
+        let module = parse("function f() {}\nclass C {}\n");
+        let lookup = build_ts_lookup(&module, "m");
+        let f = lookup
+            .bindings
+            .get("f")
+            .and_then(|v| v.first())
+            .expect("f binding");
+        assert_eq!(f.scope_idx, ModuleLookup::ROOT_SCOPE);
+        assert!(matches!(
+            f.source,
+            BindingSource::LocalDecl {
+                decl_kind: LocalDeclKind::Function
+            }
+        ));
+        let c = lookup
+            .bindings
+            .get("C")
+            .and_then(|v| v.first())
+            .expect("C binding");
+        assert_eq!(c.scope_idx, ModuleLookup::ROOT_SCOPE);
+        assert!(matches!(
+            c.source,
+            BindingSource::LocalDecl {
+                decl_kind: LocalDeclKind::Class
+            }
+        ));
+    }
 
-	#[test]
-	fn imports_populate_both_bindings_and_import_records() {
-		let src = r#"import { foo, bar as baz } from "other";
+    #[test]
+    fn imports_populate_both_bindings_and_import_records() {
+        let src = r#"import { foo, bar as baz } from "other";
 import type { T } from "other";
 import def from "default-pkg";
 import * as ns from "ns-pkg";
 "#;
-		let module = parse(src);
-		let lookup = build_ts_lookup(&module, "m");
+        let module = parse(src);
+        let lookup = build_ts_lookup(&module, "m");
 
-		assert!(lookup.bindings.contains_key("foo"));
-		assert!(lookup.bindings.contains_key("baz"));
-		assert!(lookup.bindings.contains_key("T"));
-		assert!(lookup.bindings.contains_key("def"));
-		assert!(lookup.bindings.contains_key("ns"));
+        assert!(lookup.bindings.contains_key("foo"));
+        assert!(lookup.bindings.contains_key("baz"));
+        assert!(lookup.bindings.contains_key("T"));
+        assert!(lookup.bindings.contains_key("def"));
+        assert!(lookup.bindings.contains_key("ns"));
 
-		// foo: regular import, not type-only
-		let foo = lookup.bindings.get("foo").and_then(|v| v.first()).unwrap();
-		match &foo.source {
-			BindingSource::Import {
-				module_path,
-				is_type_only,
-				..
-			} => {
-				assert_eq!(module_path, "other");
-				assert!(!is_type_only);
-			}
-			other => panic!("expected Import, got {other:?}"),
-		}
+        // foo: regular import, not type-only
+        let foo = lookup.bindings.get("foo").and_then(|v| v.first()).unwrap();
+        match &foo.source {
+            BindingSource::Import {
+                module_path,
+                is_type_only,
+                ..
+            } => {
+                assert_eq!(module_path, "other");
+                assert!(!is_type_only);
+            }
+            other => panic!("expected Import, got {other:?}"),
+        }
 
-		// T: type-only import
-		let t = lookup.bindings.get("T").and_then(|v| v.first()).unwrap();
-		match &t.source {
-			BindingSource::Import { is_type_only, .. } => {
-				assert!(is_type_only);
-			}
-			other => panic!("expected Import, got {other:?}"),
-		}
-		assert!(t.attributes.iter().any(|a| a == "type-only"));
+        // T: type-only import
+        let t = lookup.bindings.get("T").and_then(|v| v.first()).unwrap();
+        match &t.source {
+            BindingSource::Import { is_type_only, .. } => {
+                assert!(is_type_only);
+            }
+            other => panic!("expected Import, got {other:?}"),
+        }
+        assert!(t.attributes.iter().any(|a| a == "type-only"));
 
-		// baz: aliased — original_name should be `bar`
-		let baz = lookup.bindings.get("baz").and_then(|v| v.first()).unwrap();
-		match &baz.source {
-			BindingSource::Import { original_name, .. } => {
-				assert_eq!(original_name.as_deref(), Some("bar"));
-			}
-			other => panic!("expected Import, got {other:?}"),
-		}
+        // baz: aliased — original_name should be `bar`
+        let baz = lookup.bindings.get("baz").and_then(|v| v.first()).unwrap();
+        match &baz.source {
+            BindingSource::Import { original_name, .. } => {
+                assert_eq!(original_name.as_deref(), Some("bar"));
+            }
+            other => panic!("expected Import, got {other:?}"),
+        }
 
-		// 4 import records (foo, baz, T, def, ns)  =  5 entries flat
-		assert_eq!(lookup.imports.len(), 5);
-	}
+        // 4 import records (foo, baz, T, def, ns)  =  5 entries flat
+        assert_eq!(lookup.imports.len(), 5);
+    }
 
-	#[test]
-	fn const_alias_captures_leftmost_base() {
-		let module = parse("const x = FOO;\nconst y = obj.a.b;\nlet z = mut_target;\n");
-		let lookup = build_ts_lookup(&module, "m");
+    #[test]
+    fn const_alias_captures_leftmost_base() {
+        let module = parse("const x = FOO;\nconst y = obj.a.b;\nlet z = mut_target;\n");
+        let lookup = build_ts_lookup(&module, "m");
 
-		let x = lookup.bindings.get("x").and_then(|v| v.first()).unwrap();
-		assert_eq!(x.aliases_to.as_deref(), Some("FOO"));
-		assert_eq!(x.mutability, Some(AliasMutability::Const));
+        let x = lookup.bindings.get("x").and_then(|v| v.first()).unwrap();
+        assert_eq!(x.aliases_to.as_deref(), Some("FOO"));
+        assert_eq!(x.mutability, Some(AliasMutability::Const));
 
-		let y = lookup.bindings.get("y").and_then(|v| v.first()).unwrap();
-		assert_eq!(y.aliases_to.as_deref(), Some("obj"));
+        let y = lookup.bindings.get("y").and_then(|v| v.first()).unwrap();
+        assert_eq!(y.aliases_to.as_deref(), Some("obj"));
 
-		let z = lookup.bindings.get("z").and_then(|v| v.first()).unwrap();
-		assert_eq!(z.aliases_to.as_deref(), Some("mut_target"));
-		assert_eq!(z.mutability, Some(AliasMutability::Mutable));
-	}
+        let z = lookup.bindings.get("z").and_then(|v| v.first()).unwrap();
+        assert_eq!(z.aliases_to.as_deref(), Some("mut_target"));
+        assert_eq!(z.mutability, Some(AliasMutability::Mutable));
+    }
 
-	#[test]
-	fn function_body_var_lands_in_function_scope_not_root() {
-		let module = parse("function f() { const inner = 1; }\n");
-		let lookup = build_ts_lookup(&module, "m");
-		let inner = lookup
-			.bindings
-			.get("inner")
-			.and_then(|v| v.first())
-			.expect("inner binding");
-		assert_ne!(inner.scope_idx, ModuleLookup::ROOT_SCOPE);
-		// Walk parent chain — must reach ROOT.
-		let mut cursor = inner.scope_idx;
-		while let Some(parent) = lookup.scopes[cursor as usize].parent {
-			cursor = parent;
-		}
-		assert_eq!(cursor, ModuleLookup::ROOT_SCOPE);
-	}
+    #[test]
+    fn function_body_var_lands_in_function_scope_not_root() {
+        let module = parse("function f() { const inner = 1; }\n");
+        let lookup = build_ts_lookup(&module, "m");
+        let inner = lookup
+            .bindings
+            .get("inner")
+            .and_then(|v| v.first())
+            .expect("inner binding");
+        assert_ne!(inner.scope_idx, ModuleLookup::ROOT_SCOPE);
+        // Walk parent chain — must reach ROOT.
+        let mut cursor = inner.scope_idx;
+        while let Some(parent) = lookup.scopes[cursor as usize].parent {
+            cursor = parent;
+        }
+        assert_eq!(cursor, ModuleLookup::ROOT_SCOPE);
+    }
 
-	#[test]
-	fn type_param_bound_in_function_scope() {
-		let module = parse("function f<T>(x: T): T { return x; }\n");
-		let lookup = build_ts_lookup(&module, "m");
-		let t = lookup
-			.bindings
-			.get("T")
-			.and_then(|v| v.first())
-			.expect("T binding");
-		assert!(matches!(t.source, BindingSource::TypeParam));
-		assert_ne!(t.scope_idx, ModuleLookup::ROOT_SCOPE);
-	}
+    #[test]
+    fn type_param_bound_in_function_scope() {
+        let module = parse("function f<T>(x: T): T { return x; }\n");
+        let lookup = build_ts_lookup(&module, "m");
+        let t = lookup
+            .bindings
+            .get("T")
+            .and_then(|v| v.first())
+            .expect("T binding");
+        assert!(matches!(t.source, BindingSource::TypeParam));
+        assert_ne!(t.scope_idx, ModuleLookup::ROOT_SCOPE);
+    }
 
-	#[test]
-	fn enum_members_bound_inside_enum_scope() {
-		let module = parse("enum Color { Red, Green }\n");
-		let lookup = build_ts_lookup(&module, "m");
-		// Color binding at root.
-		assert!(lookup.bindings.contains_key("Color"));
-		// Red + Green inside the enum's TypeContainer scope.
-		let red = lookup
-			.bindings
-			.get("Red")
-			.and_then(|v| v.first())
-			.expect("Red binding");
-		assert_ne!(red.scope_idx, ModuleLookup::ROOT_SCOPE);
-		assert!(red.attributes.iter().any(|a| a == "enum-member"));
-	}
+    #[test]
+    fn enum_members_bound_inside_enum_scope() {
+        let module = parse("enum Color { Red, Green }\n");
+        let lookup = build_ts_lookup(&module, "m");
+        // Color binding at root.
+        assert!(lookup.bindings.contains_key("Color"));
+        // Red + Green inside the enum's TypeContainer scope.
+        let red = lookup
+            .bindings
+            .get("Red")
+            .and_then(|v| v.first())
+            .expect("Red binding");
+        assert_ne!(red.scope_idx, ModuleLookup::ROOT_SCOPE);
+        assert!(red.attributes.iter().any(|a| a == "enum-member"));
+    }
 
-	#[test]
-	fn destructuring_tags_attribute_and_still_binds_idents() {
-		let module = parse("const { a, b: c } = obj;\nconst [x, y] = arr;\n");
-		let lookup = build_ts_lookup(&module, "m");
-		for n in ["a", "c", "x", "y"] {
-			let b = lookup
-				.bindings
-				.get(n)
-				.and_then(|v| v.first())
-				.unwrap_or_else(|| panic!("{n} binding missing"));
-			assert!(
-				b.attributes.iter().any(|a| a == "unhandled-destructuring"),
-				"{n} should carry unhandled-destructuring"
-			);
-		}
-	}
+    #[test]
+    fn destructuring_tags_attribute_and_still_binds_idents() {
+        let module = parse("const { a, b: c } = obj;\nconst [x, y] = arr;\n");
+        let lookup = build_ts_lookup(&module, "m");
+        for n in ["a", "c", "x", "y"] {
+            let b = lookup
+                .bindings
+                .get(n)
+                .and_then(|v| v.first())
+                .unwrap_or_else(|| panic!("{n} binding missing"));
+            assert!(
+                b.attributes.iter().any(|a| a == "unhandled-destructuring"),
+                "{n} should carry unhandled-destructuring"
+            );
+        }
+    }
 
-	#[test]
-	fn resolve_local_walks_chain_to_root_binding() {
-		let module = parse("const outer = 1;\nfunction f() { const inner = outer; }\n");
-		let lookup = build_ts_lookup(&module, "m");
-		let inner_scope = lookup
-			.bindings
-			.get("inner")
-			.and_then(|v| v.first())
-			.unwrap()
-			.scope_idx;
-		// `outer` is reachable from inside `f`'s scope via parent chain.
-		let outer = lookup
-			.resolve_local("outer", inner_scope)
-			.expect("outer reachable via parent");
-		assert_eq!(outer.scope_idx, ModuleLookup::ROOT_SCOPE);
-	}
+    #[test]
+    fn resolve_local_walks_chain_to_root_binding() {
+        let module = parse("const outer = 1;\nfunction f() { const inner = outer; }\n");
+        let lookup = build_ts_lookup(&module, "m");
+        let inner_scope = lookup
+            .bindings
+            .get("inner")
+            .and_then(|v| v.first())
+            .unwrap()
+            .scope_idx;
+        // `outer` is reachable from inside `f`'s scope via parent chain.
+        let outer = lookup
+            .resolve_local("outer", inner_scope)
+            .expect("outer reachable via parent");
+        assert_eq!(outer.scope_idx, ModuleLookup::ROOT_SCOPE);
+    }
 
-	// --- Constructor param binding (IR-4-c follow-up) ----------------------
+    // --- Constructor param binding (IR-4-c follow-up) ----------------------
 
-	#[test]
-	fn constructor_plain_param_bound_in_function_scope() {
-		// Plain `Param` (not `TsParamProp`) inside a constructor must
-		// land in the constructor's Function scope, just like a normal
-		// fn param — proves the `ParamOrTsParamProp::Param` branch of
-		// `visit_constructor` routes through `bind_pat` correctly.
-		let module = parse("class Foo { constructor(x: number) {} }\n");
-		let lookup = build_ts_lookup(&module, "m");
-		let x = lookup
-			.bindings
-			.get("x")
-			.and_then(|v| v.first())
-			.expect("x binding");
-		assert!(matches!(x.source, BindingSource::Param));
-		assert_ne!(x.scope_idx, ModuleLookup::ROOT_SCOPE);
-		assert!(
-			!x.attributes.iter().any(|a| a == "param-property"),
-			"plain Param must NOT carry param-property"
-		);
-	}
+    #[test]
+    fn constructor_plain_param_bound_in_function_scope() {
+        // Plain `Param` (not `TsParamProp`) inside a constructor must
+        // land in the constructor's Function scope, just like a normal
+        // fn param — proves the `ParamOrTsParamProp::Param` branch of
+        // `visit_constructor` routes through `bind_pat` correctly.
+        let module = parse("class Foo { constructor(x: number) {} }\n");
+        let lookup = build_ts_lookup(&module, "m");
+        let x = lookup
+            .bindings
+            .get("x")
+            .and_then(|v| v.first())
+            .expect("x binding");
+        assert!(matches!(x.source, BindingSource::Param));
+        assert_ne!(x.scope_idx, ModuleLookup::ROOT_SCOPE);
+        assert!(
+            !x.attributes.iter().any(|a| a == "param-property"),
+            "plain Param must NOT carry param-property"
+        );
+    }
 
-	#[test]
-	fn constructor_ts_param_prop_ident_seeds_binding_with_attribute() {
-		// `constructor(private readonly db: Db)` shorthand — `db` is a
-		// param-property: SWC encodes it as TsParamProp(Ident). The
-		// lookup builder must seed `db` as a Param binding so body refs
-		// resolve, AND tag it `param-property` so consumers can recognise
-		// the implicit `this.db = db` assignment.
-		let module =
-			parse("class Foo { constructor(private readonly db: Db) {} }\n");
-		let lookup = build_ts_lookup(&module, "m");
-		let db = lookup
-			.bindings
-			.get("db")
-			.and_then(|v| v.first())
-			.expect("db binding");
-		assert!(matches!(db.source, BindingSource::Param));
-		assert_ne!(db.scope_idx, ModuleLookup::ROOT_SCOPE);
-		assert!(
-			db.attributes.iter().any(|a| a == "param-property"),
-			"TsParamProp must carry param-property attribute"
-		);
-	}
+    #[test]
+    fn constructor_ts_param_prop_ident_seeds_binding_with_attribute() {
+        // `constructor(private readonly db: Db)` shorthand — `db` is a
+        // param-property: SWC encodes it as TsParamProp(Ident). The
+        // lookup builder must seed `db` as a Param binding so body refs
+        // resolve, AND tag it `param-property` so consumers can recognise
+        // the implicit `this.db = db` assignment.
+        let module = parse("class Foo { constructor(private readonly db: Db) {} }\n");
+        let lookup = build_ts_lookup(&module, "m");
+        let db = lookup
+            .bindings
+            .get("db")
+            .and_then(|v| v.first())
+            .expect("db binding");
+        assert!(matches!(db.source, BindingSource::Param));
+        assert_ne!(db.scope_idx, ModuleLookup::ROOT_SCOPE);
+        assert!(
+            db.attributes.iter().any(|a| a == "param-property"),
+            "TsParamProp must carry param-property attribute"
+        );
+    }
 
-	#[test]
-	fn constructor_ts_param_prop_with_default_value_binds_via_assign_pat() {
-		// `constructor(public x = 0)` — TsParamProp(Assign) variant.
-		// SWC encodes the LHS as a `Pat` (here `Pat::Ident("x")`) inside
-		// an AssignPat. The lookup builder must route through `bind_pat`
-		// to seed the underlying ident.
-		let module = parse("class Foo { constructor(public x = 0) {} }\n");
-		let lookup = build_ts_lookup(&module, "m");
-		let x = lookup
-			.bindings
-			.get("x")
-			.and_then(|v| v.first())
-			.expect("x binding");
-		assert!(matches!(x.source, BindingSource::Param));
-		assert_ne!(x.scope_idx, ModuleLookup::ROOT_SCOPE);
-		assert!(
-			x.attributes.iter().any(|a| a == "param-property"),
-			"TsParamProp(Assign) must carry param-property attribute"
-		);
-	}
+    #[test]
+    fn constructor_ts_param_prop_with_default_value_binds_via_assign_pat() {
+        // `constructor(public x = 0)` — TsParamProp(Assign) variant.
+        // SWC encodes the LHS as a `Pat` (here `Pat::Ident("x")`) inside
+        // an AssignPat. The lookup builder must route through `bind_pat`
+        // to seed the underlying ident.
+        let module = parse("class Foo { constructor(public x = 0) {} }\n");
+        let lookup = build_ts_lookup(&module, "m");
+        let x = lookup
+            .bindings
+            .get("x")
+            .and_then(|v| v.first())
+            .expect("x binding");
+        assert!(matches!(x.source, BindingSource::Param));
+        assert_ne!(x.scope_idx, ModuleLookup::ROOT_SCOPE);
+        assert!(
+            x.attributes.iter().any(|a| a == "param-property"),
+            "TsParamProp(Assign) must carry param-property attribute"
+        );
+    }
 }

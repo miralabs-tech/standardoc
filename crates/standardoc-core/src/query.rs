@@ -8,9 +8,9 @@
 //! `Unresolved { name }` because the stored `to_unresolved` text discards the
 //! `BridgeKind` distinction (cf. storage::conv::unresolved_to_storage).
 
-mod similarity;
 pub mod call_sites;
 pub mod projects;
+mod similarity;
 pub mod workspace;
 
 use rusqlite::{Connection, OptionalExtension, Row};
@@ -2377,7 +2377,11 @@ mod tests {
         };
         let got = list_symbols(&handle, &filter, 50, None).unwrap();
         assert_eq!(got.items.len(), 2);
-        assert!(got.items.iter().all(|s| s.visibility == Visibility::Private));
+        assert!(
+            got.items
+                .iter()
+                .all(|s| s.visibility == Visibility::Private)
+        );
         assert!(got.next_cursor.is_none());
     }
 
@@ -2466,13 +2470,8 @@ mod tests {
         loop {
             iterations += 1;
             assert!(iterations < 100, "pagination loop did not terminate");
-            let page = list_symbols(
-                &handle,
-                &SymbolFilter::default(),
-                2,
-                cursor.as_deref(),
-            )
-            .unwrap();
+            let page =
+                list_symbols(&handle, &SymbolFilter::default(), 2, cursor.as_deref()).unwrap();
             for s in page.items {
                 seen.push(s.fqdn);
             }
@@ -2483,7 +2482,13 @@ mod tests {
         }
         assert_eq!(
             seen,
-            vec!["crate::f0", "crate::f1", "crate::f2", "crate::f3", "crate::f4"],
+            vec![
+                "crate::f0",
+                "crate::f1",
+                "crate::f2",
+                "crate::f3",
+                "crate::f4"
+            ],
         );
     }
 
@@ -2507,13 +2512,7 @@ mod tests {
         }
         // Start past the second item — cursor uses strict `>` so the
         // anchor fqdn itself is NOT included in the next page.
-        let page = list_symbols(
-            &handle,
-            &SymbolFilter::default(),
-            10,
-            Some("crate::f1"),
-        )
-        .unwrap();
+        let page = list_symbols(&handle, &SymbolFilter::default(), 10, Some("crate::f1")).unwrap();
         let fqdns: Vec<&str> = page.items.iter().map(|s| s.fqdn.as_str()).collect();
         assert_eq!(fqdns, vec!["crate::f2", "crate::f3"]);
         assert!(page.next_cursor.is_none());
@@ -3464,8 +3463,7 @@ mod tests {
                 "peer-uuid-l3e1",
             );
         }
-        let got =
-            search_text(&handle, "alpha", 50, &SymbolFilter::default()).unwrap();
+        let got = search_text(&handle, "alpha", 50, &SymbolFilter::default()).unwrap();
         let fqdns: Vec<&str> = got.iter().map(|s| s.fqdn.as_str()).collect();
         assert_eq!(
             fqdns,
@@ -3518,8 +3516,7 @@ mod tests {
                 "peer-uuid-l3e3",
             );
         }
-        let got = find_by_pattern(&handle, "helper_*", &SymbolFilter::default(), 50)
-            .unwrap();
+        let got = find_by_pattern(&handle, "helper_*", &SymbolFilter::default(), 50).unwrap();
         let fqdns: Vec<&str> = got.iter().map(|s| s.fqdn.as_str()).collect();
         assert_eq!(fqdns, vec!["primary::helper_a"]);
     }
@@ -3565,8 +3562,7 @@ mod tests {
                 "peer-uuid-l3e5",
             );
         }
-        let page =
-            list_symbols(&handle, &SymbolFilter::default(), 50, None).unwrap();
+        let page = list_symbols(&handle, &SymbolFilter::default(), 50, None).unwrap();
         let fqdns: Vec<&str> = page.items.iter().map(|s| s.fqdn.as_str()).collect();
         assert_eq!(fqdns, vec!["primary::alpha"]);
     }

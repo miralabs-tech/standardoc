@@ -614,26 +614,21 @@ impl StandardocMcp {
         };
         let raw_for_call = raw_fqdn.clone();
         let opts_clone = opts.clone();
-        let result =
-            tokio::task::spawn_blocking(move || {
-                if let Some(slice) =
-                    query::body_for_fqdn(&handle, &raw_for_call, &opts_clone)?
-                {
-                    return Ok::<_, standardoc_core::StorageError>(Some(slice));
+        let result = tokio::task::spawn_blocking(move || {
+            if let Some(slice) = query::body_for_fqdn(&handle, &raw_for_call, &opts_clone)? {
+                return Ok::<_, standardoc_core::StorageError>(Some(slice));
+            }
+            if raw_for_call.contains('.') {
+                let normalized = normalize_fqdn(&raw_for_call);
+                if let Some(slice) = query::body_for_fqdn(&handle, &normalized, &opts_clone)? {
+                    return Ok(Some(slice));
                 }
-                if raw_for_call.contains('.') {
-                    let normalized = normalize_fqdn(&raw_for_call);
-                    if let Some(slice) =
-                        query::body_for_fqdn(&handle, &normalized, &opts_clone)?
-                    {
-                        return Ok(Some(slice));
-                    }
-                }
-                Ok(None)
-            })
-                .await
-                .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-                .map_err(|e| server_error_to_rmcp(&e.into()))?;
+            }
+            Ok(None)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
         match result {
             Some(slice) => {
@@ -698,7 +693,9 @@ impl StandardocMcp {
                 active: watcher_active,
             },
             indexing: IndexingCapabilityJson { ready },
-            workspace: WorkspaceCapabilityJson { kind: workspace_kind },
+            workspace: WorkspaceCapabilityJson {
+                kind: workspace_kind,
+            },
         }))
     }
 
@@ -1104,10 +1101,12 @@ impl StandardocMcp {
         let handle = self.handle.clone();
         let workspace_id = params.workspace_id.clone();
         let workspace_id_for_watcher = params.workspace_id;
-        tokio::task::spawn_blocking(move || workspace_query::unlink_workspace(&handle, &workspace_id))
-            .await
-            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-            .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        tokio::task::spawn_blocking(move || {
+            workspace_query::unlink_workspace(&handle, &workspace_id)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(|e| server_error_to_rmcp(&e.into()))?;
         // L3d-3: drop the peer from the live watcher registry.
         // Idempotent on the watcher side — safe even if the peer was
         // never registered (e.g. linked with direction=Out, or the
@@ -1141,18 +1140,17 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?;
         match result {
             Ok(stats) => Ok(success_json(&stats)),
-            Err(workspace_query::RefreshPeerError::NotFound(id)) => {
-                Err(ErrorData::invalid_params(
-                    format!("workspace_id not found: {id}"),
-                    Some(serde_json::json!({ "workspace_id": id })),
-                ))
-            }
+            Err(workspace_query::RefreshPeerError::NotFound(id)) => Err(ErrorData::invalid_params(
+                format!("workspace_id not found: {id}"),
+                Some(serde_json::json!({ "workspace_id": id })),
+            )),
             Err(workspace_query::RefreshPeerError::Storage(e)) => {
                 Err(server_error_to_rmcp(&e.into()))
             }
-            Err(workspace_query::RefreshPeerError::Extract(e)) => Err(
-                ErrorData::internal_error(format!("peer extract failed: {e}"), None),
-            ),
+            Err(workspace_query::RefreshPeerError::Extract(e)) => Err(ErrorData::internal_error(
+                format!("peer extract failed: {e}"),
+                None,
+            )),
         }
     }
 
@@ -1196,10 +1194,7 @@ impl StandardocMcp {
                         );
                     }
                     (true, false) => {
-                        unregister_peer_from_watcher(
-                            &self.watcher_slot(),
-                            &outcome.workspace_id,
-                        );
+                        unregister_peer_from_watcher(&self.watcher_slot(), &outcome.workspace_id);
                     }
                     _ => {}
                 }
@@ -1208,8 +1203,7 @@ impl StandardocMcp {
                     root_path: outcome.root_path,
                     previous_direction: link_direction_label(outcome.previous_direction)
                         .to_string(),
-                    new_direction: link_direction_label(outcome.new_direction)
-                        .to_string(),
+                    new_direction: link_direction_label(outcome.new_direction).to_string(),
                 }))
             }
             Err(workspace_query::SetLinkDirectionError::NotFound(id)) => {
@@ -1232,10 +1226,11 @@ impl StandardocMcp {
     )]
     async fn list_linked_workspaces(&self) -> Result<CallToolResult, ErrorData> {
         let handle = self.handle.clone();
-        let rows = tokio::task::spawn_blocking(move || workspace_query::list_linked_workspaces(&handle))
-            .await
-            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-            .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        let rows =
+            tokio::task::spawn_blocking(move || workspace_query::list_linked_workspaces(&handle))
+                .await
+                .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+                .map_err(|e| server_error_to_rmcp(&e.into()))?;
         Ok(success_json(&serde_json::json!({ "workspaces": rows })))
     }
 
@@ -1315,10 +1310,11 @@ impl StandardocMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.handle.clone();
         let path = params.path;
-        let result = tokio::task::spawn_blocking(move || projects_query::project_for_file(&handle, &path))
-            .await
-            .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
-            .map_err(|e| server_error_to_rmcp(&e.into()))?;
+        let result =
+            tokio::task::spawn_blocking(move || projects_query::project_for_file(&handle, &path))
+                .await
+                .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+                .map_err(|e| server_error_to_rmcp(&e.into()))?;
         match result {
             Some(info) => Ok(success_json(&info)),
             None => Ok(success_json(&serde_json::Value::Null)),
@@ -2018,9 +2014,7 @@ fn parse_link_direction(s: &str) -> Result<LinkDirection, ErrorData> {
         "out" => Ok(LinkDirection::Out),
         "bidirectional" => Ok(LinkDirection::Bidirectional),
         other => Err(ErrorData::invalid_params(
-            format!(
-                "unknown direction `{other}` — expected one of: in, out, bidirectional"
-            ),
+            format!("unknown direction `{other}` — expected one of: in, out, bidirectional"),
             None,
         )),
     }
@@ -2032,9 +2026,7 @@ fn parse_indexing_mode(s: Option<&str>) -> Result<IndexingMode, ErrorData> {
         Some("blob_import") => Ok(IndexingMode::BlobImport),
         Some("extract") => Ok(IndexingMode::Extract),
         Some(other) => Err(ErrorData::invalid_params(
-            format!(
-                "unknown indexing_mode `{other}` — expected one of: blob_import, extract"
-            ),
+            format!("unknown indexing_mode `{other}` — expected one of: blob_import, extract"),
             None,
         )),
     }
@@ -2085,10 +2077,7 @@ fn register_peer_with_watcher(
 }
 
 /// L3d-3 helper: drop a peer from the live watcher registry. Idempotent.
-fn unregister_peer_from_watcher(
-    slot: &Arc<Mutex<Option<WatcherHandle>>>,
-    workspace_id: &str,
-) {
+fn unregister_peer_from_watcher(slot: &Arc<Mutex<Option<WatcherHandle>>>, workspace_id: &str) {
     let mut guard = match slot.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
@@ -2570,8 +2559,7 @@ mod tests {
     fn parse_filter_propagates_workspace_id_when_supplied() {
         // L3e-2: workspace_id flows through parse_filter unchanged so
         // downstream SQL narrows to that peer's rows.
-        let f = parse_filter(None, None, None, None, Some("peer-uuid-xyz".into()))
-            .unwrap();
+        let f = parse_filter(None, None, None, None, Some("peer-uuid-xyz".into())).unwrap();
         assert_eq!(f.workspace_id.as_deref(), Some("peer-uuid-xyz"));
         assert_eq!(f.effective_workspace_id(), "peer-uuid-xyz");
     }
@@ -3323,10 +3311,7 @@ mod tests {
             .await
             .expect("unlink ok");
 
-        let list = mcp
-            .list_linked_workspaces()
-            .await
-            .expect("list ok");
+        let list = mcp.list_linked_workspaces().await.expect("list ok");
         let list_body = body_text(&list);
         assert!(
             !list_body.contains(&workspace_id),
@@ -3375,10 +3360,7 @@ mod tests {
 
         let slot = mcp.watcher_slot();
         let guard = slot.lock().unwrap();
-        let snapshot = guard
-            .as_ref()
-            .expect("watcher present")
-            .peers_snapshot();
+        let snapshot = guard.as_ref().expect("watcher present").peers_snapshot();
         assert_eq!(snapshot.len(), 1, "peer must be registered");
         assert_eq!(snapshot[0].workspace_id, workspace_id);
     }
@@ -3416,10 +3398,7 @@ mod tests {
 
         let slot = mcp.watcher_slot();
         let guard = slot.lock().unwrap();
-        let snapshot = guard
-            .as_ref()
-            .expect("watcher present")
-            .peers_snapshot();
+        let snapshot = guard.as_ref().expect("watcher present").peers_snapshot();
         assert!(
             snapshot.is_empty(),
             "Out direction must not register a peer; got {snapshot:?}"
@@ -3471,10 +3450,7 @@ mod tests {
 
         let slot = mcp.watcher_slot();
         let guard = slot.lock().unwrap();
-        let snapshot = guard
-            .as_ref()
-            .expect("watcher present")
-            .peers_snapshot();
+        let snapshot = guard.as_ref().expect("watcher present").peers_snapshot();
         assert!(
             snapshot.is_empty(),
             "peer must be gone from watcher after unlink"
@@ -3537,7 +3513,10 @@ mod tests {
             .await
             .expect("set_link_direction ok");
         let body = body_text(&response);
-        assert!(body.contains("\"previous_direction\": \"out\""), "got `{body}`");
+        assert!(
+            body.contains("\"previous_direction\": \"out\""),
+            "got `{body}`"
+        );
         assert!(body.contains("\"new_direction\": \"in\""), "got `{body}`");
 
         let slot = mcp.watcher_slot();
@@ -3761,10 +3740,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn list_projects_returns_empty_array_on_fresh_index() {
         let (_dir, mcp) = fixture();
-        let result = mcp
-            .list_projects()
-            .await
-            .expect("list_projects ok");
+        let result = mcp.list_projects().await.expect("list_projects ok");
         let body = body_text(&result);
         assert!(body.contains("\"projects\""), "got `{body}`");
         assert!(body.contains("\"projects\": []"), "got `{body}`");
@@ -3782,10 +3758,7 @@ mod tests {
         .unwrap();
         cold_start_workspace(&mcp, dir.path());
 
-        let result = mcp
-            .list_projects()
-            .await
-            .expect("list_projects ok");
+        let result = mcp.list_projects().await.expect("list_projects ok");
         let body = body_text(&result);
         assert!(
             body.contains("\"kind\": \"rust\""),
@@ -3926,7 +3899,11 @@ mod tests {
         let body = body_text(&result);
         let arr: serde_json::Value = serde_json::from_str(&body).unwrap();
         let rows = arr.as_array().unwrap();
-        assert_eq!(rows.len(), 2, "caller_a calls both tauri_invoke + foo, got `{body}`");
+        assert_eq!(
+            rows.len(),
+            2,
+            "caller_a calls both tauri_invoke + foo, got `{body}`"
+        );
         for row in rows {
             assert_eq!(row["from_fqdn"].as_str(), Some("fixture::caller_a"));
         }

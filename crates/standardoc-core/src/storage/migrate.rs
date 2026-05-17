@@ -50,12 +50,24 @@ fn apply_upgrade(conn: &Connection, from: u32) -> Result<(), StorageError> {
         6 => conn.execute_batch(V6_TO_V7_SQL).map_err(StorageError::from),
         7 => conn.execute_batch(V7_TO_V8_SQL).map_err(StorageError::from),
         8 => conn.execute_batch(V8_TO_V9_SQL).map_err(StorageError::from),
-        9 => conn.execute_batch(V9_TO_V10_SQL).map_err(StorageError::from),
-        10 => conn.execute_batch(V10_TO_V11_SQL).map_err(StorageError::from),
-        11 => conn.execute_batch(V11_TO_V12_SQL).map_err(StorageError::from),
-        12 => conn.execute_batch(V12_TO_V13_SQL).map_err(StorageError::from),
-        13 => conn.execute_batch(V13_TO_V14_SQL).map_err(StorageError::from),
-        14 => conn.execute_batch(V14_TO_V15_SQL).map_err(StorageError::from),
+        9 => conn
+            .execute_batch(V9_TO_V10_SQL)
+            .map_err(StorageError::from),
+        10 => conn
+            .execute_batch(V10_TO_V11_SQL)
+            .map_err(StorageError::from),
+        11 => conn
+            .execute_batch(V11_TO_V12_SQL)
+            .map_err(StorageError::from),
+        12 => conn
+            .execute_batch(V12_TO_V13_SQL)
+            .map_err(StorageError::from),
+        13 => conn
+            .execute_batch(V13_TO_V14_SQL)
+            .map_err(StorageError::from),
+        14 => conn
+            .execute_batch(V14_TO_V15_SQL)
+            .map_err(StorageError::from),
         other => Err(StorageError::InvalidSchemaMetadata {
             key: "schema_version".into(),
             value: format!("no upgrade path from version {other}"),
@@ -312,7 +324,9 @@ mod tests {
             );
         }
         let indexes: Vec<String> = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'call_sites'")
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'call_sites'",
+            )
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
@@ -531,9 +545,14 @@ mod tests {
         )
         .unwrap();
         let default_flags: String = conn
-            .query_row("SELECT flags FROM symbols WHERE fqdn = 'x::f'", [], |r| r.get(0))
+            .query_row("SELECT flags FROM symbols WHERE fqdn = 'x::f'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(default_flags, "[]", "legacy-row insertion must default flags to '[]'");
+        assert_eq!(
+            default_flags, "[]",
+            "legacy-row insertion must default flags to '[]'"
+        );
         assert_eq!(
             read_schema_version(&conn).unwrap(),
             SUPPORTED_SCHEMA_VERSION
@@ -705,7 +724,10 @@ mod tests {
         ensure_schema(&conn).unwrap();
 
         // 1. Schema version bumped.
-        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
 
         // 2. Existing rows preserved with same ids — the FK canary
         //    (edge) still resolves both endpoints.
@@ -801,16 +823,15 @@ mod tests {
         // 7. AUTOINCREMENT state sane — next INSERT lands at MAX(id)+1
         //    rather than restarting from 1 or jumping wildly.
         let next_id: i64 = conn
-            .query_row(
-                "SELECT MAX(id) FROM symbols",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT MAX(id) FROM symbols", [], |r| r.get(0))
             .unwrap();
         // We inserted: 2 v11 rows, 1 peer-uuid clone, 1 distinctive_marker
         // → ids 1, 2, 3, 4. The sqlite_sequence must reflect this so
         // the NEXT INSERT goes to 5 (not 1, not 2).
-        assert_eq!(next_id, 4, "AUTOINCREMENT bookkeeping must reflect every inserted row");
+        assert_eq!(
+            next_id, 4,
+            "AUTOINCREMENT bookkeeping must reflect every inserted row"
+        );
         let seq: Option<i64> = conn
             .query_row(
                 "SELECT seq FROM sqlite_sequence WHERE name = 'symbols'",
@@ -937,7 +958,10 @@ mod tests {
         )
         .expect("'extract' must be accepted by the CHECK constraint");
 
-        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -979,7 +1003,14 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        for expected in ["symbol_id", "file", "start_line", "end_line", "start_col", "end_col"] {
+        for expected in [
+            "symbol_id",
+            "file",
+            "start_line",
+            "end_line",
+            "start_col",
+            "end_col",
+        ] {
             assert!(
                 cols.iter().any(|c| c == expected),
                 "v13→v14 must add column {expected}, got {cols:?}"
@@ -1031,7 +1062,9 @@ mod tests {
         )
         .unwrap();
         let count_before: i64 = conn
-            .query_row("SELECT COUNT(*) FROM symbol_decl_location", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM symbol_decl_location", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count_before, 1);
 
@@ -1040,14 +1073,19 @@ mod tests {
         conn.execute("DELETE FROM symbols WHERE id = ?1", [sym_id])
             .unwrap();
         let count_after: i64 = conn
-            .query_row("SELECT COUNT(*) FROM symbol_decl_location", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM symbol_decl_location", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(
             count_after, 0,
             "ON DELETE CASCADE must drop the decl_location row when its symbol is deleted"
         );
 
-        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -1158,7 +1196,8 @@ mod tests {
         )
         .expect("'export' direction must be accepted");
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        conn.execute("DELETE FROM symbols WHERE id = ?1", [sid]).unwrap();
+        conn.execute("DELETE FROM symbols WHERE id = ?1", [sid])
+            .unwrap();
         let count_after: i64 = conn
             .query_row("SELECT COUNT(*) FROM symbol_ffi_binding", [], |r| r.get(0))
             .unwrap();
@@ -1167,7 +1206,10 @@ mod tests {
             "ON DELETE CASCADE must drop ffi binding when its parent symbol is deleted"
         );
 
-        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
     }
 
     #[test]

@@ -63,10 +63,7 @@ pub(crate) fn read_decl_location(
 /// `ON DELETE CASCADE` when the parent `symbols` row is removed; the
 /// explicit helper is exposed so the pipeline can purge stale joins
 /// when a header file is unlinked from a workspace.
-pub(crate) fn delete_decl_location(
-    conn: &Connection,
-    symbol_id: i64,
-) -> Result<(), StorageError> {
+pub(crate) fn delete_decl_location(conn: &Connection, symbol_id: i64) -> Result<(), StorageError> {
     conn.execute(
         "DELETE FROM symbol_decl_location WHERE symbol_id = ?1",
         [symbol_id],

@@ -27,10 +27,12 @@ pub(crate) fn extract_file(
             detail: format!("load tree-sitter-c: {e}"),
         })?;
 
-    let tree = parser.parse(content, None).ok_or_else(|| ExtractError::Parse {
-        file: workspace_relative_path.into(),
-        detail: "tree-sitter returned no parse tree".into(),
-    })?;
+    let tree = parser
+        .parse(content, None)
+        .ok_or_else(|| ExtractError::Parse {
+            file: workspace_relative_path.into(),
+            detail: "tree-sitter returned no parse tree".into(),
+        })?;
 
     let module_path = compute_module_path(package_relative);
     let module_fqdn = if module_path.is_empty() {

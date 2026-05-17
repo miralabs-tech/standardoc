@@ -36,11 +36,12 @@ impl SymbolLookup for CoreSymbolLookup<'_> {
             include_external: false,
             ..SymbolFilter::default()
         };
-        let page = query::list_symbols(self.handle, &filter, WORKSPACE_FQDN_LIMIT, None).map_err(
-            |e| RagError::InvalidStoredData {
-                detail: format!("list_symbols: {e}"),
-            },
-        )?;
+        let page =
+            query::list_symbols(self.handle, &filter, WORKSPACE_FQDN_LIMIT, None).map_err(|e| {
+                RagError::InvalidStoredData {
+                    detail: format!("list_symbols: {e}"),
+                }
+            })?;
         Ok(page.items.into_iter().map(|s| s.fqdn).collect())
     }
 

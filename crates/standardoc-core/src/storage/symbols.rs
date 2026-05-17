@@ -41,8 +41,7 @@ pub(crate) fn insert_symbol(
     // column so queries can `LIKE`/`json_each` filter without an
     // extra join. `serde_json::to_string` on `&Vec<String>` always
     // succeeds — the `expect` never fires.
-    let flags_json = serde_json::to_string(&symbol.flags)
-        .expect("Vec<String> serializes to JSON");
+    let flags_json = serde_json::to_string(&symbol.flags).expect("Vec<String> serializes to JSON");
 
     let id = conn
         .query_row(

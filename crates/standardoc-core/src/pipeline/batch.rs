@@ -100,10 +100,7 @@ fn apply_ffi_bindings(
     Ok(())
 }
 
-fn lookup_symbol_id_by_fqdn(
-    conn: &Connection,
-    fqdn: &str,
-) -> Result<Option<i64>, StorageError> {
+fn lookup_symbol_id_by_fqdn(conn: &Connection, fqdn: &str) -> Result<Option<i64>, StorageError> {
     let id = conn
         .query_row(
             "SELECT id FROM symbols WHERE fqdn = ?1 LIMIT 1",

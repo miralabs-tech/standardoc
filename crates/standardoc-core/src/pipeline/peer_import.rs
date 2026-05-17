@@ -26,7 +26,7 @@ use crate::storage::workspace_catalog::{LinkedWorkspace, list_linked_workspaces}
 
 /// Outcome of attempting to import a single peer workspace's lookup data.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PeerImportStats {
+pub(crate) struct PeerImportStats {
     pub workspace_id: String,
     pub root_path: String,
     pub status: PeerImportStatus,
@@ -35,7 +35,7 @@ pub struct PeerImportStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PeerImportStatus {
+pub(crate) enum PeerImportStatus {
     /// Peer DB found, rows copied successfully.
     Imported,
     /// Peer DB file does not exist at `<peer_root>/.standardoc/index.db`.
@@ -54,7 +54,8 @@ pub enum PeerImportStatus {
 ///
 /// Best-effort : a single peer failure does not abort the sweep. The caller
 /// (cold-start orchestrator) is expected to log the result and move on.
-pub fn import_active_peer_workspaces(
+#[cfg(test)]
+fn import_active_peer_workspaces(
     primary_conn: &mut Connection,
 ) -> Result<Vec<PeerImportStats>, StorageError> {
     let peers = list_linked_workspaces(primary_conn)?;
@@ -73,7 +74,7 @@ pub fn import_active_peer_workspaces(
 /// standardoc-ir version. If the peer's payload encoding is older, later
 /// `get_module_lookup` calls will surface the decode error naturally ; the
 /// import itself stays cheap.
-pub fn import_peer_workspace(
+pub(crate) fn import_peer_workspace(
     primary_conn: &mut Connection,
     peer: &LinkedWorkspace,
 ) -> PeerImportStats {
@@ -360,11 +361,7 @@ mod tests {
 
     #[test]
     fn stage3b7a_re_import_overwrites_prior_copy_idempotently() {
-        let peer = setup_peer_workspace(&[(
-            "peer::initial",
-            Language::Rust,
-            "std::collections",
-        )]);
+        let peer = setup_peer_workspace(&[("peer::initial", Language::Rust, "std::collections")]);
         let mut primary = fresh_mem_db();
         let peer_id = register_linked_workspace(
             &primary,
@@ -417,11 +414,7 @@ mod tests {
 
     #[test]
     fn stage3b7a_imported_workspace_imports_resolve_via_cross_workspace_query() {
-        let peer = setup_peer_workspace(&[(
-            "peer::api",
-            Language::Rust,
-            "std::collections",
-        )]);
+        let peer = setup_peer_workspace(&[("peer::api", Language::Rust, "std::collections")]);
         let mut primary = fresh_mem_db();
         register_linked_workspace(
             &primary,
@@ -433,9 +426,11 @@ mod tests {
         import_active_peer_workspaces(&mut primary).unwrap();
 
         // workspace_imports_by_origin should return the peer's row.
-        let rows =
-            crate::storage::module_lookup::workspace_imports_by_origin(&primary, "std::collections")
-                .unwrap();
+        let rows = crate::storage::module_lookup::workspace_imports_by_origin(
+            &primary,
+            "std::collections",
+        )
+        .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].module_fqdn, "peer::api");
         assert_ne!(rows[0].workspace_id, "primary");
@@ -443,11 +438,7 @@ mod tests {
 
     #[test]
     fn stage3b7a_updates_last_indexed_at_on_success() {
-        let peer = setup_peer_workspace(&[(
-            "peer::x",
-            Language::Rust,
-            "std::fmt",
-        )]);
+        let peer = setup_peer_workspace(&[("peer::x", Language::Rust, "std::fmt")]);
         let mut primary = fresh_mem_db();
         let peer_id = register_linked_workspace(
             &primary,

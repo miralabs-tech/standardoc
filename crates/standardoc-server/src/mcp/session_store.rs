@@ -45,9 +45,7 @@ impl FileSessionStore {
     /// the in-memory cache (post-restart recovery). A missing / corrupt
     /// file starts empty and is best-effort overwritten on next mutation.
     pub(crate) fn new(workspace_root: &Path) -> Self {
-        let path = workspace_root
-            .join(".standardoc")
-            .join("mcp-sessions.json");
+        let path = workspace_root.join(".standardoc").join("mcp-sessions.json");
         let cache = load_from_disk(&path).unwrap_or_default();
         Self {
             path,
@@ -91,11 +89,7 @@ impl SessionStore for FileSessionStore {
         Ok(self.cache.read().await.get(session_id).cloned())
     }
 
-    async fn store(
-        &self,
-        session_id: &str,
-        state: &SessionState,
-    ) -> Result<(), SessionStoreError> {
+    async fn store(&self, session_id: &str, state: &SessionState) -> Result<(), SessionStoreError> {
         {
             let mut g = self.cache.write().await;
             g.insert(session_id.to_string(), state.clone());
