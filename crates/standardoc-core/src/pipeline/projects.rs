@@ -29,6 +29,12 @@ use crate::storage::projects;
 
 pub use standarbuild_detect::{Detector, DetectorRegistry as ProjectDetectorRegistry};
 
+/// Re-export of 0.3's [`standarbuild_detect::DetectionResult`] for
+/// callers that want both the project list and the workspace-manifest
+/// list from a single discovery scan. Stage 3e-3 consumes `.workspaces`
+/// at cold-start to persist the primary workspace kind in `schema_meta`.
+pub use standarbuild_detect::DetectionResult;
+
 /// Convert the detector's opaque [`KindId`] to the IR's `ProjectKind`.
 /// Built-in slugs map to their named variants; anything else becomes
 /// [`ProjectKind::Custom`] so user-registered detectors (e.g. a future
@@ -85,10 +91,39 @@ pub fn discover_and_persist_projects_with(
     workspace_root: &Path,
     registry: &DetectorRegistry,
 ) -> Result<Vec<ProjectInfo>, StorageError> {
+    let detected = discover_workspace_with(workspace_root, registry);
+    persist_projects(conn, detected.projects)
+}
+
+/// Run `standarbuild_detect::discover` against `workspace_root` and return
+/// the full [`DetectionResult`] — both projects and workspace manifests.
+/// Stage 3e-3 callers use the `.workspaces` part to seed the primary
+/// `workspace_kind` in `schema_meta`. The plain
+/// [`discover_and_persist_projects`] flow ignores it and only persists
+/// the project list.
+pub fn discover_workspace(workspace_root: &Path) -> DetectionResult {
+    discover_workspace_with(workspace_root, &DetectorRegistry::with_builtins())
+}
+
+/// Same as [`discover_workspace`] but against a custom registry.
+pub fn discover_workspace_with(
+    workspace_root: &Path,
+    registry: &DetectorRegistry,
+) -> DetectionResult {
     let opts = standarbuild_detect::DiscoverOptions::default();
-    let detected = standarbuild_detect::discover_with(workspace_root, &opts, registry);
-    let mut out = Vec::with_capacity(detected.len());
-    for d in detected {
+    standarbuild_detect::discover_with(workspace_root, &opts, registry)
+}
+
+/// Persist a list of [`standarbuild_detect::ProjectInfo`] entries into
+/// the `projects` table, returning the IR-flavored `ProjectInfo` with
+/// freshly-assigned `project_id`s. Filters out the `UNKNOWN` sentinel
+/// (see [`discover_and_persist_projects_with`] for why).
+fn persist_projects(
+    conn: &Connection,
+    projects_in: Vec<standarbuild_detect::ProjectInfo>,
+) -> Result<Vec<ProjectInfo>, StorageError> {
+    let mut out = Vec::with_capacity(projects_in.len());
+    for d in projects_in {
         // Filter out the `Unknown` sentinel — the detector's
         // `include_unknown_at_depth_one` default surfaces depth-1
         // dirs as Unknown for UI bootstrap contexts, but we'd
@@ -282,11 +317,12 @@ mod tests {
 
     /// Custom detector that matches a directory containing a
     /// `shaders/` subfolder. Mirrors the WGSL example in the
-    /// `standarbuild-detect` 0.2 docstrings.
+    /// `standarbuild-detect` 0.3 docstrings (post-API rename: `kind()`
+    /// became `name()`, `DetectMatch` became `DetectorHit::Project`).
     struct ShadersDetector;
     impl standarbuild_detect::Detector for ShadersDetector {
-        fn kind(&self) -> KindId {
-            KindId::custom("wgsl")
+        fn name(&self) -> &str {
+            "wgsl"
         }
         fn priority(&self) -> i32 {
             120 // beats every built-in (max is Rust=100)
@@ -294,10 +330,10 @@ mod tests {
         fn detect(
             &self,
             dir: &std::path::Path,
-        ) -> Option<standarbuild_detect::DetectMatch> {
+        ) -> Option<standarbuild_detect::DetectorHit> {
             dir.join("shaders")
                 .is_dir()
-                .then(|| standarbuild_detect::DetectMatch {
+                .then(|| standarbuild_detect::DetectorHit::Project {
                     kind: KindId::custom("wgsl"),
                     signals: vec!["shaders/".into()],
                 })
