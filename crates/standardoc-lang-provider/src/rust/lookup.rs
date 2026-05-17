@@ -1,15 +1,17 @@
 use proc_macro2::Span;
 use standardoc_ir::{
-	BindingSource, IdentResolution, ImportRecord, Language, LocalDeclKind, ModuleLookup,
-	ScopeKind, ScopeRange,
+	AliasMutability, BindingSource, IdentResolution, ImportRecord, Language, LocalDeclKind,
+	ModuleLookup, ScopeKind, ScopeRange,
 };
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{
-	File, FnArg, GenericParam, ImplItem, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMacro,
+	Expr, File, FnArg, GenericParam, ImplItem, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMacro,
 	ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemType, ItemUnion, ItemUse, Local, Pat,
 	UseTree,
 };
+
+use super::walk::path_to_string;
 
 /// Build the AOT identifier-resolution table for a Rust module (parity
 /// with [`crate::ts::lookup::build_ts_lookup`]).
@@ -88,6 +90,31 @@ impl<'a> LookupBuilder<'a> {
 			mutability: None,
 			scope_idx,
 			attributes,
+			ir_kind: None,
+		});
+	}
+
+	/// Stage 3e-2-bis — push an alias-carrying binding for `let x = bar;`
+	/// patterns. Mirrors `ts::lookup::LookupBuilder::add_aliased_binding`.
+	/// The `aliases_to` slot stores the RHS path text-as-written so the
+	/// visitor-side `resolve_name` can re-resolve it through the module
+	/// chain (alias_table → defined_fqdns → builtin → unresolved).
+	fn add_aliased_binding(
+		&mut self,
+		name: String,
+		decl_kind: LocalDeclKind,
+		mutability: AliasMutability,
+		aliases_to: String,
+	) {
+		let scope_idx = self.current_scope();
+		self.lookup.push_binding(IdentResolution {
+			name,
+			source: BindingSource::LocalDecl { decl_kind },
+			resolved_fqdn: None,
+			aliases_to: Some(aliases_to),
+			mutability: Some(mutability),
+			scope_idx,
+			attributes: vec![mutability.as_slug().to_string()],
 			ir_kind: None,
 		});
 	}
@@ -403,6 +430,32 @@ impl<'ast> Visit<'ast> for LookupBuilder<'_> {
 	}
 
 	fn visit_local(&mut self, node: &'ast Local) {
+		// Stage 3e-2-bis — alias detection: `let x = bar;` or
+		// `let x = MyType::CONST;` captures the RHS path as `aliases_to`
+		// so subsequent value-reads of `x` propagate to that target with
+		// a `via-alias[-mutable]` slug. Restricted to single Pat::Ident
+		// (optionally wrapped in Pat::Type for type-annotated bindings).
+		// Non-Path RHS (call, literal, closure, …) falls through to the
+		// plain `bind_pat` path — no alias, `x` becomes an opaque Local.
+		if let Some(init) = node.init.as_ref() {
+			if let Some(alias_str) = resolve_alias_rhs(&init.expr) {
+				if let Some(pat_ident) = unwrap_pat_ident(&node.pat) {
+					let mutability = if pat_ident.mutability.is_some() {
+						AliasMutability::Mutable
+					} else {
+						AliasMutability::Const
+					};
+					self.add_aliased_binding(
+						pat_ident.ident.to_string(),
+						LocalDeclKind::Let,
+						mutability,
+						alias_str,
+					);
+					syn::visit::visit_local(self, node);
+					return;
+				}
+			}
+		}
 		self.bind_pat(
 			&node.pat,
 			BindingSource::LocalDecl {
@@ -427,6 +480,36 @@ impl<'ast> Visit<'ast> for LookupBuilder<'_> {
 // the syn surface tidy in case Stage 4 expands here.
 #[allow(dead_code)]
 const _: Option<&ImplItem> = None;
+
+/// Stage 3e-2-bis — leftmost-base of an alias-worthy RHS expression.
+/// Restricted to `Expr::Path` (single-ident OR multi-segment) day-1.
+/// Field accesses (`obj.field`), references (`&foo`), calls and
+/// literals are NOT aliases — they're fresh values that don't share
+/// identity with the original binding. Mirrors the conservative shape
+/// of `ts::lookup::resolve_alias_rhs` but stores the full path text
+/// rather than the leftmost-base ident (Rust paths are atomic at the
+/// AST level, so the visitor's `resolve_name` re-resolves them through
+/// the module chain in one shot).
+fn resolve_alias_rhs(expr: &Expr) -> Option<String> {
+	match expr {
+		Expr::Path(p) => {
+			let s = path_to_string(&p.path);
+			if s.is_empty() { None } else { Some(s) }
+		}
+		_ => None,
+	}
+}
+
+/// Stage 3e-2-bis — peel `Pat::Type` wrappers (`let x: T = ...`) to get
+/// at the underlying [`syn::PatIdent`]. Returns `None` for destructuring
+/// patterns (tuple, struct, …) which the alias path doesn't handle.
+fn unwrap_pat_ident(pat: &Pat) -> Option<&syn::PatIdent> {
+	match pat {
+		Pat::Ident(p) => Some(p),
+		Pat::Type(t) => unwrap_pat_ident(&t.pat),
+		_ => None,
+	}
+}
 
 #[cfg(test)]
 mod tests {

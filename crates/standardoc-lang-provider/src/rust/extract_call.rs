@@ -15,11 +15,13 @@ pub(crate) fn visit_block(
     enclosing_fqdn: &str,
 ) {
     let file_path = ctx.core.file_path.clone();
+    let initial_scope = lookup_scope_for(ctx, block.span());
     let mut visitor = CallVisitor {
         ctx,
         current_module: current_module.to_string(),
         enclosing_fqdn: enclosing_fqdn.to_string(),
         file_path,
+        current_scope_idx: initial_scope,
     };
     visitor.visit_block(block);
 }
@@ -29,6 +31,13 @@ struct CallVisitor<'a> {
     current_module: String,
     enclosing_fqdn: String,
     file_path: String,
+    /// Stage 3e-2-bis — current scope_idx into `ctx.core.lookup.scopes`,
+    /// maintained as a save/restore stack across `visit_block` and
+    /// `visit_expr_closure` overrides. Mirrors `ts::visit::CallVisitor::
+    /// current_scope_idx`. The flat `lookup_scope_for(span)` shortcut only
+    /// works for scope-creation spans (exact HashMap match) — arbitrary
+    /// expression spans inside a scope require this maintained value.
+    current_scope_idx: u32,
 }
 
 impl CallVisitor<'_> {
@@ -78,9 +87,11 @@ impl CallVisitor<'_> {
     ///    plus optional `via-alias[-mutable]` (scope-alias propagation)
     ///    and `via-builtin` / `builtin-<slug>` (Edge-tier builtin hit).
     fn emit_value_ref(&mut self, path: &str, span: Span) {
-        let scope_idx = lookup_scope_for(self.ctx, span);
         let (target, alias_mut, via_builtin) =
-            match self.ctx.resolve_name(path, scope_idx, &self.current_module) {
+            match self
+                .ctx
+                .resolve_name(path, self.current_scope_idx, &self.current_module)
+            {
                 NameResolution::Drop | NameResolution::Local => return,
                 NameResolution::Attribute(tag) => {
                     self.ctx
@@ -194,6 +205,27 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
             self.emit_value_ref(&path_str, node.span());
         }
         syn::visit::visit_expr_path(self, node);
+    }
+
+    /// Stage 3e-2-bis — keep `current_scope_idx` aligned with the AOT
+    /// `ModuleLookup` scope chain. Nested blocks introduce new Block
+    /// scopes during the pre-pass; we save/swap/restore so
+    /// `emit_value_ref` can resolve locals against the right scope.
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        let saved = self.current_scope_idx;
+        self.current_scope_idx = lookup_scope_for(self.ctx, node.span());
+        syn::visit::visit_block(self, node);
+        self.current_scope_idx = saved;
+    }
+
+    /// Stage 3e-2-bis — closures introduce a Function scope in the
+    /// pre-pass (params bound there). Mirror the save/swap/restore so
+    /// captured-via-closure path reads resolve correctly.
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        let saved = self.current_scope_idx;
+        self.current_scope_idx = lookup_scope_for(self.ctx, node.span());
+        syn::visit::visit_expr_closure(self, node);
+        self.current_scope_idx = saved;
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
@@ -625,5 +657,121 @@ mod tests {
             "unresolved bare ident value-read must be skipped, got {:?}",
             refs(&edges)
         );
+    }
+
+    // --- Stage 3e-2-bis: Rust let-binding alias propagation ---
+
+    #[test]
+    fn stage3e2bis_let_binding_propagates_alias_with_via_alias_slug() {
+        // `let x = bar;` makes `x` an alias for `bar`. Reading `x`
+        // surfaces as a References edge to `c::bar` with `via-alias`.
+        let parsed = parse("fn bar() {} fn caller() { let x = bar; let _ = x; }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let vr = value_reads(&edges);
+        // One value-read through alias (`x`) + one direct value-read on
+        // the RHS (`bar` in `let x = bar;` is also an Expr::Path read).
+        // Both must resolve to c::bar.
+        let alias_refs: Vec<_> = vr
+            .iter()
+            .filter(|e| e.attributes.iter().any(|a| a == "via-alias"))
+            .collect();
+        assert_eq!(
+            alias_refs.len(),
+            1,
+            "exactly one via-alias edge expected, got {vr:?}"
+        );
+        match &alias_refs[0].to {
+            ResolvedOrUnresolved::Resolved { fqdn } => assert_eq!(fqdn, "c::bar"),
+            other => panic!("expected resolved c::bar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage3e2bis_let_mut_binding_propagates_alias_with_via_alias_mutable_slug() {
+        // `let mut x = bar;` — the binding is mutable, so the alias is
+        // tagged `via-alias-mutable` to signal staleness risk.
+        let parsed = parse("fn bar() {} fn caller() { let mut x = bar; let _ = x; }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let mutable_refs: Vec<_> = value_reads(&edges)
+            .into_iter()
+            .filter(|e| e.attributes.iter().any(|a| a == "via-alias-mutable"))
+            .collect();
+        assert_eq!(
+            mutable_refs.len(),
+            1,
+            "exactly one via-alias-mutable edge expected, got {:?}",
+            value_reads(&edges)
+        );
+        match &mutable_refs[0].to {
+            ResolvedOrUnresolved::Resolved { fqdn } => assert_eq!(fqdn, "c::bar"),
+            other => panic!("expected resolved c::bar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage3e2bis_non_path_rhs_does_not_create_alias() {
+        // `let x = bar();` — RHS is a Call, not an alias-worthy Path.
+        // `x` becomes an opaque Local → reading it surfaces nothing.
+        let parsed = parse("fn bar() -> u32 { 0 } fn caller() { let x = bar(); let _ = x; }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        // The `bar()` call still emits a Calls edge.
+        let cs = calls(&edges);
+        assert!(cs.iter().any(|e| matches!(&e.to,
+            ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "c::bar"
+        )));
+        // But `x` read should NOT produce a References edge — x is Local.
+        assert!(
+            refs(&edges).is_empty(),
+            "non-Path RHS must not create alias propagation, got {:?}",
+            refs(&edges)
+        );
+    }
+
+    #[test]
+    fn stage3e2bis_type_annotated_let_still_aliases() {
+        // `let x: fn() = bar;` — the Pat::Type wrapper around Pat::Ident
+        // must be peeled so alias detection still fires.
+        let parsed = parse("fn bar() {} fn caller() { let x: fn() = bar; let _ = x; }");
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let alias_refs: Vec<_> = value_reads(&edges)
+            .into_iter()
+            .filter(|e| e.attributes.iter().any(|a| a == "via-alias"))
+            .collect();
+        assert_eq!(
+            alias_refs.len(),
+            1,
+            "type-annotated let must still alias, got {:?}",
+            value_reads(&edges)
+        );
+    }
+
+    #[test]
+    fn stage3e2bis_destructuring_pattern_falls_through_to_bind_pat() {
+        // `let (x, y) = (bar, baz);` — tuple destructuring isn't an
+        // alias (the RHS is a Tuple expr, not a Path), so x and y stay
+        // opaque Locals. Reading them produces no References edge.
+        let parsed = parse(
+            "fn bar() {} fn baz() {} fn caller() { let (x, y) = (bar, baz); let _ = x; let _ = y; }",
+        );
+        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        // The tuple expr's inner Expr::Path reads on bar and baz DO emit
+        // value-reads at the RHS expression itself. But x/y reads on the
+        // bottom lines must NOT emit (locals without alias).
+        let resolved_targets: Vec<_> = value_reads(&edges)
+            .iter()
+            .filter_map(|e| match &e.to {
+                ResolvedOrUnresolved::Resolved { fqdn } => Some(fqdn.clone()),
+                _ => None,
+            })
+            .collect();
+        // Should see c::bar and c::baz from the RHS tuple (2 reads),
+        // NOT 4 (no x/y propagation).
+        assert_eq!(
+            resolved_targets.len(),
+            2,
+            "destructuring must not create alias propagation, got {resolved_targets:?}"
+        );
+        assert!(resolved_targets.contains(&"c::bar".to_string()));
+        assert!(resolved_targets.contains(&"c::baz".to_string()));
     }
 }
