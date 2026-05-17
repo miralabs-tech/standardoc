@@ -265,25 +265,25 @@ mod tests {
 
     #[test]
     fn compact_rust_tokens_already_compact_is_idempotent() {
-        let s = "Arc<dyn Embedder>";
+        let s = "Arc<dyn Logger>";
         assert_eq!(compact_rust_tokens(s), s);
     }
 
     #[test]
     fn compact_rust_tokens_strips_spaces_around_angle_brackets_and_double_colon() {
         let raw =
-            "& Arc < std :: sync :: Mutex < Option < standardoc_core :: RagWatcherHandle > > >";
+            "& Arc < std :: sync :: Mutex < Option < standardoc_core :: WatcherHandle > > >";
         assert_eq!(
             compact_rust_tokens(raw),
-            "&Arc<std::sync::Mutex<Option<standardoc_core::RagWatcherHandle>>>"
+            "&Arc<std::sync::Mutex<Option<standardoc_core::WatcherHandle>>>"
         );
     }
 
     #[test]
     fn compact_rust_tokens_keeps_space_after_dyn_impl_mut() {
         assert_eq!(
-            compact_rust_tokens("Arc < dyn Embedder >"),
-            "Arc<dyn Embedder>"
+            compact_rust_tokens("Arc < dyn Logger >"),
+            "Arc<dyn Logger>"
         );
         assert_eq!(
             compact_rust_tokens("impl Trait + Send"),

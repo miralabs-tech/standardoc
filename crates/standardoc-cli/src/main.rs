@@ -555,23 +555,6 @@ fn cmd_stdignore_preview(workspace: &Path, pattern: &str, limit: usize) -> Resul
     Ok(())
 }
 
-fn confirm_destructive(prompt: &str, yes_flag: bool) -> Result<bool, ServerError> {
-    if yes_flag {
-        return Ok(true);
-    }
-    if !io::stdin().is_terminal() {
-        return Err(io::Error::other(format!(
-            "non-interactive shell: pass --yes to confirm — {prompt}"
-        ))
-        .into());
-    }
-    eprint!("{prompt} [y/N] ");
-    let _ = io::stderr().flush();
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES"))
-}
-
 fn confirm_purge(count: usize, yes_flag: bool) -> Result<bool, ServerError> {
     if yes_flag {
         return Ok(true);
