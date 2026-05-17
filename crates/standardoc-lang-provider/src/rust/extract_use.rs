@@ -127,6 +127,7 @@ fn emit_import(
             signature: None,
             body_hash: None,
             attributes: vec![],
+            flags: vec![],
         });
     }
 }

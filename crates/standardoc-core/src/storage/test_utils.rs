@@ -49,6 +49,7 @@ pub(crate) fn sample_symbol(name: &str, fqdn: &str) -> RawSymbol {
         signature: None,
         body_hash: Some(Blake3Hash::new([0xab; 32])),
         attributes: vec![],
+        flags: vec![],
     }
 }
 

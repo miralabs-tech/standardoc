@@ -51,6 +51,7 @@ fn fixture() -> ExtractedFile {
                 col: 0,
             },
         }],
+        flags: vec![],
     };
 
     let module_root = RawSymbol {
@@ -70,6 +71,7 @@ fn fixture() -> ExtractedFile {
         signature: None,
         body_hash: Some(Blake3Hash::new([0x01; 32])),
         attributes: vec![],
+        flags: vec![],
     };
 
     let calls_edge = RawEdge {

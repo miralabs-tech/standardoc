@@ -351,7 +351,8 @@ fn extract_fn(item: &syn::ItemFn, parent_fqdn: &str, path: &str) -> RawSymbol {
         signature: Some(sig),
         body_hash: Some(body_hash::hash_tokens(&item.to_token_stream())),
         attributes: extract_attributes(&item.attrs, path),
-    }
+            flags: vec![],
+}
 }
 
 /// Bug C-2 — push the struct symbol AND one `RawSymbol` per field.
@@ -425,7 +426,8 @@ fn extract_enum(ctx: &mut WalkContext, item: &syn::ItemEnum, parent_fqdn: &str) 
                 signature: None,
                 body_hash: Some(body_hash::hash_tokens(&variant.to_token_stream())),
                 attributes: extract_attributes(&variant.attrs, &path),
-            },
+                            flags: vec![],
+},
             &variant.attrs,
         );
         // Bug C-3: walk the variant's inner field types
@@ -541,7 +543,8 @@ fn push_field(
             signature: Some(signature),
             body_hash: Some(body_hash::hash_tokens(&field.to_token_stream())),
             attributes: extract_attributes(&field.attrs, path),
-        },
+                    flags: vec![],
+},
         &field.attrs,
     );
     // Bug C-3: emit UsesType from the field fqdn for every named type
@@ -605,7 +608,8 @@ fn type_def_symbol(
         signature: None,
         body_hash: Some(body_hash::hash_tokens(tokens)),
         attributes: extract_attributes(attrs, path),
-    }
+            flags: vec![],
+}
 }
 
 fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str) {
@@ -626,7 +630,8 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
             signature: None,
             body_hash: Some(body_hash::hash_tokens(&item.to_token_stream())),
             attributes: extract_attributes(&item.attrs, &path),
-        },
+                    flags: vec![],
+},
         &item.attrs,
     );
 
@@ -664,7 +669,8 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
                     signature: Some(sig),
                     body_hash: Some(body_hash::hash_tokens(&item_fn.to_token_stream())),
                     attributes: extract_attributes(&item_fn.attrs, &path),
-                },
+                                    flags: vec![],
+},
                 &item_fn.attrs,
             );
             // The method's own scope_idx has the trait scope as parent;
@@ -757,7 +763,8 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
                     signature: Some(sig),
                     body_hash: Some(body_hash::hash_tokens(&item_fn.to_token_stream())),
                     attributes: extract_attributes(&item_fn.attrs, &path),
-                },
+                                    flags: vec![],
+},
                 &item_fn.attrs,
             );
             // Same as trait method: fn's own scope_idx has impl scope
@@ -823,7 +830,8 @@ fn value_def_symbol(
         signature: None,
         body_hash: Some(body_hash::hash_tokens(tokens)),
         attributes: extract_attributes(attrs, path),
-    }
+            flags: vec![],
+}
 }
 
 fn extract_macro_def(item: &syn::ItemMacro, parent_fqdn: &str, path: &str) -> Option<RawSymbol> {
@@ -846,7 +854,8 @@ fn extract_macro_def(item: &syn::ItemMacro, parent_fqdn: &str, path: &str) -> Op
         signature: None,
         body_hash: Some(body_hash::hash_tokens(&item.to_token_stream())),
         attributes: extract_attributes(&item.attrs, path),
-    })
+            flags: vec![],
+})
 }
 
 fn extract_signature(sig: &syn::Signature) -> Signature {

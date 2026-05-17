@@ -583,6 +583,7 @@ fn process_export_default_decl(
                     signature: Some(signature),
                     body_hash,
                     attributes: vec![],
+                    flags: vec![],
                 },
                 outer_pos,
             );
@@ -617,6 +618,7 @@ fn process_export_default_decl(
                     signature: None,
                     body_hash: ctx.body_hash_of(span),
                     attributes: vec![],
+                    flags: vec![],
                 },
                 outer_pos,
             );
@@ -721,6 +723,7 @@ fn extract_fn_decl(
         signature: Some(signature),
         body_hash: ctx.body_hash_of(span),
         attributes: vec![],
+        flags: vec![],
     }
 }
 
@@ -757,6 +760,7 @@ fn extract_class_inner(
             signature: None,
             body_hash: ctx.body_hash_of(class_span),
             attributes: vec![],
+            flags: vec![],
         },
         outer_pos,
     );
@@ -887,6 +891,7 @@ fn extract_constructor(
         signature: None,
         body_hash: ctx.body_hash_of(span),
         attributes: vec![],
+        flags: vec![],
     }
 }
 
@@ -920,6 +925,7 @@ fn extract_class_prop(
         signature: None,
         body_hash: ctx.body_hash_of(span),
         attributes: vec![],
+        flags: vec![],
     }
 }
 
@@ -943,6 +949,7 @@ fn extract_private_method(
         signature: Some(build_function_signature(ctx, &method.function)),
         body_hash: ctx.body_hash_of(span),
         attributes: vec![],
+        flags: vec![],
     }
 }
 
@@ -970,6 +977,7 @@ fn extract_private_prop(
         signature: None,
         body_hash: ctx.body_hash_of(span),
         attributes: vec![],
+        flags: vec![],
     }
 }
 
@@ -998,6 +1006,7 @@ fn extract_method(
         signature: Some(build_function_signature(ctx, &method.function)),
         body_hash: ctx.body_hash_of(span),
         attributes: vec![],
+        flags: vec![],
     }
 }
 
@@ -1038,6 +1047,7 @@ fn extract_var_decl(
                 signature,
                 body_hash: ctx.body_hash_of(span),
                 attributes: vec![],
+                flags: vec![],
             },
             outer_pos,
         );
@@ -1080,6 +1090,7 @@ fn extract_interface_decl(
             signature: None,
             body_hash: ctx.body_hash_of(span),
             attributes: vec![],
+            flags: vec![],
         },
         outer_pos,
     );
@@ -1131,6 +1142,7 @@ fn extract_interface_decl(
                         signature: None,
                         body_hash: ctx.body_hash_of(prop.span),
                         attributes: vec![],
+                        flags: vec![],
                     },
                     prop.span.lo,
                 );
@@ -1164,6 +1176,7 @@ fn extract_interface_decl(
                         signature: None,
                         body_hash: ctx.body_hash_of(method.span),
                         attributes: vec![],
+                        flags: vec![],
                     },
                     method.span.lo,
                 );
@@ -1215,6 +1228,7 @@ fn extract_interface_decl(
                         signature: None,
                         body_hash: ctx.body_hash_of(getter.span),
                         attributes: vec![],
+                        flags: vec![],
                     },
                     getter.span.lo,
                 );
@@ -1248,6 +1262,7 @@ fn extract_interface_decl(
                         signature: None,
                         body_hash: ctx.body_hash_of(setter.span),
                         attributes: vec![],
+                        flags: vec![],
                     },
                     setter.span.lo,
                 );
@@ -1291,6 +1306,7 @@ fn extract_type_alias_decl(
         signature: None,
         body_hash: ctx.body_hash_of(span),
         attributes: vec![],
+        flags: vec![],
     }
 }
 
@@ -1320,6 +1336,7 @@ fn extract_enum_decl(
             signature: None,
             body_hash: ctx.body_hash_of(span),
             attributes: vec![],
+            flags: vec![],
         },
         outer_pos,
     );
@@ -1338,6 +1355,7 @@ fn extract_enum_decl(
                 signature: None,
                 body_hash: ctx.body_hash_of(member.span),
                 attributes: vec![],
+                flags: vec![],
             },
             member.span.lo,
         );

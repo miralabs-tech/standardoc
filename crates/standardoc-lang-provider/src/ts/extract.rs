@@ -128,6 +128,7 @@ fn extract_file_inner(
         signature: None,
         body_hash: Some(content_hash),
         attributes: vec![],
+        flags: vec![],
     };
 
     let mut documents = Vec::new();

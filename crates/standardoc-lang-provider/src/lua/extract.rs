@@ -59,6 +59,7 @@ pub(crate) fn extract_file(
         signature: None,
         body_hash: Some(content_hash),
         attributes: vec![],
+        flags: vec![],
     };
 
     let mut ctx = LuaWalkContext::new(
@@ -147,6 +148,7 @@ pub(crate) fn extract_local_function(ctx: &mut LuaWalkContext, lf: &LocalFunctio
         signature: Some(signature),
         body_hash,
         attributes: vec![],
+        flags: vec![],
     };
     ctx.push_symbol(sym);
 
@@ -191,6 +193,7 @@ pub(crate) fn extract_function_declaration(
         signature: Some(signature),
         body_hash,
         attributes: vec![],
+        flags: vec![],
     };
     ctx.push_symbol(sym);
 
@@ -249,6 +252,7 @@ pub(crate) fn extract_local_assignment(
             signature: None,
             body_hash,
             attributes: vec![],
+            flags: vec![],
         };
         ctx.push_symbol(sym);
 
@@ -308,6 +312,7 @@ pub(crate) fn extract_assignment(ctx: &mut LuaWalkContext, a: &Assignment, conte
             signature: Some(signature),
             body_hash,
             attributes: vec![],
+            flags: vec![],
         };
         ctx.push_symbol(sym);
 

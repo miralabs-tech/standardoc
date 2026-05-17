@@ -267,6 +267,7 @@ mod tests {
             signature: None,
             body_hash: Some(Blake3Hash::new([hash_byte; 32])),
             attributes: vec![],
+            flags: vec![],
         }
     }
 

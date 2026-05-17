@@ -1234,6 +1234,10 @@ fn build_symbol(raw: SymbolRowRaw) -> Result<RawSymbol, StorageError> {
         signature,
         body_hash,
         attributes: Vec::new(),
+        // Stage 3e-1b: hydrated by the storage layer in v9 (see
+        // `pipeline::batch` flush path). Reader-side wire-up lands in
+        // the storage migration commit that follows the IR addition.
+        flags: Vec::new(),
     })
 }
 
@@ -1598,6 +1602,7 @@ mod tests {
             signature: None,
             body_hash: Some(Blake3Hash::new([0xab; 32])),
             attributes: vec![],
+            flags: vec![],
         };
         let id = insert_symbol(
             conn,
@@ -1671,6 +1676,7 @@ mod tests {
                 }),
                 body_hash: Some(body),
                 attributes: vec![],
+                flags: vec![],
             };
             insert_symbol(
                 &conn,
@@ -2025,6 +2031,7 @@ mod tests {
             signature: None,
             body_hash: Some(Blake3Hash::new([0xab; 32])),
             attributes: vec![],
+            flags: vec![],
         };
         insert_symbol(
             conn,
@@ -2798,6 +2805,7 @@ mod tests {
                 signature: None,
                 body_hash: Some(Blake3Hash::new([0x02; 32])),
                 attributes: vec![],
+                flags: vec![],
             }],
             edges: vec![],
             call_sites: vec![],
@@ -2844,6 +2852,7 @@ mod tests {
             signature: None,
             body_hash: None,
             attributes: vec![],
+            flags: vec![],
         };
         insert_symbol(
             conn,
