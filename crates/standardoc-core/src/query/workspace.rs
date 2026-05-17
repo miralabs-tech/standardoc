@@ -194,6 +194,54 @@ pub enum RefreshPeerError {
     Extract(#[from] ColdStartError),
 }
 
+/// Outcome of [`set_link_direction`]. Carries both the previous and the
+/// new direction so the caller (MCP handler) can decide whether the
+/// transition crosses the watch boundary (`Out ↔ {In, Bidirectional}`)
+/// and react accordingly. `root_path` is surfaced so the watcher's
+/// `add_peer` call has the path it needs without re-querying.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetLinkDirectionOutcome {
+    pub workspace_id: String,
+    pub root_path: String,
+    pub previous_direction: LinkDirection,
+    pub new_direction: LinkDirection,
+}
+
+/// Error variants for [`set_link_direction`]. Mirrors [`RefreshPeerError`].
+#[derive(Debug, thiserror::Error)]
+pub enum SetLinkDirectionError {
+    #[error("workspace_id not found: {0}")]
+    NotFound(String),
+    #[error("storage: {0}")]
+    Storage(#[from] StorageError),
+}
+
+/// Update the link direction of a registered peer. Returns the
+/// previous direction in the [`SetLinkDirectionOutcome`] so the
+/// caller can detect transitions that cross the watch boundary
+/// (`Out ↔ {In, Bidirectional}`) and propagate them to the live
+/// watcher. Idempotent at the catalog layer: setting the same
+/// direction twice is a no-op write (the UPDATE matches but
+/// changes nothing).
+pub fn set_link_direction(
+    handle: &IndexHandle,
+    workspace_id: &str,
+    new_direction: LinkDirection,
+) -> Result<SetLinkDirectionOutcome, SetLinkDirectionError> {
+    let pool = handle.pool().map_err(StorageError::from)?;
+    let conn = pool.get().map_err(StorageError::from)?;
+    let peer = workspace_catalog::get_linked_workspace(&conn, workspace_id)?
+        .ok_or_else(|| SetLinkDirectionError::NotFound(workspace_id.to_string()))?;
+    let previous_direction = peer.link_direction;
+    workspace_catalog::set_link_direction(&conn, workspace_id, new_direction)?;
+    Ok(SetLinkDirectionOutcome {
+        workspace_id: workspace_id.to_string(),
+        root_path: peer.root_path,
+        previous_direction,
+        new_direction,
+    })
+}
+
 pub fn list_linked_workspaces(handle: &IndexHandle) -> Result<Vec<LinkedWorkspace>, StorageError> {
     let pool = handle.pool()?;
     let conn = pool.get()?;
@@ -361,6 +409,77 @@ mod tests {
             RefreshPeerError::NotFound(id) => assert_eq!(id, "no-such-uuid"),
             other => panic!("expected NotFound, got {other:?}"),
         }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // post-3b-7-b: set_link_direction
+    // ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn set_link_direction_returns_not_found_for_unknown_workspace_id() {
+        let dir = tempdir().unwrap();
+        let handle = IndexHandle::open(dir.path()).unwrap();
+        let err = set_link_direction(&handle, "no-such-uuid", LinkDirection::Out)
+            .unwrap_err();
+        match err {
+            SetLinkDirectionError::NotFound(id) => assert_eq!(id, "no-such-uuid"),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_link_direction_round_trips_previous_and_new_direction() {
+        // Link with direction=In, then flip to Out. Outcome must carry
+        // both directions so the caller can detect the watch-boundary
+        // crossing (In → Out means stop watching).
+        let primary = tempdir().unwrap();
+        let peer = tempdir().unwrap();
+        let handle = IndexHandle::open(primary.path()).unwrap();
+        let workspace_id = link_workspace(
+            &handle,
+            &peer.path().to_string_lossy(),
+            LinkDirection::In,
+            IndexingMode::default(),
+        )
+        .expect("link ok");
+
+        let outcome =
+            set_link_direction(&handle, &workspace_id, LinkDirection::Out).unwrap();
+        assert_eq!(outcome.workspace_id, workspace_id);
+        assert_eq!(outcome.previous_direction, LinkDirection::In);
+        assert_eq!(outcome.new_direction, LinkDirection::Out);
+        assert!(
+            outcome
+                .root_path
+                .ends_with(&peer.path().file_name().unwrap().to_string_lossy().to_string())
+                || outcome.root_path.contains(&*peer.path().to_string_lossy()),
+            "root_path must surface canonical peer path, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn set_link_direction_is_idempotent_for_same_direction() {
+        // Setting the same direction twice must succeed (no error) and
+        // report previous == new in the second call.
+        let primary = tempdir().unwrap();
+        let peer = tempdir().unwrap();
+        let handle = IndexHandle::open(primary.path()).unwrap();
+        let workspace_id = link_workspace(
+            &handle,
+            &peer.path().to_string_lossy(),
+            LinkDirection::Bidirectional,
+            IndexingMode::default(),
+        )
+        .expect("link ok");
+
+        let outcome = set_link_direction(
+            &handle,
+            &workspace_id,
+            LinkDirection::Bidirectional,
+        )
+        .unwrap();
+        assert_eq!(outcome.previous_direction, LinkDirection::Bidirectional);
+        assert_eq!(outcome.new_direction, LinkDirection::Bidirectional);
     }
 
     #[test]
