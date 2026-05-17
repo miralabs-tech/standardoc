@@ -1,11 +1,12 @@
 use standardoc_ir::{
-    AliasMutability, BuiltinTag, EdgeKind, ModuleLookup, RawEdge, ResolvedOrUnresolved,
+    AliasMutability, BuiltinTag, EdgeKind, ModuleLookup, RawCallArg, RawCallSite, RawEdge,
+    ResolvedOrUnresolved, Site,
 };
-use swc_core::common::Span;
+use swc_core::common::{Span, Spanned};
 use swc_core::ecma::ast::{
-    ArrowExpr, BlockStmt, BlockStmtOrExpr, CallExpr, Callee, CatchClause, Expr,
+    ArrowExpr, BlockStmt, BlockStmtOrExpr, CallExpr, Callee, CatchClause, Expr, ExprOrSpread,
     ForInStmt, ForOfStmt, ForStmt, Function, Ident, JSXAttrOrSpread, JSXAttrValue, JSXElement,
-    JSXElementChild, JSXElementName, JSXExpr, MemberProp, NewExpr, OptChainBase,
+    JSXElementChild, JSXElementName, JSXExpr, Lit, MemberProp, NewExpr, OptChainBase,
     OptChainExpr, Pat, TsAsExpr, TsEntityName, TsTypeAnn, TsTypeAssertion,
     TsTypeParamInstantiation, TsTypeRef,
 };
@@ -368,6 +369,33 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
         self.emit_call_raw(target.to, span, attrs);
     }
 
+    /// IR-4-c: push an observational [`RawCallSite`] for the plugin
+    /// layer. Independent of the Drop / Local / Attribute tier
+    /// decisions made by `handle_callee_expr` — `foo()` still emits a
+    /// call_site even when the matching Calls edge is suppressed.
+    fn emit_call_site(
+        &mut self,
+        callee_text: String,
+        args: Vec<RawCallArg>,
+        receiver_chain: Vec<String>,
+        span: Span,
+    ) {
+        if callee_text.is_empty() {
+            // Pathological callee shape (`(0, x)()` etc.) — `callee_text_of`
+            // returned the empty placeholder. Skip rather than emit a
+            // useless call_site that the plugin layer can't act on.
+            return;
+        }
+        let site = self.ctx.span_site(span);
+        self.ctx.push_call_site(RawCallSite {
+            from_fqdn: self.enclosing_fqdn.clone(),
+            callee_text,
+            args,
+            receiver_chain,
+            site,
+        });
+    }
+
     /// Bug B Stage 2 — `Calls` edge emitted through a propagated scope
     /// alias. Tags the edge with `via-alias` / `via-alias-mutable` so
     /// consumers can distinguish direct calls from chained-binding
@@ -659,6 +687,18 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
 
 impl Visit for CallVisitor<'_, '_> {
     fn visit_call_expr(&mut self, node: &CallExpr) {
+        // IR-4-c: observational call_site — emitted before the edge-tier
+        // dispatch in `handle_callee_expr` so Drop / Local / Attribute
+        // suppression of the graph edge doesn't suppress the plugin-
+        // visible record.
+        let (callee_text, recv_chain) = match &node.callee {
+            Callee::Expr(e) => (callee_text_of(e), receiver_chain_for_callee(e)),
+            Callee::Super(_) => ("super".to_string(), Vec::new()),
+            Callee::Import(_) => ("import".to_string(), Vec::new()),
+        };
+        let args = args_from_swc(self.ctx, &node.args);
+        self.emit_call_site(callee_text, args, recv_chain, node.span);
+
         if let Callee::Expr(expr) = &node.callee {
             self.handle_callee_expr(expr);
             // Walk the rest of the callee for base identifiers (e.g.
@@ -682,6 +722,20 @@ impl Visit for CallVisitor<'_, '_> {
 
     fn visit_new_expr(&mut self, node: &NewExpr) {
         let callee = node.callee.as_ref();
+        // IR-4-c: `new Foo(x)` surfaces as a call_site with the
+        // constructor expression as callee_text. No `new` prefix in the
+        // text — plugins can derive it from edge-kind context.
+        let args = node
+            .args
+            .as_deref()
+            .map(|a| args_from_swc(self.ctx, a))
+            .unwrap_or_default();
+        self.emit_call_site(
+            callee_text_of(callee),
+            args,
+            receiver_chain_for_callee(callee),
+            node.span,
+        );
         self.handle_callee_expr(callee);
         self.walk_callee_remainder(callee);
         if let Some(args) = &node.args {
@@ -701,8 +755,19 @@ impl Visit for CallVisitor<'_, '_> {
     // let the recursion visit the args inside.
     fn visit_opt_chain_expr(&mut self, node: &OptChainExpr) {
         if let OptChainBase::Call(call) = node.base.as_ref() {
-            self.handle_callee_expr(call.callee.as_ref());
-            self.walk_callee_remainder(call.callee.as_ref());
+            // IR-4-c: optional-call `foo?.()` — callee_text from the
+            // wrapped callee, receiver_chain from its Member receiver
+            // (if any). The `?` semantics are captured by the chain
+            // helpers, not by the call_site itself.
+            let callee_expr = call.callee.as_ref();
+            self.emit_call_site(
+                callee_text_of(callee_expr),
+                args_from_swc(self.ctx, &call.args),
+                receiver_chain_for_callee(callee_expr),
+                node.span,
+            );
+            self.handle_callee_expr(callee_expr);
+            self.walk_callee_remainder(callee_expr);
             for arg in &call.args {
                 arg.visit_with(self);
             }
@@ -1021,6 +1086,142 @@ fn leftmost_type_name(entity: &TsEntityName) -> String {
     }
 }
 
+// --- IR-4-c: call_site emission helpers ---
+
+/// Format a callee expression as the dotted text the IR records on
+/// [`RawCallSite::callee_text`]. Mirrors swc's parse tree:
+/// - `Ident("foo")` → `"foo"`
+/// - `Member { obj, prop }` → `"<obj>.prop"` (computed props render
+///   as `"<obj>.<computed>"` since the index isn't a stable name)
+/// - `OptChain` → `"<obj>?.prop"` for the optional `.` variant
+/// - `This` → `"this"`
+/// - anything else → empty string (caller decides whether to skip)
+fn callee_text_of(expr: &Expr) -> String {
+    match expr {
+        Expr::Ident(i) => i.sym.to_string(),
+        Expr::Member(m) => {
+            let base = callee_text_of(&m.obj);
+            let prop = member_prop_name(&m.prop).unwrap_or_else(|| "<computed>".to_string());
+            if base.is_empty() { prop } else { format!("{base}.{prop}") }
+        }
+        Expr::OptChain(opt) => match opt.base.as_ref() {
+            OptChainBase::Member(m) => {
+                let base = callee_text_of(&m.obj);
+                let prop =
+                    member_prop_name(&m.prop).unwrap_or_else(|| "<computed>".to_string());
+                if base.is_empty() {
+                    prop
+                } else {
+                    format!("{base}?.{prop}")
+                }
+            }
+            OptChainBase::Call(c) => callee_text_of(&c.callee),
+        },
+        Expr::This(_) => "this".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Walk a method-call receiver expression and produce the dotted
+/// `receiver_chain` segment list in source order. `a.b.c()` (callee =
+/// `Member { obj: a.b, prop: "c" }`) yields `["a", "b"]` (final
+/// segment `c` is the method, not a receiver). Peels `Member` /
+/// `OptChain::Member` layers; at the inner-most non-member base it
+/// stops with a single segment (ident name, `this`, or full callee
+/// text for non-trivial bases like `(x as any).y`).
+fn receiver_chain_of(receiver: &Expr) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cursor: &Expr = receiver;
+    loop {
+        match cursor {
+            Expr::Member(m) => {
+                let seg = member_prop_name(&m.prop).unwrap_or_else(|| "<computed>".to_string());
+                out.push(seg);
+                cursor = &m.obj;
+            }
+            Expr::OptChain(opt) => match opt.base.as_ref() {
+                OptChainBase::Member(m) => {
+                    let seg =
+                        member_prop_name(&m.prop).unwrap_or_else(|| "<computed>".to_string());
+                    out.push(seg);
+                    cursor = &m.obj;
+                }
+                OptChainBase::Call(_) => {
+                    out.push(callee_text_of(cursor));
+                    break;
+                }
+            },
+            Expr::Ident(i) => {
+                out.push(i.sym.to_string());
+                break;
+            }
+            Expr::This(_) => {
+                out.push("this".to_string());
+                break;
+            }
+            other => {
+                out.push(callee_text_of(other));
+                break;
+            }
+        }
+    }
+    out.reverse();
+    out
+}
+
+/// If `callee` is a `Member` (or OptChain::Member) call, return the
+/// `receiver_chain` walked from its `.obj`. Free-fn callees
+/// (`Ident`, `This`, `Super`, dynamic `import`, …) return an empty
+/// vec — there's no receiver concept.
+fn receiver_chain_for_callee(callee: &Expr) -> Vec<String> {
+    match callee {
+        Expr::Member(m) => receiver_chain_of(&m.obj),
+        Expr::OptChain(opt) => match opt.base.as_ref() {
+            OptChainBase::Member(m) => receiver_chain_of(&m.obj),
+            OptChainBase::Call(_) => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// Classify a positional arg into a [`RawCallArg`]. String literals get
+/// `is_string_literal=true` (with quotes stripped); spread args carry
+/// a `...` prefix in `value` and never count as a string literal.
+/// Non-literal/non-ident expressions fall back to the source-span
+/// snippet — best-effort textual representation for the plugin layer.
+fn arg_from_swc(ctx: &super::walk::TsWalkContext<'_>, arg: &ExprOrSpread) -> RawCallArg {
+    let is_spread = arg.spread.is_some();
+    let prefix = if is_spread { "..." } else { "" };
+    if !is_spread
+        && let Expr::Lit(Lit::Str(s)) = arg.expr.as_ref()
+    {
+        return RawCallArg {
+            value: s.value.to_string_lossy().into_owned(),
+            is_string_literal: true,
+        };
+    }
+    if let Expr::Ident(i) = arg.expr.as_ref() {
+        return RawCallArg {
+            value: format!("{prefix}{}", i.sym),
+            is_string_literal: false,
+        };
+    }
+    let snippet = ctx
+        .span_snippet(arg.expr.span())
+        .unwrap_or_else(|| "<expr>".to_string());
+    RawCallArg {
+        value: format!("{prefix}{snippet}"),
+        is_string_literal: false,
+    }
+}
+
+fn args_from_swc(
+    ctx: &super::walk::TsWalkContext<'_>,
+    args: &[ExprOrSpread],
+) -> Vec<RawCallArg> {
+    args.iter().map(|a| arg_from_swc(ctx, a)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1080,7 +1281,7 @@ mod tests {
 
     fn run(source: &str) -> (Vec<standardoc_ir::RawSymbol>, Vec<RawEdge>) {
         let (cm, module, comments) = parse_ts(source);
-        let (symbols, edges, _) = super::super::walk::walk(
+        let (symbols, edges, _, _) = super::super::walk::walk(
             &module,
             "@app",
             "src/index.ts",
@@ -1096,7 +1297,7 @@ mod tests {
 
     fn run_tsx(source: &str) -> (Vec<standardoc_ir::RawSymbol>, Vec<RawEdge>) {
         let (cm, module, comments) = parse_tsx(source);
-        let (symbols, edges, _) = super::super::walk::walk(
+        let (symbols, edges, _, _) = super::super::walk::walk(
             &module,
             "@app",
             "src/App.tsx",
@@ -2056,5 +2257,173 @@ mod tests {
             leaked.is_empty(),
             "interface-level T + method-level U must both be local: {leaked:?}",
         );
+    }
+
+    // --- IR-4-c: call_sites emission (observational, separate from edges) ---
+
+    fn run_with_call_sites(source: &str) -> Vec<standardoc_ir::RawCallSite> {
+        let (cm, module, comments) = parse_ts(source);
+        let (_, _, _, css) = super::super::walk::walk(
+            &module,
+            "@app",
+            "src/index.ts",
+            "src",
+            cm,
+            &PathBuf::from("/tmp/pkg/src/index.ts"),
+            &PathBuf::from("/tmp/pkg"),
+            None,
+            &comments,
+        );
+        css
+    }
+
+    #[test]
+    fn ir4c_free_fn_call_emits_call_site_with_classified_args() {
+        // `foo("hi", 42, x)` — three positional args: a string literal,
+        // a numeric literal, and an identifier. Args must classify
+        // string-literals vs others correctly.
+        let css = run_with_call_sites("function caller() { let x = 0; foo(\"hi\", 42, x); }");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "foo")
+            .unwrap_or_else(|| panic!("expected foo(...) call_site, got {css:?}"));
+        assert_eq!(cs.from_fqdn, "src::caller");
+        assert!(cs.receiver_chain.is_empty());
+        assert_eq!(cs.args.len(), 3);
+        assert_eq!(cs.args[0].value, "hi");
+        assert!(cs.args[0].is_string_literal);
+        assert!(!cs.args[1].is_string_literal);
+        assert!(cs.args[1].value.contains("42"));
+        assert_eq!(cs.args[2].value, "x");
+        assert!(!cs.args[2].is_string_literal);
+    }
+
+    #[test]
+    fn ir4c_member_call_emits_receiver_chain_single_segment() {
+        // `obj.bar(x)` — receiver_chain=["obj"], callee_text="obj.bar".
+        let css = run_with_call_sites("function caller() { obj.bar(x); }");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "obj.bar")
+            .unwrap_or_else(|| panic!("expected obj.bar call_site, got {css:?}"));
+        assert_eq!(cs.receiver_chain, vec!["obj".to_string()]);
+    }
+
+    #[test]
+    fn ir4c_chained_member_call_walks_through_member_layers() {
+        // `obj.field.bar(x)` — receiver = ExprMember { obj: Member{obj:Ident("obj"), prop:"field"}, prop:"bar" }
+        // Chain segments are pushed inner→outer then reversed, so the
+        // result is ["obj", "field"] in source order.
+        let css = run_with_call_sites("function caller() { obj.field.bar(x); }");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "obj.field.bar")
+            .unwrap_or_else(|| panic!("expected obj.field.bar call_site, got {css:?}"));
+        assert_eq!(
+            cs.receiver_chain,
+            vec!["obj".to_string(), "field".to_string()]
+        );
+    }
+
+    #[test]
+    fn ir4c_optional_chain_call_uses_question_dot_in_callee_text() {
+        // `obj?.bar(x)` — optional chain on member. callee_text reflects
+        // the optional `.` syntax so plugins can distinguish from a
+        // direct member access. receiver_chain is still ["obj"].
+        let css = run_with_call_sites("function caller() { obj?.bar(x); }");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "obj?.bar")
+            .unwrap_or_else(|| panic!("expected obj?.bar call_site, got {css:?}"));
+        assert_eq!(cs.receiver_chain, vec!["obj".to_string()]);
+    }
+
+    #[test]
+    fn ir4c_new_expression_emits_call_site_with_constructor_text() {
+        // `new Foo(x)` — surfaces with the constructor expression as
+        // callee_text (no `new` prefix). Receiver chain stays empty.
+        let css = run_with_call_sites("function caller() { new Foo(x); }");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "Foo")
+            .unwrap_or_else(|| panic!("expected new Foo(...) call_site, got {css:?}"));
+        assert!(cs.receiver_chain.is_empty());
+        assert_eq!(cs.args.len(), 1);
+        assert_eq!(cs.args[0].value, "x");
+    }
+
+    #[test]
+    fn ir4c_spread_arg_carries_dotdotdot_prefix() {
+        // `foo(...rest)` — spread args carry a `...` prefix in `value`
+        // and are never tagged as string literals (the spread source
+        // isn't evaluated to a string at the call site).
+        let css = run_with_call_sites("function caller() { foo(...rest); }");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "foo")
+            .unwrap_or_else(|| panic!("expected foo call_site, got {css:?}"));
+        assert_eq!(cs.args.len(), 1);
+        assert_eq!(cs.args[0].value, "...rest");
+        assert!(!cs.args[0].is_string_literal);
+    }
+
+    #[test]
+    #[ignore = "TS walker doesn't visit constructor bodies yet; the Callee::Super branch in \
+                visit_call_expr is dead until that's wired up (separate change)."]
+    fn ir4c_super_call_emits_call_site_with_super_callee_text() {
+        // `super(x)` — `Callee::Super`. callee_text would be the
+        // literal string "super"; receiver_chain stays empty. Ignored
+        // because the TS walker currently skips `ClassMember::Constructor`
+        // bodies — the visitor never reaches the super-call.
+        let css = run_with_call_sites(
+            "class Foo extends Bar { constructor() { super(\"x\"); } }",
+        );
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "super")
+            .unwrap_or_else(|| panic!("expected super(...) call_site, got {css:?}"));
+        assert!(cs.receiver_chain.is_empty());
+        assert_eq!(cs.args.len(), 1);
+        assert!(cs.args[0].is_string_literal);
+        assert_eq!(cs.args[0].value, "x");
+    }
+
+    #[test]
+    fn ir4c_dynamic_import_emits_call_site_with_import_callee_text() {
+        // `import("./mod")` — `Callee::Import`. callee_text="import".
+        let css = run_with_call_sites("function caller() { import(\"./mod\"); }");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "import")
+            .unwrap_or_else(|| panic!("expected import(...) call_site, got {css:?}"));
+        assert_eq!(cs.args.len(), 1);
+        assert!(cs.args[0].is_string_literal);
+        assert_eq!(cs.args[0].value, "./mod");
+    }
+
+    #[test]
+    fn ir4c_drop_tier_member_call_still_emits_call_site() {
+        // `arr.push(x)` — `Array.push` is a Drop-tier builtin in the
+        // edge layer (gets suppressed), but the call_site must still
+        // surface so plugins reading textual patterns aren't blinded.
+        let css =
+            run_with_call_sites("function caller() { const arr = [1]; arr.push(2); }");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "arr.push")
+            .unwrap_or_else(|| panic!("expected arr.push call_site, got {css:?}"));
+        assert_eq!(cs.receiver_chain, vec!["arr".to_string()]);
+    }
+
+    #[test]
+    fn ir4c_call_site_from_fqdn_attributes_to_enclosing_method() {
+        // `class Svc { run() { helper(); } }` — call_site's `from_fqdn`
+        // must point at `src::Svc::run`, not the module fqdn.
+        let css = run_with_call_sites("class Svc { run() { helper(); } }");
+        let cs = css
+            .iter()
+            .find(|c| c.callee_text == "helper")
+            .unwrap_or_else(|| panic!("expected helper() call_site, got {css:?}"));
+        assert_eq!(cs.from_fqdn, "src::Svc::run");
     }
 }

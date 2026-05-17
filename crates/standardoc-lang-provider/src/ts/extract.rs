@@ -142,7 +142,7 @@ fn extract_file_inner(
     }
 
     let mut symbols = vec![module_symbol];
-    let (item_symbols, edges, item_documents) = walk::walk(
+    let (item_symbols, edges, item_documents, call_sites) = walk::walk(
         &module,
         package_name,
         workspace_relative_path,
@@ -165,7 +165,7 @@ fn extract_file_inner(
         byte_size: u64::try_from(content.len()).unwrap_or(u64::MAX),
         symbols,
         edges,
-        call_sites: vec![],
+        call_sites,
         documents,
     })
 }

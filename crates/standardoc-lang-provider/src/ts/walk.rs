@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use standardoc_ir::{
     Blake3Hash, BuiltinTag, BuiltinTier, EdgeKind, Kind, Language, LanguageKind, Modifiers, Param,
-    RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site,
-    SymbolLocation, TypeRef, Visibility,
+    RawCallSite, RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta,
+    Site, SymbolLocation, TypeRef, Visibility,
 };
 use swc_core::common::BytePos;
 use swc_core::common::comments::SingleThreadedComments;
@@ -82,6 +82,10 @@ impl<'a> TsWalkContext<'a> {
 
     pub(crate) fn push_document(&mut self, doc: RawDocument) {
         self.core.push_document(doc);
+    }
+
+    pub(crate) fn push_call_site(&mut self, cs: RawCallSite) {
+        self.core.push_call_site(cs);
     }
 
     /// Push the symbol and, if a JSDoc block precedes `attached_pos`, also
@@ -201,7 +205,14 @@ impl<'a> TsWalkContext<'a> {
         self.cm.span_to_snippet(span).ok()
     }
 
-    pub(crate) fn into_outputs(mut self) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
+    pub(crate) fn into_outputs(
+        mut self,
+    ) -> (
+        Vec<RawSymbol>,
+        Vec<RawEdge>,
+        Vec<RawDocument>,
+        Vec<RawCallSite>,
+    ) {
         // Stage 3e-1b — flush accumulated Attribute-tier flags onto the
         // symbols they belong to. Iteration order is stable (sorted by
         // flag string) so the resulting `symbol.flags` vec is
@@ -224,7 +235,12 @@ impl<'a> TsWalkContext<'a> {
                 }
             }
         }
-        (self.core.symbols, self.core.edges, self.core.documents)
+        (
+            self.core.symbols,
+            self.core.edges,
+            self.core.documents,
+            self.core.call_sites,
+        )
     }
 }
 
@@ -315,7 +331,12 @@ pub(crate) fn walk(
     package_root: &Path,
     tsconfig: Option<TsConfigPaths>,
     comments: &SingleThreadedComments,
-) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
+) -> (
+    Vec<RawSymbol>,
+    Vec<RawEdge>,
+    Vec<RawDocument>,
+    Vec<RawCallSite>,
+) {
     let mut ctx = TsWalkContext::new(
         file_path.to_string(),
         package_name.to_string(),
@@ -1697,7 +1718,14 @@ mod tests {
         (cm, module, comments)
     }
 
-    fn run(source: &str) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
+    fn run(
+        source: &str,
+    ) -> (
+        Vec<RawSymbol>,
+        Vec<RawEdge>,
+        Vec<RawDocument>,
+        Vec<RawCallSite>,
+    ) {
         let (cm, module, comments) = parse_ts(source);
         walk(
             &module,
@@ -1714,7 +1742,7 @@ mod tests {
 
     #[test]
     fn function_decl_emits_function_symbol() {
-        let (symbols, edges, _docs) = run("function foo() {}");
+        let (symbols, edges, _docs, _) = run("function foo() {}");
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].kind, Kind::Function);
         assert_eq!(symbols[0].fqdn, "src::foo");
@@ -1724,13 +1752,13 @@ mod tests {
 
     #[test]
     fn export_function_decl_is_public() {
-        let (symbols, _, _) = run("export function foo() {}");
+        let (symbols, _, _, _) = run("export function foo() {}");
         assert_eq!(symbols[0].visibility, Visibility::Public);
     }
 
     #[test]
     fn function_signature_captures_param_types_and_return() {
-        let (symbols, _, _) =
+        let (symbols, _, _, _) =
             run("export function add(a: number, b: number): number { return a + b; }");
         let sig = symbols[0].signature.as_ref().unwrap();
         assert_eq!(sig.params.len(), 2);
@@ -1742,20 +1770,20 @@ mod tests {
 
     #[test]
     fn async_function_modifier_set() {
-        let (symbols, _, _) = run("export async function boot() {}");
+        let (symbols, _, _, _) = run("export async function boot() {}");
         assert!(symbols[0].signature.as_ref().unwrap().modifiers.is_async);
     }
 
     #[test]
     fn function_default_param_captured() {
-        let (symbols, _, _) = run("export function f(x: number = 7) {}");
+        let (symbols, _, _, _) = run("export function f(x: number = 7) {}");
         let p = &symbols[0].signature.as_ref().unwrap().params[0];
         assert_eq!(p.default.as_deref(), Some("7"));
     }
 
     #[test]
     fn rest_param_prefixed_with_ellipsis() {
-        let (symbols, _, _) = run("export function f(...args: number[]) {}");
+        let (symbols, _, _, _) = run("export function f(...args: number[]) {}");
         let p = &symbols[0].signature.as_ref().unwrap().params[0];
         assert_eq!(p.name, "...args");
         assert_eq!(p.ty.display, "number[]");
@@ -1763,7 +1791,7 @@ mod tests {
 
     #[test]
     fn generic_params_captured_as_strings() {
-        let (symbols, _, _) = run("export function id<T>(x: T): T { return x; }");
+        let (symbols, _, _, _) = run("export function id<T>(x: T): T { return x; }");
         let g = &symbols[0]
             .signature
             .as_ref()
@@ -1776,7 +1804,7 @@ mod tests {
 
     #[test]
     fn class_emits_type_symbol_and_methods() {
-        let (symbols, _, _) = run("export class Foo { run(): void {} }");
+        let (symbols, _, _, _) = run("export class Foo { run(): void {} }");
         let foo = symbols.iter().find(|s| s.fqdn == "src::Foo").unwrap();
         assert_eq!(foo.kind, Kind::Type);
         assert_eq!(foo.language_kind.as_str(), "class");
@@ -1787,7 +1815,7 @@ mod tests {
 
     #[test]
     fn class_extends_emits_extends_edge() {
-        let (_, edges, _) = run("class Foo extends Bar {}");
+        let (_, edges, _, _) = run("class Foo extends Bar {}");
         let ext: Vec<_> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Extends)
@@ -1802,7 +1830,7 @@ mod tests {
 
     #[test]
     fn class_implements_emits_implements_edge() {
-        let (_, edges, _) = run("class Foo implements IBar {}");
+        let (_, edges, _, _) = run("class Foo implements IBar {}");
         let imp: Vec<_> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Implements)
@@ -1817,7 +1845,7 @@ mod tests {
 
     #[test]
     fn class_method_accessibility_maps_to_visibility() {
-        let (symbols, _, _) =
+        let (symbols, _, _, _) =
             run("class Foo { public a() {} private b() {} protected c() {} d() {} }");
         let a = symbols.iter().find(|s| s.fqdn == "src::Foo::a").unwrap();
         assert_eq!(a.visibility, Visibility::Public);
@@ -1831,7 +1859,7 @@ mod tests {
 
     #[test]
     fn interface_emits_type_symbol() {
-        let (symbols, _, _) = run("export interface IFoo { x: number }");
+        let (symbols, _, _, _) = run("export interface IFoo { x: number }");
         assert_eq!(symbols[0].kind, Kind::Type);
         assert_eq!(symbols[0].language_kind.as_str(), "interface");
         assert_eq!(symbols[0].fqdn, "src::IFoo");
@@ -1839,7 +1867,7 @@ mod tests {
 
     #[test]
     fn interface_extends_emits_extends_edge() {
-        let (_, edges, _) = run("interface A extends B {}");
+        let (_, edges, _, _) = run("interface A extends B {}");
         let ext: Vec<_> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Extends)
@@ -1850,7 +1878,7 @@ mod tests {
 
     #[test]
     fn type_alias_emits_type_symbol() {
-        let (symbols, _, _) = run("export type Bytes = Uint8Array;");
+        let (symbols, _, _, _) = run("export type Bytes = Uint8Array;");
         assert_eq!(symbols[0].kind, Kind::Type);
         assert_eq!(symbols[0].language_kind.as_str(), "type_alias");
         assert_eq!(symbols[0].fqdn, "src::Bytes");
@@ -1858,14 +1886,14 @@ mod tests {
 
     #[test]
     fn enum_emits_type_symbol() {
-        let (symbols, _, _) = run("export enum Color { Red, Green }");
+        let (symbols, _, _, _) = run("export enum Color { Red, Green }");
         assert_eq!(symbols[0].kind, Kind::Type);
         assert_eq!(symbols[0].language_kind.as_str(), "enum");
     }
 
     #[test]
     fn const_var_emits_value_symbol() {
-        let (symbols, _, _) = run("export const N = 42;");
+        let (symbols, _, _, _) = run("export const N = 42;");
         assert_eq!(symbols[0].kind, Kind::Value);
         assert_eq!(symbols[0].language_kind.as_str(), "const");
         assert_eq!(symbols[0].fqdn, "src::N");
@@ -1873,7 +1901,7 @@ mod tests {
 
     #[test]
     fn arrow_const_emits_function_symbol() {
-        let (symbols, _, _) = run("export const add = (a: number, b: number): number => a + b;");
+        let (symbols, _, _, _) = run("export const add = (a: number, b: number): number => a + b;");
         assert_eq!(symbols[0].kind, Kind::Function);
         assert_eq!(symbols[0].language_kind.as_str(), "function");
         let sig = symbols[0].signature.as_ref().unwrap();
@@ -1884,7 +1912,7 @@ mod tests {
 
     #[test]
     fn import_named_emits_import_edge_and_alias() {
-        let (_, edges, _) = run("import { foo } from './helper';");
+        let (_, edges, _, _) = run("import { foo } from './helper';");
         let imp: Vec<_> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Imports)
@@ -1894,19 +1922,19 @@ mod tests {
 
     #[test]
     fn import_default_emits_import_edge() {
-        let (_, edges, _) = run("import React from 'react';");
+        let (_, edges, _, _) = run("import React from 'react';");
         assert!(edges.iter().any(|e| e.kind == EdgeKind::Imports));
     }
 
     #[test]
     fn import_namespace_emits_import_edge() {
-        let (_, edges, _) = run("import * as utils from './utils';");
+        let (_, edges, _, _) = run("import * as utils from './utils';");
         assert!(edges.iter().any(|e| e.kind == EdgeKind::Imports));
     }
 
     #[test]
     fn import_side_effect_emits_one_edge_no_alias() {
-        let (_, edges, _) = run("import 'polyfill';");
+        let (_, edges, _, _) = run("import 'polyfill';");
         let imp: Vec<_> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Imports)
@@ -1916,7 +1944,7 @@ mod tests {
 
     #[test]
     fn export_default_function_named() {
-        let (symbols, _, _) = run("export default function foo() {}");
+        let (symbols, _, _, _) = run("export default function foo() {}");
         let foo = symbols.iter().find(|s| s.fqdn == "src::foo").unwrap();
         assert_eq!(foo.kind, Kind::Function);
         assert_eq!(foo.visibility, Visibility::Public);
@@ -1924,27 +1952,27 @@ mod tests {
 
     #[test]
     fn export_default_function_anonymous_uses_default_name() {
-        let (symbols, _, _) = run("export default function () {}");
+        let (symbols, _, _, _) = run("export default function () {}");
         assert_eq!(symbols[0].fqdn, "src::default");
     }
 
     #[test]
     fn export_default_class_named() {
-        let (symbols, _, _) = run("export default class Foo {}");
+        let (symbols, _, _, _) = run("export default class Foo {}");
         let foo = symbols.iter().find(|s| s.fqdn == "src::Foo").unwrap();
         assert_eq!(foo.kind, Kind::Type);
     }
 
     #[test]
     fn span_locations_are_captured() {
-        let (symbols, _, _) = run("\n\nexport function foo() {}\n");
+        let (symbols, _, _, _) = run("\n\nexport function foo() {}\n");
         assert_eq!(symbols[0].location.start_line, 3);
     }
 
     #[test]
     fn body_hash_changes_with_body_content() {
-        let (sym_a, _, _) = run("export function foo() { return 1; }");
-        let (sym_b, _, _) = run("export function foo() { return 2; }");
+        let (sym_a, _, _, _) = run("export function foo() { return 1; }");
+        let (sym_b, _, _, _) = run("export function foo() { return 2; }");
         assert_ne!(sym_a[0].body_hash, sym_b[0].body_hash);
     }
 
@@ -2159,7 +2187,7 @@ mod tests {
         // Duplicate register is a no-op (HashSet dedup).
         ctx.register_attribute_flag("src::doStuff", &BuiltinTag::Async);
 
-        let (symbols, _, _) = ctx.into_outputs();
+        let (symbols, _, _, _) = ctx.into_outputs();
         let s = symbols
             .into_iter()
             .find(|s| s.fqdn == "src::doStuff")
