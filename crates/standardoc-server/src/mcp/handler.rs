@@ -1107,6 +1107,46 @@ impl StandardocMcp {
         Ok(success_json(&serde_json::json!({ "ok": true })))
     }
 
+    /// Stage 3b-7-b L3-bis: explicit re-extraction of a single linked
+    /// peer outside of cold_start. The Q4 staleness gap: peer source
+    /// can drift between sessions, and the watcher (L3d) only catches
+    /// changes that happen while THIS daemon is running. This tool is
+    /// the user-facing escape hatch — "I edited the peer, re-index it
+    /// now". Returns the same PeerExtractStats shape cold_start emits
+    /// internally so callers can surface files_extracted /
+    /// files_skipped_unchanged / files_parse_errors counters.
+    #[tool(
+        description = "Re-extract a single linked peer workspace's source files into the primary index. Use after editing the peer's source between cold_starts (the live watcher only catches edits while the daemon is up). Returns `{workspace_id, root_path, status, files_extracted, files_skipped_unchanged, files_parse_errors}`. `status` is one of `ok` / `skipped_inactive` / `skipped_missing` / `failed`. Unknown workspace_id returns invalid_params."
+    )]
+    async fn refresh_peer(
+        &self,
+        Parameters(params): Parameters<RefreshPeerParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.handle.clone();
+        let provider = Arc::clone(&self.provider);
+        let workspace_id = params.workspace_id;
+        let result = tokio::task::spawn_blocking(move || {
+            workspace_query::refresh_peer(&handle, provider.as_ref(), &workspace_id)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?;
+        match result {
+            Ok(stats) => Ok(success_json(&stats)),
+            Err(workspace_query::RefreshPeerError::NotFound(id)) => {
+                Err(ErrorData::invalid_params(
+                    format!("workspace_id not found: {id}"),
+                    Some(serde_json::json!({ "workspace_id": id })),
+                ))
+            }
+            Err(workspace_query::RefreshPeerError::Storage(e)) => {
+                Err(server_error_to_rmcp(&e.into()))
+            }
+            Err(workspace_query::RefreshPeerError::Extract(e)) => Err(
+                ErrorData::internal_error(format!("peer extract failed: {e}"), None),
+            ),
+        }
+    }
+
     /// Enumerate every linked workspace registered in the catalog,
     /// ordered by registration time (oldest first).
     #[tool(
@@ -1796,6 +1836,15 @@ pub(crate) struct LinkWorkspaceParams {
 /// Tool input — `unlink_workspace(workspace_id)`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct UnlinkWorkspaceParams {
+    pub workspace_id: String,
+}
+
+/// Tool input — `refresh_peer(workspace_id)`. Triggers a single-peer
+/// re-extraction outside of cold_start (Q4 staleness mitigation).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RefreshPeerParams {
+    /// UUID workspace_id of the linked peer to refresh, as returned
+    /// by `link_workspace` or `list_linked_workspaces`.
     pub workspace_id: String,
 }
 
@@ -3320,6 +3369,59 @@ mod tests {
             snapshot.is_empty(),
             "peer must be gone from watcher after unlink"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refresh_peer_returns_invalid_params_for_unknown_workspace_id() {
+        // L3-bis-2: unknown workspace_id surfaces as invalid_params
+        // with the offending id in the data envelope, so MCP clients
+        // can show a "no such peer" message without guessing.
+        let (_dir, mcp) = fixture();
+        let err = mcp
+            .refresh_peer(Parameters(RefreshPeerParams {
+                workspace_id: "ghost-uuid".into(),
+            }))
+            .await
+            .expect_err("unknown workspace_id must error");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("ghost-uuid"),
+            "error must surface offending workspace_id, got `{rendered}`"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refresh_peer_after_link_returns_ok_stats_envelope() {
+        // L3-bis-2: link a peer (no source seeded, so 0 files) and
+        // call refresh_peer. The Ok envelope must carry the
+        // workspace_id + status="ok" + numeric counters.
+        let (_dir, mcp) = fixture();
+        let peer = tempfile::tempdir().unwrap();
+        let link = mcp
+            .link_workspace(Parameters(LinkWorkspaceParams {
+                path: peer.path().to_string_lossy().into_owned(),
+                direction: "in".into(),
+                indexing_mode: Some("extract".into()),
+            }))
+            .await
+            .expect("link ok");
+        let workspace_id = body_text(&link)
+            .split("\"workspace_id\": \"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .expect("workspace_id present")
+            .to_string();
+
+        let result = mcp
+            .refresh_peer(Parameters(RefreshPeerParams {
+                workspace_id: workspace_id.clone(),
+            }))
+            .await
+            .expect("refresh_peer ok");
+        let body = body_text(&result);
+        assert!(body.contains(&workspace_id), "got `{body}`");
+        assert!(body.contains("\"kind\": \"ok\""), "got `{body}`");
+        assert!(body.contains("\"files_extracted\""), "got `{body}`");
     }
 
     #[tokio::test(flavor = "multi_thread")]
