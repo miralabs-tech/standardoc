@@ -1147,6 +1147,75 @@ impl StandardocMcp {
         }
     }
 
+    /// Flip the link direction of a registered peer AND propagate the
+    /// change to the live watcher. Transitions crossing the watch
+    /// boundary (`Out ↔ {In, Bidirectional}`) trigger an `add_peer` /
+    /// `remove_peer` on the watcher. Same-direction calls are no-ops
+    /// at both the catalog and watcher layers. Avoids the prior
+    /// workaround of `unlink_workspace` + `link_workspace` (which lost
+    /// the workspace_id and forced the caller to re-discover it).
+    #[tool(
+        description = "Change the link direction of a registered peer. `direction` is one of `in` (peer feeds us), `out` (we feed peer), `bidirectional`. Returns `{workspace_id, root_path, previous_direction, new_direction}`. Side effects: transitions crossing the watch boundary (Out ↔ {in, bidirectional}) register or unregister the peer on the live watcher. Unknown workspace_id returns invalid_params."
+    )]
+    async fn set_link_direction(
+        &self,
+        Parameters(params): Parameters<SetLinkDirectionParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let new_direction = parse_link_direction(&params.direction)?;
+        let handle = self.handle.clone();
+        let workspace_id = params.workspace_id;
+        let workspace_id_for_response = workspace_id.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            workspace_query::set_link_direction(&handle, &workspace_id, new_direction)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?;
+        match result {
+            Ok(outcome) => {
+                // Watch-boundary transition: Out ↔ {In, Bidirectional}.
+                // Same-side transitions (e.g. In → Bidirectional) leave
+                // the watcher state untouched — direction is metadata
+                // from the watcher's perspective once it's watching.
+                let was_watching = watches_peer(outcome.previous_direction);
+                let now_watching = watches_peer(outcome.new_direction);
+                match (was_watching, now_watching) {
+                    (false, true) => {
+                        register_peer_with_watcher(
+                            &self.watcher_slot(),
+                            outcome.workspace_id.clone(),
+                            Path::new(&outcome.root_path),
+                        );
+                    }
+                    (true, false) => {
+                        unregister_peer_from_watcher(
+                            &self.watcher_slot(),
+                            &outcome.workspace_id,
+                        );
+                    }
+                    _ => {}
+                }
+                Ok(success_json(&SetLinkDirectionJson {
+                    workspace_id: outcome.workspace_id,
+                    root_path: outcome.root_path,
+                    previous_direction: link_direction_label(outcome.previous_direction)
+                        .to_string(),
+                    new_direction: link_direction_label(outcome.new_direction)
+                        .to_string(),
+                }))
+            }
+            Err(workspace_query::SetLinkDirectionError::NotFound(id)) => {
+                Err(ErrorData::invalid_params(
+                    format!("workspace_id not found: {id}"),
+                    Some(serde_json::json!({ "workspace_id": id })),
+                ))
+            }
+            Err(workspace_query::SetLinkDirectionError::Storage(e)) => {
+                let _ = workspace_id_for_response;
+                Err(server_error_to_rmcp(&e.into()))
+            }
+        }
+    }
+
     /// Enumerate every linked workspace registered in the catalog,
     /// ordered by registration time (oldest first).
     #[tool(
@@ -1848,6 +1917,30 @@ pub(crate) struct RefreshPeerParams {
     pub workspace_id: String,
 }
 
+/// Tool input — `set_link_direction(workspace_id, direction)`. Flips
+/// the persisted link direction AND propagates the change to the live
+/// watcher (Out ↔ {In, Bidirectional} transitions register or
+/// unregister the peer root).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct SetLinkDirectionParams {
+    /// UUID workspace_id of the linked peer whose direction to change.
+    pub workspace_id: String,
+    /// New direction: one of `in` (peer feeds us), `out` (we feed peer),
+    /// `bidirectional`.
+    pub direction: String,
+}
+
+/// JSON response shape for [`set_link_direction`]. Surfaces both the
+/// previous and the new direction so callers can confirm the
+/// transition.
+#[derive(Debug, Serialize)]
+struct SetLinkDirectionJson {
+    workspace_id: String,
+    root_path: String,
+    previous_direction: String,
+    new_direction: String,
+}
+
 /// Tool input — `module_lookup(module_fqdn, workspace_id?)`. Omit
 /// `workspace_id` to query the primary workspace.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1944,6 +2037,14 @@ const fn link_direction_label(d: LinkDirection) -> &'static str {
         LinkDirection::Out => "out",
         LinkDirection::Bidirectional => "bidirectional",
     }
+}
+
+/// Does this direction trigger the live watcher to observe the peer
+/// root? `Out` means the peer reads us — we have nothing to watch on
+/// their side, so the watcher stays silent. `In` and `Bidirectional`
+/// both require watching the peer's source.
+const fn watches_peer(d: LinkDirection) -> bool {
+    matches!(d, LinkDirection::In | LinkDirection::Bidirectional)
 }
 
 /// L3d-3 helper: hand a freshly-linked peer to the live watcher. Lives
@@ -3368,6 +3469,202 @@ mod tests {
         assert!(
             snapshot.is_empty(),
             "peer must be gone from watcher after unlink"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_link_direction_out_to_in_adds_peer_to_live_watcher() {
+        // post-3b-7-b finalize: a peer linked with direction=Out is NOT
+        // watched (Out means the peer reads us). Flipping to direction=in
+        // must register the peer on the live watcher so subsequent file
+        // changes flow through dispatch.
+        use standardoc_core::spawn_watcher;
+
+        let (_dir, mcp) = fixture();
+        let peer = tempfile::tempdir().unwrap();
+
+        let watcher = spawn_watcher(
+            mcp.handle.clone(),
+            Arc::clone(&mcp.provider),
+            Arc::clone(&mcp.filters),
+        )
+        .expect("watcher boot");
+        {
+            let slot = mcp.watcher_slot();
+            let mut guard = slot.lock().unwrap();
+            *guard = Some(watcher);
+        }
+
+        let link = mcp
+            .link_workspace(Parameters(LinkWorkspaceParams {
+                path: peer.path().to_string_lossy().into_owned(),
+                direction: "out".into(),
+                indexing_mode: None,
+            }))
+            .await
+            .expect("link ok");
+        let workspace_id = body_text(&link)
+            .split("\"workspace_id\": \"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .expect("workspace_id present")
+            .to_string();
+
+        // Pre-condition: Out direction means NO peer is registered.
+        {
+            let slot = mcp.watcher_slot();
+            let guard = slot.lock().unwrap();
+            assert!(
+                guard.as_ref().unwrap().peers_snapshot().is_empty(),
+                "Out direction must not register a peer"
+            );
+        }
+
+        let response = mcp
+            .set_link_direction(Parameters(SetLinkDirectionParams {
+                workspace_id: workspace_id.clone(),
+                direction: "in".into(),
+            }))
+            .await
+            .expect("set_link_direction ok");
+        let body = body_text(&response);
+        assert!(body.contains("\"previous_direction\": \"out\""), "got `{body}`");
+        assert!(body.contains("\"new_direction\": \"in\""), "got `{body}`");
+
+        let slot = mcp.watcher_slot();
+        let guard = slot.lock().unwrap();
+        let snapshot = guard.as_ref().unwrap().peers_snapshot();
+        assert_eq!(snapshot.len(), 1, "Out → In must register the peer");
+        assert_eq!(snapshot[0].workspace_id, workspace_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_link_direction_in_to_out_removes_peer_from_live_watcher() {
+        // Inverse of the above: In → Out must unregister the peer.
+        use standardoc_core::spawn_watcher;
+
+        let (_dir, mcp) = fixture();
+        let peer = tempfile::tempdir().unwrap();
+
+        let watcher = spawn_watcher(
+            mcp.handle.clone(),
+            Arc::clone(&mcp.provider),
+            Arc::clone(&mcp.filters),
+        )
+        .expect("watcher boot");
+        {
+            let slot = mcp.watcher_slot();
+            let mut guard = slot.lock().unwrap();
+            *guard = Some(watcher);
+        }
+
+        let link = mcp
+            .link_workspace(Parameters(LinkWorkspaceParams {
+                path: peer.path().to_string_lossy().into_owned(),
+                direction: "in".into(),
+                indexing_mode: None,
+            }))
+            .await
+            .expect("link ok");
+        let workspace_id = body_text(&link)
+            .split("\"workspace_id\": \"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .expect("workspace_id present")
+            .to_string();
+
+        // Pre-condition: In direction registered the peer (L3d-3).
+        {
+            let slot = mcp.watcher_slot();
+            let guard = slot.lock().unwrap();
+            assert_eq!(guard.as_ref().unwrap().peers_snapshot().len(), 1);
+        }
+
+        let _ = mcp
+            .set_link_direction(Parameters(SetLinkDirectionParams {
+                workspace_id: workspace_id.clone(),
+                direction: "out".into(),
+            }))
+            .await
+            .expect("set_link_direction ok");
+
+        let slot = mcp.watcher_slot();
+        let guard = slot.lock().unwrap();
+        assert!(
+            guard.as_ref().unwrap().peers_snapshot().is_empty(),
+            "In → Out must unregister the peer"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_link_direction_same_side_transition_is_watcher_noop() {
+        // In → Bidirectional: both directions watch the peer, so the
+        // watcher registry must stay at 1 entry (NOT 0, NOT 2).
+        use standardoc_core::spawn_watcher;
+
+        let (_dir, mcp) = fixture();
+        let peer = tempfile::tempdir().unwrap();
+
+        let watcher = spawn_watcher(
+            mcp.handle.clone(),
+            Arc::clone(&mcp.provider),
+            Arc::clone(&mcp.filters),
+        )
+        .expect("watcher boot");
+        {
+            let slot = mcp.watcher_slot();
+            let mut guard = slot.lock().unwrap();
+            *guard = Some(watcher);
+        }
+
+        let link = mcp
+            .link_workspace(Parameters(LinkWorkspaceParams {
+                path: peer.path().to_string_lossy().into_owned(),
+                direction: "in".into(),
+                indexing_mode: None,
+            }))
+            .await
+            .expect("link ok");
+        let workspace_id = body_text(&link)
+            .split("\"workspace_id\": \"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .expect("workspace_id present")
+            .to_string();
+
+        let _ = mcp
+            .set_link_direction(Parameters(SetLinkDirectionParams {
+                workspace_id: workspace_id.clone(),
+                direction: "bidirectional".into(),
+            }))
+            .await
+            .expect("set_link_direction ok");
+
+        let slot = mcp.watcher_slot();
+        let guard = slot.lock().unwrap();
+        let snapshot = guard.as_ref().unwrap().peers_snapshot();
+        assert_eq!(
+            snapshot.len(),
+            1,
+            "same-side transition must not change registry size"
+        );
+        assert_eq!(snapshot[0].workspace_id, workspace_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_link_direction_returns_invalid_params_for_unknown_workspace_id() {
+        let (_dir, mcp) = fixture();
+        let err = mcp
+            .set_link_direction(Parameters(SetLinkDirectionParams {
+                workspace_id: "ghost-uuid".into(),
+                direction: "in".into(),
+            }))
+            .await
+            .expect_err("unknown workspace_id must error");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("ghost-uuid"),
+            "error must surface offending workspace_id, got `{rendered}`"
         );
     }
 
