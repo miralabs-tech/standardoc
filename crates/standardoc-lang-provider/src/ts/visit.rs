@@ -11,8 +11,21 @@ use swc_core::ecma::ast::{
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
 
-use super::walk::{CallTarget, TsWalkContext};
+use super::walk::{CallTarget, ResolutionOutcome, TsWalkContext};
 use crate::template::JS_GLOBALS;
+
+/// Bridge between the walker's [`ResolutionOutcome`] (tier-aware) and
+/// the visitor's [`NameResolution`] (also-tier-aware-AND-scope-aware).
+/// Drop / Attribute pass through unchanged ; Emit becomes a `Target`
+/// stamped with the optional `AliasMutability` the caller derived from
+/// the scope walk.
+fn outcome_to_resolution(outcome: ResolutionOutcome, alias_mut: Option<AliasMutability>) -> NameResolution {
+    match outcome {
+        ResolutionOutcome::Drop => NameResolution::Drop,
+        ResolutionOutcome::Attribute(tag) => NameResolution::Attribute(tag),
+        ResolutionOutcome::Emit(target) => NameResolution::Target(target, alias_mut),
+    }
+}
 
 /// Append `via-builtin` + `builtin-<slug>` attrs when the target is a
 /// synthetic Edge-tier builtin. No-op when `via_builtin` is `None`. Pair
@@ -223,7 +236,8 @@ const fn alias_mut_slug(m: AliasMutability) -> &'static str {
 /// `resolve_call` fall-through chain. Internal output type — callers
 /// pattern-match on the variants to decide between emitting an edge
 /// (Target) or skipping (Local for nested-scope bindings without alias,
-/// Skip for Drop/Attribute-tier builtins).
+/// Drop for tier-classified noise, Attribute for tier-classified
+/// source-flag promotion targets).
 enum NameResolution {
     /// Either an alias propagation (Some(mutability)) or a module-level
     /// resolution (None) — both carry the canonical target so the caller
@@ -235,11 +249,17 @@ enum NameResolution {
     /// an alias. Callers skip emission — locals aren't surfaced in the
     /// module graph by design.
     Local,
-    /// Stage 3e-1: the name matched a builtin classified as
-    /// [`BuiltinTier::Drop`] (`Array` / `Map` / `undefined` / …) or
-    /// [`BuiltinTier::Attribute`] (`Promise` / iterator families — flag
-    /// promotion lands in 3e-1b). Every emit path early-returns.
-    Skip,
+    /// Stage 3e-1 : the name matched a builtin classified as
+    /// [`BuiltinTier::Drop`] (`Array` / `Map` / `undefined` / …).
+    /// Every emit path silently returns — no edge, no flag.
+    Drop,
+    /// Stage 3e-1b : the name matched a builtin classified as
+    /// [`BuiltinTier::Attribute`] (`Promise` / iterator families).
+    /// Every emit path skips the edge but registers the carried tag
+    /// against the enclosing FQDN via
+    /// [`TsWalkContext::register_attribute_flag`] so the symbol picks
+    /// up `"async"` / `"iter"` / custom UST flags in its `flags` vec.
+    Attribute(BuiltinTag),
 }
 
 struct CallVisitor<'a, 'b> {
@@ -326,23 +346,20 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
         let lookup = &self.ctx.core.lookup;
         if let Some(res) = lookup.resolve_local(name, self.current_scope_idx) {
             if res.scope_idx == ModuleLookup::ROOT_SCOPE {
-                return match self.ctx.resolve_call(name, &self.current_module) {
-                    Some(target) => NameResolution::Target(target, None),
-                    None => NameResolution::Skip,
-                };
+                return outcome_to_resolution(
+                    self.ctx.resolve_call(name, &self.current_module),
+                    None,
+                );
             }
             if let (Some(alias_str), Some(m)) = (res.aliases_to.as_deref(), res.mutability) {
-                return match self.ctx.resolve_call(alias_str, &self.current_module) {
-                    Some(target) => NameResolution::Target(target, Some(m)),
-                    None => NameResolution::Skip,
-                };
+                return outcome_to_resolution(
+                    self.ctx.resolve_call(alias_str, &self.current_module),
+                    Some(m),
+                );
             }
             return NameResolution::Local;
         }
-        match self.ctx.resolve_call(name, &self.current_module) {
-            Some(target) => NameResolution::Target(target, None),
-            None => NameResolution::Skip,
-        }
+        outcome_to_resolution(self.ctx.resolve_call(name, &self.current_module), None)
     }
 
     fn emit_call(&mut self, target: CallTarget, span: Span) {
@@ -395,13 +412,21 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
         // Pure value-reads (`emit_value_ref`) keep the strict local-skip
         // rule; this asymmetry is intentional.
         let (target, alias_mut) = match self.resolve_name(name) {
-            NameResolution::Skip => return,
+            NameResolution::Drop => return,
+            NameResolution::Attribute(tag) => {
+                self.ctx.register_attribute_flag(&self.enclosing_fqdn, &tag);
+                return;
+            }
             // Local binding shadows the name — re-resolve through the
             // module-level chain to produce a canonical-unresolved (or
-            // None for Drop/Attribute builtins, which we then skip).
+            // Drop/Attribute for builtins, which we then skip / flag).
             NameResolution::Local => match self.ctx.resolve_call(name, &self.current_module) {
-                Some(t) => (t, None),
-                None => return,
+                ResolutionOutcome::Drop => return,
+                ResolutionOutcome::Attribute(tag) => {
+                    self.ctx.register_attribute_flag(&self.enclosing_fqdn, &tag);
+                    return;
+                }
+                ResolutionOutcome::Emit(t) => (t, None),
             },
             NameResolution::Target(t, m) => (t, m),
         };
@@ -441,7 +466,11 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
             return;
         }
         let (target, alias_mut) = match self.resolve_name(name) {
-            NameResolution::Skip | NameResolution::Local => return,
+            NameResolution::Drop | NameResolution::Local => return,
+            NameResolution::Attribute(tag) => {
+                self.ctx.register_attribute_flag(&self.enclosing_fqdn, &tag);
+                return;
+            }
             NameResolution::Target(t, m) => (t, m),
         };
         let target_fqdn = match &target.to {
@@ -507,7 +536,11 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
             return;
         };
         let target = match self.resolve_name(name) {
-            NameResolution::Skip | NameResolution::Local => return,
+            NameResolution::Drop | NameResolution::Local => return,
+            NameResolution::Attribute(tag) => {
+                self.ctx.register_attribute_flag(&self.enclosing_fqdn, &tag);
+                return;
+            }
             NameResolution::Target(t, _) => t,
         };
         if let ResolvedOrUnresolved::Resolved { fqdn } = &target.to
@@ -587,7 +620,10 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
                 // at a local, etc.) are NOT surfaced — the matching
                 // call lives entirely inside the enclosing FQDN.
                 match self.resolve_name(ident.sym.as_ref()) {
-                    NameResolution::Local | NameResolution::Skip => {}
+                    NameResolution::Local | NameResolution::Drop => {}
+                    NameResolution::Attribute(tag) => {
+                        self.ctx.register_attribute_flag(&self.enclosing_fqdn, &tag);
+                    }
                     NameResolution::Target(target, Some(m)) => {
                         self.emit_call_via_alias(target, ident.span, m);
                     }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use standardoc_ir::{
@@ -40,6 +40,11 @@ pub(crate) struct TsWalkContext<'a> {
     pub(crate) package_root: PathBuf,
     pub(crate) tsconfig: Option<TsConfigPaths>,
     pub(crate) comments: &'a SingleThreadedComments,
+    /// Stage 3e-1b — flags accumulated from Attribute-tier builtin hits
+    /// while walking. Keyed by the source symbol's FQDN (the enclosing
+    /// function / class FQDN that owns the touched type / call / ref).
+    /// Flushed into each symbol's `flags` vec at `into_outputs`.
+    pub(crate) attribute_flags: HashMap<String, HashSet<String>>,
 }
 
 impl<'a> TsWalkContext<'a> {
@@ -63,6 +68,7 @@ impl<'a> TsWalkContext<'a> {
             package_root,
             tsconfig,
             comments,
+            attribute_flags: HashMap::new(),
         }
     }
 
@@ -104,31 +110,40 @@ impl<'a> TsWalkContext<'a> {
     /// member-expression calls (`obj.method`) are handled separately by the
     /// visitor (always Unresolved by method ident, day-1).
     ///
-    /// Stage 3e-1: returns `None` when the name matches a builtin classified
-    /// as [`BuiltinTier::Drop`] (structural noise — `Array`, `Map`, `undefined`)
-    /// or [`BuiltinTier::Attribute`] (semantic effect on source — `Promise` /
-    /// iterator families; folded into source-symbol flags in 3e-1b, not yet
-    /// wired). Edge-tier builtins surface as `Resolved{synthetic}` with the
-    /// [`BuiltinTag`] propagated through [`CallTarget::via_builtin`] so
-    /// callers can stamp `via-builtin` / `builtin-<slug>` attrs.
+    /// Stage 3e-1 / 3e-1b: the return type is a 3-variant
+    /// [`ResolutionOutcome`] so callers can distinguish the three skip
+    /// semantics introduced by tier classification :
+    ///
+    /// - [`ResolutionOutcome::Drop`] — structural noise (`Array`,
+    ///   `Map`, `undefined`, …). Caller silently skips ; nothing to
+    ///   record.
+    /// - [`ResolutionOutcome::Attribute(tag)`] — semantic effect on
+    ///   the *source* symbol (`Promise` → `"async"` flag, `Iterator`
+    ///   → `"iter"` flag). Caller skips the edge and registers the
+    ///   tag against the enclosing FQDN via
+    ///   [`TsWalkContext::register_attribute_flag`].
+    /// - [`ResolutionOutcome::Emit(target)`] — emit the edge.
+    ///   `target.via_builtin` is `Some(tag)` for Edge-tier builtins
+    ///   so callers can stamp `via-builtin` / `builtin-<slug>` attrs.
     pub(crate) fn resolve_call(
         &self,
         name: &str,
         current_module_fqdn: &str,
-    ) -> Option<CallTarget> {
+    ) -> ResolutionOutcome {
         if let Some(import) = self.import_aliases.get(name) {
-            return Some(CallTarget::plain(import.target.clone()));
+            return ResolutionOutcome::Emit(CallTarget::plain(import.target.clone()));
         }
         let local = format!("{current_module_fqdn}::{name}");
         if self.core.defined_fqdns.contains(&local) {
-            return Some(CallTarget::plain(ResolvedOrUnresolved::Resolved {
-                fqdn: local,
-            }));
+            return ResolutionOutcome::Emit(CallTarget::plain(
+                ResolvedOrUnresolved::Resolved { fqdn: local },
+            ));
         }
         if let Some(entry) = global_builtin_registry().lookup(name, self.core.lookup.language) {
             return match entry.tier {
-                BuiltinTier::Drop | BuiltinTier::Attribute => None,
-                BuiltinTier::Edge => Some(CallTarget {
+                BuiltinTier::Drop => ResolutionOutcome::Drop,
+                BuiltinTier::Attribute => ResolutionOutcome::Attribute(entry.tag.clone()),
+                BuiltinTier::Edge => ResolutionOutcome::Emit(CallTarget {
                     to: ResolvedOrUnresolved::Resolved {
                         fqdn: entry.synthetic_fqdn.clone(),
                     },
@@ -136,9 +151,22 @@ impl<'a> TsWalkContext<'a> {
                 }),
             };
         }
-        Some(CallTarget::plain(ResolvedOrUnresolved::Unresolved {
+        ResolutionOutcome::Emit(CallTarget::plain(ResolvedOrUnresolved::Unresolved {
             name: local,
         }))
+    }
+
+    /// Stage 3e-1b — record a builtin tag against the symbol identified
+    /// by `source_fqdn` so the post-walk flush can stamp it onto the
+    /// symbol's `flags` vec. Best-effort : callers fire-and-forget,
+    /// duplicates collapse into a `HashSet` so the same flag never lands
+    /// twice on the same symbol regardless of how many times the same
+    /// Attribute-tier builtin is touched in the symbol's body.
+    pub(crate) fn register_attribute_flag(&mut self, source_fqdn: &str, tag: &BuiltinTag) {
+        self.attribute_flags
+            .entry(source_fqdn.to_string())
+            .or_default()
+            .insert(tag.slug());
     }
 
     pub(crate) fn span_location(&self, span: Span) -> SymbolLocation {
@@ -173,9 +201,50 @@ impl<'a> TsWalkContext<'a> {
         self.cm.span_to_snippet(span).ok()
     }
 
-    pub(crate) fn into_outputs(self) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
+    pub(crate) fn into_outputs(mut self) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
+        // Stage 3e-1b — flush accumulated Attribute-tier flags onto the
+        // symbols they belong to. Iteration order is stable (sorted by
+        // flag string) so the resulting `symbol.flags` vec is
+        // deterministic across runs — important for diff tools and the
+        // body_hash-driven `apply_edges` plan.
+        if !self.attribute_flags.is_empty() {
+            let mut by_fqdn: HashMap<String, Vec<String>> = HashMap::new();
+            for (fqdn, flags) in self.attribute_flags.drain() {
+                let mut sorted: Vec<String> = flags.into_iter().collect();
+                sorted.sort();
+                by_fqdn.insert(fqdn, sorted);
+            }
+            for sym in self.core.symbols.iter_mut() {
+                if let Some(extra) = by_fqdn.get(&sym.fqdn) {
+                    for f in extra {
+                        if !sym.flags.contains(f) {
+                            sym.flags.push(f.clone());
+                        }
+                    }
+                }
+            }
+        }
         (self.core.symbols, self.core.edges, self.core.documents)
     }
+}
+
+/// Outcome of [`TsWalkContext::resolve_call`]. Three variants reflect
+/// the three skip semantics introduced by Stage 3e-1 tier
+/// classification + 3e-1b's flag promotion :
+#[derive(Debug, Clone)]
+pub(crate) enum ResolutionOutcome {
+    /// Drop tier builtin or unmatched name with no entry to record.
+    /// Caller silently skips emission.
+    Drop,
+    /// Attribute tier builtin — caller skips the edge but registers
+    /// the carried [`BuiltinTag`] against the enclosing symbol via
+    /// [`TsWalkContext::register_attribute_flag`].
+    Attribute(BuiltinTag),
+    /// Resolvable target — caller emits the edge using the carried
+    /// [`CallTarget`]. `target.via_builtin` is `Some(tag)` for
+    /// Edge-tier builtins (so the emitter can stamp `via-builtin` /
+    /// `builtin-<slug>` attrs).
+    Emit(CallTarget),
 }
 
 /// A resolved (or unresolved-canonical) import, keyed in `import_aliases` by
@@ -767,14 +836,19 @@ fn extract_class_inner(
 
     if let Some(super_class) = &class.super_class {
         let span = super_class.span();
-        // Stage 3e-1: `None` means the heritage target is a Drop/Attribute
-        // builtin (e.g. `class C extends Array` / `extends Promise`); skip
-        // the edge but keep walking generic args so inner type refs still
+        // Stage 3e-1 / 3e-1b: tier-dependent dispatch. Drop ⇒ skip;
+        // Attribute ⇒ flag the class (e.g. `class C extends Promise`
+        // becomes flagged `async`); Emit ⇒ stamp the heritage edge.
+        // Generic args still recurse regardless so inner type refs
         // surface their own UsesType edges.
-        if let Some(target) =
-            ctx.resolve_call(&render_expr_name(super_class), parent_fqdn)
-        {
-            push_heritage_edge(ctx, &class_fqdn, EdgeKind::Extends, target, span);
+        match ctx.resolve_call(&render_expr_name(super_class), parent_fqdn) {
+            ResolutionOutcome::Drop => {}
+            ResolutionOutcome::Attribute(tag) => {
+                ctx.register_attribute_flag(&class_fqdn, &tag);
+            }
+            ResolutionOutcome::Emit(target) => {
+                push_heritage_edge(ctx, &class_fqdn, EdgeKind::Extends, target, span);
+            }
         }
         // Bug B Stage 2b: walk extends' generic args
         // (`class X extends Foo<Bar>` → UsesType edge to Bar).
@@ -790,10 +864,14 @@ fn extract_class_inner(
     }
     for impl_target in &class.implements {
         let span = impl_target.span;
-        if let Some(target) =
-            ctx.resolve_call(&render_ts_entity_name(&impl_target.expr), parent_fqdn)
-        {
-            push_heritage_edge(ctx, &class_fqdn, EdgeKind::Implements, target, span);
+        match ctx.resolve_call(&render_ts_entity_name(&impl_target.expr), parent_fqdn) {
+            ResolutionOutcome::Drop => {}
+            ResolutionOutcome::Attribute(tag) => {
+                ctx.register_attribute_flag(&class_fqdn, &tag);
+            }
+            ResolutionOutcome::Emit(target) => {
+                push_heritage_edge(ctx, &class_fqdn, EdgeKind::Implements, target, span);
+            }
         }
         // Bug B Stage 2b: walk implements' generic args
         // (`class X implements Foo<Bar>` → UsesType edge to Bar).
@@ -1096,8 +1174,14 @@ fn extract_interface_decl(
     );
     for ext in &item.extends {
         let span = ext.span;
-        if let Some(target) = ctx.resolve_call(&render_expr_name(&ext.expr), parent_fqdn) {
-            push_heritage_edge(ctx, &fqdn, EdgeKind::Extends, target, span);
+        match ctx.resolve_call(&render_expr_name(&ext.expr), parent_fqdn) {
+            ResolutionOutcome::Drop => {}
+            ResolutionOutcome::Attribute(tag) => {
+                ctx.register_attribute_flag(&fqdn, &tag);
+            }
+            ResolutionOutcome::Emit(target) => {
+                push_heritage_edge(ctx, &fqdn, EdgeKind::Extends, target, span);
+            }
         }
         // Bug B Stage 2b: walk the extends' generic args
         // (`interface I extends J<K>` → UsesType edge to K).
@@ -1864,6 +1948,13 @@ mod tests {
         assert_ne!(sym_a[0].body_hash, sym_b[0].body_hash);
     }
 
+    fn expect_emit(outcome: ResolutionOutcome) -> CallTarget {
+        match outcome {
+            ResolutionOutcome::Emit(target) => target,
+            other => panic!("expected ResolutionOutcome::Emit, got {other:?}"),
+        }
+    }
+
     #[test]
     fn resolve_call_via_alias_table() {
         let (cm, _module, comments) = parse_ts("");
@@ -1885,9 +1976,7 @@ mod tests {
                 },
             },
         );
-        let target = ctx
-            .resolve_call("Foo", "src")
-            .expect("alias path always yields Some");
+        let target = expect_emit(ctx.resolve_call("Foo", "src"));
         assert!(
             target.via_builtin.is_none(),
             "alias resolution carries no via_builtin"
@@ -1914,9 +2003,7 @@ mod tests {
             &comments,
         );
         ctx.core.defined_fqdns.insert("src::foo".into());
-        let target = ctx
-            .resolve_call("foo", "src")
-            .expect("module-local resolved path always yields Some");
+        let target = expect_emit(ctx.resolve_call("foo", "src"));
         assert!(
             target.via_builtin.is_none(),
             "module-local resolution carries no via_builtin"
@@ -1940,9 +2027,7 @@ mod tests {
             None,
             &comments,
         );
-        let target = ctx
-            .resolve_call("nope", "src")
-            .expect("fall-through path always yields Some(Unresolved)");
+        let target = expect_emit(ctx.resolve_call("nope", "src"));
         assert!(
             target.via_builtin.is_none(),
             "fall-through unresolved carries no via_builtin"
@@ -1970,9 +2055,7 @@ mod tests {
             None,
             &comments,
         );
-        let target = ctx
-            .resolve_call("Math", "src")
-            .expect("Edge-tier builtin must resolve to Some");
+        let target = expect_emit(ctx.resolve_call("Math", "src"));
         match &target.to {
             ResolvedOrUnresolved::Resolved { fqdn } => {
                 assert!(
@@ -2009,17 +2092,16 @@ mod tests {
             &comments,
         );
         assert!(
-            ctx.resolve_call("Array", "src").is_none(),
-            "Drop-tier builtin must resolve to None"
+            matches!(ctx.resolve_call("Array", "src"), ResolutionOutcome::Drop),
+            "Drop-tier builtin must resolve to ResolutionOutcome::Drop"
         );
     }
 
     #[test]
-    fn stage3e1_resolve_call_builtin_attribute_returns_none() {
-        // `Promise` is `BuiltinTier::Attribute` — folded into source-symbol
-        // flags in 3e-1b (not yet wired). Until then the resolver also
-        // returns `None` (no edge, no source-flag promotion either, by
-        // design — we ship skip semantics first).
+    fn stage3e1b_resolve_call_attribute_tier_returns_tag() {
+        // `Promise` is `BuiltinTier::Attribute` (Async tag). Stage 3e-1b
+        // surfaces the tag through `ResolutionOutcome::Attribute(tag)`
+        // so callers can flag the enclosing source symbol.
         let (cm, _module, comments) = parse_ts("");
         let ctx = TsWalkContext::new(
             "src/index.ts".into(),
@@ -2031,10 +2113,60 @@ mod tests {
             None,
             &comments,
         );
-        assert!(
-            ctx.resolve_call("Promise", "src").is_none(),
-            "Attribute-tier builtin must resolve to None until 3e-1b"
+        match ctx.resolve_call("Promise", "src") {
+            ResolutionOutcome::Attribute(BuiltinTag::Async) => {}
+            other => panic!("expected Attribute(Async) for Promise, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage3e1b_register_attribute_flag_flushes_to_symbol() {
+        // End-to-end : register a flag against an FQDN, push a matching
+        // symbol, drain via `into_outputs`, assert the symbol picks the
+        // flag up.
+        let (cm, _module, comments) = parse_ts("");
+        let mut ctx = TsWalkContext::new(
+            "src/index.ts".into(),
+            "@app".into(),
+            "src".into(),
+            cm,
+            PathBuf::new(),
+            PathBuf::new(),
+            None,
+            &comments,
         );
+        ctx.push_symbol(RawSymbol {
+            name: "doStuff".into(),
+            fqdn: "src::doStuff".into(),
+            kind: Kind::Function,
+            language_kind: LanguageKind::from("function"),
+            module: Some("src".into()),
+            visibility: Visibility::Public,
+            location: SymbolLocation {
+                file: "src/index.ts".into(),
+                start_line: 1,
+                end_line: 5,
+                start_col: 0,
+                end_col: 1,
+            },
+            signature: None,
+            body_hash: None,
+            attributes: vec![],
+            flags: vec![],
+        });
+        ctx.register_attribute_flag("src::doStuff", &BuiltinTag::Async);
+        ctx.register_attribute_flag("src::doStuff", &BuiltinTag::Iter);
+        // Duplicate register is a no-op (HashSet dedup).
+        ctx.register_attribute_flag("src::doStuff", &BuiltinTag::Async);
+
+        let (symbols, _, _) = ctx.into_outputs();
+        let s = symbols
+            .into_iter()
+            .find(|s| s.fqdn == "src::doStuff")
+            .expect("symbol must be retained");
+        assert!(s.flags.contains(&"async".to_string()), "got {:?}", s.flags);
+        assert!(s.flags.contains(&"iter".to_string()), "got {:?}", s.flags);
+        assert_eq!(s.flags.len(), 2, "dedup must yield exactly 2 flags");
     }
 
     #[test]
@@ -2062,9 +2194,7 @@ mod tests {
                 },
             },
         );
-        let target = ctx
-            .resolve_call("Promise", "src")
-            .expect("alias shadow must yield Some, not the Attribute None");
+        let target = expect_emit(ctx.resolve_call("Promise", "src"));
         assert!(
             target.via_builtin.is_none(),
             "alias-shadowed Promise is NOT a builtin"
