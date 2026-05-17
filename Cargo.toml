@@ -21,6 +21,9 @@ standardoc-core          = { version = "1.0.0-beta.2", path = "crates/standardoc
 standardoc-rag           = { version = "1.0.0-beta.2", path = "crates/standardoc-rag" }
 standardoc-server        = { version = "1.0.0-beta.2", path = "crates/standardoc-server" }
 standardoc-graph-viz     = { version = "1.0.0-beta.2", path = "crates/standardoc-graph-viz" }
+# Versioned independently of the core workspace per SOURCEMAP_v1.md §8 —
+# protocol semver tracks the wire format, not the standardoc release train.
+standardoc-sourcemap     = { version = "1.0.0", path = "crates/standardoc-sourcemap" }
 
 serde       = { version = "1.0", features = ["derive"] }
 serde_json  = "1.0"
