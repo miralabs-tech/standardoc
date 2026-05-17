@@ -248,11 +248,18 @@ fn emit_uses_type_path(
     if let Some(entry) = global_builtin_registry().lookup(leftmost, Language::Rust) {
         match entry.tier {
             // Stage 3e-1: `Drop` = structural noise (`Vec<T>`, `Box<T>`,
-            // `Option<T>`, marker traits, …). `Attribute` = source-flag
-            // promotion target (`Iterator`/`Future`; folded into source
-            // symbol in 3e-1b). Both skip edge emission — inner type
-            // args still recurse via `visit_type_path` / `visit_trait_bound`.
-            BuiltinTier::Drop | BuiltinTier::Attribute => return,
+            // `Option<T>`, marker traits, …) — silently skipped, inner
+            // type args still recurse via `visit_type_path` /
+            // `visit_trait_bound`.
+            BuiltinTier::Drop => return,
+            // Stage 3e-1b: `Attribute` = source-flag promotion target.
+            // `Iterator` / `IntoIterator` / `FromIterator` stamp `iter`
+            // on the source symbol ; `Future` / `Stream` stamp `async`.
+            // No edge — the property surfaces as `symbol.flags` instead.
+            BuiltinTier::Attribute => {
+                ctx.register_attribute_flag(enclosing_fqdn, &entry.tag);
+                return;
+            }
             BuiltinTier::Edge => {
                 let to = ResolvedOrUnresolved::Resolved {
                     fqdn: entry.synthetic_fqdn.clone(),

@@ -66,13 +66,18 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
                 match global_builtin_registry().lookup(leftmost, Language::Rust) {
                     // Stage 3e-1: Drop = structural noise (`Vec::new`,
                     // `Box::new`, `Some(x)`, `Ok(x)`, `String::from`).
-                    // Attribute = source-flag promotion target (`Iterator`,
-                    // `Future`; rare for call positions). Both skip the
-                    // edge — inner args still walked below.
-                    Some(entry) if matches!(
-                        entry.tier,
-                        BuiltinTier::Drop | BuiltinTier::Attribute
-                    ) => {}
+                    // Silently skipped — inner args still walked below.
+                    Some(entry) if matches!(entry.tier, BuiltinTier::Drop) => {}
+                    // Stage 3e-1b: Attribute = source-flag promotion
+                    // target. Rare in call position (most Iterator /
+                    // Future hits happen via type bounds in
+                    // `extract_type`), but covered for symmetry —
+                    // e.g. `Future::poll(...)` would surface as a
+                    // `"async"` flag on the enclosing fn.
+                    Some(entry) if matches!(entry.tier, BuiltinTier::Attribute) => {
+                        self.ctx
+                            .register_attribute_flag(&self.enclosing_fqdn, &entry.tag);
+                    }
                     // Edge-tier call (e.g. `Error::source(...)`) — emit
                     // straight to the synthetic builtin FQDN with the
                     // standard `via-builtin` / `builtin-<slug>` attrs.

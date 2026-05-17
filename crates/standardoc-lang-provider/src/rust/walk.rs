@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use proc_macro2::Span;
 use quote::ToTokens;
@@ -36,6 +36,13 @@ pub(crate) struct WalkContext {
     pub(crate) core: WalkContextCore,
     pub(crate) crate_name: String,
     pub(crate) alias_table: HashMap<String, String>,
+    /// Stage 3e-1b — flags accumulated from Attribute-tier builtin
+    /// hits during the walk. Keyed by the source symbol's FQDN
+    /// (the enclosing fn / struct / impl method owning the touched
+    /// trait / type / call). Flushed onto `core.symbols[*].flags`
+    /// before `walk()` returns. Mirrors the TS-side `TsWalkContext`
+    /// machinery.
+    pub(crate) attribute_flags: HashMap<String, HashSet<String>>,
 }
 
 impl WalkContext {
@@ -44,7 +51,24 @@ impl WalkContext {
             core: WalkContextCore::new(file_path.to_string(), file_module_fqdn, Language::Rust),
             crate_name: crate_name.to_string(),
             alias_table: HashMap::new(),
+            attribute_flags: HashMap::new(),
         }
+    }
+
+    /// Stage 3e-1b — record a builtin tag against `source_fqdn` so the
+    /// post-walk flush stamps it onto the symbol's `flags` vec. Best-
+    /// effort : duplicates collapse into a `HashSet` so the same flag
+    /// never lands twice on the same symbol regardless of how many
+    /// times the Attribute-tier builtin is touched in the symbol body.
+    pub(crate) fn register_attribute_flag(
+        &mut self,
+        source_fqdn: &str,
+        tag: &standardoc_ir::BuiltinTag,
+    ) {
+        self.attribute_flags
+            .entry(source_fqdn.to_string())
+            .or_default()
+            .insert(tag.slug());
     }
 
     pub(crate) fn push_symbol(&mut self, sym: RawSymbol) {
@@ -172,7 +196,34 @@ pub(crate) fn walk(
     ctx.core.lookup = super::lookup::build_rust_lookup(parsed, module_fqdn);
     walk_p1(&mut ctx, &parsed.items, module_fqdn);
     walk_p2(&mut ctx, &parsed.items, module_fqdn);
+    flush_attribute_flags(&mut ctx);
     (ctx.core.symbols, ctx.core.edges, ctx.core.documents)
+}
+
+/// Stage 3e-1b — apply Attribute-tier flags accumulated during the walk
+/// onto each affected symbol's `flags` vec. Sorted + dedup'd so the
+/// resulting order is deterministic across runs (important for the
+/// body_hash-driven `apply_edges` plan that decides re-extraction
+/// boundaries).
+fn flush_attribute_flags(ctx: &mut WalkContext) {
+    if ctx.attribute_flags.is_empty() {
+        return;
+    }
+    let mut by_fqdn: HashMap<String, Vec<String>> = HashMap::new();
+    for (fqdn, flags) in ctx.attribute_flags.drain() {
+        let mut sorted: Vec<String> = flags.into_iter().collect();
+        sorted.sort();
+        by_fqdn.insert(fqdn, sorted);
+    }
+    for sym in ctx.core.symbols.iter_mut() {
+        if let Some(extra) = by_fqdn.get(&sym.fqdn) {
+            for f in extra {
+                if !sym.flags.contains(f) {
+                    sym.flags.push(f.clone());
+                }
+            }
+        }
+    }
 }
 
 // Pass 1: items → symbols + IMPORTS (use/extern_crate) + IMPLEMENTS + alias-table.
@@ -1717,18 +1768,67 @@ mod tests {
     }
 
     #[test]
-    fn stage3e1_uses_type_attribute_tier_skipped() {
-        // `Iterator` is `BuiltinTier::Attribute` — folded into source
-        // flags in 3e-1b. Until then it skips emission entirely. The
-        // inner item type still recurses (no inner here, just guards
-        // against the bound itself producing an edge).
+    fn stage3e1b_uses_type_attribute_tier_promotes_flag_on_source_symbol() {
+        // `Iterator` is `BuiltinTier::Attribute` (`Iter` tag). Stage
+        // 3e-1b flushes that into `flags = ["iter"]` on the enclosing
+        // fn ; no edge surfaces (the property is a fact about the fn,
+        // not a graph neighbor worth a node).
         let parsed = parse("pub fn collect<T: Iterator>(it: T) {}");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let refs = uses_type_with(&edges, &["via-type"]);
         let targets = resolved_targets(&refs);
         assert!(
             !targets.iter().any(|t| t.ends_with("::Iterator")),
-            "Attribute-tier Iterator must not surface, got {targets:?}",
+            "Attribute-tier Iterator must not surface as an edge, got {targets:?}",
+        );
+        let collect_sym = symbols
+            .iter()
+            .find(|s| s.fqdn == "c::collect")
+            .expect("c::collect must be indexed");
+        assert!(
+            collect_sym.flags.contains(&"iter".to_string()),
+            "expected `iter` flag on c::collect, got {:?}",
+            collect_sym.flags
+        );
+    }
+
+    #[test]
+    fn stage3e1b_future_bound_promotes_async_flag() {
+        // `Future` is `BuiltinTier::Attribute` (`Async` tag) — same
+        // mechanism as Iterator but flagged as `"async"`.
+        let parsed = parse("pub fn run<F: Future>(fut: F) {}");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let run_sym = symbols
+            .iter()
+            .find(|s| s.fqdn == "c::run")
+            .expect("c::run must be indexed");
+        assert!(
+            run_sym.flags.contains(&"async".to_string()),
+            "expected `async` flag on c::run, got {:?}",
+            run_sym.flags
+        );
+    }
+
+    #[test]
+    fn stage3e1b_attribute_flag_dedupes_across_multiple_hits() {
+        // Same Attribute-tier trait touched twice in one fn signature
+        // (param bound + return bound) must produce the flag exactly
+        // once — `HashSet` dedup happens at the register-time site.
+        let parsed = parse("pub fn pipe<I: Iterator>(i: I) -> impl Iterator { i }");
+        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let pipe_sym = symbols
+            .iter()
+            .find(|s| s.fqdn == "c::pipe")
+            .expect("c::pipe must be indexed");
+        let iter_count = pipe_sym
+            .flags
+            .iter()
+            .filter(|f| *f == "iter")
+            .count();
+        assert_eq!(
+            iter_count, 1,
+            "iter flag must dedup, got flags = {:?}",
+            pipe_sym.flags
         );
     }
 
