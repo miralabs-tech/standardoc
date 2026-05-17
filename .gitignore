@@ -44,3 +44,9 @@ web/
 /docs/cli-reference.fr.md
 /docs/mcp-reference.md
 /docs/mcp-reference.fr.md
+
+# Local design / planning docs that should never be committed. User-maintained
+# scratchpads consumed by the AI agent across sessions ; tracked content
+# would create noise on every doc iteration without serving repo consumers.
+/UST_LUA_SPEC.md
+/SOURCEMAP_v1.md
