@@ -51,6 +51,8 @@ pub(crate) fn extract_file(
     symbols.extend(item_symbols);
     documents.extend(item_documents);
 
+    let ffi_bindings = super::extract_ffi_bindings(&parsed, &module_fqdn);
+
     Ok(ExtractedFile {
         file: path.into(),
         language: Language::Rust,
@@ -62,7 +64,7 @@ pub(crate) fn extract_file(
         edges,
         call_sites,
         documents,
-        ffi_bindings: vec![],
+        ffi_bindings,
         module_lookup: Some(lookup),
     })
 }

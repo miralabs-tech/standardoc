@@ -169,6 +169,18 @@ impl WalkContext {
         }
     }
 
+    // TODO(stage3-r3): cross-workspace fall-through at extract time.
+    // When `resolve_path` falls into `ResolvedOrUnresolved::Unresolved`
+    // AND the leftmost segment matches a known peer import (via the
+    // alias_table or a `use crate::<peer>` path), consult the lazy
+    // in-memory `CrossWorkspaceResolver` (designed in session memo
+    // `stage3-r1-shipped-r3-handoff`) and rewrite the target to the
+    // peer's FQDN with `cross-workspace` + `peer-<ws_id>` attrs, or to
+    // `UnresolvedBridge` when the peer is known but the symbol can't
+    // bind. Today any peer-targeting ident falls through to
+    // `Unresolved`, so cross-workspace edges only materialise at MCP
+    // query time via `resolve_cross_workspace`, not in the extraction
+    // payload that the viz consumes.
     /// Stage 3e-2 — resolve a name read in value position. Pipeline mirrors
     /// the TS-side `ts::visit::CallVisitor::resolve_name`:
     ///

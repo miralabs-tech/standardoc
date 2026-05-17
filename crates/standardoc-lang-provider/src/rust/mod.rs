@@ -18,7 +18,6 @@ mod module_path;
 mod visibility;
 mod walk;
 
-#[allow(unused_imports)]
 pub(crate) use ffi_tagger::extract_ffi_bindings;
 
 /// Native Rust `LanguageProvider` (syn 2-based).

@@ -167,6 +167,17 @@ fn extract_file_inner(
         edges,
         call_sites,
         documents,
+        // TODO(viz-readiness-G5): extract TS FFI surfaces and populate
+        // this vec. Today TS emits no `RawFfiBinding`, so the cross-
+        // language `ffi_resolve` pass only matches C↔Rust pairs and the
+        // viz can't show JS/TS ↔ native bridges. Detect:
+        //  - `import { dlopen, suffix } from "bun:ffi"` + `dlopen(path,
+        //    { foo: { args, returns } })` -> import bindings keyed by
+        //    each `foo` name with C ABI.
+        //  - `Deno.dlopen(path, { foo: { parameters, result } })` -> same.
+        //  - NAPI: `require('bindings')('addon')` -> N-API ABI.
+        // Mirror the `rust::ffi_tagger` module pattern: a per-file
+        // tagger that walks the swc AST and returns Vec<RawFfiBinding>.
         ffi_bindings: vec![],
         module_lookup: Some(lookup),
     })

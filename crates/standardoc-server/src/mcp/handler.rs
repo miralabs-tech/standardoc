@@ -84,6 +84,15 @@ const RECENT_DEPTH1_RETENTION_SECS: i64 = 1800;
 ///   dropped on shutdown so the dispatch thread joins before stdio closes
 ///   (mirrors `lsp::handler::StandardocLsp`).
 /// - `tool_router`: rmcp dispatch table built from the `#[tool]` methods.
+//
+// TODO(viz-readiness-G7): expose a `fetch_graph` MCP tool returning
+// `GraphPayload { symbols, edges, focal }` (shape defined in
+// `standardoc-graph-viz::payload`) so the viz crate can consume the
+// payload directly instead of rebuilding it client-side from
+// `find_symbols_by_pattern` + `get_context` primitives. Params: optional
+// `focal: String` (FQDN to center on), optional `depth: u8` (1..=N),
+// optional `kinds: Vec<EdgeKind>` filter. Server-side composition joins
+// symbols + edges from the index handle and stamps `outbound` per edge.
 #[derive(Clone)]
 pub struct StandardocMcp {
     handle: IndexHandle,

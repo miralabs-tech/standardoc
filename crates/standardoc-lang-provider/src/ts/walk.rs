@@ -108,6 +108,18 @@ impl<'a> TsWalkContext<'a> {
         self.import_aliases.insert(local_name, resolved);
     }
 
+    // TODO(stage3-r3): cross-workspace fall-through at extract time.
+    // When `import_aliases.get(name)` returns a `Resolved { fqdn }`
+    // whose target lives outside `defined_fqdns` AND matches a known
+    // peer workspace import path, consult the lazy in-memory
+    // `CrossWorkspaceResolver` (designed in session memo
+    // `stage3-r1-shipped-r3-handoff`) and rewrite the target to the
+    // peer's FQDN with `cross-workspace` + `peer-<ws_id>` attrs, or to
+    // `UnresolvedBridge` when the peer is known but the symbol can't
+    // bind. Today any peer-targeting ident falls through to
+    // `Unresolved`, so cross-workspace edges only materialise at MCP
+    // query time via `resolve_cross_workspace`, not in the extraction
+    // payload that the viz consumes.
     /// Resolve a single-ident call target through the alias-table, then through
     /// `<current_module_fqdn>::<name>` against `defined_fqdns`, then through
     /// the language's [`BuiltinRegistry`] (Stage 3a-6b chain). Multi-segment

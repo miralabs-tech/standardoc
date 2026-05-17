@@ -98,6 +98,18 @@ pub(crate) fn extract_file(
         edges: ctx.core.edges,
         call_sites: ctx.core.call_sites,
         documents: ctx.core.documents,
+        // TODO(viz-readiness-G6): extract Lua FFI surfaces and populate
+        // this vec. Today Lua emits no `RawFfiBinding`, so the cross-
+        // language `ffi_resolve` pass can't pair Lua imports with C
+        // exports. Detect:
+        //  - LuaJIT `ffi.cdef("...")` blocks: parse the embedded C
+        //    declarations and emit one import binding per declared
+        //    function with C ABI.
+        //  - `ffi.load(libname)` + bound names captured into a local
+        //    table -> attach the loaded library context to imports.
+        //  - C-side `lua_register` / `luaL_register` / `luaL_setfuncs`
+        //    in companion C files emit Lua-callable EXPORTS (matches
+        //    on the Lua import side).
         ffi_bindings: vec![],
         module_lookup: None,
     })

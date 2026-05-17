@@ -22,6 +22,13 @@ use super::helpers::ident_text;
 /// track (Rust pub use + TS re-exports) which will need cross-file FQDN
 /// resolution to decide effective public surface for module-table fields
 /// re-exported across files.
+///
+// TODO(viz-readiness-G4-lua): no `build_lua_lookup` AOT pass yet. Lua
+// resolution is procedural (no scope-aware `ModuleLookup`), so Lua
+// symbols can't be the target of cross-workspace resolution via
+// ModuleLookup. Add a `lua::lookup` module if Lua needs to participate
+// in the peer-workspace symbol-binding chain (mirroring
+// `rust::lookup` / `ts::lookup`).
 #[allow(dead_code)]
 pub(crate) struct LuaWalkContext {
     pub(crate) core: WalkContextCore,

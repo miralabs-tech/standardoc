@@ -13,6 +13,14 @@ use super::helpers::{
 };
 
 /// Per-file walker state for the C provider.
+///
+// TODO(viz-readiness-G4-c): no `build_c_lookup` AOT pass yet. C symbols
+// can't currently be the target of cross-workspace `ModuleLookup`
+// resolution from peer workspaces. FFI bindings remain the only
+// cross-language bridge for C. If C-side symbols need to be addressable
+// from peer workspaces via ModuleLookup (rather than only via FFI), add
+// a `c::lookup` module mirroring `rust::lookup` / `ts::lookup` and wire
+// it through `extract_file` so `ExtractedFile.module_lookup` is `Some`.
 pub(crate) struct CWalkContext {
     pub(crate) core: WalkContextCore,
     pub(crate) ffi_bindings: Vec<RawFfiBinding>,
@@ -113,6 +121,14 @@ fn emit_include(node: Node, src: &str, ctx: &mut CWalkContext) {
     });
 }
 
+// TODO(viz-readiness-G2): emit `RawCallSite` for tree-sitter
+// `call_expression` nodes found inside this function's body so the C
+// intra-fn call graph materialises in the viz. Today the body is walked
+// only for FFI binding emission (export side) — calls between C
+// functions stay invisible to `find_call_sites` / graph payloads.
+// Needs a `CallVisitor`-style descent through the `compound_statement`
+// child, collecting `call_expression` -> RawCallSite { from_fqdn,
+// callee_text, args, site } via `ctx.core.push_call_site`.
 fn emit_function_definition(node: Node, src: &str, ctx: &mut CWalkContext) {
     let Some(declarator) = node.child_by_field_name("declarator") else {
         return;
