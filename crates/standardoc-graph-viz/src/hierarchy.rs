@@ -85,6 +85,11 @@ pub(crate) struct HierarchyNode {
     /// (Module, Type, Function, Value, Macro, Unknown) — skipping
     /// kinds with zero chips.
     pub sections: Vec<SectionLayout>,
+    /// `Some(kind)` marks a **project-tier** frame (the level above
+    /// the module tree) — `kind` is the ecosystem tag (`rust` /
+    /// `bun` / `node` / …) the renderer colours the frame by. `None`
+    /// is an ordinary module node.
+    pub project_kind: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -96,6 +101,41 @@ pub(crate) struct Hierarchy {
 impl Hierarchy {
     pub(crate) fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Append a fresh node, wiring it under `parent` (or registering
+    /// it as a root when `parent` is `None`) and returning its arena
+    /// index. The single construction site for `HierarchyNode` — both
+    /// the project tier and the module tree route through here.
+    pub(crate) fn push(
+        &mut self,
+        segment: String,
+        parent: Option<u32>,
+        depth: u16,
+        project_kind: Option<String>,
+    ) -> u32 {
+        let idx = self.nodes.len() as u32;
+        self.nodes.push(HierarchyNode {
+            segment,
+            parent,
+            children: Vec::new(),
+            symbol_indices: Vec::new(),
+            depth,
+            recursive_symbol_count: 0,
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+            display_title: String::new(),
+            display_subtitle: String::new(),
+            sections: Vec::new(),
+            project_kind,
+        });
+        match parent {
+            Some(p) => self.nodes[p as usize].children.push(idx),
+            None => self.roots.push(idx),
+        }
+        idx
     }
 
     /// Iterate leaves (nodes with no children) in arena order. The
@@ -127,69 +167,47 @@ impl Hierarchy {
     }
 }
 
-/// Insert one full path into the arena, creating any missing
-/// intermediate nodes. Returns the index of the **terminal** node
-/// (the deepest segment of `path`). Idempotent: paths that share a
+/// Insert one `::`-delimited module path **under an existing parent
+/// node** (a project frame, or a deeper module). Creates any missing
+/// intermediate module nodes and returns the index of the terminal
+/// node. Idempotent within one `path_to_idx` map — paths that share a
 /// prefix reuse the existing nodes.
-fn ensure_path(h: &mut Hierarchy, path_to_idx: &mut HashMap<String, u32>, path: &str) -> u32 {
+///
+/// `path_to_idx` is expected to be scoped to a single project so two
+/// projects with a same-named module (`foo::util`) never collide.
+/// An empty `path` resolves to `parent` itself — used when a symbol's
+/// module was nothing but the stripped project segment.
+pub(crate) fn ensure_path_under(
+    h: &mut Hierarchy,
+    path_to_idx: &mut HashMap<String, u32>,
+    parent: u32,
+    path: &str,
+) -> u32 {
+    if path.is_empty() {
+        return parent;
+    }
     if let Some(&idx) = path_to_idx.get(path) {
         return idx;
     }
 
-    let mut parent: Option<u32> = None;
+    let base_depth = h.nodes[parent as usize].depth;
+    let mut cur = parent;
     let mut acc = String::new();
-    let mut terminal: u32 = 0;
-    for (depth, seg) in path.split("::").enumerate() {
+    for (offset, seg) in path.split("::").enumerate() {
         if !acc.is_empty() {
             acc.push_str("::");
         }
         acc.push_str(seg);
-        terminal = if let Some(&i) = path_to_idx.get(&acc) {
+        cur = if let Some(&i) = path_to_idx.get(&acc) {
             i
         } else {
-            let i = h.nodes.len() as u32;
-            h.nodes.push(HierarchyNode {
-                segment: seg.to_string(),
-                parent,
-                children: Vec::new(),
-                symbol_indices: Vec::new(),
-                depth: depth as u16,
-                recursive_symbol_count: 0,
-                x: 0.0,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-                display_title: String::new(),
-                display_subtitle: String::new(),
-                sections: Vec::new(),
-            });
+            let depth = base_depth + 1 + offset as u16;
+            let i = h.push(seg.to_string(), Some(cur), depth, None);
             path_to_idx.insert(acc.clone(), i);
-            match parent {
-                Some(p) => h.nodes[p as usize].children.push(i),
-                None => h.roots.push(i),
-            }
             i
         };
-        parent = Some(terminal);
     }
-    terminal
-}
-
-/// Build a hierarchy from the set of distinct module paths the input
-/// payload produced. The caller owns the actual symbol grouping —
-/// this only erects the tree; symbol-to-node attachment is done by
-/// `layout::pack` afterwards. Returns a map `path → leaf_index` so
-/// the layout can route each symbol's `module` to its arena slot.
-pub(crate) fn build<'a, I>(paths: I) -> (Hierarchy, HashMap<String, u32>)
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let mut hierarchy = Hierarchy::default();
-    let mut path_to_idx: HashMap<String, u32> = HashMap::new();
-    for path in paths {
-        ensure_path(&mut hierarchy, &mut path_to_idx, path);
-    }
-    (hierarchy, path_to_idx)
+    cur
 }
 
 /// Post-order DFS that fills `recursive_symbol_count` for every

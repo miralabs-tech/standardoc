@@ -30,6 +30,10 @@ pub(crate) struct Scene {
     pub node_by_fqdn: HashMap<String, usize>,
     /// Cached AABB over all nodes — used by the viewport's `fit_to`.
     pub bounds: Bounds,
+    /// `(foundation, dependant)` pairs of `hierarchy.nodes` indices —
+    /// the aggregated frame-tier dependencies the renderer draws as
+    /// persistent wires.
+    pub frame_edges: Vec<(u32, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +43,10 @@ pub(crate) struct Node {
     pub kind: Kind,
     pub visibility: String,
     pub language_kind: String,
+    /// Broad source language (`rust` / `typescript` / `c` / `lua` /
+    /// …) — the serde-lowercased IR `Language`. Drives the chip's
+    /// left accent bar via `Palette::language_color`.
+    pub language: String,
     pub is_external: bool,
     /// Index into `Scene.hierarchy.nodes` of the container node that
     /// owns this chip. Usually a leaf, but can be an intermediate
@@ -123,7 +131,8 @@ impl Default for Bounds {
 
 impl Scene {
     pub(crate) fn from_payload(payload: GraphPayload) -> Self {
-        let (hierarchy, nodes) = layout::pack(payload.symbols);
+        let (hierarchy, nodes, frame_edges) =
+            layout::pack(payload.symbols, payload.projects, &payload.edges);
 
         let mut node_by_fqdn = HashMap::with_capacity(nodes.len());
         let mut bounds = Bounds::EMPTY;
@@ -146,6 +155,7 @@ impl Scene {
             edges,
             node_by_fqdn,
             bounds,
+            frame_edges,
         }
     }
 
@@ -216,6 +226,74 @@ impl Scene {
 
     pub(crate) fn bounds(&self) -> Bounds {
         self.bounds
+    }
+
+    /// Bounds of the deepest hierarchy frame whose rectangle contains
+    /// the world point, or `None` when the point hits no frame. Drives
+    /// double-click zoom-to-fit navigation.
+    pub(crate) fn frame_bounds_at(&self, world_x: f64, world_y: f64) -> Option<Bounds> {
+        self.hierarchy
+            .nodes
+            .iter()
+            .filter(|n| {
+                let (x, y) = (n.x as f64, n.y as f64);
+                world_x >= x
+                    && world_x <= x + n.w as f64
+                    && world_y >= y
+                    && world_y <= y + n.h as f64
+            })
+            .max_by_key(|n| n.depth)
+            .map(|n| Bounds {
+                min_x: n.x as f64,
+                min_y: n.y as f64,
+                max_x: (n.x + n.w) as f64,
+                max_y: (n.y + n.h) as f64,
+            })
+    }
+
+    /// Bounds of the hierarchy frame at arena index `id`, or `None`
+    /// when `id` is out of range. Drives breadcrumb `fit_to_frame`.
+    pub(crate) fn frame_bounds(&self, id: u32) -> Option<Bounds> {
+        self.hierarchy.nodes.get(id as usize).map(|n| Bounds {
+            min_x: n.x as f64,
+            min_y: n.y as f64,
+            max_x: (n.x + n.w) as f64,
+            max_y: (n.y + n.h) as f64,
+        })
+    }
+
+    /// Breadcrumb trail (root → deepest) of frames whose rectangle
+    /// fully contains the world-space viewbox. Empty when the viewbox
+    /// is larger than every frame (full overview). Each entry is the
+    /// frame's `(segment, arena_index)`.
+    pub(crate) fn focus_path(&self, vx0: f64, vy0: f64, vx1: f64, vy1: f64) -> Vec<(String, u32)> {
+        let deepest = self
+            .hierarchy
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| {
+                (n.x as f64) <= vx0
+                    && (n.y as f64) <= vy0
+                    && (n.x + n.w) as f64 >= vx1
+                    && (n.y + n.h) as f64 >= vy1
+            })
+            .max_by_key(|(_, n)| n.depth)
+            .map(|(i, _)| i as u32);
+        let Some(mut cur) = deepest else {
+            return Vec::new();
+        };
+        let mut path: Vec<(String, u32)> = Vec::new();
+        loop {
+            let n = &self.hierarchy.nodes[cur as usize];
+            path.push((n.segment.clone(), cur));
+            match n.parent {
+                Some(p) => cur = p,
+                None => break,
+            }
+        }
+        path.reverse();
+        path
     }
 
     pub(crate) fn symbol_count(&self) -> usize {

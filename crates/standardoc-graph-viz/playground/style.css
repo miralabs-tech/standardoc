@@ -30,6 +30,44 @@ body {
   font-size: 11px;
 }
 
+.breadcrumb {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  overflow-x: auto;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.breadcrumb .crumb {
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  font: inherit;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.breadcrumb .crumb:last-child {
+  color: var(--fg);
+}
+
+.breadcrumb .crumb:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+
+.breadcrumb .crumb-sep {
+  color: var(--fg-muted);
+  opacity: 0.6;
+  user-select: none;
+}
+
 main {
   flex: 1;
   display: flex;
@@ -43,6 +81,74 @@ standardoc-graph {
   position: relative;
   min-width: 0;
   min-height: 0;
+}
+
+.legend {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 6;
+  background: rgba(20, 20, 22, 0.9);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  max-width: 220px;
+  overflow: hidden;
+}
+
+.legend-toggle {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--accent);
+  font: inherit;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.legend.collapsed .legend-toggle {
+  border-bottom: 0;
+}
+
+.legend.collapsed .legend-body {
+  display: none;
+}
+
+.legend-body {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.legend-section-title {
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 9px;
+  margin-bottom: 3px;
+}
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.6;
+}
+
+.legend-swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.15);
 }
 
 .detail {

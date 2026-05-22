@@ -104,9 +104,12 @@ pub struct GraphSymbol {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     pub language_kind: LanguageKind,
+    pub language: String,
     pub is_external: bool,
     pub file: String,
     pub start_line: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<u32>,
 }
 
 /// Edge record paired with an `outbound` hint relative to the focal
@@ -121,12 +124,33 @@ pub struct GraphEdge {
     pub outbound: bool,
 }
 
+/// Project metadata for the symbols in a response. The viz layer
+/// frames symbols by `project_id` and colours each frame by `kind`;
+/// shipping the lookup table here keeps the viz a dumb renderer
+/// (it never re-derives the project tree itself).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphProject {
+    pub project_id: u32,
+    pub label: String,
+    /// Ecosystem tag — `rust` / `node` / `bun` / `deno` / `python` /
+    /// `lua` / `c` / `cpp` / `custom:<tag>` / `unknown`.
+    pub kind: String,
+    /// POSIX-style path relative to the workspace root. The viz nests
+    /// project frames by `rel_path` prefix.
+    pub rel_path: String,
+}
+
 /// Composed response. `focal` echoes the request so the consumer
 /// can stamp the centered node without round-tripping its own state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphResponse {
     pub symbols: Vec<GraphSymbol>,
     pub edges: Vec<GraphEdge>,
+    /// Every project detected in the workspace. The consumer indexes
+    /// it by `project_id` (the `GraphSymbol.project_id` foreign key)
+    /// and ignores entries no symbol references.
+    #[serde(default)]
+    pub projects: Vec<GraphProject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focal: Option<String>,
 }
@@ -170,6 +194,7 @@ fn compose_focal(
         return Ok(GraphResponse {
             symbols: Vec::new(),
             edges: Vec::new(),
+            projects: Vec::new(),
             focal: Some(focal),
         });
     }
@@ -228,9 +253,11 @@ fn compose_focal(
 
     let visited_vec: Vec<String> = visited.iter().cloned().collect();
     let symbols = load_graph_symbols(handle, &visited_vec, include_external)?;
+    let projects = load_graph_projects(handle)?;
     Ok(GraphResponse {
         symbols,
         edges,
+        projects,
         focal: Some(focal),
     })
 }
@@ -272,11 +299,30 @@ fn compose_bounded(
     }
 
     let symbols = load_graph_symbols(handle, &node_fqdns, include_external)?;
+    let projects = load_graph_projects(handle)?;
     Ok(GraphResponse {
         symbols,
         edges,
+        projects,
         focal: None,
     })
+}
+
+/// Load every detected project as a flat `GraphProject` list. The
+/// whole table is ~10-50 rows even on large monorepos, so we ship it
+/// wholesale rather than filtering to referenced ids — the consumer
+/// indexes by `project_id` and skips entries with no symbols.
+fn load_graph_projects(handle: &IndexHandle) -> Result<Vec<GraphProject>, StorageError> {
+    let projects = crate::query::projects::list_projects(handle)?;
+    Ok(projects
+        .into_iter()
+        .map(|p| GraphProject {
+            project_id: p.project_id,
+            label: p.label,
+            kind: p.kind.as_str().into_owned(),
+            rel_path: p.rel_path,
+        })
+        .collect())
 }
 
 fn kind_allowed(allow: Option<&HashSet<EdgeKind>>, kind: &EdgeKind) -> bool {
@@ -391,9 +437,10 @@ fn load_graph_symbols(
     // BFS expansion and the 5000-node bounded ceiling without chunking.
     let fqdns_json = serde_json::to_string(fqdns)?;
     let mut stmt = conn.prepare(
-        "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, \
-                s.visibility, s.file_path, s.start_line, s.is_external \
+        "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.language, s.module, \
+                s.visibility, s.file_path, s.start_line, s.is_external, f.project_id \
          FROM symbols s \
+         LEFT JOIN files f ON f.path = s.file_path \
          WHERE s.workspace_id = ?1 \
            AND s.fqdn IN (SELECT value FROM json_each(?2)) \
            AND (?3 = 1 OR s.is_external = 0) \
@@ -414,9 +461,11 @@ fn load_graph_symbols(
                 visibility: visibility_from_sql_text(&raw.visibility)?,
                 module: raw.module,
                 language_kind: LanguageKind::from(raw.language_kind),
+                language: raw.language,
                 is_external: raw.is_external,
                 file: raw.file_path,
                 start_line: raw.start_line,
+                project_id: raw.project_id,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -428,11 +477,13 @@ struct GraphSymbolRowRaw {
     name: String,
     kind: String,
     language_kind: String,
+    language: String,
     module: Option<String>,
     visibility: String,
     file_path: String,
     start_line: u32,
     is_external: bool,
+    project_id: Option<u32>,
 }
 
 fn read_graph_symbol(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSymbolRowRaw> {
@@ -441,11 +492,13 @@ fn read_graph_symbol(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSymbolRow
         name: row.get(1)?,
         kind: row.get(2)?,
         language_kind: row.get(3)?,
-        module: row.get(4)?,
-        visibility: row.get(5)?,
-        file_path: row.get(6)?,
-        start_line: row.get(7)?,
-        is_external: row.get(8)?,
+        language: row.get(4)?,
+        module: row.get(5)?,
+        visibility: row.get(6)?,
+        file_path: row.get(7)?,
+        start_line: row.get(8)?,
+        is_external: row.get(9)?,
+        project_id: row.get(10)?,
     })
 }
 

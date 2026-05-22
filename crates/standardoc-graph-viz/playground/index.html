@@ -13,9 +13,14 @@
       status-kind="booting"
       status-text="booting…"
     ></standardoc-toolbar>
+    <nav id="breadcrumb" class="breadcrumb" aria-label="graph focus"></nav>
     <main>
       <standardoc-graph id="graph"></standardoc-graph>
       <standardoc-hud id="hud"></standardoc-hud>
+      <aside id="legend" class="legend">
+        <button id="legend-toggle" class="legend-toggle" type="button">Legend</button>
+        <div id="legend-body" class="legend-body"></div>
+      </aside>
       <aside id="detail" class="detail">
         <h3>Pick a symbol</h3>
         <p class="empty">Hover a chip in the canvas to inspect its edges; click to log its FQDN.</p>

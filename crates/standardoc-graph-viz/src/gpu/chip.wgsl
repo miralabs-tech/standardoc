@@ -3,6 +3,10 @@
 // single indexed-instanced draw call — that's the pattern that scales
 // to 10⁵+ symbols without a per-object overhead trail.
 
+// Width (world units) of the per-chip language accent bar. Kept in
+// lock-step with `ACCENT_BAR_W` in `render.rs`.
+const ACCENT_BAR_W: f32 = 4.0;
+
 struct ViewUniform {
     view_proj: mat4x4<f32>,
 };
@@ -24,6 +28,9 @@ struct InstanceInput {
     // x: corner radius (world units). y: stroke width (world units).
     // z, w: reserved (highlight flag / LOD bias) for upcoming iterations.
     @location(5) params:  vec4<f32>,
+    // Language accent bar color. `a == 0` means "no bar" — cluster
+    // frames pass a zero vector so only leaf chips get the accent.
+    @location(6) accent:  vec4<f32>,
 };
 
 struct VertexOutput {
@@ -35,6 +42,7 @@ struct VertexOutput {
     @location(2) local:  vec2<f32>,
     @location(3) size:   vec2<f32>,
     @location(4) params: vec4<f32>,
+    @location(5) accent: vec4<f32>,
 };
 
 @vertex
@@ -47,6 +55,7 @@ fn vs_main(v: VertexInput, i: InstanceInput) -> VertexOutput {
     out.local  = v.corner * i.size;
     out.size   = i.size;
     out.params = i.params;
+    out.accent = i.accent;
     return out;
 }
 
@@ -81,6 +90,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let stroke_t = 1.0 - smoothstep(-stroke_w - aa, -stroke_w + aa, d);
         color = mix(in.stroke, in.fill, stroke_t);
     }
+
+    // Left accent bar — drawn over fill + stroke. The rounded-corner
+    // SDF mask (`fill_a`) clips it to the chip silhouette for free, so
+    // the bar follows the corner curve without extra geometry.
+    if (in.accent.a > 0.0 && in.local.x < ACCENT_BAR_W) {
+        color = vec4<f32>(in.accent.rgb, color.a);
+    }
+
     color.a *= fill_a;
     return color;
 }

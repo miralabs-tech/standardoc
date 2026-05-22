@@ -22,8 +22,29 @@ pub(crate) struct GraphPayload {
     pub symbols: Vec<SymbolEntry>,
     #[serde(default)]
     pub edges: Vec<EdgeEntry>,
+    /// Project lookup table for the `SymbolEntry.project_id` foreign
+    /// key. The layout frames symbols by project and nests frames by
+    /// `rel_path`; entries no symbol references are ignored.
+    #[serde(default)]
+    pub projects: Vec<ProjectEntry>,
     #[serde(default)]
     pub focal: Option<String>,
+}
+
+/// One detected project — the framing tier above the module tree.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ProjectEntry {
+    pub project_id: u32,
+    pub label: String,
+    /// Ecosystem tag (`rust` / `node` / `bun` / `deno` / `python` /
+    /// `lua` / `c` / `cpp` / `custom:<tag>` / `unknown`) — drives the
+    /// frame colour via `Palette::project_color`.
+    #[serde(default)]
+    pub kind: String,
+    /// POSIX-style path relative to the workspace root. Project
+    /// frames nest by `rel_path` prefix.
+    #[serde(default)]
+    pub rel_path: String,
 }
 
 /// Edges-only payload accepted by `GraphEngine::set_edges`. Used when
@@ -50,11 +71,15 @@ pub(crate) struct SymbolEntry {
     #[serde(default)]
     pub language_kind: String,
     #[serde(default)]
+    pub language: String,
+    #[serde(default)]
     pub is_external: bool,
     #[serde(default)]
     pub file: String,
     #[serde(default)]
     pub start_line: u32,
+    #[serde(default)]
+    pub project_id: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]

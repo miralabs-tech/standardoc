@@ -65,6 +65,14 @@ impl Viewport {
         self.center_on(bounds, viewport_w, viewport_h);
     }
 
+    /// Recenter so a specific world point sits at the viewport
+    /// centre, keeping the current scale. Used by minimap
+    /// click-to-teleport.
+    pub(crate) fn center_world(&mut self, wx: f64, wy: f64, viewport_w: f64, viewport_h: f64) {
+        self.offset_x = viewport_w * 0.5 - wx * self.scale;
+        self.offset_y = viewport_h * 0.5 - wy * self.scale;
+    }
+
     /// Keep the current scale, just slide the viewport so `bounds` is
     /// centered. Used on resize, so the user doesn't lose their
     /// zoom level when the panel changes size.

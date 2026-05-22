@@ -38,6 +38,16 @@ mod render;
 mod scene;
 mod viewport;
 
+/// One breadcrumb crumb — a frame's display label and its hierarchy
+/// arena index. Serialised into the `focus_path` JSON the host renders
+/// as a clickable breadcrumb; `id` round-trips back through
+/// `fit_to_frame`.
+#[derive(serde::Serialize)]
+struct FocusCrumb {
+    label: String,
+    id: u32,
+}
+
 use wasm_bindgen::prelude::*;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, Performance, window};
 
@@ -265,6 +275,13 @@ impl GraphEngine {
         Ok(())
     }
 
+    /// The fully-resolved theme palette as JSON — every default filled
+    /// in. The host reads it to build the colour legend without
+    /// duplicating the language / project-kind / edge-kind palettes.
+    pub fn palette_json(&self) -> String {
+        serde_json::to_string(&self.palette).unwrap_or_else(|_| "{}".to_string())
+    }
+
     /// Render one frame. Caller wires this into
     /// `requestAnimationFrame`; the engine returns early when nothing
     /// has changed since the last paint, so a quiescent loop costs
@@ -386,8 +403,22 @@ impl GraphEngine {
             self.needs_redraw = true;
             return;
         }
+        // A pointer over the minimap panel must not hover-select the
+        // chips painted behind it.
+        let over_minimap = crate::render::minimap_world_target(
+            self.width,
+            self.height,
+            self.scene.bounds(),
+            sx,
+            sy,
+        )
+        .is_some();
         let (wx, wy) = self.viewport.screen_to_world(sx, sy);
-        let hit = self.scene.hit_test(wx, wy);
+        let hit = if over_minimap {
+            None
+        } else {
+            self.scene.hit_test(wx, wy)
+        };
         if hit != self.interaction.hovered() {
             self.interaction.set_hovered(hit.clone());
             self.needs_redraw = true;
@@ -403,6 +434,20 @@ impl GraphEngine {
         }
         let sx = f64::from(x);
         let sy = f64::from(y);
+        // A click inside the minimap teleports the viewport (recenter,
+        // keep zoom) instead of starting a pan or selecting a chip.
+        if let Some((wx, wy)) = crate::render::minimap_world_target(
+            self.width,
+            self.height,
+            self.scene.bounds(),
+            sx,
+            sy,
+        ) {
+            self.viewport
+                .center_world(wx, wy, self.width, self.height);
+            self.needs_redraw = true;
+            return;
+        }
         let (wx, wy) = self.viewport.screen_to_world(sx, sy);
         if let Some(fqdn) = self.scene.hit_test(wx, wy) {
             self.interaction.set_click_candidate(Some((fqdn, sx, sy)));
@@ -421,6 +466,46 @@ impl GraphEngine {
             }
         }
         self.interaction.set_pan_origin(None);
+    }
+
+    /// JS double-click → zoom-to-fit the deepest frame under the
+    /// cursor. Coordinates are CSS pixels relative to the canvas's
+    /// bounding rect, same convention as `on_pointer_*`.
+    pub fn on_double_click(&mut self, x: f32, y: f32) {
+        let (wx, wy) = self
+            .viewport
+            .screen_to_world(f64::from(x), f64::from(y));
+        if let Some(bounds) = self.scene.frame_bounds_at(wx, wy) {
+            self.viewport.fit_to(bounds, self.width, self.height);
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Breadcrumb trail for the current viewport as a JSON array
+    /// `[{label, id}]`, root → deepest. The host renders it as a
+    /// clickable breadcrumb; each `id` feeds `fit_to_frame`. Empty
+    /// array at full overview (no frame contains the viewport).
+    pub fn focus_path(&self) -> String {
+        let (vx0, vy0) = self.viewport.screen_to_world(0.0, 0.0);
+        let (vx1, vy1) = self
+            .viewport
+            .screen_to_world(self.width, self.height);
+        let crumbs: Vec<FocusCrumb> = self
+            .scene
+            .focus_path(vx0, vy0, vx1, vy1)
+            .into_iter()
+            .map(|(label, id)| FocusCrumb { label, id })
+            .collect();
+        serde_json::to_string(&crumbs).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Zoom-to-fit a frame by its hierarchy arena index (a breadcrumb
+    /// crumb `id`). No-op for an out-of-range id.
+    pub fn fit_to_frame(&mut self, id: u32) {
+        if let Some(bounds) = self.scene.frame_bounds(id) {
+            self.viewport.fit_to(bounds, self.width, self.height);
+            self.needs_redraw = true;
+        }
     }
 
     pub fn on_pointer_leave(&mut self) {

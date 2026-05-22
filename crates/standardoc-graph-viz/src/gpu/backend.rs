@@ -51,6 +51,9 @@ struct ChipInstance {
     /// Reserved slots are picked up by upcoming hover highlight + LOD
     /// fade work without forcing a layout change.
     params: [f32; 4],
+    /// Language accent bar color (RGBA, 0..1). `a == 0` disables the
+    /// bar — cluster frames use that to opt out.
+    accent: [f32; 4],
 }
 
 #[repr(C)]
@@ -206,6 +209,7 @@ impl WebGpuBackend {
                             3 => Float32x4,
                             4 => Float32x4,
                             5 => Float32x4,
+                            6 => Float32x4,
                         ],
                     },
                 ],
@@ -301,6 +305,8 @@ impl WebGpuBackend {
 
         let cluster_fill = parse_hex(&palette.widget_background);
         let cluster_stroke = parse_hex(&palette.panel_border);
+        // Cluster frames opt out of the accent bar via alpha 0.
+        let no_accent = [0.0_f32; 4];
         for c in &scene.hierarchy.nodes {
             instances.push(ChipInstance {
                 offset: [c.x, c.y],
@@ -308,6 +314,25 @@ impl WebGpuBackend {
                 color: cluster_fill,
                 stroke: cluster_stroke,
                 params: [CLUSTER_RADIUS, CLUSTER_STROKE_WIDTH, 0.0, 0.0],
+                accent: no_accent,
+            });
+        }
+
+        // Project-frame header bands — one extra instance per project
+        // node, kind-coloured, drawn over the cluster fills but under
+        // the chips (chips sit below the header, so no overlap).
+        let band_h = crate::layout::CONTAINER_HEADER_H;
+        for c in &scene.hierarchy.nodes {
+            let Some(kind) = c.project_kind.as_deref() else {
+                continue;
+            };
+            instances.push(ChipInstance {
+                offset: [c.x, c.y],
+                size: [c.w, band_h.min(c.h)],
+                color: parse_hex(palette.project_color(kind)),
+                stroke: [0.0; 4],
+                params: [CLUSTER_RADIUS, 0.0, 0.0, 0.0],
+                accent: no_accent,
             });
         }
 
@@ -320,6 +345,7 @@ impl WebGpuBackend {
                 color: chip_fill,
                 stroke: chip_stroke,
                 params: [CHIP_RADIUS, CHIP_STROKE_WIDTH, 0.0, 0.0],
+                accent: parse_hex(palette.language_color(&n.language)),
             });
         }
 

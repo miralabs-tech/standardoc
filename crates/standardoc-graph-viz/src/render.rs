@@ -7,13 +7,25 @@ use web_sys::CanvasRenderingContext2d;
 
 use crate::interaction::InteractionState;
 use crate::palette::Palette;
-use crate::scene::{Node, Scene};
+use crate::scene::{Bounds, Node, Scene};
 use crate::viewport::Viewport;
 
 const CLUSTER_RADIUS: f64 = 6.0;
 const CHIP_RADIUS: f64 = 4.0;
 const FONT_PX: f64 = 12.0;
 const HEADER_FONT_PX: f64 = 12.0;
+/// Width (world units) of the per-chip language accent bar. Kept in
+/// lock-step with `ACCENT_BAR_W` in `gpu/chip.wgsl`.
+const ACCENT_BAR_W: f64 = 4.0;
+
+// Minimap — a fixed-size overview panel pinned bottom-right, drawn in
+// screen space after the world render. Project frames map into it as
+// blips; the current viewport shows as an outlined rect; a click
+// inside teleports the viewport (see `minimap_world_target`).
+const MINIMAP_W: f64 = 220.0;
+const MINIMAP_H: f64 = 150.0;
+const MINIMAP_MARGIN: f64 = 12.0;
+const MINIMAP_PAD: f64 = 8.0;
 
 // LOD thresholds — scale ratios below which we skip increasingly
 // expensive draw work. Without these, a "fit-everything" zoom on a
@@ -23,6 +35,35 @@ const HEADER_FONT_PX: f64 = 12.0;
 const LOD_TEXT_MIN_SCALE: f64 = 0.5; // chip name + cluster title
 const LOD_GLYPH_MIN_SCALE: f64 = 0.4; // kind glyph (fn / T / val …)
 const LOD_OUTLINE_MIN_SCALE: f64 = 0.2; // chip stroke (rect outlines)
+
+// Semantic-zoom tier boundaries. Below `PROJECT` the canvas paints
+// only project blocks; between `PROJECT` and `MODULE` it paints the
+// frame tree without chips; above `MODULE` it paints everything.
+// Aggregating this way keeps a 5 k-chip overview legible instead of
+// drowning it in sub-pixel rectangles.
+const LOD_PROJECT_MAX_SCALE: f64 = 0.16;
+const LOD_MODULE_MAX_SCALE: f64 = 0.46;
+
+/// Granularity the canvas renders at the current viewport scale.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LodTier {
+    /// Zoomed out — project frames only, as solid blocks.
+    Project,
+    /// Mid range — the full frame tree (projects + modules), no chips.
+    Module,
+    /// Zoomed in — frames, sections and individual chips.
+    Chip,
+}
+
+fn lod_tier(scale: f64) -> LodTier {
+    if scale < LOD_PROJECT_MAX_SCALE {
+        LodTier::Project
+    } else if scale < LOD_MODULE_MAX_SCALE {
+        LodTier::Module
+    } else {
+        LodTier::Chip
+    }
+}
 
 /// World-space axis-aligned bounding box of the current viewport.
 /// Anything outside it is culled before we walk the chip list.
@@ -85,12 +126,261 @@ pub(crate) fn draw(
     let hovered_fqdn = interaction.hovered_ref();
     let view_box = ViewportBox::from_screen(viewport, width, height);
 
-    draw_clusters(ctx, scene, palette, viewport.scale, view_box);
-    draw_sections(ctx, scene, palette, viewport.scale, view_box);
-    draw_nodes(ctx, scene, palette, viewport.scale, hovered_fqdn, view_box);
+    let tier = lod_tier(viewport.scale);
+    match tier {
+        LodTier::Project => {
+            draw_project_blocks(ctx, scene, palette, viewport.scale, view_box);
+            draw_frame_wires(ctx, scene, palette, viewport.scale, view_box, tier);
+        }
+        LodTier::Module => {
+            draw_clusters(ctx, scene, palette, viewport.scale, view_box);
+            draw_frame_wires(ctx, scene, palette, viewport.scale, view_box, tier);
+        }
+        LodTier::Chip => {
+            draw_clusters(ctx, scene, palette, viewport.scale, view_box);
+            draw_sections(ctx, scene, palette, viewport.scale, view_box);
+            draw_nodes(ctx, scene, palette, viewport.scale, hovered_fqdn, view_box);
+        }
+    }
     if hovered_fqdn.is_some() {
         draw_edges_for_hovered(ctx, scene, palette, viewport.scale, hovered_fqdn);
     }
+
+    // Minimap overlay — screen space, on top of everything.
+    let _ = ctx.set_transform(dpr, 0.0, 0.0, dpr, 0.0, 0.0);
+    draw_minimap(ctx, width, height, scene, viewport, palette);
+}
+
+/// Screen-space rect `(x, y, w, h)` of the minimap panel — pinned to
+/// the bottom-right corner.
+fn minimap_screen_rect(width: f64, height: f64) -> (f64, f64, f64, f64) {
+    (
+        width - MINIMAP_W - MINIMAP_MARGIN,
+        height - MINIMAP_H - MINIMAP_MARGIN,
+        MINIMAP_W,
+        MINIMAP_H,
+    )
+}
+
+/// World→minimap fit: maps `bounds` into the minimap's padded inner
+/// box, centered. Returns `(scale, off_x, off_y)` such that a world
+/// point projects via `mm = off + world * scale`.
+fn minimap_transform(width: f64, height: f64, bounds: Bounds) -> Option<(f64, f64, f64)> {
+    if !bounds.is_valid() {
+        return None;
+    }
+    let (mx, my, _, _) = minimap_screen_rect(width, height);
+    let inner_w = MINIMAP_W - MINIMAP_PAD * 2.0;
+    let inner_h = MINIMAP_H - MINIMAP_PAD * 2.0;
+    let scale = (inner_w / bounds.width().max(1.0)).min(inner_h / bounds.height().max(1.0));
+    let off_x = mx + MINIMAP_PAD + (inner_w - bounds.width() * scale) * 0.5 - bounds.min_x * scale;
+    let off_y = my + MINIMAP_PAD + (inner_h - bounds.height() * scale) * 0.5 - bounds.min_y * scale;
+    Some((scale, off_x, off_y))
+}
+
+/// If screen point `(sx, sy)` lands inside the minimap panel, return
+/// the world point it maps to — used for click-to-teleport. `None`
+/// when the point is outside the panel.
+pub(crate) fn minimap_world_target(
+    width: f64,
+    height: f64,
+    bounds: Bounds,
+    sx: f64,
+    sy: f64,
+) -> Option<(f64, f64)> {
+    let (mx, my, mw, mh) = minimap_screen_rect(width, height);
+    if sx < mx || sx > mx + mw || sy < my || sy > my + mh {
+        return None;
+    }
+    let (scale, off_x, off_y) = minimap_transform(width, height, bounds)?;
+    Some(((sx - off_x) / scale, (sy - off_y) / scale))
+}
+
+/// Paint the minimap: a panel, every project frame as a kind-coloured
+/// blip, and the current viewport as an outlined rect. Clipped to the
+/// panel so a viewbox panned past the graph bounds stays contained.
+fn draw_minimap(
+    ctx: &CanvasRenderingContext2d,
+    width: f64,
+    height: f64,
+    scene: &Scene,
+    viewport: &Viewport,
+    palette: &Palette,
+) {
+    let (mx, my, mw, mh) = minimap_screen_rect(width, height);
+    let Some((scale, off_x, off_y)) = minimap_transform(width, height, scene.bounds()) else {
+        return;
+    };
+
+    ctx.set_global_alpha(0.92);
+    ctx.set_fill_style_str(&palette.widget_background);
+    fill_round_rect(ctx, mx, my, mw, mh, 4.0);
+    ctx.set_global_alpha(1.0);
+    ctx.set_stroke_style_str(&palette.panel_border);
+    ctx.set_line_width(1.0);
+    stroke_round_rect(ctx, mx, my, mw, mh, 4.0);
+
+    ctx.save();
+    trace_round_rect(ctx, mx, my, mw, mh, 4.0);
+    ctx.clip();
+
+    for n in &scene.hierarchy.nodes {
+        let Some(kind) = n.project_kind.as_deref() else {
+            continue;
+        };
+        ctx.set_fill_style_str(palette.project_color(kind));
+        ctx.fill_rect(
+            off_x + n.x as f64 * scale,
+            off_y + n.y as f64 * scale,
+            (n.w as f64 * scale).max(1.0),
+            (n.h as f64 * scale).max(1.0),
+        );
+    }
+
+    let (vx0, vy0) = viewport.screen_to_world(0.0, 0.0);
+    let (vx1, vy1) = viewport.screen_to_world(width, height);
+    ctx.set_stroke_style_str(&palette.focus_border);
+    ctx.set_line_width(1.5);
+    ctx.stroke_rect(
+        off_x + vx0 * scale,
+        off_y + vy0 * scale,
+        (vx1 - vx0) * scale,
+        (vy1 - vy0) * scale,
+    );
+
+    ctx.restore();
+}
+
+/// Project-tier render: every project frame as a solid kind-coloured
+/// block stamped with its recursive symbol count. Module frames and
+/// chips are omitted — the overview answers "which projects, how big"
+/// without drowning in thousands of chip rectangles. Root frames with
+/// no project (the `(unscoped)` bucket) paint as a neutral block.
+fn draw_project_blocks(
+    ctx: &CanvasRenderingContext2d,
+    scene: &Scene,
+    palette: &Palette,
+    scale: f64,
+    view_box: ViewportBox,
+) {
+    ctx.set_stroke_style_str(&palette.panel_border);
+    ctx.set_line_width(stroke_world_px(1.5, scale));
+    for n in &scene.hierarchy.nodes {
+        if !is_project_block(n) {
+            continue;
+        }
+        let (x, y, w, h) = (n.x as f64, n.y as f64, n.w as f64, n.h as f64);
+        if !view_box.intersects_rect(x, y, w, h) {
+            continue;
+        }
+        let fill = match n.project_kind.as_deref() {
+            Some(kind) => palette.project_color(kind),
+            None => &palette.widget_background,
+        };
+        ctx.set_fill_style_str(fill);
+        fill_round_rect(ctx, x, y, w, h, CLUSTER_RADIUS);
+        stroke_round_rect(ctx, x, y, w, h, CLUSTER_RADIUS);
+    }
+
+    // Label + count, sized in world units so they land at a fixed
+    // on-screen size whatever the overview zoom (world px = target /
+    // scale). Drawn last so the text sits above any nested block.
+    let title_px = 15.0 / scale.max(0.0001);
+    let count_px = 12.0 / scale.max(0.0001);
+    ctx.set_text_align("left");
+    ctx.set_text_baseline("alphabetic");
+    for n in &scene.hierarchy.nodes {
+        if !is_project_block(n) {
+            continue;
+        }
+        let (x, y, w, h) = (n.x as f64, n.y as f64, n.w as f64, n.h as f64);
+        if !view_box.intersects_rect(x, y, w, h) {
+            continue;
+        }
+        ctx.set_fill_style_str(&palette.foreground);
+        ctx.set_font(&format!("600 {title_px}px system-ui, sans-serif"));
+        let _ = ctx.fill_text(&n.segment, x + title_px * 0.5, y + title_px * 1.1);
+        ctx.set_fill_style_str(&palette.description);
+        ctx.set_font(&format!("{count_px}px system-ui, sans-serif"));
+        let _ = ctx.fill_text(
+            &format!("{} symbols", n.recursive_symbol_count),
+            x + title_px * 0.5,
+            y + title_px * 1.1 + count_px * 1.3,
+        );
+    }
+}
+
+/// A hierarchy node painted as a solid block at the project LOD tier:
+/// any project frame, plus root frames (the `(unscoped)` bucket).
+fn is_project_block(n: &crate::hierarchy::HierarchyNode) -> bool {
+    n.project_kind.is_some() || n.parent.is_none()
+}
+
+/// Persistent dependency wires between sibling frames. A wire runs
+/// from the foundation frame's right edge to the dependant frame's
+/// left edge (the layout places the dependant one column right) — a
+/// flat Bézier with an arrowhead, the UE-Blueprint pin link. Drawn at
+/// the project + module tiers; the chip tier keeps the hover edges.
+fn draw_frame_wires(
+    ctx: &CanvasRenderingContext2d,
+    scene: &Scene,
+    palette: &Palette,
+    scale: f64,
+    view_box: ViewportBox,
+    tier: LodTier,
+) {
+    if scene.frame_edges.is_empty() {
+        return;
+    }
+    ctx.set_stroke_style_str(&palette.text_link);
+    ctx.set_fill_style_str(&palette.text_link);
+    ctx.set_global_alpha(0.5);
+    ctx.set_line_width(stroke_world_px(1.6, scale));
+    for &(a, b) in &scene.frame_edges {
+        let (Some(na), Some(nb)) = (
+            scene.hierarchy.nodes.get(a as usize),
+            scene.hierarchy.nodes.get(b as usize),
+        ) else {
+            continue;
+        };
+        // The project tier paints only project-block frames — skip a
+        // wire unless both its ends are visible there.
+        if tier == LodTier::Project && !(is_project_block(na) && is_project_block(nb)) {
+            continue;
+        }
+        let (ax, ay) = (na.x as f64 + na.w as f64, na.y as f64 + na.h as f64 * 0.5);
+        let (bx, by) = (nb.x as f64, nb.y as f64 + nb.h as f64 * 0.5);
+        let (min_x, min_y) = (ax.min(bx), ay.min(by));
+        if !view_box.intersects_rect(min_x, min_y, (ax - bx).abs(), (ay - by).abs()) {
+            continue;
+        }
+        // Flat S-curve — control points pulled horizontally so the
+        // wire leaves the foundation rightward and enters the
+        // dependant from the left.
+        let pull = ((bx - ax).abs() * 0.5).max(48.0);
+        ctx.begin_path();
+        ctx.move_to(ax, ay);
+        ctx.bezier_curve_to(ax + pull, ay, bx - pull, by, bx, by);
+        ctx.stroke();
+        // Arrowhead at the dependant end — direction ≈ tangent at the
+        // curve end, collinear with `(end − control2)`.
+        let (dx, dy) = (bx - (bx - pull), by - by);
+        let len = dx.hypot(dy);
+        if len < 0.1 {
+            continue;
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        let head = 9.0 / scale.max(0.0001);
+        let (basex, basey) = (bx - ux * head, by - uy * head);
+        let half = head * 0.5;
+        ctx.begin_path();
+        ctx.move_to(bx, by);
+        ctx.line_to(basex - uy * half, basey + ux * half);
+        ctx.line_to(basex + uy * half, basey - ux * half);
+        ctx.close_path();
+        ctx.fill();
+    }
+    ctx.set_global_alpha(1.0);
 }
 
 fn draw_clusters(
@@ -132,6 +422,27 @@ fn draw_clusters(
         stroke_round_rect(ctx, x, y, w, h, CLUSTER_RADIUS);
     }
 
+    // Project frames get a kind-coloured header band. One node per
+    // project (a dozen at most), so clipping to the container's
+    // rounded silhouette per node is free — and it gives the band
+    // crisp rounded top corners with a flush square bottom edge.
+    let band_h = crate::layout::CONTAINER_HEADER_H as f64;
+    for n in &scene.hierarchy.nodes {
+        let Some(kind) = n.project_kind.as_deref() else {
+            continue;
+        };
+        let (x, y, w, h) = (n.x as f64, n.y as f64, n.w as f64, n.h as f64);
+        if !view_box.intersects_rect(x, y, w, h) {
+            continue;
+        }
+        ctx.save();
+        trace_round_rect(ctx, x, y, w, h, CLUSTER_RADIUS);
+        ctx.clip();
+        ctx.set_fill_style_str(palette.project_color(kind));
+        ctx.fill_rect(x, y, w, band_h.min(h));
+        ctx.restore();
+    }
+
     // Below the readability threshold we skip every header text and
     // count badge — they're sub-pixel-blur smears at full-overview
     // zoom and dominate the frame cost on dense graphs.
@@ -148,9 +459,16 @@ fn draw_clusters(
         if !view_box.intersects_rect(x, y, w, h) {
             continue;
         }
-        // Title (segment) — top line.
+        // Title (segment) — top line. Project frames sit on a
+        // coloured band, so their title takes `foreground` for
+        // contrast; module nodes keep the `text_link` accent.
+        let title_color = if n.project_kind.is_some() {
+            &palette.foreground
+        } else {
+            &palette.text_link
+        };
         ctx.set_font(&header_font);
-        ctx.set_fill_style_str(&palette.text_link);
+        ctx.set_fill_style_str(title_color);
         ctx.set_text_align("left");
         let title = if n.display_title.is_empty() {
             n.segment.as_str()
@@ -174,7 +492,13 @@ fn draw_clusters(
         // average; the count placement is forgiving on exact pixels.
         let title_width = title.chars().count() as f64 * 7.0;
         ctx.set_font(count_font);
-        ctx.set_fill_style_str(&palette.description);
+        // On a project band the muted `description` grey washes out —
+        // reuse the title's contrast colour there.
+        ctx.set_fill_style_str(if n.project_kind.is_some() {
+            &palette.foreground
+        } else {
+            &palette.description
+        });
         let _ = ctx.fill_text(
             &format!("({count})"),
             x + 12.0 + title_width + 6.0,
@@ -331,6 +655,13 @@ fn draw_node(
             ctx.set_line_dash(&js_sys::Array::new()).ok();
         }
     }
+
+    // Left accent bar — the chip's source language at a glance. Drawn
+    // after the outline so it sits flush over the left hairline.
+    // Inset vertically by the corner radius so it stays inside the
+    // rounded silhouette without paying for a per-chip clip path.
+    ctx.set_fill_style_str(palette.language_color(&n.language));
+    ctx.fill_rect(n.x, n.y + CHIP_RADIUS, ACCENT_BAR_W, n.h - 2.0 * CHIP_RADIUS);
 
     if draw_text {
         ctx.set_fill_style_str(&palette.foreground);

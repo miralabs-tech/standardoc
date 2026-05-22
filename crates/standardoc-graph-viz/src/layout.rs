@@ -1,4 +1,4 @@
-//! Hierarchical shelf-pack layout (Round 4 / Phase C+B).
+//! Layered dependency layout (Sugiyama-style).
 //!
 //! Each module path is split on `::` and walked into the [`Hierarchy`]
 //! arena. Within every owner node (a node carrying its own symbols),
@@ -7,23 +7,26 @@
 //! exceeds [`SECTION_COLLAPSE_THRESHOLD`] so dense workspaces don't
 //! drown the viewport at load time.
 //!
-//! Bottom-up we compute every node's intrinsic size: chip region
-//! (sections stacked vertically), plus children containers shelf-
-//! packed below within a fixed target width. Top-down we then
-//! position each node relative to its parent's inner origin.
+//! Sibling frames — root projects, and the module subtree inside each
+//! one — are arranged in dependency COLUMNS: a frame sits one column
+//! right of every sibling it depends on, so foundational code lands
+//! left and the flow reads left→right (the UE-Blueprint metaphor).
+//! Symbol edges are aggregated to sibling-frame dependencies via the
+//! lowest-common-ancestor of each edge's endpoints. Within a column
+//! frames flow top-down, wrapping to a parallel sub-column past
+//! `TARGET_HEIGHT` so a dependency-free layer never becomes one
+//! endless vertical strip.
 //!
-//! The shelf-pack (CSS flex-wrap-like) was chosen over a pure
-//! squarified treemap because our chips are **fixed-size** for label
-//! readability and a treemap that varies item area cannot preserve
-//! that constraint. Shelf-pack exploits the horizontal axis well
-//! enough for the "Figma canvas / UE Blueprint" metaphor while
-//! keeping the algorithm prévisible and easy to audit.
+//! Bottom-up we compute every node's intrinsic size (chip region plus
+//! the layered children envelope); top-down we then position each
+//! node relative to its parent's inner origin. Chips inside a leaf
+//! keep their fixed-size kind-section grid.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::hierarchy::{self, Hierarchy, SectionLayout};
 use crate::kind::{Kind, SECTIONS_ORDER};
-use crate::payload::SymbolEntry;
+use crate::payload::{EdgeEntry, ProjectEntry, SymbolEntry};
 use crate::scene::Node;
 
 // Chip / container geometry.
@@ -44,12 +47,15 @@ const CONTAINER_GUTTER: f32 = 28.0;
 pub(crate) const SECTION_HEADER_H: f32 = 22.0;
 const SECTION_GUTTER: f32 = 6.0;
 
-// World canvas width target before wrapping siblings to the next row.
-// 3200 px ≈ 16 chips wide at CHIP_W=200 — gives a horizontal canvas
-// the user pans across, instead of stacking everything vertically.
-// Same target is reused at every nesting level so layout stays
-// prévisible regardless of depth.
-const TARGET_WIDTH: f32 = 3200.0;
+// Horizontal gap between dependency columns. Wider than
+// `CONTAINER_GUTTER` so the column flow reads clearly and leaves room
+// for the dependency wires (layout Stage 3).
+const COLUMN_GUTTER: f32 = 160.0;
+
+// Soft height ceiling for one dependency column. A column past this
+// wraps its frames into a parallel sub-column, so a layer with no
+// internal dependencies never becomes one endless vertical strip.
+const TARGET_HEIGHT: f32 = 2600.0;
 
 // Cap on cols inside a single owner's chip grid. Without a cap, an
 // owner with 200 chips would stretch ~3000 px wide on one row and
@@ -62,32 +68,79 @@ const MAX_LEAF_COLS: usize = 8;
 // (Phase B.2 — toggle wiring lands in a follow-up).
 const SECTION_COLLAPSE_THRESHOLD: u32 = 20;
 
-pub(crate) fn pack(symbols: Vec<SymbolEntry>) -> (Hierarchy, Vec<Node>) {
+pub(crate) fn pack(
+    symbols: Vec<SymbolEntry>,
+    projects: Vec<ProjectEntry>,
+    edges: &[EdgeEntry],
+) -> (Hierarchy, Vec<Node>, Vec<(u32, u32)>) {
     if symbols.is_empty() {
-        return (Hierarchy::default(), Vec::new());
+        return (Hierarchy::default(), Vec::new(), Vec::new());
     }
 
-    // Group symbols by their module path (alphabetical via BTreeMap
-    // for deterministic creation order — that order also seeds the
-    // hierarchy arena, which carries through to sibling ordering).
-    let mut groups: BTreeMap<String, Vec<SymbolEntry>> = BTreeMap::new();
+    let mut hierarchy = Hierarchy::default();
+
+    // --- Project tier ---------------------------------------------------
+    // Frame only the projects that actually own a symbol here. Sorted
+    // by `rel_path` so a parent project is always created before any
+    // project nested inside it (shorter prefix sorts first).
+    let referenced: HashSet<u32> = symbols.iter().filter_map(|s| s.project_id).collect();
+    let mut refs: Vec<&ProjectEntry> = projects
+        .iter()
+        .filter(|p| referenced.contains(&p.project_id))
+        .collect();
+    refs.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+
+    let mut project_node: HashMap<u32, u32> = HashMap::new();
+    for p in &refs {
+        let parent = project_parent(&refs, &project_node, p);
+        let depth = parent.map_or(0, |pi| hierarchy.nodes[pi as usize].depth + 1);
+        let idx = hierarchy.push(p.label.clone(), parent, depth, Some(p.kind.clone()));
+        project_node.insert(p.project_id, idx);
+    }
+
+    // A symbol is "unscoped" when it has no `project_id` OR names a
+    // project absent from the payload's `projects` table (stale data).
+    // Such symbols share one synthetic catch-all frame — never the old
+    // global `(root)` bucket.
+    let needs_unscoped = symbols.iter().any(|s| {
+        s.project_id
+            .is_none_or(|pid| !project_node.contains_key(&pid))
+    });
+    let unscoped_node: Option<u32> = needs_unscoped
+        .then(|| hierarchy.push("(unscoped)".to_string(), None, 0, None));
+
+    // --- Route every symbol to its owning hierarchy node ----------------
+    // Bucket by project frame first so each project's shared module
+    // prefix can be computed before its module subtree is built.
+    let mut by_frame: HashMap<u32, Vec<SymbolEntry>> = HashMap::new();
     for s in symbols {
-        let key = s.module.clone().unwrap_or_else(|| "(root)".to_string());
-        groups.entry(key).or_default().push(s);
+        let frame = s
+            .project_id
+            .and_then(|pid| project_node.get(&pid).copied())
+            .or(unscoped_node)
+            .expect("needs_unscoped covers every unresolved symbol");
+        by_frame.entry(frame).or_default().push(s);
     }
 
-    let paths: Vec<String> = groups.keys().cloned().collect();
-    let (mut hierarchy, path_to_idx) = hierarchy::build(paths.iter().map(String::as_str));
-
-    // Attach each group to the terminal node of its path. Note: that
-    // terminal can be an **intermediate** node (e.g. `std::io` is a
-    // terminal for the `Read` trait AND a parent of `std::io::BufReader`).
+    // Build each project's module subtree under its frame. Per-frame
+    // `path_to_idx` maps keep same-named modules in different projects
+    // from colliding. Frames processed in arena order for determinism.
     let mut node_symbols: HashMap<u32, Vec<SymbolEntry>> = HashMap::new();
-    for (path, group) in groups {
-        let idx = *path_to_idx
-            .get(&path)
-            .expect("hierarchy::build inserted path");
-        node_symbols.insert(idx, group);
+    let mut frames: Vec<u32> = by_frame.keys().copied().collect();
+    frames.sort_unstable();
+    for frame in frames {
+        let group = by_frame.remove(&frame).expect("frame key from by_frame");
+        // When every symbol of a project sits under one root module
+        // segment, that segment just echoes the project label — strip
+        // it so the frame contains `query::graph`, not a redundant
+        // `standardoc-core` node wrapping it.
+        let shared = shared_module_prefix(&group);
+        let mut map: HashMap<String, u32> = HashMap::new();
+        for s in group {
+            let sub = module_subpath(s.module.as_deref(), shared.as_deref());
+            let owner = hierarchy::ensure_path_under(&mut hierarchy, &mut map, frame, &sub);
+            node_symbols.entry(owner).or_default().push(s);
+        }
     }
 
     // Drop module-kind chips that duplicate a sub-container. Without
@@ -140,8 +193,40 @@ pub(crate) fn pack(symbols: Vec<SymbolEntry>) -> (Hierarchy, Vec<Node>) {
         });
     }
 
-    compute_intrinsic_sizes(&mut hierarchy);
-    position_layout(&mut hierarchy);
+    // Aggregate symbol edges into frame-tier dependencies. Each edge
+    // `u → v` maps to the pair of sibling frames just below the lowest
+    // common ancestor of `u`'s and `v`'s owner frames; the `None` key
+    // holds the root-tier (cross-project) dependencies.
+    let mut sym_frame: HashMap<&str, u32> = HashMap::new();
+    for (&frame, group) in &node_symbols {
+        for s in group {
+            sym_frame.insert(s.fqdn.as_str(), frame);
+        }
+    }
+    // Each dependency pair is `(foundation, dependant)` — the edge
+    // target (`e.to`, what the code relies on) is passed to
+    // `frame_dep` first so the layered pass places the dependant one
+    // column to the RIGHT. Foundations end up left, the flow reads →.
+    let mut child_deps: HashMap<Option<u32>, HashSet<(u32, u32)>> = HashMap::new();
+    for e in edges {
+        let (Some(&from_frame), Some(&to_frame)) =
+            (sym_frame.get(e.from.as_str()), sym_frame.get(e.to.as_str()))
+        else {
+            continue;
+        };
+        if let Some((parent, foundation, dependant)) =
+            frame_dep(&hierarchy, to_frame, from_frame)
+        {
+            child_deps
+                .entry(parent)
+                .or_default()
+                .insert((foundation, dependant));
+        }
+    }
+    drop(sym_frame);
+
+    compute_intrinsic_sizes(&mut hierarchy, &child_deps);
+    position_layout(&mut hierarchy, &child_deps);
 
     // Emit Vec<Node> from each owner's final position + per-section
     // chip placement. Chips of collapsed sections are skipped — they
@@ -194,6 +279,7 @@ pub(crate) fn pack(symbols: Vec<SymbolEntry>) -> (Hierarchy, Vec<Node>) {
                     kind: sym.kind,
                     visibility: sym.visibility,
                     language_kind: sym.language_kind,
+                    language: sym.language,
                     is_external: sym.is_external,
                     owner_index: owner_idx,
                     x: chip_x,
@@ -209,7 +295,91 @@ pub(crate) fn pack(symbols: Vec<SymbolEntry>) -> (Hierarchy, Vec<Node>) {
 
     hierarchy::fill_recursive_counts(&mut hierarchy);
 
-    (hierarchy, nodes_out)
+    // Flatten the per-tier dependency pairs into a single list of
+    // `(foundation, dependant)` frame edges — the renderer draws these
+    // as persistent dependency wires. Sorted for deterministic draw
+    // order.
+    let mut frame_edges: Vec<(u32, u32)> =
+        child_deps.values().flatten().copied().collect();
+    frame_edges.sort_unstable();
+
+    (hierarchy, nodes_out, frame_edges)
+}
+
+/// Frame a nested project hangs under: the referenced project with
+/// the longest `rel_path` that is a proper ancestor directory of
+/// `child.rel_path`. `refs` is sorted by `rel_path`, so every
+/// candidate ancestor is already present in `project_node`.
+fn project_parent(
+    refs: &[&ProjectEntry],
+    project_node: &HashMap<u32, u32>,
+    child: &ProjectEntry,
+) -> Option<u32> {
+    let mut best: Option<(usize, u32)> = None;
+    for cand in refs {
+        let Some(&node) = project_node.get(&cand.project_id) else {
+            continue; // not inserted yet — cannot be an ancestor
+        };
+        if is_ancestor_path(&cand.rel_path, &child.rel_path)
+            && best.is_none_or(|(len, _)| cand.rel_path.len() > len)
+        {
+            best = Some((cand.rel_path.len(), node));
+        }
+    }
+    best.map(|(_, node)| node)
+}
+
+/// True when `a` is a proper ancestor directory of `b` (POSIX-style
+/// rel paths). `.` is the workspace root — ancestor of everything.
+/// The byte after the `a` prefix must be `/` so `crates/foo` is not
+/// treated as an ancestor of `crates/foobar`.
+fn is_ancestor_path(a: &str, b: &str) -> bool {
+    if a == b {
+        return false;
+    }
+    if a == "." {
+        return true;
+    }
+    b.starts_with(a) && b.as_bytes().get(a.len()) == Some(&b'/')
+}
+
+/// First `::` segment shared by every module path in `group`, or
+/// `None` when the modules disagree (or none carries a module).
+fn shared_module_prefix(group: &[SymbolEntry]) -> Option<String> {
+    let mut shared: Option<&str> = None;
+    for s in group {
+        let Some(module) = s.module.as_deref() else {
+            continue;
+        };
+        let first = module.split("::").next().unwrap_or(module);
+        match shared {
+            None => shared = Some(first),
+            Some(prev) if prev != first => return None,
+            Some(_) => {}
+        }
+    }
+    shared.map(str::to_string)
+}
+
+/// A symbol's module path **relative to its project frame**: the raw
+/// `module` with the shared project-root segment stripped. A `None`
+/// module — or one equal to the stripped segment — yields `""`, which
+/// `ensure_path_under` resolves to the frame node itself.
+fn module_subpath(module: Option<&str>, shared: Option<&str>) -> String {
+    let Some(module) = module else {
+        return String::new();
+    };
+    match shared {
+        Some(sh) if module == sh => String::new(),
+        Some(sh)
+            if module.len() > sh.len() + 2
+                && module.starts_with(sh)
+                && module.as_bytes().get(sh.len()) == Some(&b':') =>
+        {
+            module[sh.len() + 2..].to_string()
+        }
+        _ => module.to_string(),
+    }
 }
 
 /// Position of `kind` within `SECTIONS_ORDER`, used as the primary
@@ -310,8 +480,13 @@ fn chips_region_width(sections: &[SectionLayout], cols: usize) -> f32 {
 /// parent is processed. Arena order guarantees parent-before-child
 /// (paths are walked depth-first when building), so reverse-iterating
 /// the arena is a valid post-order traversal — no explicit stack.
-fn compute_intrinsic_sizes(h: &mut Hierarchy) {
-    let inner_target = TARGET_WIDTH - CONTAINER_PADDING * 2.0;
+/// A container's children envelope is the layered-column arrangement
+/// (`layered_arrange`), keyed on the parent's dependency set.
+fn compute_intrinsic_sizes(
+    h: &mut Hierarchy,
+    child_deps: &HashMap<Option<u32>, HashSet<(u32, u32)>>,
+) {
+    let empty: HashSet<(u32, u32)> = HashSet::new();
     for idx in (0..h.nodes.len()).rev() {
         let sections = h.nodes[idx].sections.clone();
         // Compute chip-region dimensions from the section list.
@@ -326,12 +501,13 @@ fn compute_intrinsic_sizes(h: &mut Hierarchy) {
         let (kids_w, kids_h) = if children.is_empty() {
             (0.0, 0.0)
         } else {
-            shelf_pack_sizes(
-                children
-                    .iter()
-                    .map(|&c| (h.nodes[c as usize].w, h.nodes[c as usize].h)),
-                inner_target,
-            )
+            let items: Vec<(u32, f32, f32)> = children
+                .iter()
+                .map(|&c| (c, h.nodes[c as usize].w, h.nodes[c as usize].h))
+                .collect();
+            let deps = child_deps.get(&Some(idx as u32)).unwrap_or(&empty);
+            let (_, w, hh) = layered_arrange(&items, deps);
+            (w, hh)
         };
 
         let inner_w = chips_w.max(kids_w);
@@ -346,118 +522,202 @@ fn compute_intrinsic_sizes(h: &mut Hierarchy) {
     }
 }
 
-/// Shelf-pack a stream of `(w, h)` rectangles within `target_w` and
-/// return the resulting bounding box. Each item starts a new row when
-/// adding it to the current row would exceed `target_w`. Mirrors what
-/// `shelf_pack_positions` does for the position pass — but we don't
-/// need the per-item positions during size computation, only the
-/// envelope.
-fn shelf_pack_sizes<I: Iterator<Item = (f32, f32)>>(items: I, target_w: f32) -> (f32, f32) {
-    let mut cursor_x: f32 = 0.0;
-    let mut cursor_y: f32 = 0.0;
-    let mut row_max_h: f32 = 0.0;
-    let mut max_used_w: f32 = 0.0;
-    let mut first_in_row = true;
-    for (w, h) in items {
-        let needed = if first_in_row {
-            w
-        } else {
-            cursor_x + CONTAINER_GUTTER + w
-        };
-        if !first_in_row && needed > target_w {
-            cursor_y += row_max_h + CONTAINER_GUTTER;
-            cursor_x = 0.0;
-            row_max_h = 0.0;
-            first_in_row = true;
-        }
-        if !first_in_row {
-            cursor_x += CONTAINER_GUTTER;
-        }
-        cursor_x += w;
-        if cursor_x > max_used_w {
-            max_used_w = cursor_x;
-        }
-        if h > row_max_h {
-            row_max_h = h;
-        }
-        first_in_row = false;
+/// Ancestor chain of `n`, from `n` itself up to its root (inclusive).
+fn ancestors(h: &Hierarchy, mut n: u32) -> Vec<u32> {
+    let mut chain = vec![n];
+    while let Some(p) = h.nodes[n as usize].parent {
+        chain.push(p);
+        n = p;
     }
-    (max_used_w, cursor_y + row_max_h)
+    chain
 }
 
-/// Top-down positioning. Roots are shelf-packed at the world origin,
-/// then every container's children are positioned relative to it.
-/// Arena order (parent-before-child) lets us iterate forward so each
-/// container's `(x, y)` is already set by the time we touch its
-/// children.
-fn position_layout(h: &mut Hierarchy) {
-    let roots = h.roots.clone();
-    shelf_pack_positions(h, &roots, 0.0, 0.0, TARGET_WIDTH);
+/// Map a symbol edge between owner frames `fa` and `fb` to a sibling
+/// dependency: the two frames just below their lowest common
+/// ancestor. Returns `(lca, child_a, child_b)` — `lca` is `None` when
+/// the frames sit in different root trees (a cross-project, root-tier
+/// dependency). Returns `None` overall when one frame is an ancestor
+/// of the other (no sibling pair) or they are the same frame.
+fn frame_dep(h: &Hierarchy, fa: u32, fb: u32) -> Option<(Option<u32>, u32, u32)> {
+    if fa == fb {
+        return None;
+    }
+    let mut ra = ancestors(h, fa);
+    let mut rb = ancestors(h, fb);
+    ra.reverse(); // root → fa
+    rb.reverse(); // root → fb
+    let mut i = 0;
+    while i < ra.len() && i < rb.len() && ra[i] == rb[i] {
+        i += 1;
+    }
+    // A full-prefix match means one frame is an ancestor of the other.
+    if i >= ra.len() || i >= rb.len() {
+        return None;
+    }
+    let lca = if i == 0 { None } else { Some(ra[i - 1]) };
+    Some((lca, ra[i], rb[i]))
+}
 
-    let inner_target = TARGET_WIDTH - CONTAINER_PADDING * 2.0;
+/// Arrange a set of sibling frames in dependency COLUMNS. Returns the
+/// per-item relative `(idx, x, y)` and the envelope `(w, h)`. A frame
+/// sits one column right of every sibling it depends on; within a
+/// column frames flow top-down and wrap to a parallel sub-column past
+/// `TARGET_HEIGHT`, so a dependency-free layer never becomes one
+/// endless vertical strip. Used at every tier — root projects and the
+/// module subtree inside each container.
+fn layered_arrange(
+    items: &[(u32, f32, f32)],
+    deps: &HashSet<(u32, u32)>,
+) -> (Vec<(u32, f32, f32)>, f32, f32) {
+    if items.is_empty() {
+        return (Vec::new(), 0.0, 0.0);
+    }
+    let in_set: HashSet<u32> = items.iter().map(|&(i, _, _)| i).collect();
+    let size_of: HashMap<u32, (f32, f32)> =
+        items.iter().map(|&(i, w, h)| (i, (w, h))).collect();
+    let deps: Vec<(u32, u32)> = deps
+        .iter()
+        .copied()
+        .filter(|(u, v)| u != v && in_set.contains(u) && in_set.contains(v))
+        .collect();
+
+    // Layer assignment — iterative longest-path relaxation. Cycle-safe:
+    // a dependency cycle just saturates after `items.len()` rounds
+    // instead of looping forever.
+    let mut layer: HashMap<u32, u32> = items.iter().map(|&(i, _, _)| (i, 0u32)).collect();
+    for _ in 0..items.len() {
+        let mut changed = false;
+        for &(u, v) in &deps {
+            let cand = layer[&u] + 1;
+            if cand > layer[&v] {
+                layer.insert(v, cand);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let max_layer = layer.values().copied().max().unwrap_or(0);
+    let mut columns: Vec<Vec<u32>> = vec![Vec::new(); max_layer as usize + 1];
+    for &(i, _, _) in items {
+        columns[layer[&i] as usize].push(i);
+    }
+
+    // Within-column ordering — barycentre of predecessors. Column 0
+    // keeps `items` order (stable); each later column sorts by the
+    // mean row of its dependency sources in the column to its left.
+    let mut row_of: HashMap<u32, f32> = HashMap::new();
+    for (col_idx, col) in columns.iter_mut().enumerate() {
+        if col_idx > 0 {
+            col.sort_by(|&a, &b| {
+                bary(a, &deps, &row_of)
+                    .partial_cmp(&bary(b, &deps, &row_of))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        for (row, &n) in col.iter().enumerate() {
+            row_of.insert(n, row as f32);
+        }
+    }
+
+    // Position — columns left→right; each column vertical-shelf-packs
+    // its frames within `TARGET_HEIGHT`, wrapping to a sub-column.
+    let mut out: Vec<(u32, f32, f32)> = Vec::with_capacity(items.len());
+    let mut col_x = 0.0_f32;
+    let mut env_h = 0.0_f32;
+    for col in &columns {
+        let mut sub_x = 0.0_f32;
+        let mut sub_y = 0.0_f32;
+        let mut sub_w = 0.0_f32;
+        let mut col_w = 0.0_f32;
+        let mut first = true;
+        for &n in col {
+            let (w, hh) = size_of[&n];
+            if !first && sub_y + CONTAINER_GUTTER + hh > TARGET_HEIGHT {
+                sub_x += sub_w + CONTAINER_GUTTER;
+                sub_y = 0.0;
+                sub_w = 0.0;
+                first = true;
+            }
+            if !first {
+                sub_y += CONTAINER_GUTTER;
+            }
+            out.push((n, col_x + sub_x, sub_y));
+            sub_y += hh;
+            sub_w = sub_w.max(w);
+            col_w = col_w.max(sub_x + sub_w);
+            env_h = env_h.max(sub_y);
+            first = false;
+        }
+        col_x += col_w + COLUMN_GUTTER;
+    }
+    let env_w = (col_x - COLUMN_GUTTER).max(0.0);
+    (out, env_w, env_h)
+}
+
+/// Mean row of a node's dependency predecessors — the barycentre key
+/// for within-column ordering. A node with no placed predecessor
+/// sorts to the top (`0.0`).
+fn bary(node: u32, deps: &[(u32, u32)], row_of: &HashMap<u32, f32>) -> f32 {
+    let (mut sum, mut n) = (0.0_f32, 0.0_f32);
+    for &(u, v) in deps {
+        if v == node {
+            if let Some(&r) = row_of.get(&u) {
+                sum += r;
+                n += 1.0;
+            }
+        }
+    }
+    if n > 0.0 { sum / n } else { 0.0 }
+}
+
+/// Top-down positioning. The root projects are arranged at the world
+/// origin in dependency columns; then every container's children are
+/// arranged relative to it the same way. Arena order
+/// (parent-before-child) lets us iterate forward so a container's
+/// `(x, y)` is already final by the time we reach its children.
+fn position_layout(h: &mut Hierarchy, child_deps: &HashMap<Option<u32>, HashSet<(u32, u32)>>) {
+    let empty: HashSet<(u32, u32)> = HashSet::new();
+
+    // Root tier — laid out at the world origin.
+    let roots: Vec<(u32, f32, f32)> = h
+        .roots
+        .iter()
+        .map(|&r| (r, h.nodes[r as usize].w, h.nodes[r as usize].h))
+        .collect();
+    let (root_pos, _, _) = layered_arrange(&roots, child_deps.get(&None).unwrap_or(&empty));
+    for (n, x, y) in root_pos {
+        h.nodes[n as usize].x = x;
+        h.nodes[n as usize].y = y;
+    }
+
+    // Every container's children, relative to the container's inner
+    // origin (below the header, below its own chip region).
     for idx in 0..h.nodes.len() {
         let children = h.nodes[idx].children.clone();
         if children.is_empty() {
             continue;
         }
         let chips_h = chips_region_height(&h.nodes[idx].sections);
-
-        let self_x = h.nodes[idx].x;
-        let self_y = h.nodes[idx].y;
-        let children_origin_x = self_x + CONTAINER_PADDING;
-        let chips_origin_y = self_y + CONTAINER_HEADER_H;
-        let children_origin_y = if chips_h > 0.0 {
+        let origin_x = h.nodes[idx].x + CONTAINER_PADDING;
+        let chips_origin_y = h.nodes[idx].y + CONTAINER_HEADER_H;
+        let origin_y = if chips_h > 0.0 {
             chips_origin_y + chips_h + CONTAINER_GUTTER
         } else {
             chips_origin_y
         };
 
-        shelf_pack_positions(
-            h,
-            &children,
-            children_origin_x,
-            children_origin_y,
-            inner_target,
-        );
-    }
-}
-
-/// Position-writing companion of `shelf_pack_sizes`. Writes `(x, y)`
-/// onto each item in `items` (an arena-index slice) as it walks the
-/// shelf-pack. Origin is the inner-content corner of the parent.
-fn shelf_pack_positions(
-    h: &mut Hierarchy,
-    items: &[u32],
-    origin_x: f32,
-    origin_y: f32,
-    target_w: f32,
-) {
-    let mut cursor_x: f32 = 0.0;
-    let mut cursor_y: f32 = 0.0;
-    let mut row_max_h: f32 = 0.0;
-    let mut first_in_row = true;
-    for &i in items {
-        let (w, hh) = (h.nodes[i as usize].w, h.nodes[i as usize].h);
-        let needed = if first_in_row {
-            w
-        } else {
-            cursor_x + CONTAINER_GUTTER + w
-        };
-        if !first_in_row && needed > target_w {
-            cursor_y += row_max_h + CONTAINER_GUTTER;
-            cursor_x = 0.0;
-            row_max_h = 0.0;
-            first_in_row = true;
+        let items: Vec<(u32, f32, f32)> = children
+            .iter()
+            .map(|&c| (c, h.nodes[c as usize].w, h.nodes[c as usize].h))
+            .collect();
+        let deps = child_deps.get(&Some(idx as u32)).unwrap_or(&empty);
+        let (pos, _, _) = layered_arrange(&items, deps);
+        for (n, rx, ry) in pos {
+            h.nodes[n as usize].x = origin_x + rx;
+            h.nodes[n as usize].y = origin_y + ry;
         }
-        if !first_in_row {
-            cursor_x += CONTAINER_GUTTER;
-        }
-        h.nodes[i as usize].x = origin_x + cursor_x;
-        h.nodes[i as usize].y = origin_y + cursor_y;
-        cursor_x += w;
-        if hh > row_max_h {
-            row_max_h = hh;
-        }
-        first_in_row = false;
     }
 }

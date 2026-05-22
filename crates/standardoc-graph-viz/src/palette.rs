@@ -4,9 +4,9 @@
 //! something sensible before the host has a chance to push a real
 //! palette. The host SHOULD call `set_palette(json)` once at boot.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Palette {
     #[serde(default = "default_background")]
     pub background: String,
@@ -40,6 +40,40 @@ pub(crate) struct Palette {
     pub edge_uses_type: String,
     #[serde(default = "default_edge_exposes_api")]
     pub edge_exposes_api: String,
+    #[serde(default = "default_lang_rust")]
+    pub lang_rust: String,
+    #[serde(default = "default_lang_typescript")]
+    pub lang_typescript: String,
+    #[serde(default = "default_lang_javascript")]
+    pub lang_javascript: String,
+    #[serde(default = "default_lang_lua")]
+    pub lang_lua: String,
+    #[serde(default = "default_lang_vue")]
+    pub lang_vue: String,
+    #[serde(default = "default_lang_svelte")]
+    pub lang_svelte: String,
+    #[serde(default = "default_lang_c")]
+    pub lang_c: String,
+    #[serde(default = "default_lang_default")]
+    pub lang_default: String,
+    #[serde(default = "default_proj_rust")]
+    pub proj_rust: String,
+    #[serde(default = "default_proj_node")]
+    pub proj_node: String,
+    #[serde(default = "default_proj_bun")]
+    pub proj_bun: String,
+    #[serde(default = "default_proj_deno")]
+    pub proj_deno: String,
+    #[serde(default = "default_proj_python")]
+    pub proj_python: String,
+    #[serde(default = "default_proj_lua")]
+    pub proj_lua: String,
+    #[serde(default = "default_proj_c")]
+    pub proj_c: String,
+    #[serde(default = "default_proj_cpp")]
+    pub proj_cpp: String,
+    #[serde(default = "default_proj_default")]
+    pub proj_default: String,
 }
 
 impl Default for Palette {
@@ -61,6 +95,23 @@ impl Default for Palette {
             edge_defines: default_edge_defines(),
             edge_uses_type: default_edge_uses_type(),
             edge_exposes_api: default_edge_exposes_api(),
+            lang_rust: default_lang_rust(),
+            lang_typescript: default_lang_typescript(),
+            lang_javascript: default_lang_javascript(),
+            lang_lua: default_lang_lua(),
+            lang_vue: default_lang_vue(),
+            lang_svelte: default_lang_svelte(),
+            lang_c: default_lang_c(),
+            lang_default: default_lang_default(),
+            proj_rust: default_proj_rust(),
+            proj_node: default_proj_node(),
+            proj_bun: default_proj_bun(),
+            proj_deno: default_proj_deno(),
+            proj_python: default_proj_python(),
+            proj_lua: default_proj_lua(),
+            proj_c: default_proj_c(),
+            proj_cpp: default_proj_cpp(),
+            proj_default: default_proj_default(),
         }
     }
 }
@@ -81,6 +132,44 @@ impl Palette {
             "USES_TYPE" => &self.edge_uses_type,
             "EXPOSES_API" => &self.edge_exposes_api,
             _ => &self.foreground,
+        }
+    }
+
+    /// Color of a chip's left accent bar, keyed on the symbol's
+    /// `language` string (the serde-lowercased `Language` enum:
+    /// `rust` / `typescript` / `javascript` / `lua` / `vue` /
+    /// `svelte` / `c`). Falls back to `lang_default` so a future IR
+    /// language doesn't paint invisible.
+    #[must_use]
+    pub(crate) fn language_color(&self, language: &str) -> &str {
+        match language {
+            "rust" => &self.lang_rust,
+            "typescript" => &self.lang_typescript,
+            "javascript" => &self.lang_javascript,
+            "lua" => &self.lang_lua,
+            "vue" => &self.lang_vue,
+            "svelte" => &self.lang_svelte,
+            "c" => &self.lang_c,
+            _ => &self.lang_default,
+        }
+    }
+
+    /// Color of a project frame's header band, keyed on the project
+    /// `kind` (ecosystem tag — `rust` / `node` / `bun` / …). Falls
+    /// back to `proj_default` for `custom:<tag>` / `unknown` / any
+    /// future ecosystem.
+    #[must_use]
+    pub(crate) fn project_color(&self, kind: &str) -> &str {
+        match kind {
+            "rust" => &self.proj_rust,
+            "node" => &self.proj_node,
+            "bun" => &self.proj_bun,
+            "deno" => &self.proj_deno,
+            "python" => &self.proj_python,
+            "lua" => &self.proj_lua,
+            "c" => &self.proj_c,
+            "cpp" => &self.proj_cpp,
+            _ => &self.proj_default,
         }
     }
 }
@@ -132,4 +221,60 @@ fn default_edge_uses_type() -> String {
 }
 fn default_edge_exposes_api() -> String {
     "#b180d7".into()
+}
+
+// Language accent colors — GitHub linguist palette.
+fn default_lang_rust() -> String {
+    "#dea584".into()
+}
+fn default_lang_typescript() -> String {
+    "#3178c6".into()
+}
+fn default_lang_javascript() -> String {
+    "#f1e05a".into()
+}
+fn default_lang_lua() -> String {
+    "#000080".into()
+}
+fn default_lang_vue() -> String {
+    "#41b883".into()
+}
+fn default_lang_svelte() -> String {
+    "#ff3e00".into()
+}
+fn default_lang_c() -> String {
+    "#555555".into()
+}
+fn default_lang_default() -> String {
+    "#8b949e".into()
+}
+
+// Project frame header-band colors — saturated enough to carry
+// light header text, one distinct hue per ecosystem.
+fn default_proj_rust() -> String {
+    "#c56a1c".into()
+}
+fn default_proj_node() -> String {
+    "#cb9b00".into()
+}
+fn default_proj_bun() -> String {
+    "#9b8b6a".into()
+}
+fn default_proj_deno() -> String {
+    "#4d4d4d".into()
+}
+fn default_proj_python() -> String {
+    "#3572a5".into()
+}
+fn default_proj_lua() -> String {
+    "#2d2d80".into()
+}
+fn default_proj_c() -> String {
+    "#5c6370".into()
+}
+fn default_proj_cpp() -> String {
+    "#9c4668".into()
+}
+fn default_proj_default() -> String {
+    "#3a3a3a".into()
 }

@@ -27,6 +27,11 @@ export interface GraphEngineFacade {
 	on_pointer_up(x: number, y: number, button: number): void;
 	on_pointer_leave(): void;
 	on_wheel(x: number, y: number, deltaY: number): void;
+	on_double_click(x: number, y: number): void;
+
+	focus_path(): string;
+	fit_to_frame(id: number): void;
+	palette_json(): string;
 
 	set_mode(mode: string): void;
 	enable_webgpu(canvas: HTMLCanvasElement): Promise<void>;

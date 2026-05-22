@@ -16,8 +16,6 @@ import init, { GraphEngine } from '../pkg/standardoc_graph_viz.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
-import { matcher } from 'matchigo';
-
 import '@standarx/standardoc-viz/components/toolbar';
 import '@standarx/standardoc-viz/components/hud';
 import '@standarx/standardoc-viz/components/graph';
@@ -38,22 +36,6 @@ import type {
 	ToolbarModeRequestDetail,
 } from '@standarx/standardoc-viz';
 
-interface RawSymbol {
-	readonly fqdn: string;
-	readonly name: string;
-	readonly kind: string;
-	readonly visibility: string;
-	readonly module: string | null;
-	readonly language_kind: string;
-	readonly is_external?: boolean;
-	readonly location: { file: string; start_line: number };
-}
-
-interface ListSymbolsPage {
-	readonly items: ReadonlyArray<RawSymbol>;
-	readonly next_cursor: string | null;
-}
-
 interface BrowseSymbol {
 	readonly fqdn: string;
 	readonly name: string;
@@ -61,9 +43,11 @@ interface BrowseSymbol {
 	readonly visibility: string;
 	readonly module: string | null;
 	readonly language_kind: string;
+	readonly language: string;
 	readonly is_external: boolean;
 	readonly file: string;
 	readonly start_line: number;
+	readonly project_id?: number | null;
 }
 
 interface BrowseEdge {
@@ -73,51 +57,30 @@ interface BrowseEdge {
 	readonly outbound: boolean;
 }
 
-interface ResolvedTarget {
-	readonly kind: 'resolved';
-	readonly fqdn: string;
+interface BrowseProject {
+	readonly project_id: number;
+	readonly label: string;
+	readonly kind: string;
+	readonly rel_path: string;
 }
 
-interface UnresolvedTarget {
-	readonly kind: 'unresolved';
-	readonly name: string;
-}
-
-interface UnresolvedBridgeTarget {
-	readonly kind: 'unresolved_bridge';
-	readonly bridge: string;
-	readonly name: string;
-}
-
-type NeighborTarget = ResolvedTarget | UnresolvedTarget | UnresolvedBridgeTarget;
-
-interface NeighborSymbol {
-	readonly edge_kind: string;
-	readonly target: NeighborTarget;
-}
-
-// Hoisted module-scope matcher per the matchigo AI usage contract:
-// lazy-compiled once, then O(1) literal dispatch on `kind`.
-// Compile-time exhaustive — if the Rust-side `NeighborTarget` union
-// grows a new variant, this fails the typecheck instead of silently
-// dropping the edge.
-const resolveNeighborFqdn = matcher<NeighborTarget, string | null>()
-	.with({ kind: 'resolved' }, t => t.fqdn)
-	.with({ kind: 'unresolved' }, () => null)
-	.with({ kind: 'unresolved_bridge' }, () => null)
-	.exhaustive();
-
-interface SymbolContextWithNeighbors {
-	readonly callers: ReadonlyArray<NeighborSymbol>;
-	readonly callees: ReadonlyArray<NeighborSymbol>;
-	readonly imports: ReadonlyArray<NeighborSymbol>;
-	readonly imported_by: ReadonlyArray<NeighborSymbol>;
+interface FetchGraphResponse {
+	readonly symbols: ReadonlyArray<BrowseSymbol>;
+	readonly edges: ReadonlyArray<BrowseEdge>;
+	readonly projects?: ReadonlyArray<BrowseProject>;
+	readonly focal?: string | null;
 }
 
 const toolbarEl = document.getElementById('toolbar') as HTMLElement;
 const hudEl = document.getElementById('hud') as HudElement;
 const graphEl = document.getElementById('graph') as GraphElement;
 const detailEl = document.getElementById('detail') as HTMLElement;
+const breadcrumbEl = document.getElementById('breadcrumb') as HTMLElement;
+
+interface FocusCrumb {
+	readonly label: string;
+	readonly id: number;
+}
 
 function setStatus(text: string, kind: StatusKind): void {
 	toolbarEl.setAttribute('status-text', text);
@@ -149,17 +112,33 @@ class McpBrowse {
 		return new McpBrowse(client);
 	}
 
-	async listModules(includeExternal: boolean): Promise<ReadonlyArray<RawSymbol>> {
-		return this.listAllSymbols({ kind: 'module', include_external: includeExternal });
+	async fetchGraph(includeExternal: boolean): Promise<FetchGraphResponse> {
+		// Single bounded snapshot — `fetch_graph` already does the JOIN
+		// with files/projects server-side and returns the flat wire shape
+		// the WASM engine consumes directly. Replaces the previous
+		// `list_symbols(kind=module)` + per-module `list_symbols(module=)`
+		// N+1 walk and the `rawToBrowse` reshape it required.
+		const raw = await this.callTool('fetch_graph', {
+			include_external: includeExternal,
+			max_nodes: 5000,
+		});
+		return JSON.parse(raw) as FetchGraphResponse;
 	}
 
-	async listInModule(module: string, includeExternal: boolean): Promise<ReadonlyArray<RawSymbol>> {
-		return this.listAllSymbols({ module, include_external: includeExternal });
-	}
-
-	async getContext(fqdn: string): Promise<SymbolContextWithNeighbors> {
-		const raw = await this.callTool('get_context', { fqdn, depth: 1 });
-		return JSON.parse(raw) as SymbolContextWithNeighbors;
+	/**
+	 * Depth-1 BFS expansion around `fqdn`. Unlike `get_context` (which
+	 * only surfaces callers/callees/imports/imported_by — i.e. CALLS +
+	 * IMPORTS), `fetch_graph` focal mode carries every edge kind:
+	 * EXTENDS / IMPLEMENTS / USES_TYPE / REFERENCES / DEFINES /
+	 * EXPOSES_API too. The hover panel needs all of them.
+	 */
+	async fetchNeighborhood(fqdn: string, includeExternal: boolean): Promise<FetchGraphResponse> {
+		const raw = await this.callTool('fetch_graph', {
+			focal: fqdn,
+			depth: 1,
+			include_external: includeExternal,
+		});
+		return JSON.parse(raw) as FetchGraphResponse;
 	}
 
 	/**
@@ -181,30 +160,6 @@ class McpBrowse {
 		};
 	}
 
-	/**
-	 * Walks `list_symbols` page by page using cursor pagination. The
-	 * daemon returns at most 100 items per call AND a `next_cursor`;
-	 * we re-call with that cursor until it goes `null`. Defensive cap
-	 * at 1 000 pages (100 k symbols) so a misbehaving daemon can't
-	 * spin the loop forever.
-	 */
-	private async listAllSymbols(filters: Record<string, unknown>): Promise<ReadonlyArray<RawSymbol>> {
-		const out: RawSymbol[] = [];
-		let cursor: string | undefined;
-		const MAX_PAGES = 1000;
-		for (let page = 0; page < MAX_PAGES; page++) {
-			const args: Record<string, unknown> = { ...filters, limit: 100 };
-			if (cursor !== undefined) args.cursor = cursor;
-			const raw = await this.callTool('list_symbols', args);
-			const parsed = JSON.parse(raw) as ListSymbolsPage;
-			if (!Array.isArray(parsed.items)) break;
-			out.push(...parsed.items);
-			if (parsed.next_cursor === null || parsed.next_cursor === undefined) break;
-			cursor = parsed.next_cursor;
-		}
-		return out;
-	}
-
 	private async callTool(name: string, args: Record<string, unknown>): Promise<string> {
 		const result = await this.client.callTool({ name, arguments: args });
 		const content = (result as { content?: ReadonlyArray<{ type?: string; text?: string }> }).content;
@@ -215,67 +170,15 @@ class McpBrowse {
 	}
 }
 
-function rawToBrowse(s: RawSymbol): BrowseSymbol {
-	return {
-		fqdn: s.fqdn,
-		name: s.name,
-		kind: s.kind,
-		visibility: s.visibility,
-		module: s.module,
-		language_kind: s.language_kind,
-		is_external: s.is_external === true,
-		file: s.location.file,
-		start_line: s.location.start_line,
-	};
-}
-
-async function fetchAllSymbols(mcp: McpBrowse, includeExternal: boolean): Promise<{ symbols: BrowseSymbol[] }> {
-	setStatus('listing modules…', 'loading');
-	const modules = await mcp.listModules(includeExternal);
-
-	const symbols: BrowseSymbol[] = [];
-	const seenFqdn = new Set<string>();
-	for (const m of modules) {
-		if (!seenFqdn.has(m.fqdn)) {
-			seenFqdn.add(m.fqdn);
-			symbols.push(rawToBrowse(m));
-		}
-	}
-
-	let processed = 0;
-	for (const m of modules) {
-		setStatus(`fetching module ${++processed}/${modules.length} (${symbols.length} symbols)`, 'loading');
-		const children = await mcp.listInModule(m.fqdn, includeExternal).catch(() => [] as ReadonlyArray<RawSymbol>);
-		for (const c of children) {
-			if (seenFqdn.has(c.fqdn)) continue;
-			seenFqdn.add(c.fqdn);
-			symbols.push(rawToBrowse(c));
-		}
-	}
-	return { symbols };
-}
-
-async function fetchEdgesFor(mcp: McpBrowse, fqdn: string): Promise<ReadonlyArray<BrowseEdge>> {
-	const ctx = await mcp.getContext(fqdn).catch(() => null);
-	if (ctx === null) return [];
-	const edges: BrowseEdge[] = [];
-	const collect = (list: ReadonlyArray<NeighborSymbol>, outbound: boolean): void => {
-		for (const n of list) {
-			const targetFqdn = resolveNeighborFqdn(n.target);
-			if (targetFqdn === null) continue;
-			edges.push({
-				from: outbound ? fqdn : targetFqdn,
-				to: outbound ? targetFqdn : fqdn,
-				kind: n.edge_kind,
-				outbound,
-			});
-		}
-	};
-	collect(ctx.callees, true);
-	collect(ctx.imports, true);
-	collect(ctx.callers, false);
-	collect(ctx.imported_by, false);
-	return edges;
+async function fetchEdgesFor(
+	mcp: McpBrowse,
+	fqdn: string,
+	includeExternal: boolean,
+): Promise<ReadonlyArray<BrowseEdge>> {
+	const graph = await mcp.fetchNeighborhood(fqdn, includeExternal).catch(() => null);
+	// `from`/`to` are already canonical (source → target) and the
+	// payload carries every edge kind — no per-bucket reshape needed.
+	return graph?.edges ?? [];
 }
 
 function renderDetail(symbol: BrowseSymbol | null): void {
@@ -288,13 +191,95 @@ function renderDetail(symbol: BrowseSymbol | null): void {
 		<dl>
 			<dt>fqdn</dt><dd><code>${escapeHtml(symbol.fqdn)}</code></dd>
 			<dt>kind</dt><dd>${escapeHtml(symbol.kind)} (${escapeHtml(symbol.language_kind)})</dd>
+			<dt>lang</dt><dd>${escapeHtml(symbol.language || '(unknown)')}</dd>
 			<dt>vis</dt><dd>${escapeHtml(symbol.visibility)}</dd>
 			<dt>module</dt><dd><code>${escapeHtml(symbol.module ?? '(root)')}</code></dd>
+			<dt>project</dt><dd>${symbol.project_id ?? '(orphan)'}</dd>
 			<dt>loc</dt><dd><code>${escapeHtml(symbol.file)}:${symbol.start_line}</code></dd>
 			${symbol.is_external ? '<dt>ext</dt><dd>yes</dd>' : ''}
 		</dl>
 	`;
 }
+
+const legendEl = document.getElementById('legend') as HTMLElement;
+const legendBodyEl = document.getElementById('legend-body') as HTMLElement;
+const legendToggleEl = document.getElementById('legend-toggle') as HTMLElement;
+
+type PaletteMap = Record<string, string>;
+
+// Legend sections — `[palette key, display label]`. Keys match the
+// fields the engine serialises from its `Palette` struct.
+const LEGEND_SECTIONS: ReadonlyArray<{
+	readonly title: string;
+	readonly rows: ReadonlyArray<readonly [string, string]>;
+}> = [
+	{
+		title: 'Languages',
+		rows: [
+			['lang_rust', 'Rust'],
+			['lang_typescript', 'TypeScript'],
+			['lang_javascript', 'JavaScript'],
+			['lang_c', 'C'],
+			['lang_lua', 'Lua'],
+			['lang_vue', 'Vue'],
+			['lang_svelte', 'Svelte'],
+		],
+	},
+	{
+		title: 'Project kinds',
+		rows: [
+			['proj_rust', 'Cargo'],
+			['proj_node', 'Node'],
+			['proj_bun', 'Bun'],
+			['proj_deno', 'Deno'],
+			['proj_python', 'Python'],
+			['proj_lua', 'Lua'],
+			['proj_c', 'C'],
+			['proj_cpp', 'C++'],
+		],
+	},
+	{
+		title: 'Edge kinds',
+		rows: [
+			['edge_calls', 'Calls'],
+			['edge_imports', 'Imports'],
+			['edge_extends', 'Extends'],
+			['edge_implements', 'Implements'],
+			['edge_references', 'References'],
+			['edge_defines', 'Defines'],
+			['edge_uses_type', 'Uses type'],
+			['edge_exposes_api', 'Exposes API'],
+		],
+	},
+];
+
+function buildLegend(palette: PaletteMap): void {
+	legendBodyEl.replaceChildren();
+	for (const section of LEGEND_SECTIONS) {
+		const wrap = document.createElement('div');
+		const title = document.createElement('div');
+		title.className = 'legend-section-title';
+		title.textContent = section.title;
+		wrap.appendChild(title);
+		for (const [key, label] of section.rows) {
+			const color = palette[key];
+			if (color === undefined) continue;
+			const row = document.createElement('div');
+			row.className = 'legend-row';
+			const swatch = document.createElement('span');
+			swatch.className = 'legend-swatch';
+			swatch.style.background = color;
+			row.appendChild(swatch);
+			const text = document.createElement('span');
+			text.textContent = label;
+			row.appendChild(text);
+			wrap.appendChild(row);
+		}
+		legendBodyEl.appendChild(wrap);
+	}
+}
+
+legendToggleEl.addEventListener('click', () => legendEl.classList.toggle('collapsed'));
 
 function escapeHtml(s: string): string {
 	return s
@@ -336,6 +321,7 @@ async function main(): Promise<void> {
 
 	const engine = graphEl.engine!;
 	engine.set_palette(paletteFromCss());
+	buildLegend(JSON.parse(engine.palette_json()) as PaletteMap);
 
 	toolbarEl.setAttribute('webgpu-available', String(graphEl.webgpuAvailable));
 	toolbarEl.setAttribute('mode', graphEl.currentMode);
@@ -354,9 +340,14 @@ async function main(): Promise<void> {
 	let includeExternal = false;
 
 	const loadGraph = async (): Promise<void> => {
-		const { symbols } = await fetchAllSymbols(mcp, includeExternal);
+		setStatus('fetching graph…', 'loading');
+		const { symbols, projects, edges } = await mcp.fetchGraph(includeExternal);
 		symbolByFqdn = new Map(symbols.map(s => [s.fqdn, s]));
-		engine.load_graph(JSON.stringify({ symbols, edges: [] }));
+		// Push symbols + projects + edges. Edges are needed at load
+		// time now: the layout lays root projects out in dependency
+		// columns, so `pack` must see the edge set. The hover handler
+		// still narrows the *drawn* edges via `set_edges`.
+		engine.load_graph(JSON.stringify({ symbols, projects: projects ?? [], edges }));
 		engine.fit();
 		setStatus(`${symbols.length} symbols loaded`, 'ready');
 	};
@@ -375,7 +366,7 @@ async function main(): Promise<void> {
 
 		let edges = edgesByFqdn.get(fqdn);
 		if (edges === undefined) {
-			edges = await fetchEdgesFor(mcp, fqdn);
+			edges = await fetchEdgesFor(mcp, fqdn, includeExternal);
 			edgesByFqdn.set(fqdn, edges);
 		}
 		// If the user moved on to another chip while the fetch was
@@ -413,6 +404,15 @@ async function main(): Promise<void> {
 	});
 	toolbarEl.addEventListener('sd-fit', () => engine.fit());
 	toolbarEl.addEventListener('sd-reset-zoom', () => engine.reset_zoom());
+
+	// Double-click a frame → zoom-to-fit it. `dblclick` is a composed
+	// DOM event so it bubbles out of the graph component's shadow root;
+	// we map client coords to the element's local box, same convention
+	// the engine's pointer handlers expect.
+	graphEl.addEventListener('dblclick', e => {
+		const rect = graphEl.getBoundingClientRect();
+		engine.on_double_click(e.clientX - rect.left, e.clientY - rect.top);
+	});
 	toolbarEl.addEventListener('sd-refetch', () => {
 		edgesByFqdn.clear();
 		void loadGraph();
@@ -520,6 +520,34 @@ async function main(): Promise<void> {
 		else console.warn('[playground] live snapshot copy failed (clipboard denied?)');
 	});
 
+	// Breadcrumb — the deepest frame path containing the viewport,
+	// derived live from the engine. The JSON string is diffed so the
+	// DOM is rebuilt only when the focus actually changes, not 60×/s.
+	let lastBreadcrumb = '';
+	const syncBreadcrumb = (): void => {
+		const json = engine.focus_path();
+		if (json === lastBreadcrumb) return;
+		lastBreadcrumb = json;
+		const crumbs = JSON.parse(json) as ReadonlyArray<FocusCrumb>;
+		breadcrumbEl.replaceChildren();
+		const addCrumb = (label: string, onClick: () => void): void => {
+			const b = document.createElement('button');
+			b.className = 'crumb';
+			b.textContent = label;
+			b.addEventListener('click', onClick);
+			breadcrumbEl.appendChild(b);
+		};
+		// Static root crumb — clicking it fits the whole workspace.
+		addCrumb('workspace', () => engine.fit());
+		for (const c of crumbs) {
+			const sep = document.createElement('span');
+			sep.className = 'crumb-sep';
+			sep.textContent = '›';
+			breadcrumbEl.appendChild(sep);
+			addCrumb(c.label, () => engine.fit_to_frame(c.id));
+		}
+	};
+
 	const loop = (): void => {
 		const now = performance.now();
 		// `tick()` is the only `&mut self` call we still drive from the
@@ -527,6 +555,7 @@ async function main(): Promise<void> {
 		// by the graph component. Match the same engineBusy gate so we
 		// don't race the async webgpu init.
 		if (!graphEl.engineBusy) engine.tick();
+		syncBreadcrumb();
 		profiler.tick(now);
 		requestAnimationFrame(loop);
 	};
