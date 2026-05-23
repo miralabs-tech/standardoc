@@ -204,6 +204,7 @@ impl Visitor for FfiVisitor<'_> {
             }
             let fqdn = format!("{}::{}", self.module_fqdn, name);
             self.symbols.push(RawSymbol {
+                decl_kind: None,
                 name: name.clone(),
                 fqdn: fqdn.clone(),
                 kind: Kind::Value,

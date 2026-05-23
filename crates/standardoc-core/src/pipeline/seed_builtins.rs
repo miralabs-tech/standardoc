@@ -71,6 +71,7 @@ pub(crate) fn seed_into(
         let module = synthetic_module(lang);
         for entry in lang_entries {
             let sym = RawSymbol {
+                decl_kind: None,
                 name: entry.name.clone(),
                 fqdn: entry.synthetic_fqdn.clone(),
                 kind: entry.kind,

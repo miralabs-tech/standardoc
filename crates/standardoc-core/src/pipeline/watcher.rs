@@ -650,6 +650,7 @@ mod tests {
             byte_size: 100,
             module_lookup: None,
             symbols: vec![RawSymbol {
+                decl_kind: None,
                 name: fqdn.rsplit("::").next().unwrap_or(fqdn).into(),
                 fqdn: fqdn.into(),
                 kind: Kind::Function,

@@ -170,6 +170,7 @@ mod tests {
 
     fn sym(name: &str, fqdn: &str, kind: Kind, lang_kind: &str, vis: Visibility) -> RawSymbol {
         RawSymbol {
+            decl_kind: None,
             name: name.into(),
             fqdn: fqdn.into(),
             kind,
@@ -195,6 +196,7 @@ mod tests {
             .rsplit_once("::")
             .map(|(m, _)| m.to_string());
         RawSymbol {
+            decl_kind: None,
             name: module_fqdn
                 .rsplit("::")
                 .next()

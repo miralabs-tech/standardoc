@@ -533,6 +533,7 @@ fn extract_fn(item: &syn::ItemFn, parent_fqdn: &str, path: &str) -> RawSymbol {
     let mut sig = extract_signature(&item.sig);
     sig.modifiers.deprecated = extract_deprecated(&item.attrs);
     RawSymbol {
+        decl_kind: None,
         name,
         fqdn,
         kind: Kind::Function,
@@ -613,6 +614,7 @@ fn extract_enum(ctx: &mut WalkContext, item: &syn::ItemEnum, parent_fqdn: &str) 
         let variant_fqdn = format!("{enum_fqdn}::{variant_name}");
         ctx.push_symbol_with_doc(
             RawSymbol {
+                decl_kind: None,
                 name: variant_name,
                 fqdn: variant_fqdn.clone(),
                 kind: Kind::Type,
@@ -732,6 +734,7 @@ fn push_field(
     };
     ctx.push_symbol_with_doc(
         RawSymbol {
+            decl_kind: None,
             name: name.to_string(),
             fqdn: field_fqdn.clone(),
             kind: Kind::Value,
@@ -797,6 +800,7 @@ fn type_def_symbol(
 ) -> RawSymbol {
     let fqdn = format!("{parent_fqdn}::{name}");
     RawSymbol {
+        decl_kind: None,
         name,
         fqdn,
         kind: Kind::Type,
@@ -819,6 +823,7 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
 
     ctx.push_symbol_with_doc(
         RawSymbol {
+            decl_kind: None,
             name,
             fqdn: trait_fqdn.clone(),
             kind: Kind::Type,
@@ -858,6 +863,7 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
             sig.modifiers.deprecated = extract_deprecated(&item_fn.attrs);
             ctx.push_symbol_with_doc(
                 RawSymbol {
+                    decl_kind: None,
                     name: fn_name,
                     fqdn: fn_fqdn.clone(),
                     kind: Kind::Function,
@@ -946,6 +952,7 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
             sig.modifiers.deprecated = extract_deprecated(&item_fn.attrs);
             ctx.push_symbol_with_doc(
                 RawSymbol {
+                    decl_kind: None,
                     name: fn_name,
                     fqdn: fn_fqdn.clone(),
                     kind: Kind::Function,
@@ -1007,6 +1014,7 @@ fn value_def_symbol(
 ) -> RawSymbol {
     let fqdn = format!("{parent_fqdn}::{name}");
     RawSymbol {
+        decl_kind: None,
         name,
         fqdn,
         kind: Kind::Value,
@@ -1031,6 +1039,7 @@ fn extract_macro_def(item: &syn::ItemMacro, parent_fqdn: &str, path: &str) -> Op
         Visibility::Private
     };
     Some(RawSymbol {
+        decl_kind: None,
         name,
         fqdn,
         kind: Kind::Macro,

@@ -34,6 +34,7 @@ pub(crate) fn seed_file(conn: &Connection, path: &str) {
 
 pub(crate) fn sample_symbol(name: &str, fqdn: &str) -> RawSymbol {
     RawSymbol {
+        decl_kind: None,
         name: name.into(),
         fqdn: fqdn.into(),
         kind: Kind::Function,

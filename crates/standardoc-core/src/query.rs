@@ -22,8 +22,9 @@ use standardoc_ir::{
 };
 
 use crate::storage::conv::{
-    edge_confidence_from_sql_text, edge_kind_from_sql_text, json_to_signature, kind_from_sql_text,
-    kind_to_sql_text, language_from_sql_text, visibility_from_sql_text, visibility_to_sql_text,
+    decl_kind_from_sql_text, edge_confidence_from_sql_text, edge_kind_from_sql_text,
+    json_to_signature, kind_from_sql_text, kind_to_sql_text, language_from_sql_text,
+    visibility_from_sql_text, visibility_to_sql_text,
 };
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
@@ -95,7 +96,7 @@ pub struct SymbolContextWithNeighbors {
 
 const SYMBOL_COLUMNS: &str = "fqdn, name, kind, language_kind, module, visibility, \
      file_path, start_line, end_line, start_col, end_col, \
-     signature_json, body_hash, flags";
+     signature_json, body_hash, flags, decl_kind";
 
 fn with_conn<F, R>(handle: &IndexHandle, f: F) -> Result<R, StorageError>
 where
@@ -286,7 +287,7 @@ pub fn search_text(
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
-                    s.signature_json, s.body_hash, s.flags \
+                    s.signature_json, s.body_hash, s.flags, s.decl_kind \
              FROM symbols_fts f \
              JOIN symbols s ON s.id = f.rowid \
              WHERE symbols_fts MATCH ?1 \
@@ -378,7 +379,7 @@ pub fn list_symbols(
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
-                    s.signature_json, s.body_hash, s.flags \
+                    s.signature_json, s.body_hash, s.flags, s.decl_kind \
              FROM symbols s \
              WHERE (?1 IS NULL OR s.kind       = ?1) \
                AND (?2 IS NULL OR s.visibility = ?2) \
@@ -442,7 +443,7 @@ pub fn find_by_pattern(
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
-                    s.signature_json, s.body_hash, s.flags \
+                    s.signature_json, s.body_hash, s.flags, s.decl_kind \
              FROM symbols s \
              WHERE (s.name GLOB ?1 OR s.fqdn GLOB ?1) \
                AND (?2 IS NULL OR s.kind       = ?2) \
@@ -506,7 +507,7 @@ pub fn find_similar(
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
-                    s.signature_json, s.body_hash, s.flags \
+                    s.signature_json, s.body_hash, s.flags, s.decl_kind \
              FROM symbols s \
              WHERE (?1 IS NULL OR s.kind       = ?1) \
                AND (?2 IS NULL OR s.visibility = ?2) \
@@ -596,8 +597,8 @@ pub fn context_for_symbol(
                 |row| {
                     Ok((
                         read_symbol_row(row)?,
-                        row.get::<_, Option<String>>(14)?,
                         row.get::<_, Option<String>>(15)?,
+                        row.get::<_, Option<String>>(16)?,
                     ))
                 },
             )
@@ -1389,6 +1390,7 @@ struct SymbolRowRaw {
     signature_json: Option<String>,
     body_hash_hex: Option<String>,
     flags_json: String,
+    decl_kind_text: Option<String>,
 }
 
 fn read_symbol_row(row: &Row<'_>) -> rusqlite::Result<SymbolRowRaw> {
@@ -1407,6 +1409,7 @@ fn read_symbol_row(row: &Row<'_>) -> rusqlite::Result<SymbolRowRaw> {
         signature_json: row.get(11)?,
         body_hash_hex: row.get(12)?,
         flags_json: row.get(13)?,
+        decl_kind_text: row.get(14)?,
     })
 }
 
@@ -1426,6 +1429,11 @@ fn build_symbol(raw: SymbolRowRaw) -> Result<RawSymbol, StorageError> {
         .map_err(|e| StorageError::InvalidStoredData {
             detail: format!("symbols.body_hash: {e}"),
         })?;
+    let decl_kind = raw
+        .decl_kind_text
+        .as_deref()
+        .map(decl_kind_from_sql_text)
+        .transpose()?;
     let location = SymbolLocation {
         file: raw.file_path,
         start_line: position_to_u32("start_line", raw.start_line)?,
@@ -1438,6 +1446,7 @@ fn build_symbol(raw: SymbolRowRaw) -> Result<RawSymbol, StorageError> {
         fqdn: raw.fqdn,
         kind,
         language_kind: LanguageKind::from(raw.language_kind_text),
+        decl_kind,
         module: raw.module,
         visibility,
         location,
@@ -1863,6 +1872,7 @@ mod tests {
         line: u32,
     ) -> (i64, RawSymbol) {
         let sym = RawSymbol {
+            decl_kind: None,
             name: name.into(),
             fqdn: fqdn.into(),
             kind: Kind::Function,
@@ -1926,6 +1936,7 @@ mod tests {
             let conn = handle.pool().unwrap().get().unwrap();
             seed_file(&conn, "src/main.rs");
             let sym = RawSymbol {
+                decl_kind: None,
                 name: "f".into(),
                 fqdn: "crate::f".into(),
                 kind: Kind::Function,
@@ -1993,6 +2004,7 @@ mod tests {
         workspace_id: &str,
     ) -> i64 {
         let sym = RawSymbol {
+            decl_kind: None,
             name: name.into(),
             fqdn: fqdn.into(),
             kind: Kind::Function,
@@ -2420,6 +2432,7 @@ mod tests {
         module: Option<&str>,
     ) -> i64 {
         let sym = RawSymbol {
+            decl_kind: None,
             name: name.into(),
             fqdn: fqdn.into(),
             kind,
@@ -3195,6 +3208,7 @@ mod tests {
             byte_size: 100,
             module_lookup: None,
             symbols: vec![RawSymbol {
+                decl_kind: None,
                 name: "boot".into(),
                 fqdn: "crate::boot".into(),
                 kind: Kind::Function,
@@ -3249,6 +3263,7 @@ mod tests {
     fn insert_ranged_symbol(conn: &Connection, fqdn: &str, kind: Kind, location: SymbolLocation) {
         let file = location.file.clone();
         let sym = RawSymbol {
+            decl_kind: None,
             name: fqdn.rsplit("::").next().unwrap_or(fqdn).into(),
             fqdn: fqdn.into(),
             kind,

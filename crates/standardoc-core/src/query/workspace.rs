@@ -522,6 +522,7 @@ mod tests {
             byte_size: 32,
             module_lookup: None,
             symbols: vec![RawSymbol {
+                decl_kind: None,
                 name: "peer_only_marker".into(),
                 fqdn: "crate::peer_only_marker".into(),
                 kind: Kind::Function,

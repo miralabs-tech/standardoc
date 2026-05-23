@@ -60,6 +60,54 @@ pub enum Language {
     C,
 }
 
+/// Refined declaration-kind layer paired with the coarse [`Kind`]
+/// bucket. Phase 2 K (K-Step-A) foundation — every variant is
+/// cross-language enough to map onto multiple frontends; per-language
+/// nuance not covered here lives in `language_kind` (string) or the
+/// `Custom { lang, tag }` escape hatch below.
+///
+/// Hierarchy of coverage by [`Kind`]:
+///   - `Kind::Module`   → `Module` / `Namespace` / `Crate`
+///   - `Kind::Type`     → `Struct` / `Enum` / `Union` / `Class` /
+///                        `Interface` (Rust trait collapses here) /
+///                        `TypeAlias`
+///   - `Kind::Function` → `Function` / `Method` / `Constructor` /
+///                        `Getter` / `Setter`
+///   - `Kind::Value`    → `Const` / `Static` / `Var` / `Field` /
+///                        `EnumVariant`
+///   - `Kind::Macro`    → `DeclarativeMacro` / `ProcMacro` /
+///                        `Decorator`
+///
+/// `Impl` is intentionally absent — Rust `impl` blocks are wrappers,
+/// not symbols; their methods carry `DeclKind::Method` directly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclKind {
+    Module,
+    Namespace,
+    Crate,
+    Struct,
+    Enum,
+    Union,
+    Class,
+    Interface,
+    TypeAlias,
+    Function,
+    Method,
+    Constructor,
+    Getter,
+    Setter,
+    Const,
+    Static,
+    Var,
+    Field,
+    EnumVariant,
+    DeclarativeMacro,
+    ProcMacro,
+    Decorator,
+    Custom { lang: Language, tag: String },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +227,72 @@ mod tests {
             let back: EdgeKind = serde_json::from_str(&s).unwrap();
             assert_eq!(kind, back);
         }
+    }
+
+    #[test]
+    fn decl_kind_snake_case_built_ins() {
+        assert_eq!(
+            serde_json::to_string(&DeclKind::Function).unwrap(),
+            "\"function\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DeclKind::Method).unwrap(),
+            "\"method\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DeclKind::DeclarativeMacro).unwrap(),
+            "\"declarative_macro\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DeclKind::EnumVariant).unwrap(),
+            "\"enum_variant\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DeclKind::TypeAlias).unwrap(),
+            "\"type_alias\""
+        );
+    }
+
+    #[test]
+    fn decl_kind_round_trip_built_ins() {
+        for kind in [
+            DeclKind::Module,
+            DeclKind::Namespace,
+            DeclKind::Crate,
+            DeclKind::Struct,
+            DeclKind::Enum,
+            DeclKind::Union,
+            DeclKind::Class,
+            DeclKind::Interface,
+            DeclKind::TypeAlias,
+            DeclKind::Function,
+            DeclKind::Method,
+            DeclKind::Constructor,
+            DeclKind::Getter,
+            DeclKind::Setter,
+            DeclKind::Const,
+            DeclKind::Static,
+            DeclKind::Var,
+            DeclKind::Field,
+            DeclKind::EnumVariant,
+            DeclKind::DeclarativeMacro,
+            DeclKind::ProcMacro,
+            DeclKind::Decorator,
+        ] {
+            let s = serde_json::to_string(&kind).unwrap();
+            let back: DeclKind = serde_json::from_str(&s).unwrap();
+            assert_eq!(kind, back);
+        }
+    }
+
+    #[test]
+    fn decl_kind_custom_round_trip() {
+        let dk = DeclKind::Custom {
+            lang: Language::Rust,
+            tag: "macro_rules_call".into(),
+        };
+        let s = serde_json::to_string(&dk).unwrap();
+        let back: DeclKind = serde_json::from_str(&s).unwrap();
+        assert_eq!(dk, back);
     }
 }

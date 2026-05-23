@@ -726,6 +726,7 @@ fn process_export_default_decl(
             let body_hash = ctx.body_hash_of(span);
             ctx.push_symbol_with_doc(
                 RawSymbol {
+                    decl_kind: None,
                     fqdn: format!("{current_module}::{name}"),
                     name,
                     kind: Kind::Function,
@@ -761,6 +762,7 @@ fn process_export_default_decl(
             let name = interface.id.sym.to_string();
             ctx.push_symbol_with_doc(
                 RawSymbol {
+                    decl_kind: None,
                     fqdn: format!("{current_module}::{name}"),
                     name,
                     kind: Kind::Type,
@@ -866,6 +868,7 @@ fn extract_fn_decl(
     let span = item.function.span;
     let signature = build_function_signature(ctx, &item.function);
     RawSymbol {
+        decl_kind: None,
         name,
         fqdn,
         kind: Kind::Function,
@@ -903,6 +906,7 @@ fn extract_class_inner(
     let class_span = class.span;
     ctx.push_symbol_with_doc(
         RawSymbol {
+            decl_kind: None,
             name: name.to_string(),
             fqdn: class_fqdn.clone(),
             kind: Kind::Type,
@@ -1043,6 +1047,7 @@ fn extract_constructor(
     });
     let visibility = map_access_modifier(raw_access, raw_access.is_none());
     RawSymbol {
+        decl_kind: None,
         name: "constructor".to_string(),
         fqdn,
         kind: Kind::Function,
@@ -1077,6 +1082,7 @@ fn extract_class_prop(
         LanguageKind::from("property")
     };
     RawSymbol {
+        decl_kind: None,
         name: prop_name.to_string(),
         fqdn,
         kind: Kind::Value,
@@ -1100,6 +1106,7 @@ fn extract_private_method(
     let fqdn = format!("{class_fqdn}::{method_name}");
     let span = method.span;
     RawSymbol {
+        decl_kind: None,
         name: method_name.to_string(),
         fqdn,
         kind: Kind::Function,
@@ -1129,6 +1136,7 @@ fn extract_private_prop(
         LanguageKind::from("property")
     };
     RawSymbol {
+        decl_kind: None,
         name: prop_name.to_string(),
         fqdn,
         kind: Kind::Value,
@@ -1158,6 +1166,7 @@ fn extract_method(
     });
     let visibility = map_access_modifier(raw_access, raw_access.is_none());
     RawSymbol {
+        decl_kind: None,
         name: method_name.to_string(),
         fqdn,
         kind: Kind::Function,
@@ -1199,6 +1208,7 @@ fn extract_var_decl(
         };
         ctx.push_symbol_with_doc(
             RawSymbol {
+                decl_kind: None,
                 name,
                 fqdn: fqdn.clone(),
                 kind,
@@ -1242,6 +1252,7 @@ fn extract_interface_decl(
     let span = item.span;
     ctx.push_symbol_with_doc(
         RawSymbol {
+            decl_kind: None,
             name,
             fqdn: fqdn.clone(),
             kind: Kind::Type,
@@ -1300,6 +1311,7 @@ fn extract_interface_decl(
                 let member_fqdn = format!("{fqdn}::{member_name}");
                 ctx.push_symbol_with_doc(
                     RawSymbol {
+                        decl_kind: None,
                         name: member_name,
                         fqdn: member_fqdn.clone(),
                         kind: Kind::Value,
@@ -1334,6 +1346,7 @@ fn extract_interface_decl(
                 let member_fqdn = format!("{fqdn}::{member_name}");
                 ctx.push_symbol_with_doc(
                     RawSymbol {
+                        decl_kind: None,
                         name: member_name,
                         fqdn: member_fqdn.clone(),
                         kind: Kind::Function,
@@ -1386,6 +1399,7 @@ fn extract_interface_decl(
                 let member_fqdn = format!("{fqdn}::{member_name}");
                 ctx.push_symbol_with_doc(
                     RawSymbol {
+                        decl_kind: None,
                         name: member_name,
                         fqdn: member_fqdn.clone(),
                         kind: Kind::Function,
@@ -1420,6 +1434,7 @@ fn extract_interface_decl(
                 let member_fqdn = format!("{fqdn}::{member_name}");
                 ctx.push_symbol_with_doc(
                     RawSymbol {
+                        decl_kind: None,
                         name: member_name,
                         fqdn: member_fqdn.clone(),
                         kind: Kind::Function,
@@ -1464,6 +1479,7 @@ fn extract_type_alias_decl(
     let fqdn = format!("{parent_fqdn}::{name}");
     let span = item.span;
     RawSymbol {
+        decl_kind: None,
         name,
         fqdn,
         kind: Kind::Type,
@@ -1494,6 +1510,7 @@ fn extract_enum_decl(
     let span = item.span;
     ctx.push_symbol_with_doc(
         RawSymbol {
+            decl_kind: None,
             name,
             fqdn: enum_fqdn.clone(),
             kind: Kind::Type,
@@ -1513,6 +1530,7 @@ fn extract_enum_decl(
         let member_fqdn = format!("{enum_fqdn}::{member_name}");
         ctx.push_symbol_with_doc(
             RawSymbol {
+                decl_kind: None,
                 name: member_name,
                 fqdn: member_fqdn,
                 kind: Kind::Value,
@@ -2229,6 +2247,7 @@ mod tests {
             &comments,
         );
         ctx.push_symbol(RawSymbol {
+            decl_kind: None,
             name: "doStuff".into(),
             fqdn: "src::doStuff".into(),
             kind: Kind::Function,

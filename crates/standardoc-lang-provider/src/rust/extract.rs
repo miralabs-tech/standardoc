@@ -24,6 +24,7 @@ pub(crate) fn extract_file(
     let content_hash = hash_bytes(content.as_bytes());
 
     let module_symbol = RawSymbol {
+        decl_kind: None,
         name,
         fqdn: module_fqdn.clone(),
         kind: Kind::Module,

@@ -17,7 +17,7 @@ CREATE TABLE schema_meta (
 );
 
 INSERT INTO schema_meta (key, value) VALUES
-  ('schema_version',              '0'),
+  ('schema_version',              '1'),
   ('workspace_root',              ''),
   ('created_at',                  ''),
   ('cold_start_progress',         ''),
@@ -73,6 +73,7 @@ CREATE TABLE symbols (
   end_col                INTEGER NOT NULL,
   signature_json         TEXT,
   body_hash              TEXT,
+  decl_kind              TEXT,
   is_external            INTEGER NOT NULL DEFAULT 0 CHECK (is_external IN (0, 1)),
   source_origin          TEXT    NOT NULL DEFAULT 'workspace' CHECK (source_origin IN
                            ('workspace', 'cargo_registry', 'node_modules_dts',

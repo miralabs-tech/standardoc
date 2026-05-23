@@ -277,6 +277,7 @@ mod tests {
             // Synthesize one function symbol per file at line 1.
             let fqdn = format!("{path}::stub");
             let symbol = RawSymbol {
+                decl_kind: None,
                 name: "stub".into(),
                 fqdn,
                 kind: Kind::Function,
@@ -385,6 +386,7 @@ mod tests {
             byte_size: 0,
             module_lookup: None,
             symbols: vec![RawSymbol {
+                decl_kind: None,
                 name: "f".into(),
                 fqdn: "x::f".into(),
                 kind: Kind::Function,

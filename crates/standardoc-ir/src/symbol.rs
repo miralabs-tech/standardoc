@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::attribute::RawAttribute;
 use crate::hash::Blake3Hash;
-use crate::kinds::{Kind, Visibility};
+use crate::kinds::{DeclKind, Kind, Visibility};
 use crate::language_kind::LanguageKind;
 use crate::location::SymbolLocation;
 use crate::signature::Signature;
@@ -13,6 +13,12 @@ pub struct RawSymbol {
     pub fqdn: String,
     pub kind: Kind,
     pub language_kind: LanguageKind,
+    /// Phase 2 K refined declaration kind — populated per language in
+    /// K-Step-B+ (Rust/TS/C/Lua). `None` on rows extracted before the
+    /// language gained DeclKind coverage, or for languages that have
+    /// not been migrated yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decl_kind: Option<DeclKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     pub visibility: Visibility,
@@ -49,6 +55,7 @@ mod tests {
             fqdn: "crate::foo".into(),
             kind: Kind::Function,
             language_kind: LanguageKind::from("function"),
+            decl_kind: None,
             module: None,
             visibility: Visibility::Public,
             location: SymbolLocation {
@@ -75,6 +82,7 @@ mod tests {
             fqdn: "external::serde::Deserialize".into(),
             kind: Kind::Type,
             language_kind: LanguageKind::from("trait"),
+            decl_kind: None,
             module: Some("serde".into()),
             visibility: Visibility::Public,
             location: SymbolLocation {
@@ -101,6 +109,7 @@ mod tests {
             fqdn: "app::api::fetchUser".into(),
             kind: Kind::Function,
             language_kind: LanguageKind::from("function"),
+            decl_kind: None,
             module: Some("app::api".into()),
             visibility: Visibility::Public,
             location: SymbolLocation {
@@ -131,6 +140,7 @@ mod tests {
             fqdn: "x::plain".into(),
             kind: Kind::Function,
             language_kind: LanguageKind::from("function"),
+            decl_kind: None,
             module: None,
             visibility: Visibility::Public,
             location: SymbolLocation {
@@ -150,6 +160,45 @@ mod tests {
             !json.contains("flags"),
             "empty flags must be omitted (skip_serializing_if), got {json}"
         );
+    }
+
+    #[test]
+    fn decl_kind_round_trip_method() {
+        let s = RawSymbol {
+            name: "method".into(),
+            fqdn: "crate::Type::method".into(),
+            kind: Kind::Function,
+            language_kind: LanguageKind::from("impl_fn"),
+            decl_kind: Some(DeclKind::Method),
+            module: Some("crate::Type".into()),
+            visibility: Visibility::Public,
+            location: SymbolLocation {
+                file: "src/lib.rs".into(),
+                start_line: 1,
+                end_line: 1,
+                start_col: 0,
+                end_col: 1,
+            },
+            signature: None,
+            body_hash: None,
+            attributes: vec![],
+            flags: vec![],
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"decl_kind\":\"method\""), "got {json}");
+        let back: RawSymbol = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn missing_decl_kind_defaults_to_none() {
+        let legacy_json = r#"{
+            "name":"old","fqdn":"x::old","kind":"function","language_kind":"fn",
+            "visibility":"public",
+            "location":{"file":"src/x.rs","start_line":1,"end_line":1,"start_col":0,"end_col":1}
+        }"#;
+        let back: RawSymbol = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(back.decl_kind, None);
     }
 
     #[test]

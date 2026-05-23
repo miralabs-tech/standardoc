@@ -117,6 +117,7 @@ fn emit_import(
     if is_public {
         let phantom_fqdn = format!("{from}::{alias_name}");
         ctx.push_symbol(RawSymbol {
+            decl_kind: None,
             name: alias_name.to_string(),
             fqdn: phantom_fqdn,
             kind: Kind::Type,

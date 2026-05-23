@@ -1,6 +1,6 @@
 use standardoc_ir::{
-    EdgeConfidence, EdgeKind, Kind, Language, ResolvedOrUnresolved, Signature, SourceOrigin,
-    Visibility,
+    DeclKind, EdgeConfidence, EdgeKind, Kind, Language, ResolvedOrUnresolved, Signature,
+    SourceOrigin, Visibility,
 };
 
 use crate::storage::error::StorageError;
@@ -95,6 +95,85 @@ pub(crate) fn kind_from_sql_text(s: &str) -> Result<Kind, StorageError> {
         other => Err(StorageError::InvalidStoredData {
             detail: format!("unknown kind: {other:?}"),
         }),
+    }
+}
+
+/// Encodes a [`DeclKind`] as a flat SQL text. Built-in variants map
+/// to their `serde(rename_all = "snake_case")` representation;
+/// `Custom { lang, tag }` becomes `"custom:<lang>:<tag>"` (lang slug
+/// mirrors [`language_to_sql_text`]). The flat shape is grep-friendly
+/// on the SQL side — no JSON braces in the column.
+pub(crate) fn decl_kind_to_sql_text(d: &DeclKind) -> String {
+    match d {
+        DeclKind::Module => "module".into(),
+        DeclKind::Namespace => "namespace".into(),
+        DeclKind::Crate => "crate".into(),
+        DeclKind::Struct => "struct".into(),
+        DeclKind::Enum => "enum".into(),
+        DeclKind::Union => "union".into(),
+        DeclKind::Class => "class".into(),
+        DeclKind::Interface => "interface".into(),
+        DeclKind::TypeAlias => "type_alias".into(),
+        DeclKind::Function => "function".into(),
+        DeclKind::Method => "method".into(),
+        DeclKind::Constructor => "constructor".into(),
+        DeclKind::Getter => "getter".into(),
+        DeclKind::Setter => "setter".into(),
+        DeclKind::Const => "const".into(),
+        DeclKind::Static => "static".into(),
+        DeclKind::Var => "var".into(),
+        DeclKind::Field => "field".into(),
+        DeclKind::EnumVariant => "enum_variant".into(),
+        DeclKind::DeclarativeMacro => "declarative_macro".into(),
+        DeclKind::ProcMacro => "proc_macro".into(),
+        DeclKind::Decorator => "decorator".into(),
+        DeclKind::Custom { lang, tag } => {
+            format!("custom:{}:{}", language_to_sql_text(*lang), tag)
+        }
+    }
+}
+
+pub(crate) fn decl_kind_from_sql_text(s: &str) -> Result<DeclKind, StorageError> {
+    match s {
+        "module" => Ok(DeclKind::Module),
+        "namespace" => Ok(DeclKind::Namespace),
+        "crate" => Ok(DeclKind::Crate),
+        "struct" => Ok(DeclKind::Struct),
+        "enum" => Ok(DeclKind::Enum),
+        "union" => Ok(DeclKind::Union),
+        "class" => Ok(DeclKind::Class),
+        "interface" => Ok(DeclKind::Interface),
+        "type_alias" => Ok(DeclKind::TypeAlias),
+        "function" => Ok(DeclKind::Function),
+        "method" => Ok(DeclKind::Method),
+        "constructor" => Ok(DeclKind::Constructor),
+        "getter" => Ok(DeclKind::Getter),
+        "setter" => Ok(DeclKind::Setter),
+        "const" => Ok(DeclKind::Const),
+        "static" => Ok(DeclKind::Static),
+        "var" => Ok(DeclKind::Var),
+        "field" => Ok(DeclKind::Field),
+        "enum_variant" => Ok(DeclKind::EnumVariant),
+        "declarative_macro" => Ok(DeclKind::DeclarativeMacro),
+        "proc_macro" => Ok(DeclKind::ProcMacro),
+        "decorator" => Ok(DeclKind::Decorator),
+        other => match other.strip_prefix("custom:") {
+            Some(rest) => {
+                let (lang_s, tag) =
+                    rest.split_once(':')
+                        .ok_or_else(|| StorageError::InvalidStoredData {
+                            detail: format!("custom decl_kind missing tag: {other:?}"),
+                        })?;
+                let lang = language_from_sql_text(lang_s)?;
+                Ok(DeclKind::Custom {
+                    lang,
+                    tag: tag.to_string(),
+                })
+            }
+            None => Err(StorageError::InvalidStoredData {
+                detail: format!("unknown decl_kind: {other:?}"),
+            }),
+        },
     }
 }
 
@@ -408,6 +487,66 @@ mod tests {
     #[test]
     fn kind_from_sql_text_unknown_is_invalid() {
         let err = kind_from_sql_text("class").unwrap_err();
+        assert!(matches!(err, StorageError::InvalidStoredData { .. }));
+    }
+
+    #[test]
+    fn decl_kind_round_trip_built_in_variants() {
+        for d in [
+            DeclKind::Module,
+            DeclKind::Namespace,
+            DeclKind::Crate,
+            DeclKind::Struct,
+            DeclKind::Enum,
+            DeclKind::Union,
+            DeclKind::Class,
+            DeclKind::Interface,
+            DeclKind::TypeAlias,
+            DeclKind::Function,
+            DeclKind::Method,
+            DeclKind::Constructor,
+            DeclKind::Getter,
+            DeclKind::Setter,
+            DeclKind::Const,
+            DeclKind::Static,
+            DeclKind::Var,
+            DeclKind::Field,
+            DeclKind::EnumVariant,
+            DeclKind::DeclarativeMacro,
+            DeclKind::ProcMacro,
+            DeclKind::Decorator,
+        ] {
+            let s = decl_kind_to_sql_text(&d);
+            assert_eq!(decl_kind_from_sql_text(&s).unwrap(), d, "round-trip {s:?}");
+        }
+    }
+
+    #[test]
+    fn decl_kind_custom_round_trip() {
+        let d = DeclKind::Custom {
+            lang: Language::Rust,
+            tag: "macro_rules_call".into(),
+        };
+        let s = decl_kind_to_sql_text(&d);
+        assert_eq!(s, "custom:rust:macro_rules_call");
+        assert_eq!(decl_kind_from_sql_text(&s).unwrap(), d);
+    }
+
+    #[test]
+    fn decl_kind_from_sql_text_unknown_is_invalid() {
+        let err = decl_kind_from_sql_text("trait").unwrap_err();
+        assert!(matches!(err, StorageError::InvalidStoredData { .. }));
+    }
+
+    #[test]
+    fn decl_kind_from_sql_text_custom_missing_tag_is_invalid() {
+        let err = decl_kind_from_sql_text("custom:rust").unwrap_err();
+        assert!(matches!(err, StorageError::InvalidStoredData { .. }));
+    }
+
+    #[test]
+    fn decl_kind_from_sql_text_custom_unknown_lang_is_invalid() {
+        let err = decl_kind_from_sql_text("custom:cobol:x").unwrap_err();
         assert!(matches!(err, StorageError::InvalidStoredData { .. }));
     }
 

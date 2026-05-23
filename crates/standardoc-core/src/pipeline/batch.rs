@@ -351,6 +351,7 @@ mod tests {
 
     fn sym(name: &str, fqdn: &str, hash_byte: u8, line: u32) -> RawSymbol {
         RawSymbol {
+            decl_kind: None,
             name: name.into(),
             fqdn: fqdn.into(),
             kind: Kind::Function,

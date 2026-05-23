@@ -2,8 +2,8 @@ use rusqlite::Connection;
 use standardoc_ir::{Language, RawSymbol, SourceOrigin, SymbolLocation};
 
 use crate::storage::conv::{
-    kind_to_sql_text, language_to_sql_text, signature_to_json, source_origin_to_sql_text,
-    visibility_to_sql_text,
+    decl_kind_to_sql_text, kind_to_sql_text, language_to_sql_text, signature_to_json,
+    source_origin_to_sql_text, visibility_to_sql_text,
 };
 use crate::storage::error::{StorageError, map_constraint};
 
@@ -42,6 +42,7 @@ pub(crate) fn insert_symbol(
     // extra join. `serde_json::to_string` on `&Vec<String>` always
     // succeeds — the `expect` never fires.
     let flags_json = serde_json::to_string(&symbol.flags).expect("Vec<String> serializes to JSON");
+    let decl_kind_text = symbol.decl_kind.as_ref().map(decl_kind_to_sql_text);
 
     let id = conn
         .query_row(
@@ -49,8 +50,8 @@ pub(crate) fn insert_symbol(
                 fqdn, name, kind, language_kind, language, module, visibility, \
                 file_path, start_line, end_line, start_col, end_col, \
                 signature_json, body_hash, is_external, source_origin, \
-                last_modified_revision, flags, workspace_id\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19) \
+                last_modified_revision, flags, workspace_id, decl_kind\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20) \
              ON CONFLICT(workspace_id, fqdn) DO UPDATE SET \
                 name                    = excluded.name, \
                 kind                    = excluded.kind, \
@@ -69,7 +70,8 @@ pub(crate) fn insert_symbol(
                 source_origin           = excluded.source_origin, \
                 last_modified_revision  = excluded.last_modified_revision, \
                 flags                   = excluded.flags, \
-                workspace_id            = excluded.workspace_id \
+                workspace_id            = excluded.workspace_id, \
+                decl_kind               = excluded.decl_kind \
              RETURNING id",
             rusqlite::params![
                 symbol.fqdn,
@@ -91,6 +93,7 @@ pub(crate) fn insert_symbol(
                 revision_i64,
                 flags_json,
                 ctx.workspace_id,
+                decl_kind_text,
             ],
             |row| row.get::<_, i64>(0),
         )

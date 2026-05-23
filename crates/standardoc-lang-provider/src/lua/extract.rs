@@ -49,6 +49,7 @@ pub(crate) fn extract_file(
     let content_hash = hash_bytes(content.as_bytes());
 
     let module_symbol = RawSymbol {
+        decl_kind: None,
         name: last_segment(&module_fqdn).to_string(),
         fqdn: module_fqdn.clone(),
         kind: Kind::Module,
@@ -157,6 +158,7 @@ pub(crate) fn extract_local_function(ctx: &mut LuaWalkContext, lf: &LocalFunctio
     let body_hash = body_hash_for(lf, content);
 
     let sym = RawSymbol {
+        decl_kind: None,
         name,
         fqdn: fqdn.clone(),
         kind: Kind::Function,
@@ -202,6 +204,7 @@ pub(crate) fn extract_function_declaration(
     let visibility = Visibility::Public;
 
     let sym = RawSymbol {
+        decl_kind: None,
         name: leaf_name,
         fqdn: fqdn.clone(),
         kind: Kind::Function,
@@ -261,6 +264,7 @@ pub(crate) fn extract_local_assignment(
         let body_hash = body_hash_for(la, content);
 
         let sym = RawSymbol {
+            decl_kind: None,
             name,
             fqdn: fqdn.clone(),
             kind: Kind::Value,
@@ -321,6 +325,7 @@ pub(crate) fn extract_assignment(ctx: &mut LuaWalkContext, a: &Assignment, conte
         let body_hash = body_hash_for(*var, content);
 
         let sym = RawSymbol {
+            decl_kind: None,
             name: leaf.to_string(),
             fqdn: fqdn.clone(),
             kind: Kind::Function,

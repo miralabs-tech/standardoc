@@ -182,6 +182,7 @@ mod tests {
             content_hash: Blake3Hash::new([0xab; 32]),
             byte_size: 100,
             symbols: vec![RawSymbol {
+                decl_kind: None,
                 name: "foo".into(),
                 fqdn: "crate::foo".into(),
                 kind: Kind::Function,

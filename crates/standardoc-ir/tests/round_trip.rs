@@ -7,6 +7,7 @@ use standardoc_ir::{
 
 fn fixture() -> ExtractedFile {
     let create_user = RawSymbol {
+        decl_kind: None,
         name: "create_user".into(),
         fqdn: "crate::auth::create_user".into(),
         kind: Kind::Function,
@@ -55,6 +56,7 @@ fn fixture() -> ExtractedFile {
     };
 
     let module_root = RawSymbol {
+        decl_kind: None,
         name: "auth".into(),
         fqdn: "crate::auth".into(),
         kind: Kind::Module,
