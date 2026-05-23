@@ -43,7 +43,7 @@ pub(crate) fn extract_file(
     let module_fqdn = if module_path.is_empty() {
         package_name.to_string()
     } else {
-        format!("{package_name}::{}", module_path.replace('.', "::"))
+        format!("{package_name}::{module_path}")
     };
 
     let content_hash = hash_bytes(content.as_bytes());

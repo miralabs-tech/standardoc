@@ -2,6 +2,71 @@ use std::collections::HashSet;
 
 use standardoc_ir::{Language, ModuleLookup, RawCallSite, RawDocument, RawEdge, RawSymbol};
 
+use crate::utils::strip_extension;
+
+/// Per-language conventions consumed by [`compute_module_path`] so the
+/// path-to-module logic lives in a single helper instead of being
+/// duplicated 4 times. Each lang-provider exposes a `const` of this
+/// type next to its extractor entry point.
+pub(crate) struct LanguagePathConventions {
+    /// File extensions to strip from the path tail (e.g. `[".c", ".h"]`).
+    /// Order matters when one extension is a suffix of another (e.g.
+    /// `.d.ts` must precede `.ts`); the first match wins.
+    pub extensions: &'static [&'static str],
+    /// Final path segments to drop when they alias the parent module:
+    /// Rust's `lib`/`main`/`mod`, TS's `index`, Lua's `init`. Bare files
+    /// matching one of these aliases (e.g. Lua `init.lua` at the
+    /// package root) collapse to an empty module path.
+    pub root_aliases: &'static [&'static str],
+    /// When `true`, a leading `src/` (or any `*/src/`) prefix is
+    /// stripped before path-segment processing. Rust convention; the
+    /// other languages don't gate their source layout on a `src/` dir.
+    pub strip_src_prefix: bool,
+}
+
+/// Canonical `::`-joined module path for `package_relative` under the
+/// given language conventions. Returns an empty string when the file
+/// IS the package root (Lua `init.lua`, TS `index.ts`, Rust `lib.rs`).
+/// Both `/` and `\\` are recognised as path separators so callers can
+/// pass POSIX or Windows paths interchangeably.
+pub(crate) fn compute_module_path(
+    conventions: &LanguagePathConventions,
+    package_relative: &str,
+) -> String {
+    let after_src = if conventions.strip_src_prefix {
+        strip_src_prefix(package_relative)
+    } else {
+        package_relative
+    };
+    let stem = strip_extension(after_src, conventions.extensions);
+    let segments: Vec<&str> = stem
+        .split(|c: char| c == '/' || c == '\\')
+        .filter(|s| !s.is_empty())
+        .collect();
+    if segments.is_empty() {
+        return String::new();
+    }
+    let drop_last = segments
+        .last()
+        .is_some_and(|s| conventions.root_aliases.iter().any(|a| *a == *s));
+    let useful: &[&str] = if drop_last {
+        &segments[..segments.len() - 1]
+    } else {
+        &segments[..]
+    };
+    useful.join("::")
+}
+
+fn strip_src_prefix(file_rel: &str) -> &str {
+    if let Some(idx) = file_rel.rfind("/src/") {
+        return &file_rel[idx + "/src/".len()..];
+    }
+    if let Some(rest) = file_rel.strip_prefix("src/") {
+        return rest;
+    }
+    file_rel
+}
+
 #[derive(Debug)]
 pub(crate) struct WalkContextCore {
     pub(crate) file_path: String,

@@ -2,15 +2,19 @@ use std::path::{Path, PathBuf};
 
 use standardoc_ir::Visibility;
 
-use crate::utils::strip_extension;
+use crate::walk_core::LanguagePathConventions;
 
 /// Order matters: `.d.ts` must be tried before `.ts`, etc. Lock 41 §1
 /// Q9 added `.vue` and `.svelte` so SFC files compute the same module
 /// path their script content would have under a plain TS file.
-const TS_EXTENSIONS: &[&str] = &[
-    ".d.ts", ".d.tsx", ".d.mts", ".d.cts", ".tsx", ".ts", ".jsx", ".js", ".mts", ".cts", ".mjs",
-    ".cjs", ".vue", ".svelte",
-];
+pub(crate) const TS_CONVENTIONS: LanguagePathConventions = LanguagePathConventions {
+    extensions: &[
+        ".d.ts", ".d.tsx", ".d.mts", ".d.cts", ".tsx", ".ts", ".jsx", ".js", ".mts", ".cts",
+        ".mjs", ".cjs", ".vue", ".svelte",
+    ],
+    root_aliases: &["index"],
+    strip_src_prefix: false,
+};
 
 /// Map a TS/JS access modifier to canonical IR visibility.
 ///
@@ -32,23 +36,12 @@ pub(crate) fn map_access_modifier(raw: Option<&str>, exported: bool) -> Visibili
 /// trailing `/index` to the parent directory (mirror of Rust `mod.rs`).
 ///
 /// Examples (package_relative input → output):
-/// * `"src/auth/login.ts"`   → `"src/auth/login"`
-/// * `"src/auth/index.ts"`   → `"src/auth"`
+/// * `"src/auth/login.ts"`   → `"src::auth::login"`
+/// * `"src/auth/index.ts"`   → `"src::auth"`
 /// * `"src/index.ts"`        → `"src"`
 /// * `"index.ts"`            → `""`  (file lives at package root)
 pub(crate) fn compute_module_path(package_relative: &str) -> String {
-    let stem = strip_extension(package_relative, TS_EXTENSIONS);
-    let segments: Vec<&str> = stem.split('/').filter(|s| !s.is_empty()).collect();
-    if segments.is_empty() {
-        return String::new();
-    }
-    let drop_last = segments.last().is_some_and(|s| *s == "index");
-    let useful: &[&str] = if drop_last {
-        &segments[..segments.len() - 1]
-    } else {
-        &segments[..]
-    };
-    useful.join("/")
+    crate::walk_core::compute_module_path(&TS_CONVENTIONS, package_relative)
 }
 
 /// Walk filesystem ancestors from `file_abs_path` until a `package.json` is
@@ -116,12 +109,12 @@ mod tests {
 
     #[test]
     fn compute_module_path_flat_file() {
-        assert_eq!(compute_module_path("src/auth/login.ts"), "src/auth/login");
+        assert_eq!(compute_module_path("src/auth/login.ts"), "src::auth::login");
     }
 
     #[test]
     fn compute_module_path_index_collapses_to_parent() {
-        assert_eq!(compute_module_path("src/auth/index.ts"), "src/auth");
+        assert_eq!(compute_module_path("src/auth/index.ts"), "src::auth");
     }
 
     #[test]
@@ -136,36 +129,36 @@ mod tests {
 
     #[test]
     fn compute_module_path_handles_tsx_extension() {
-        assert_eq!(compute_module_path("src/App.tsx"), "src/App");
+        assert_eq!(compute_module_path("src/App.tsx"), "src::App");
     }
 
     #[test]
     fn compute_module_path_handles_jsx_extension() {
-        assert_eq!(compute_module_path("src/legacy.jsx"), "src/legacy");
+        assert_eq!(compute_module_path("src/legacy.jsx"), "src::legacy");
     }
 
     #[test]
     fn compute_module_path_handles_js_extension() {
-        assert_eq!(compute_module_path("scripts/build.js"), "scripts/build");
+        assert_eq!(compute_module_path("scripts/build.js"), "scripts::build");
     }
 
     #[test]
     fn compute_module_path_handles_d_ts_declaration() {
         assert_eq!(compute_module_path("dist/index.d.ts"), "dist");
-        assert_eq!(compute_module_path("types/api.d.ts"), "types/api");
+        assert_eq!(compute_module_path("types/api.d.ts"), "types::api");
     }
 
     #[test]
     fn compute_module_path_handles_mts_cts_mjs_cjs() {
-        assert_eq!(compute_module_path("src/a.mts"), "src/a");
-        assert_eq!(compute_module_path("src/b.cts"), "src/b");
-        assert_eq!(compute_module_path("src/c.mjs"), "src/c");
-        assert_eq!(compute_module_path("src/d.cjs"), "src/d");
+        assert_eq!(compute_module_path("src/a.mts"), "src::a");
+        assert_eq!(compute_module_path("src/b.cts"), "src::b");
+        assert_eq!(compute_module_path("src/c.mjs"), "src::c");
+        assert_eq!(compute_module_path("src/d.cjs"), "src::d");
     }
 
     #[test]
     fn compute_module_path_no_extension_kept_as_segments() {
-        assert_eq!(compute_module_path("src/no-ext"), "src/no-ext");
+        assert_eq!(compute_module_path("src/no-ext"), "src::no-ext");
     }
 
     #[test]

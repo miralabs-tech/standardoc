@@ -235,7 +235,7 @@ fn join_fqdn(package_name: &str, module_path: &str) -> String {
     if module_path.is_empty() {
         package_name.to_string()
     } else {
-        format!("{package_name}::{}", module_path.replace('/', "::"))
+        format!("{package_name}::{module_path}")
     }
 }
 
@@ -363,8 +363,10 @@ mod tests {
     }
 
     #[test]
-    fn join_fqdn_collapses_slashes_to_double_colon() {
-        assert_eq!(join_fqdn("foo", "src/auth"), "foo::src::auth");
+    fn join_fqdn_prefixes_package_name() {
+        // `compute_module_path` now returns `::`-separated module paths
+        // already; `join_fqdn` simply prepends the package name.
+        assert_eq!(join_fqdn("foo", "src::auth"), "foo::src::auth");
     }
 
     #[test]

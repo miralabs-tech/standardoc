@@ -1,40 +1,18 @@
-use crate::utils::strip_extension;
+use crate::walk_core::{LanguagePathConventions, compute_module_path};
+
+pub(crate) const RUST_CONVENTIONS: LanguagePathConventions = LanguagePathConventions {
+    extensions: &[".rs"],
+    root_aliases: &["lib", "main", "mod"],
+    strip_src_prefix: true,
+};
 
 pub(crate) fn compute(crate_name: &str, file_rel: &str) -> String {
-    let after_src = strip_src_prefix(file_rel);
-    let stem_path = strip_extension(after_src, &[".rs"]);
-    let segments: Vec<&str> = stem_path.split('/').filter(|s| !s.is_empty()).collect();
-    let drop_root = segments
-        .last()
-        .is_some_and(|s| matches!(*s, "lib" | "main" | "mod"));
-
-    let useful: &[&str] = if drop_root {
-        &segments[..segments.len() - 1]
+    let module_path = compute_module_path(&RUST_CONVENTIONS, file_rel);
+    if module_path.is_empty() {
+        crate_name.to_string()
     } else {
-        &segments[..]
-    };
-
-    if useful.is_empty() {
-        return crate_name.to_string();
+        format!("{crate_name}::{module_path}")
     }
-
-    let mut out = String::with_capacity(crate_name.len() + useful.len() * 8);
-    out.push_str(crate_name);
-    for seg in useful {
-        out.push_str("::");
-        out.push_str(seg);
-    }
-    out
-}
-
-fn strip_src_prefix(file_rel: &str) -> &str {
-    if let Some(idx) = file_rel.rfind("/src/") {
-        return &file_rel[idx + "/src/".len()..];
-    }
-    if let Some(rest) = file_rel.strip_prefix("src/") {
-        return rest;
-    }
-    file_rel
 }
 
 #[cfg(test)]

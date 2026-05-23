@@ -3,7 +3,17 @@ use std::path::Path;
 use standardoc_ir::SymbolLocation;
 use tree_sitter::Node;
 
-use crate::utils::strip_extension;
+use crate::walk_core::LanguagePathConventions;
+
+/// Per-language conventions used by `crate::walk_core::compute_module_path`.
+/// C has no root-alias collapse (no equivalent of `mod.rs` / `index.ts`)
+/// and treats `.c` / `.h` symmetrically so the source file and its header
+/// share the same module path.
+pub(crate) const C_CONVENTIONS: LanguagePathConventions = LanguagePathConventions {
+    extensions: &[".c", ".h"],
+    root_aliases: &[],
+    strip_src_prefix: false,
+};
 
 /// Compute the `::`-joined module portion of an FQDN from a workspace-relative
 /// path (relative to the package root). Strips `.c` / `.h` extensions.
@@ -13,8 +23,7 @@ use crate::utils::strip_extension;
 /// * `"include/lur.h"` → `"include::lur"`
 /// * `"main.c"` → `"main"`
 pub(crate) fn compute_module_path(package_relative: &str) -> String {
-    let stem = strip_extension(package_relative, &[".c", ".h"]);
-    stem.replace('/', "::").replace('\\', "::")
+    crate::walk_core::compute_module_path(&C_CONVENTIONS, package_relative)
 }
 
 /// Workspace-directory-name fallback when no `standarbuild-detect` project

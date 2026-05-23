@@ -367,8 +367,9 @@ impl StandardocMcp {
     /// match instead of the full `RawSymbol`. Designed for FTS5 probes
     /// where you only need the FQDN to follow up with `get_context`
     /// or `get_code`. Massive payload reduction on broad queries.
+    /// Optional `relative_to` shortens matching FQDNs to `::<rest>`.
     #[tool(
-        description = "FQDN-only variant of `find_symbol`. Returns `[{fqdn, kind}, ...]` ranked by FTS5 — the minimal shape needed to follow up with `get_context` / `get_code`. Same filters and limit semantics as `find_symbol`. When the query returns zero matches, the response switches to `{results: [], did_you_mean: [...]}` — same did-you-mean envelope as `find_symbol`. Use this as your default discovery probe; reach for `find_symbol` only when you actually need the full RawSymbol shape per match."
+        description = "FQDN-only variant of `find_symbol`. Returns `[{fqdn, kind}, ...]` ranked by FTS5 — the minimal shape needed to follow up with `get_context` / `get_code`. Same filters and limit semantics as `find_symbol`. When the query returns zero matches, the response switches to `{results: [], did_you_mean: [...]}` — same did-you-mean envelope as `find_symbol`. Use this as your default discovery probe; reach for `find_symbol` only when you actually need the full RawSymbol shape per match. Pass `relative_to = \"foo::bar\"` to collapse matching FQDNs into `::baz::qux` form — kills the prefix repetition that dominates scoped scans."
     )]
     async fn find_symbol_fqdns(
         &self,
@@ -417,9 +418,15 @@ impl StandardocMcp {
             }
         }
 
+        let relative_to = params.relative_to.unwrap_or_default();
         let projected: Vec<_> = result
             .into_iter()
-            .map(|s| serde_json::json!({ "fqdn": s.fqdn, "kind": s.kind }))
+            .map(|s| {
+                serde_json::json!({
+                    "fqdn": relative_fqdn(&s.fqdn, &relative_to),
+                    "kind": s.kind,
+                })
+            })
             .collect();
         Ok(success_json(&projected))
     }
@@ -473,9 +480,10 @@ impl StandardocMcp {
     /// Compact variant of `list_symbols` — returns `{fqdn, kind}` per
     /// item instead of the full `RawSymbol`. Designed for audits that
     /// only need to enumerate FQDNs (with optional filter scoping).
-    /// Pagination semantics identical to `list_symbols`.
+    /// Pagination semantics identical to `list_symbols`. Optional
+    /// `relative_to` shortens matching FQDNs to `::<rest>`.
     #[tool(
-        description = "FQDN-only variant of `list_symbols`. Returns `{items: [{fqdn, kind}, ...], next_cursor}` instead of full RawSymbol per row. Same filter and pagination semantics as `list_symbols` — use cursor=next_cursor to walk pages. Use this for broad audits ('all private functions in module X', 'all types in crate Y') where the FQDN is the only field that matters."
+        description = "FQDN-only variant of `list_symbols`. Returns `{items: [{fqdn, kind}, ...], next_cursor}` instead of full RawSymbol per row. Same filter and pagination semantics as `list_symbols` — use cursor=next_cursor to walk pages. Use this for broad audits ('all private functions in module X', 'all types in crate Y') where the FQDN is the only field that matters. Pass `relative_to = \"foo::bar\"` to collapse matching FQDNs into `::baz` form."
     )]
     async fn list_symbol_fqdns(
         &self,
@@ -503,10 +511,16 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
+        let relative_to = params.relative_to.unwrap_or_default();
         let projected: Vec<_> = page
             .items
             .into_iter()
-            .map(|s| serde_json::json!({ "fqdn": s.fqdn, "kind": s.kind }))
+            .map(|s| {
+                serde_json::json!({
+                    "fqdn": relative_fqdn(&s.fqdn, &relative_to),
+                    "kind": s.kind,
+                })
+            })
             .collect();
         let envelope = serde_json::json!({
             "items": projected,
@@ -1439,6 +1453,14 @@ pub(crate) struct FindSymbolFqdnsParams {
     /// Optional — scope to a peer workspace by UUID.
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// Optional — when set, FQDNs sharing this prefix are returned in
+    /// relative form (leading `::` marker, prefix stripped). FQDNs that
+    /// do NOT share the prefix are returned verbatim. Useful for scoped
+    /// scans where the prefix repeats across every result and dilutes
+    /// the differential. Example: `relative_to = "foo::bar"` turns
+    /// `foo::bar::baz::qux` into `::baz::qux`.
+    #[serde(default)]
+    pub relative_to: Option<String>,
 }
 
 /// Tool input — `list_symbols(kind?, visibility?, module?, limit?,
@@ -1497,6 +1519,11 @@ pub(crate) struct ListSymbolFqdnsParams {
     /// Optional — scope to a peer workspace by UUID.
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// Optional — when set, FQDNs sharing this prefix are returned in
+    /// relative form (leading `::` marker, prefix stripped). Same
+    /// semantics as `find_symbol_fqdns.relative_to`.
+    #[serde(default)]
+    pub relative_to: Option<String>,
 }
 
 /// Tool input — `find_symbols_by_pattern(pattern, kind?, visibility?,
@@ -2139,6 +2166,27 @@ fn normalize_fqdn(raw: &str) -> String {
     raw.replace('.', "::")
 }
 
+/// Project `fqdn` to its `relative_to`-anchored form. FQDNs sharing the
+/// prefix become `::<rest>`; the prefix itself collapses to the empty
+/// string; FQDNs that don't share the prefix are returned verbatim. An
+/// empty `relative_to` short-circuits to the input. Used by the
+/// `find_symbol_fqdns` / `list_symbol_fqdns` projections to compress
+/// scoped listings.
+fn relative_fqdn(fqdn: &str, relative_to: &str) -> String {
+    if relative_to.is_empty() {
+        return fqdn.to_string();
+    }
+    if fqdn == relative_to {
+        return String::new();
+    }
+    if let Some(rest) = fqdn.strip_prefix(relative_to)
+        && let Some(rest) = rest.strip_prefix("::")
+    {
+        return format!("::{rest}");
+    }
+    fqdn.to_string()
+}
+
 fn success_json<T: Serialize>(value: &T) -> CallToolResult {
     match serde_json::to_string_pretty(value) {
         Ok(json) => CallToolResult::success(vec![Content::text(json)]),
@@ -2200,6 +2248,42 @@ mod tests {
     fn indexing_message_omits_progress_when_zero_total() {
         let msg = indexing_in_progress_message(Some((0, 0)));
         assert!(!msg.contains('/'), "got `{msg}`");
+    }
+
+    #[test]
+    fn relative_fqdn_strips_prefix_with_marker() {
+        assert_eq!(
+            relative_fqdn("foo::bar::baz::qux", "foo::bar"),
+            "::baz::qux",
+        );
+    }
+
+    #[test]
+    fn relative_fqdn_returns_empty_on_self_match() {
+        assert_eq!(relative_fqdn("foo::bar", "foo::bar"), "");
+    }
+
+    #[test]
+    fn relative_fqdn_passes_through_when_prefix_does_not_match() {
+        assert_eq!(
+            relative_fqdn("other::lib::x", "foo::bar"),
+            "other::lib::x",
+        );
+    }
+
+    #[test]
+    fn relative_fqdn_short_circuits_on_empty_anchor() {
+        assert_eq!(relative_fqdn("foo::bar::baz", ""), "foo::bar::baz");
+    }
+
+    #[test]
+    fn relative_fqdn_requires_segment_boundary() {
+        // `foo::bar` should NOT match the prefix of `foo::barista` — the
+        // boundary is `::`, not raw string prefix.
+        assert_eq!(
+            relative_fqdn("foo::barista::x", "foo::bar"),
+            "foo::barista::x",
+        );
     }
 
     use standardoc_core::{ScanFilters, cold_start};
