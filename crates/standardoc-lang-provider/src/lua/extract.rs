@@ -8,9 +8,9 @@ use full_moon::node::Node;
 use full_moon::tokenizer::{Position, TokenReference, TokenType};
 use standardoc_core::ExtractError;
 use standardoc_ir::{
-    Blake3Hash, BuiltinTier, EdgeKind, ExtractedFile, Kind, Language, LanguageKind, Modifiers,
-    Param, RawCallArg, RawCallSite, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature,
-    SignatureMeta, Site, SourceOrigin, SymbolLocation, TypeRef, Visibility,
+    Blake3Hash, BuiltinTier, DeclKind, EdgeKind, ExtractedFile, Kind, Language, LanguageKind,
+    Modifiers, Param, RawCallArg, RawCallSite, RawEdge, RawSymbol, ResolvedOrUnresolved,
+    Signature, SignatureMeta, Site, SourceOrigin, SymbolLocation, TypeRef, Visibility,
 };
 
 use super::extract_doc;
@@ -49,7 +49,7 @@ pub(crate) fn extract_file(
     let content_hash = hash_bytes(content.as_bytes());
 
     let module_symbol = RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(DeclKind::Module),
         name: last_segment(&module_fqdn).to_string(),
         fqdn: module_fqdn.clone(),
         kind: Kind::Module,
@@ -158,7 +158,7 @@ pub(crate) fn extract_local_function(ctx: &mut LuaWalkContext, lf: &LocalFunctio
     let body_hash = body_hash_for(lf, content);
 
     let sym = RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(DeclKind::Function),
         name,
         fqdn: fqdn.clone(),
         kind: Kind::Function,
@@ -196,6 +196,11 @@ pub(crate) fn extract_function_declaration(
     } else {
         LanguageKind::from("function")
     };
+    let decl_kind = if is_method {
+        DeclKind::Method
+    } else {
+        DeclKind::Function
+    };
 
     // Default Public for both shapes:
     // * `function foo()` (global) — Public day-1.
@@ -204,7 +209,7 @@ pub(crate) fn extract_function_declaration(
     let visibility = Visibility::Public;
 
     let sym = RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(decl_kind),
         name: leaf_name,
         fqdn: fqdn.clone(),
         kind: Kind::Function,
@@ -264,7 +269,7 @@ pub(crate) fn extract_local_assignment(
         let body_hash = body_hash_for(la, content);
 
         let sym = RawSymbol {
-            decl_kind: None,
+            decl_kind: Some(DeclKind::Var),
             name,
             fqdn: fqdn.clone(),
             kind: Kind::Value,
@@ -325,7 +330,7 @@ pub(crate) fn extract_assignment(ctx: &mut LuaWalkContext, a: &Assignment, conte
         let body_hash = body_hash_for(*var, content);
 
         let sym = RawSymbol {
-            decl_kind: None,
+            decl_kind: Some(DeclKind::Function),
             name: leaf.to_string(),
             fqdn: fqdn.clone(),
             kind: Kind::Function,
@@ -1439,5 +1444,82 @@ mod tests {
             .find(|c| c.callee_text == "helper")
             .unwrap_or_else(|| panic!("expected helper call_site, got {:?}", r.call_sites));
         assert_eq!(cs.from_fqdn, "myapp::main::svc::run");
+    }
+
+    fn decl_kind_of(file: &ExtractedFile, fqdn: &str) -> Option<DeclKind> {
+        file.symbols
+            .iter()
+            .find(|s| s.fqdn == fqdn)
+            .unwrap_or_else(|| panic!("symbol {fqdn} not found in {:?}", file.symbols))
+            .decl_kind
+            .clone()
+    }
+
+    #[test]
+    fn decl_kind_module_for_file_module() {
+        let r = extract("", "main.lua", "main.lua");
+        assert_eq!(decl_kind_of(&r, "myapp::main"), Some(DeclKind::Module));
+    }
+
+    #[test]
+    fn decl_kind_function_for_local_function() {
+        let src = "local function helper() end\n";
+        let r = extract(src, "main.lua", "main.lua");
+        assert_eq!(
+            decl_kind_of(&r, "myapp::main::helper"),
+            Some(DeclKind::Function),
+        );
+    }
+
+    #[test]
+    fn decl_kind_function_for_global_function() {
+        let src = "function greet() end\n";
+        let r = extract(src, "main.lua", "main.lua");
+        assert_eq!(
+            decl_kind_of(&r, "myapp::main::greet"),
+            Some(DeclKind::Function),
+        );
+    }
+
+    #[test]
+    fn decl_kind_function_for_dotted_function() {
+        let src = "function M.foo() end\n";
+        let r = extract(src, "lib.lua", "lib.lua");
+        assert_eq!(
+            decl_kind_of(&r, "myapp::lib::M::foo"),
+            Some(DeclKind::Function),
+        );
+    }
+
+    #[test]
+    fn decl_kind_method_for_colon_function() {
+        let src = "function M:bar() end\n";
+        let r = extract(src, "lib.lua", "lib.lua");
+        assert_eq!(
+            decl_kind_of(&r, "myapp::lib::M::bar"),
+            Some(DeclKind::Method),
+        );
+    }
+
+    #[test]
+    fn decl_kind_var_for_local_assignment() {
+        let src = "local counter = 0\n";
+        let r = extract(src, "main.lua", "main.lua");
+        assert_eq!(
+            decl_kind_of(&r, "myapp::main::counter"),
+            Some(DeclKind::Var),
+        );
+    }
+
+    #[test]
+    fn decl_kind_function_for_table_assignment_with_function_rhs() {
+        // `M.foo = function() end` — extract_assignment emits as Kind::Function
+        // because the RHS is a function literal.
+        let src = "local M = {}\nM.foo = function() end\n";
+        let r = extract(src, "lib.lua", "lib.lua");
+        assert_eq!(
+            decl_kind_of(&r, "myapp::lib::M::foo"),
+            Some(DeclKind::Function),
+        );
     }
 }
