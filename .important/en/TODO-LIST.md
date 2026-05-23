@@ -84,7 +84,7 @@ Rust + TypeScript only. Two MCP tools. Local-only.
 - [x] SQLite + FTS5 graph storage (zero-duplication external content)
 - [x] BLAKE3 double-level invalidation
 - [x] FQDN unification across Rust + TS (`<package>::<module>::<name>`)
-- [x] Typed edges day-1: `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `DEFINES`, `USES_TYPE`, `EXPOSES_API`
+- [x] Typed edges day-1: `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `USES_TYPE`
 
 #### Pipeline
 - [x] Cold-start eager full-workspace index

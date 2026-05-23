@@ -18,9 +18,7 @@ pub enum EdgeKind {
     Extends,
     Implements,
     References,
-    Defines,
     UsesType,
-    ExposesApi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -84,10 +82,6 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&EdgeKind::UsesType).unwrap(),
             "\"USES_TYPE\""
-        );
-        assert_eq!(
-            serde_json::to_string(&EdgeKind::ExposesApi).unwrap(),
-            "\"EXPOSES_API\""
         );
     }
 
@@ -179,9 +173,7 @@ mod tests {
             EdgeKind::Extends,
             EdgeKind::Implements,
             EdgeKind::References,
-            EdgeKind::Defines,
             EdgeKind::UsesType,
-            EdgeKind::ExposesApi,
         ] {
             let s = serde_json::to_string(&kind).unwrap();
             let back: EdgeKind = serde_json::from_str(&s).unwrap();

@@ -637,7 +637,7 @@ verify what the indexer captured for any given file.
 - **FQDN** — \`<package>::<module>::<name>\` (Rust + TS unified).
   Stable identifier across the workspace.
 - **Edge kinds** — \`CALLS\`, \`IMPORTS\`, \`EXTENDS\`, \`IMPLEMENTS\`,
-  \`REFERENCES\`, \`DEFINES\`, \`USES_TYPE\`, \`EXPOSES_API\`.
+  \`REFERENCES\`, \`USES_TYPE\`.
 - **Edge attributes** — every edge carries an optional JSON
   \`attributes\` field with structured metadata. Today it's populated
   for template refs in Vue / Svelte / JSX (component name, prop

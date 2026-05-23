@@ -34,8 +34,8 @@ Standardoc indexe ton code en un **graphe sémantique vivant** :
 
 - AST direct, multi-langues (Rust, TypeScript & JavaScript avec React/JSX/TSX, Vue, Svelte, Lua aujourd'hui)
 - IR canonique unifié — types de nœuds + edges typés partagés cross-langue
-  (`CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `DEFINES`,
-  `USES_TYPE`, `EXPOSES_API`), avec attributs structurés sur certains edges
+  (`CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `USES_TYPE`),
+  avec attributs structurés sur certains edges
 - SQLite + FTS5, watcher filesystem, invalidation BLAKE3, schéma versionné
 - Dérivé du code (pas une source à porter en plus), reproductible sur
   n'importe quelle machine en quelques secondes

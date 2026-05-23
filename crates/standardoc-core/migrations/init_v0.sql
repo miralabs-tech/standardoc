@@ -96,7 +96,7 @@ CREATE TABLE edges (
   from_symbol_id  INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
   kind            TEXT    NOT NULL CHECK (kind IN
                     ('CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS',
-                     'REFERENCES', 'DEFINES', 'USES_TYPE', 'EXPOSES_API')),
+                     'REFERENCES', 'USES_TYPE')),
   to_symbol_id    INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
   to_unresolved   TEXT,
   attributes      TEXT    NOT NULL DEFAULT '[]',

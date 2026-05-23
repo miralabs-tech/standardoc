@@ -6,9 +6,7 @@ export type EdgeKindJson =
   | 'EXTENDS'
   | 'IMPLEMENTS'
   | 'REFERENCES'
-  | 'DEFINES'
-  | 'USES_TYPE'
-  | 'EXPOSES_API';
+  | 'USES_TYPE';
 
 export type VisibilityJson = 'public' | 'private' | 'crate' | 'protected';
 

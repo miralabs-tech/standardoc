@@ -1062,7 +1062,7 @@ impl StandardocMcp {
     /// All clamps (`depth`, `max_nodes`) happen here at the transport
     /// boundary; the core composition trusts what it receives.
     #[tool(
-        description = "Pre-composed graph payload for the visualisation layer. Returns `{symbols: [{fqdn, name, kind, visibility, module?, language_kind, language, is_external, file, start_line, project_id?}], edges: [{from, to, kind, outbound}], projects: [{project_id, label, kind, rel_path}], focal?}` — flat shape the WASM viz consumes directly (no client-side reshape). `projects` is the lookup table for the `project_id` foreign key; the viz frames symbols by project and colours each frame by `kind`.\n\nTwo modes:\n- `focal: Some(fqdn)` → bounded BFS expansion around the node, `depth` hops (1..=5, default 2). Both outbound (edges_from) and inbound (edges_to) edges are walked; unresolved targets are skipped.\n- `focal: None` → bounded snapshot of the workspace ordered by FQDN ASC. Only edges whose target is also in the bounded set are included (no dangling).\n\nKnobs: `kinds` (allow-list of edge kinds — `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `DEFINES`, `USES_TYPE`, `EXPOSES_API`; case-insensitive, unknown values silently ignored); `max_nodes` (safety cap, default 500, clamped to 1..=5000); `include_external` (default false, scopes to workspace-authored symbols).\n\nReturns an empty `symbols`/`edges` vec with `focal` echoed when `focal` is supplied but the FQDN is unknown — lets the consumer distinguish 'no neighbors' from 'unknown symbol'."
+        description = "Pre-composed graph payload for the visualisation layer. Returns `{symbols: [{fqdn, name, kind, visibility, module?, language_kind, language, is_external, file, start_line, project_id?}], edges: [{from, to, kind, outbound}], projects: [{project_id, label, kind, rel_path}], focal?}` — flat shape the WASM viz consumes directly (no client-side reshape). `projects` is the lookup table for the `project_id` foreign key; the viz frames symbols by project and colours each frame by `kind`.\n\nTwo modes:\n- `focal: Some(fqdn)` → bounded BFS expansion around the node, `depth` hops (1..=5, default 2). Both outbound (edges_from) and inbound (edges_to) edges are walked; unresolved targets are skipped.\n- `focal: None` → bounded snapshot of the workspace ordered by FQDN ASC. Only edges whose target is also in the bounded set are included (no dangling).\n\nKnobs: `kinds` (allow-list of edge kinds — `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `USES_TYPE`; case-insensitive, unknown values silently ignored); `max_nodes` (safety cap, default 500, clamped to 1..=5000); `include_external` (default false, scopes to workspace-authored symbols).\n\nReturns an empty `symbols`/`edges` vec with `focal` echoed when `focal` is supplied but the FQDN is unknown — lets the consumer distinguish 'no neighbors' from 'unknown symbol'."
     )]
     async fn fetch_graph(
         &self,
@@ -1280,9 +1280,8 @@ pub(crate) struct FetchGraphParams {
     #[serde(default)]
     pub depth: Option<u8>,
     /// Optional allow-list of edge kinds (case-insensitive: `CALLS`,
-    /// `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `DEFINES`,
-    /// `USES_TYPE`, `EXPOSES_API`). Unknown values are silently
-    /// dropped. `None` admits every kind.
+    /// `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `USES_TYPE`).
+    /// Unknown values are silently dropped. `None` admits every kind.
     #[serde(default)]
     pub kinds: Option<Vec<String>>,
     /// Safety cap on the number of symbol nodes returned. Clamped to
@@ -1335,9 +1334,7 @@ fn parse_edge_kind(raw: &str) -> Option<EdgeKind> {
         "EXTENDS" => Some(EdgeKind::Extends),
         "IMPLEMENTS" => Some(EdgeKind::Implements),
         "REFERENCES" => Some(EdgeKind::References),
-        "DEFINES" => Some(EdgeKind::Defines),
         "USES_TYPE" | "USESTYPE" => Some(EdgeKind::UsesType),
-        "EXPOSES_API" | "EXPOSESAPI" => Some(EdgeKind::ExposesApi),
         _ => None,
     }
 }

@@ -90,7 +90,7 @@ VSCode. Rust + TypeScript uniquement. Deux tools MCP. Local-only.
 - [x] Stockage graphe SQLite + FTS5 (external content zéro-duplication)
 - [x] Invalidation BLAKE3 à double niveau
 - [x] Unification FQDN cross Rust + TS (`<package>::<module>::<name>`)
-- [x] Edges typés day-1 : `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `DEFINES`, `USES_TYPE`, `EXPOSES_API`
+- [x] Edges typés day-1 : `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `USES_TYPE`
 
 #### Pipeline
 - [x] Index full-workspace eager au cold-start

@@ -147,9 +147,7 @@ pub(crate) const fn edge_kind_to_sql_text(k: EdgeKind) -> &'static str {
         EdgeKind::Extends => "EXTENDS",
         EdgeKind::Implements => "IMPLEMENTS",
         EdgeKind::References => "REFERENCES",
-        EdgeKind::Defines => "DEFINES",
         EdgeKind::UsesType => "USES_TYPE",
-        EdgeKind::ExposesApi => "EXPOSES_API",
     }
 }
 
@@ -160,9 +158,7 @@ pub(crate) fn edge_kind_from_sql_text(s: &str) -> Result<EdgeKind, StorageError>
         "EXTENDS" => Ok(EdgeKind::Extends),
         "IMPLEMENTS" => Ok(EdgeKind::Implements),
         "REFERENCES" => Ok(EdgeKind::References),
-        "DEFINES" => Ok(EdgeKind::Defines),
         "USES_TYPE" => Ok(EdgeKind::UsesType),
-        "EXPOSES_API" => Ok(EdgeKind::ExposesApi),
         other => Err(StorageError::InvalidStoredData {
             detail: format!("unknown edge kind: {other:?}"),
         }),
@@ -461,9 +457,7 @@ mod tests {
             EdgeKind::Extends,
             EdgeKind::Implements,
             EdgeKind::References,
-            EdgeKind::Defines,
             EdgeKind::UsesType,
-            EdgeKind::ExposesApi,
         ] {
             let s = edge_kind_to_sql_text(k);
             assert_eq!(edge_kind_from_sql_text(s).unwrap(), k);
@@ -474,7 +468,6 @@ mod tests {
     fn edge_kind_to_sql_text_screaming() {
         assert_eq!(edge_kind_to_sql_text(EdgeKind::Calls), "CALLS");
         assert_eq!(edge_kind_to_sql_text(EdgeKind::UsesType), "USES_TYPE");
-        assert_eq!(edge_kind_to_sql_text(EdgeKind::ExposesApi), "EXPOSES_API");
     }
 
     #[test]

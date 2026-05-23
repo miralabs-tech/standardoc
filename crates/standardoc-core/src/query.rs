@@ -74,7 +74,7 @@ pub struct NeighborSymbol {
 /// - `imports`     — `edges_from(fqdn)` filtered to [`EdgeKind::Imports`]
 /// - `imported_by` — `edges_to(fqdn)`   filtered to [`EdgeKind::Imports`]
 /// - `dependents`  — `edges_to(fqdn)`   for all OTHER kinds (Extends,
-///   Implements, References, UsesType, Defines, ExposesApi).
+///   Implements, References, UsesType).
 ///   "Anything that breaks if this symbol changes shape".
 /// - `tests`       — subset of `callers ∪ dependents` whose source FQDN
 ///   matches a test naming convention (contains `::tests::`, `::test::`,
@@ -665,9 +665,7 @@ pub fn context_for_symbol_with_neighbors(
             EdgeKind::Extends
             | EdgeKind::Implements
             | EdgeKind::References
-            | EdgeKind::UsesType
-            | EdgeKind::Defines
-            | EdgeKind::ExposesApi => dependents.push(neighbor_inbound(handle, edge, depth)?),
+            | EdgeKind::UsesType => dependents.push(neighbor_inbound(handle, edge, depth)?),
         }
     }
 
