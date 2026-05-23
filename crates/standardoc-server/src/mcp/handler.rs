@@ -195,6 +195,74 @@ impl StandardocMcp {
         }
     }
 
+    /// Compact variant of `get_context` — returns the symbol header plus
+    /// neighbor *counts* per direction (callers / callees / imports /
+    /// imported_by / dependents / tests), without materialising the
+    /// neighbor lists themselves. Useful as a first probe to decide
+    /// whether a `get_context(depth=1)` follow-up is worth the round-trip.
+    #[tool(
+        description = "Compact context probe: returns `{symbol: {fqdn, name, kind, language_kind, visibility, module?}, neighbor_counts: {callers, callees, imports, imported_by, dependents, tests}}` for a known FQDN. Designed as a cheap first-pass to map a symbol's neighborhood size before drilling with `get_context`. Returns `null` when the FQDN is unknown."
+    )]
+    async fn get_context_summary(
+        &self,
+        Parameters(params): Parameters<GetContextSummaryParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !self.index_ready.load(Ordering::Acquire) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
+            )]));
+        }
+        let raw_fqdn = params.fqdn.clone();
+        let handle = self.handle.clone();
+        let raw_for_call = raw_fqdn.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            if let Some(ctx) =
+                query::context_for_symbol_with_neighbors(&handle, &raw_for_call, 1)?
+            {
+                return Ok::<_, standardoc_core::StorageError>(Some(ctx));
+            }
+            if raw_for_call.contains('.') {
+                let normalized = normalize_fqdn(&raw_for_call);
+                if let Some(ctx) =
+                    query::context_for_symbol_with_neighbors(&handle, &normalized, 1)?
+                {
+                    return Ok(Some(ctx));
+                }
+            }
+            Ok(None)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(|e| server_error_to_rmcp(&e.into()))?;
+
+        match result {
+            Some(ctx) => {
+                let summary = serde_json::json!({
+                    "symbol": {
+                        "fqdn": ctx.context.symbol.fqdn,
+                        "name": ctx.context.symbol.name,
+                        "kind": ctx.context.symbol.kind,
+                        "language_kind": ctx.context.symbol.language_kind,
+                        "visibility": ctx.context.symbol.visibility,
+                        "module": ctx.context.symbol.module,
+                    },
+                    "neighbor_counts": {
+                        "callers": ctx.callers.len(),
+                        "callees": ctx.callees.len(),
+                        "imports": ctx.imports.len(),
+                        "imported_by": ctx.imported_by.len(),
+                        "dependents": ctx.dependents.len(),
+                        "tests": ctx.tests.len(),
+                    },
+                });
+                Ok(success_json(&summary))
+            }
+            None => Ok(CallToolResult::success(vec![Content::text(
+                "no symbol found for the given FQDN",
+            )])),
+        }
+    }
+
     /// Returns `Some(message)` when `depth >= 2` was requested for a FQDN
     /// that has not had a `depth=1` call in the last
     /// `NAKED_DEPTH_2_WINDOW_SECS` seconds (or ever, since boot). The
@@ -295,6 +363,67 @@ impl StandardocMcp {
         Ok(success_json(&result))
     }
 
+    /// Compact variant of `find_symbol` — returns `{fqdn, kind}` per
+    /// match instead of the full `RawSymbol`. Designed for FTS5 probes
+    /// where you only need the FQDN to follow up with `get_context`
+    /// or `get_code`. Massive payload reduction on broad queries.
+    #[tool(
+        description = "FQDN-only variant of `find_symbol`. Returns `[{fqdn, kind}, ...]` ranked by FTS5 — the minimal shape needed to follow up with `get_context` / `get_code`. Same filters and limit semantics as `find_symbol`. When the query returns zero matches, the response switches to `{results: [], did_you_mean: [...]}` — same did-you-mean envelope as `find_symbol`. Use this as your default discovery probe; reach for `find_symbol` only when you actually need the full RawSymbol shape per match."
+    )]
+    async fn find_symbol_fqdns(
+        &self,
+        Parameters(params): Parameters<FindSymbolFqdnsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !self.index_ready.load(Ordering::Acquire) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
+            )]));
+        }
+        let trimmed = params.query.trim().to_owned();
+        if trimmed.is_empty() {
+            return Ok(success_json::<Vec<serde_json::Value>>(&Vec::new()));
+        }
+
+        let filter = parse_filter(
+            params.kind.as_deref(),
+            params.visibility.as_deref(),
+            params.module,
+            params.include_external,
+            params.workspace_id,
+        )?;
+        let limit = clamp_limit(params.limit);
+        let handle = self.handle.clone();
+        let filter_for_search = filter.clone();
+        let trimmed_for_search = trimmed.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            query::search_text(
+                &handle,
+                &trimmed_for_search,
+                limit as usize,
+                &filter_for_search,
+            )
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(|e| server_error_to_rmcp(&e.into()))?;
+
+        if result.is_empty() {
+            let suggestions = compute_did_you_mean(self.handle.clone(), trimmed, filter).await?;
+            if !suggestions.is_empty() {
+                return Ok(success_json(&serde_json::json!({
+                    "results": Vec::<serde_json::Value>::new(),
+                    "did_you_mean": suggestions,
+                })));
+            }
+        }
+
+        let projected: Vec<_> = result
+            .into_iter()
+            .map(|s| serde_json::json!({ "fqdn": s.fqdn, "kind": s.kind }))
+            .collect();
+        Ok(success_json(&projected))
+    }
+
     /// Filter-only listing — no FTS query, no glob pattern. Returns
     /// every symbol matching the provided filters, ordered by canonical
     /// fqdn for stable output. Designed for cross-cutting audits like
@@ -336,6 +465,51 @@ impl StandardocMcp {
 
         let envelope = serde_json::json!({
             "items": page.items,
+            "next_cursor": page.next_cursor,
+        });
+        Ok(success_json(&envelope))
+    }
+
+    /// Compact variant of `list_symbols` — returns `{fqdn, kind}` per
+    /// item instead of the full `RawSymbol`. Designed for audits that
+    /// only need to enumerate FQDNs (with optional filter scoping).
+    /// Pagination semantics identical to `list_symbols`.
+    #[tool(
+        description = "FQDN-only variant of `list_symbols`. Returns `{items: [{fqdn, kind}, ...], next_cursor}` instead of full RawSymbol per row. Same filter and pagination semantics as `list_symbols` — use cursor=next_cursor to walk pages. Use this for broad audits ('all private functions in module X', 'all types in crate Y') where the FQDN is the only field that matters."
+    )]
+    async fn list_symbol_fqdns(
+        &self,
+        Parameters(params): Parameters<ListSymbolFqdnsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !self.index_ready.load(Ordering::Acquire) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
+            )]));
+        }
+        let filter = parse_filter(
+            params.kind.as_deref(),
+            params.visibility.as_deref(),
+            params.module,
+            params.include_external,
+            params.workspace_id,
+        )?;
+        let limit = clamp_limit(params.limit);
+        let cursor = params.cursor;
+        let handle = self.handle.clone();
+        let page = tokio::task::spawn_blocking(move || {
+            query::list_symbols(&handle, &filter, limit as usize, cursor.as_deref())
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(|e| server_error_to_rmcp(&e.into()))?;
+
+        let projected: Vec<_> = page
+            .items
+            .into_iter()
+            .map(|s| serde_json::json!({ "fqdn": s.fqdn, "kind": s.kind }))
+            .collect();
+        let envelope = serde_json::json!({
+            "items": projected,
             "next_cursor": page.next_cursor,
         });
         Ok(success_json(&envelope))
@@ -496,6 +670,59 @@ impl StandardocMcp {
             strip_attrs: params.strip_attrs.unwrap_or(false),
             signature_only: params.signature_only.unwrap_or(false),
             strip_inline_comments: params.strip_inline_comments.unwrap_or(false),
+        };
+        let raw_for_call = raw_fqdn.clone();
+        let opts_clone = opts.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            if let Some(slice) = query::body_for_fqdn(&handle, &raw_for_call, &opts_clone)? {
+                return Ok::<_, standardoc_core::StorageError>(Some(slice));
+            }
+            if raw_for_call.contains('.') {
+                let normalized = normalize_fqdn(&raw_for_call);
+                if let Some(slice) = query::body_for_fqdn(&handle, &normalized, &opts_clone)? {
+                    return Ok(Some(slice));
+                }
+            }
+            Ok(None)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(|e| server_error_to_rmcp(&e.into()))?;
+
+        match result {
+            Some(slice) => Ok(success_json(&slice)),
+            None => Ok(CallToolResult::success(vec![Content::text(
+                "no symbol found for the given FQDN",
+            )])),
+        }
+    }
+
+    /// Agent-tuned variant of `get_body` — strips noise by default.
+    /// Defaults `strip_attrs = true` and `strip_inline_comments = true`,
+    /// so the returned slice is pure code without doc comments,
+    /// attribute blocks, or inline `//` / `/* */` comments. Pass either
+    /// flag explicitly to override. The leading-doc semantics are
+    /// already captured via `RawDocument` / `enrichment_description` —
+    /// duplicating them in the body is wasted context.
+    #[tool(
+        description = "Like `get_body` but returns pure code by default — leading doc comments / `#[…]` attribute blocks and inline `// …` / `/* … */` comments are stripped. The verbatim slice is still available via `get_body`; the leading description lives separately in `get_context.context.document_description`. Useful when you want to read the actual implementation without dilution. Pass `strip_attrs=false` or `strip_inline_comments=false` to disable individual strips. Other knobs (`max_lines`, `signature_only`) behave the same as `get_body`. Returns `null` when no symbol matches the FQDN."
+    )]
+    async fn get_code(
+        &self,
+        Parameters(params): Parameters<GetCodeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !self.index_ready.load(Ordering::Acquire) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
+            )]));
+        }
+        let raw_fqdn = params.fqdn.clone();
+        let handle = self.handle.clone();
+        let opts = query::BodyOptions {
+            max_lines: params.max_lines,
+            strip_attrs: params.strip_attrs.unwrap_or(true),
+            signature_only: params.signature_only.unwrap_or(false),
+            strip_inline_comments: params.strip_inline_comments.unwrap_or(true),
         };
         let raw_for_call = raw_fqdn.clone();
         let opts_clone = opts.clone();
@@ -1151,6 +1378,15 @@ pub(crate) struct GetContextParams {
     pub depth: Option<u8>,
 }
 
+/// Tool input — `get_context_summary(fqdn)`. Forwarded to
+/// `query::context_for_symbol_with_neighbors` at depth=1, then
+/// projected to neighbor counts for cheap mapping probes.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct GetContextSummaryParams {
+    /// The fully-qualified domain name of the symbol to look up.
+    pub fqdn: String,
+}
+
 /// Tool input — `find_symbol(query, limit?, kind?, visibility?, module?)`.
 /// Forwarded to `query::search_text` (FTS5 over `name` + `fqdn`).
 /// `limit` defaults to `20` and is capped at `100` server-side.
@@ -1177,6 +1413,30 @@ pub(crate) struct FindSymbolParams {
     /// workspace ("MY symbols"). Pass a peer's workspace_id to query
     /// that peer's source. There is no "all workspaces" mode — call
     /// once per workspace.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+/// Tool input — `find_symbol_fqdns(query, limit?, kind?, visibility?,
+/// module?, include_external?, workspace_id?)`. Same filters and
+/// limits as `find_symbol`; only the response shape differs (FQDN +
+/// kind, no RawSymbol).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct FindSymbolFqdnsParams {
+    /// Free-text FTS5 query against symbol `name` and `fqdn` columns.
+    pub query: String,
+    /// Maximum results to return. Defaults to 20, capped at 100.
+    pub limit: Option<u8>,
+    /// Optional filter — `function`, `type`, `value`, `module`, `macro`.
+    pub kind: Option<String>,
+    /// Optional filter — `public`, `private`, `crate`, `protected`.
+    pub visibility: Option<String>,
+    /// Optional filter — exact match on the symbol's `module` fqdn.
+    pub module: Option<String>,
+    /// Optional — include `is_external = 1` symbols. Defaults to `true`.
+    #[serde(default)]
+    pub include_external: Option<bool>,
+    /// Optional — scope to a peer workspace by UUID.
     #[serde(default)]
     pub workspace_id: Option<String>,
 }
@@ -1209,6 +1469,32 @@ pub(crate) struct ListSymbolsParams {
     /// Optional — scope the listing to a single workspace by its UUID.
     /// Defaults to the primary workspace. Pass a peer's workspace_id
     /// to list that peer's source.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+/// Tool input — `list_symbol_fqdns(kind?, visibility?, module?,
+/// limit?, include_external?, cursor?, workspace_id?)`. Same
+/// filters and pagination as `list_symbols`; only the response
+/// shape differs (FQDN + kind, no RawSymbol).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct ListSymbolFqdnsParams {
+    /// Optional filter — `function`, `type`, `value`, `module`, `macro`.
+    pub kind: Option<String>,
+    /// Optional filter — `public`, `private`, `crate`, `protected`.
+    pub visibility: Option<String>,
+    /// Optional filter — exact match on the symbol's `module` fqdn.
+    pub module: Option<String>,
+    /// Maximum results to return per page. Defaults to 20, capped at 100.
+    pub limit: Option<u8>,
+    /// Optional — include `is_external = 1` symbols. Defaults to `true`.
+    #[serde(default)]
+    pub include_external: Option<bool>,
+    /// Optional pagination anchor — pass the `next_cursor` value from
+    /// the previous page to continue the walk.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Optional — scope to a peer workspace by UUID.
     #[serde(default)]
     pub workspace_id: Option<String>,
 }
@@ -1447,6 +1733,31 @@ pub(crate) struct GetBodyParams {
     /// inside multi-line block comments are preserved so line-number
     /// alignment with the source file stays intact. Layered on top of
     /// `strip_attrs` / `signature_only` / `max_lines`.
+    #[serde(default)]
+    pub strip_inline_comments: Option<bool>,
+}
+
+/// Tool input — `get_code(fqdn, max_lines?, strip_attrs?,
+/// signature_only?, strip_inline_comments?)`. Agent-tuned variant of
+/// `get_body` — defaults `strip_attrs = true` and
+/// `strip_inline_comments = true` so the response is pure code.
+/// Forward overrides via explicit fields.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct GetCodeParams {
+    /// Fully-qualified domain name of the target symbol.
+    pub fqdn: String,
+    /// Optional cap on the number of lines returned.
+    pub max_lines: Option<u32>,
+    /// Defaults to `true` — drops leading doc comments + attribute
+    /// blocks. Pass `false` to keep them (matches `get_body` behavior).
+    #[serde(default)]
+    pub strip_attrs: Option<bool>,
+    /// Optional — truncate after the first `{` for a signature-only view.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub signature_only: Option<bool>,
+    /// Defaults to `true` — drops inline `// …` and `/* … */` comments.
+    /// Pass `false` to keep them (matches `get_body` behavior).
     #[serde(default)]
     pub strip_inline_comments: Option<bool>,
 }
