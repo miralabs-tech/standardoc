@@ -600,8 +600,8 @@ mod tests {
     fn bounded_mode_returns_workspace_symbols_ordered_by_fqdn() {
         let (_d, h) = fresh_handle();
         seed_file(&h, "src/a.rs");
-        seed_symbol(&h, "crate::beta", "beta", Kind::Function, false);
-        seed_symbol(&h, "crate::alpha", "alpha", Kind::Function, false);
+        seed_symbol(&h, "crate::beta", "beta", Kind::Callable, false);
+        seed_symbol(&h, "crate::alpha", "alpha", Kind::Callable, false);
 
         let resp = fetch_graph(&h, req(None)).unwrap();
         let fqdns: Vec<&str> = resp.symbols.iter().map(|s| s.fqdn.as_str()).collect();
@@ -614,9 +614,9 @@ mod tests {
     fn bounded_mode_keeps_only_edges_with_both_ends_in_set() {
         let (_d, h) = fresh_handle();
         seed_file(&h, "src/a.rs");
-        seed_symbol(&h, "crate::a", "a", Kind::Function, false);
-        seed_symbol(&h, "crate::b", "b", Kind::Function, false);
-        seed_symbol(&h, "crate::c", "c", Kind::Function, false);
+        seed_symbol(&h, "crate::a", "a", Kind::Callable, false);
+        seed_symbol(&h, "crate::b", "b", Kind::Callable, false);
+        seed_symbol(&h, "crate::c", "c", Kind::Callable, false);
         seed_resolved_edge(&h, "crate::a", "crate::b", EdgeKind::Calls);
 
         let mut r = req(None);
@@ -634,8 +634,8 @@ mod tests {
     fn bounded_mode_excludes_externals_when_flag_false() {
         let (_d, h) = fresh_handle();
         seed_file(&h, "src/a.rs");
-        seed_symbol(&h, "crate::local", "local", Kind::Function, false);
-        seed_symbol(&h, "extern::ext", "ext", Kind::Function, true);
+        seed_symbol(&h, "crate::local", "local", Kind::Callable, false);
+        seed_symbol(&h, "extern::ext", "ext", Kind::Callable, true);
 
         let resp = fetch_graph(&h, req(None)).unwrap();
         let fqdns: Vec<&str> = resp.symbols.iter().map(|s| s.fqdn.as_str()).collect();
@@ -646,7 +646,7 @@ mod tests {
     fn focal_mode_unknown_fqdn_returns_empty_payload_with_focal_echo() {
         let (_d, h) = fresh_handle();
         seed_file(&h, "src/a.rs");
-        seed_symbol(&h, "crate::a", "a", Kind::Function, false);
+        seed_symbol(&h, "crate::a", "a", Kind::Callable, false);
 
         let resp = fetch_graph(&h, req(Some("crate::missing"))).unwrap();
         assert!(resp.symbols.is_empty());
@@ -658,9 +658,9 @@ mod tests {
     fn focal_mode_bfs_collects_outbound_and_inbound_neighbors() {
         let (_d, h) = fresh_handle();
         seed_file(&h, "src/a.rs");
-        seed_symbol(&h, "crate::root", "root", Kind::Function, false);
-        seed_symbol(&h, "crate::callee", "callee", Kind::Function, false);
-        seed_symbol(&h, "crate::caller", "caller", Kind::Function, false);
+        seed_symbol(&h, "crate::root", "root", Kind::Callable, false);
+        seed_symbol(&h, "crate::callee", "callee", Kind::Callable, false);
+        seed_symbol(&h, "crate::caller", "caller", Kind::Callable, false);
         seed_resolved_edge(&h, "crate::root", "crate::callee", EdgeKind::Calls);
         seed_resolved_edge(&h, "crate::caller", "crate::root", EdgeKind::Calls);
 
@@ -685,9 +685,9 @@ mod tests {
     fn focal_mode_depth_two_expands_beyond_direct_neighbors() {
         let (_d, h) = fresh_handle();
         seed_file(&h, "src/a.rs");
-        seed_symbol(&h, "crate::a", "a", Kind::Function, false);
-        seed_symbol(&h, "crate::b", "b", Kind::Function, false);
-        seed_symbol(&h, "crate::c", "c", Kind::Function, false);
+        seed_symbol(&h, "crate::a", "a", Kind::Callable, false);
+        seed_symbol(&h, "crate::b", "b", Kind::Callable, false);
+        seed_symbol(&h, "crate::c", "c", Kind::Callable, false);
         seed_resolved_edge(&h, "crate::a", "crate::b", EdgeKind::Calls);
         seed_resolved_edge(&h, "crate::b", "crate::c", EdgeKind::Calls);
 
@@ -710,9 +710,9 @@ mod tests {
     fn focal_mode_kinds_filter_blocks_unwanted_edge_kinds() {
         let (_d, h) = fresh_handle();
         seed_file(&h, "src/a.rs");
-        seed_symbol(&h, "crate::a", "a", Kind::Function, false);
-        seed_symbol(&h, "crate::b", "b", Kind::Function, false);
-        seed_symbol(&h, "crate::c", "c", Kind::Function, false);
+        seed_symbol(&h, "crate::a", "a", Kind::Callable, false);
+        seed_symbol(&h, "crate::b", "b", Kind::Callable, false);
+        seed_symbol(&h, "crate::c", "c", Kind::Callable, false);
         seed_resolved_edge(&h, "crate::a", "crate::b", EdgeKind::Calls);
         seed_resolved_edge(&h, "crate::a", "crate::c", EdgeKind::Imports);
 
@@ -732,7 +732,7 @@ mod tests {
     fn focal_mode_skips_unresolved_targets() {
         let (_d, h) = fresh_handle();
         seed_file(&h, "src/a.rs");
-        seed_symbol(&h, "crate::a", "a", Kind::Function, false);
+        seed_symbol(&h, "crate::a", "a", Kind::Callable, false);
         // Insert an unresolved edge directly (no `to_symbol_id`).
         let conn = h.pool().unwrap().get().unwrap();
         let a_id: i64 = conn
@@ -767,7 +767,7 @@ mod tests {
                 &h,
                 &format!("crate::n{i}"),
                 &format!("n{i}"),
-                Kind::Function,
+                Kind::Callable,
                 false,
             );
         }
@@ -791,13 +791,13 @@ mod tests {
     fn wire_shape_is_flat_with_lowercase_kind_and_visibility() {
         let (_d, h) = fresh_handle();
         seed_file(&h, "src/a.rs");
-        seed_symbol(&h, "crate::x", "x", Kind::Function, false);
+        seed_symbol(&h, "crate::x", "x", Kind::Callable, false);
 
         let resp = fetch_graph(&h, req(None)).unwrap();
         let json = serde_json::to_value(&resp).unwrap();
         let entry = &json["symbols"][0];
         assert_eq!(entry["fqdn"], "crate::x");
-        assert_eq!(entry["kind"], "function");
+        assert_eq!(entry["kind"], "callable");
         assert_eq!(entry["visibility"], "public");
         assert_eq!(entry["language_kind"], "fn");
         assert_eq!(entry["file"], "src/a.rs");
@@ -811,8 +811,8 @@ mod tests {
     fn edge_kind_serializes_screaming_snake_case() {
         let (_d, h) = fresh_handle();
         seed_file(&h, "src/a.rs");
-        seed_symbol(&h, "crate::a", "a", Kind::Function, false);
-        seed_symbol(&h, "crate::b", "b", Kind::Function, false);
+        seed_symbol(&h, "crate::a", "a", Kind::Callable, false);
+        seed_symbol(&h, "crate::b", "b", Kind::Callable, false);
         seed_resolved_edge(&h, "crate::a", "crate::b", EdgeKind::UsesType);
 
         let resp = fetch_graph(&h, req(None)).unwrap();

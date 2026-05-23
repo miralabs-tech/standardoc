@@ -41,42 +41,42 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
             "getmetatable",
             "setmetatable",
         ],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Reflection,
         BuiltinTier::Edge,
     );
     add(
         reg,
         &["print"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Console,
         BuiltinTier::Edge,
     );
     add(
         reg,
         &["pairs", "ipairs", "next"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Iter,
         BuiltinTier::Edge,
     );
     add(
         reg,
         &["tonumber"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Decode,
         BuiltinTier::Edge,
     );
     add(
         reg,
         &["tostring"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Encode,
         BuiltinTier::Edge,
     );
     add(
         reg,
         &["require", "load", "loadfile", "loadstring", "dofile"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Custom {
             tag: "module-loader".into(),
         },
@@ -85,7 +85,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
     add(
         reg,
         &["collectgarbage"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Memory,
         BuiltinTier::Edge,
     );
@@ -121,7 +121,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
             "table.unpack",
             "table.pack",
         ],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Iter,
         BuiltinTier::Edge,
     );
@@ -140,7 +140,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
             "string.byte",
             "string.char",
         ],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Format,
         BuiltinTier::Edge,
     );
@@ -156,28 +156,28 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
             "math.sqrt",
             "math.pi",
         ],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Math,
         BuiltinTier::Edge,
     );
     add(
         reg,
         &["io.open", "io.read", "io.write", "io.close", "io.lines"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::FileSystem,
         BuiltinTier::Edge,
     );
     add(
         reg,
         &["os.time", "os.date", "os.clock", "os.difftime"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Time,
         BuiltinTier::Edge,
     );
     add(
         reg,
         &["os.exit", "os.getenv", "os.execute"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Process,
         BuiltinTier::Edge,
     );
@@ -190,7 +190,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
             "coroutine.wrap",
             "coroutine.status",
         ],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Async,
         BuiltinTier::Edge,
     );

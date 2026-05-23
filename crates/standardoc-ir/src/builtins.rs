@@ -197,7 +197,7 @@ mod tests {
         reg.register(BuiltinEntry::new(
             "JSON.parse",
             Language::JavaScript,
-            Kind::Function,
+            Kind::Callable,
             BuiltinTag::Decode,
             BuiltinTier::Edge,
         ));

@@ -17,7 +17,7 @@ CREATE TABLE schema_meta (
 );
 
 INSERT INTO schema_meta (key, value) VALUES
-  ('schema_version',              '2'),
+  ('schema_version',              '3'),
   ('workspace_root',              ''),
   ('created_at',                  ''),
   ('cold_start_progress',         ''),
@@ -60,7 +60,7 @@ CREATE TABLE symbols (
   fqdn                   TEXT    NOT NULL,
   name                   TEXT    NOT NULL,
   kind                   TEXT    NOT NULL CHECK (kind IN
-                           ('function', 'type', 'value', 'module', 'macro')),
+                           ('callable', 'type', 'value', 'module', 'macro')),
   language_kind          TEXT    NOT NULL,
   language               TEXT    NOT NULL,
   module                 TEXT,

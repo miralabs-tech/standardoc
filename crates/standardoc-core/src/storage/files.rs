@@ -179,7 +179,7 @@ mod tests {
             "INSERT INTO symbols \
              (fqdn, name, kind, language_kind, language, file_path, \
               start_line, end_line, start_col, end_col) \
-             VALUES ('crate::main', 'main', 'function', 'fn_item', 'rust', \
+             VALUES ('crate::main', 'main', 'callable', 'fn_item', 'rust', \
                      'src/main.rs', 1, 3, 0, 0)",
             [],
         )

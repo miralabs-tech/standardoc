@@ -2060,14 +2060,14 @@ fn unregister_peer_from_watcher(slot: &Arc<Mutex<Option<WatcherHandle>>>, worksp
 
 fn parse_kind(s: &str) -> Result<Kind, ErrorData> {
     match s {
-        "function" => Ok(Kind::Function),
+        "callable" => Ok(Kind::Callable),
         "type" => Ok(Kind::Type),
         "value" => Ok(Kind::Value),
         "module" => Ok(Kind::Module),
         "macro" => Ok(Kind::Macro),
         other => Err(ErrorData::invalid_params(
             format!(
-                "unknown kind `{other}` — expected one of: function, type, value, module, macro"
+                "unknown kind `{other}` — expected one of: callable, type, value, module, macro"
             ),
             None,
         )),
@@ -2457,7 +2457,7 @@ mod tests {
 
     #[test]
     fn parse_kind_recognises_every_ir_variant() {
-        assert!(parse_kind("function").is_ok());
+        assert!(parse_kind("callable").is_ok());
         assert!(parse_kind("type").is_ok());
         assert!(parse_kind("value").is_ok());
         assert!(parse_kind("module").is_ok());
@@ -2487,14 +2487,14 @@ mod tests {
     #[test]
     fn parse_filter_propagates_module_string_unchanged() {
         let f = parse_filter(
-            Some("function"),
+            Some("callable"),
             Some("private"),
             Some("crate::a".into()),
             None,
             None,
         )
         .unwrap();
-        assert_eq!(f.kind, Some(Kind::Function));
+        assert_eq!(f.kind, Some(Kind::Callable));
         assert_eq!(f.visibility, Some(Visibility::Private));
         assert_eq!(f.module.as_deref(), Some("crate::a"));
         assert!(

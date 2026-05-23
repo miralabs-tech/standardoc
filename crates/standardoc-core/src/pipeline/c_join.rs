@@ -169,7 +169,7 @@ mod tests {
                 file_path, start_line, end_line, start_col, end_col, \
                 signature_json, body_hash, is_external, source_origin, \
                 last_modified_revision, flags, workspace_id\
-             ) VALUES (?1, ?2, 'function', ?3, 'c', NULL, 'public', \
+             ) VALUES (?1, ?2, 'callable', ?3, 'c', NULL, 'public', \
                 ?4, ?5, ?5, 0, 1, NULL, NULL, 0, 'workspace', 0, '[]', 'primary') \
              RETURNING id",
             rusqlite::params![fqdn, name, language_kind, file_path, start_line],
@@ -330,7 +330,7 @@ mod tests {
                 file_path, start_line, end_line, start_col, end_col, \
                 signature_json, body_hash, is_external, source_origin, \
                 last_modified_revision, flags, workspace_id\
-             ) VALUES ('peer::x::foo', 'foo', 'function', 'fn_decl', 'c', NULL, 'public', \
+             ) VALUES ('peer::x::foo', 'foo', 'callable', 'fn_decl', 'c', NULL, 'public', \
                 'peer/x.h', 1, 1, 0, 1, NULL, NULL, 0, 'workspace', 0, '[]', 'peer-uuid')",
             [],
         )

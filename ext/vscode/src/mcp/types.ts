@@ -1,4 +1,4 @@
-export type SymbolKindJson = 'function' | 'type' | 'value' | 'module' | 'macro';
+export type SymbolKindJson = 'callable' | 'type' | 'value' | 'module' | 'macro';
 
 export type EdgeKindJson =
   | 'CALLS'

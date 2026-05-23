@@ -98,7 +98,7 @@ fn is_root_level(symbol: &RawSymbol, module_fqdn: &str) -> bool {
 /// exact discriminant.
 fn local_decl_kind_for(symbol: &RawSymbol) -> LocalDeclKind {
     match symbol.kind {
-        Kind::Function => LocalDeclKind::Function,
+        Kind::Callable => LocalDeclKind::Function,
         Kind::Module => LocalDeclKind::Module,
         Kind::Macro => LocalDeclKind::Macro,
         Kind::Type => LocalDeclKind::TypeAlias,
@@ -236,7 +236,7 @@ mod tests {
     fn top_level_function_emits_root_binding_with_resolved_fqdn() {
         let symbols = vec![
             module_sym("pkg::a"),
-            sym("greet", "pkg::a::greet", Kind::Function, "fn"),
+            sym("greet", "pkg::a::greet", Kind::Callable, "fn"),
         ];
         let lookup = build_lua_lookup(&symbols, &[], "pkg::a");
         let entries = lookup.bindings.get("greet").expect("root binding");
@@ -260,7 +260,7 @@ mod tests {
         let symbols = vec![
             module_sym("pkg::a"),
             sym("M", "pkg::a::M", Kind::Value, "module-table"),
-            sym("helper", "pkg::a::M::helper", Kind::Function, "fn"),
+            sym("helper", "pkg::a::M::helper", Kind::Callable, "fn"),
         ];
         let lookup = build_lua_lookup(&symbols, &[], "pkg::a");
         assert!(lookup.bindings.contains_key("M"));

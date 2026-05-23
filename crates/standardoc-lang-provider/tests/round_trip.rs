@@ -315,7 +315,7 @@ fn tsx_extracts_jsx_components_without_error() {
         .iter()
         .find(|s| s.fqdn == "@myorg/ui::src::Hello::Hello")
         .expect("Hello arrow const");
-    assert_eq!(hello.kind, Kind::Function);
+    assert_eq!(hello.kind, Kind::Callable);
 }
 
 #[test]

@@ -12,7 +12,7 @@ fn fixture() -> ExtractedFile {
         receiver_type: None,
         name: "create_user".into(),
         fqdn: "crate::auth::create_user".into(),
-        kind: Kind::Function,
+        kind: Kind::Callable,
         language_kind: LanguageKind::from("function"),
         module: Some("auth".into()),
         visibility: Visibility::Public,
@@ -169,7 +169,7 @@ fn keys_match_storage_conventions() {
 
     assert!(json.contains("\"language\":\"rust\""));
     assert!(json.contains("\"source_origin\":\"workspace\""));
-    assert!(json.contains("\"kind\":\"function\""));
+    assert!(json.contains("\"kind\":\"callable\""));
     assert!(json.contains("\"kind\":\"module\""));
     assert!(json.contains("\"visibility\":\"public\""));
     assert!(json.contains("\"visibility\":\"crate\""));

@@ -1887,7 +1887,7 @@ mod tests {
             receiver_type: None,
             name: name.into(),
             fqdn: fqdn.into(),
-            kind: Kind::Function,
+            kind: Kind::Callable,
             language_kind: LanguageKind::from("fn_item"),
             module: None,
             visibility: Visibility::Public,
@@ -1930,7 +1930,7 @@ mod tests {
         let got = symbol_by_fqdn(&handle, "crate::foo").unwrap().unwrap();
         assert_eq!(got.name, "foo");
         assert_eq!(got.fqdn, "crate::foo");
-        assert_eq!(got.kind, Kind::Function);
+        assert_eq!(got.kind, Kind::Callable);
         assert_eq!(got.location.start_line, 10);
     }
 
@@ -1953,7 +1953,7 @@ mod tests {
                 receiver_type: None,
                 name: "f".into(),
                 fqdn: "crate::f".into(),
-                kind: Kind::Function,
+                kind: Kind::Callable,
                 language_kind: LanguageKind::from("fn_item"),
                 module: Some("m".into()),
                 visibility: Visibility::Crate,
@@ -2023,7 +2023,7 @@ mod tests {
             receiver_type: None,
             name: name.into(),
             fqdn: fqdn.into(),
-            kind: Kind::Function,
+            kind: Kind::Callable,
             language_kind: LanguageKind::from("fn_item"),
             module: None,
             visibility: Visibility::Public,
@@ -2495,7 +2495,7 @@ mod tests {
                 "src/main.rs",
                 "marker",
                 "crate::marker_fn",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2529,7 +2529,7 @@ mod tests {
                 "src/main.rs",
                 "thing",
                 "crate::thing_pub",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2538,7 +2538,7 @@ mod tests {
                 "src/main.rs",
                 "thing",
                 "crate::thing_priv",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Private,
                 None,
             );
@@ -2563,7 +2563,7 @@ mod tests {
                 "src/main.rs",
                 "a",
                 "crate::a",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2597,7 +2597,7 @@ mod tests {
                 "src/main.rs",
                 "pub_one",
                 "crate::pub_one",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2606,7 +2606,7 @@ mod tests {
                 "src/main.rs",
                 "priv_one",
                 "crate::priv_one",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Private,
                 None,
             );
@@ -2615,7 +2615,7 @@ mod tests {
                 "src/main.rs",
                 "priv_two",
                 "crate::priv_two",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Private,
                 None,
             );
@@ -2645,7 +2645,7 @@ mod tests {
                 "src/main.rs",
                 "f1",
                 "crate::a::f1",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 Some("crate::a"),
             );
@@ -2654,7 +2654,7 @@ mod tests {
                 "src/main.rs",
                 "f2",
                 "crate::b::f2",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 Some("crate::b"),
             );
@@ -2681,7 +2681,7 @@ mod tests {
                     "src/main.rs",
                     &format!("f{i}"),
                     &format!("crate::f{i}"),
-                    Kind::Function,
+                    Kind::Callable,
                     Visibility::Public,
                     None,
                 );
@@ -2705,7 +2705,7 @@ mod tests {
                     "src/main.rs",
                     &format!("f{i}"),
                     &format!("crate::f{i}"),
-                    Kind::Function,
+                    Kind::Callable,
                     Visibility::Public,
                     None,
                 );
@@ -2753,7 +2753,7 @@ mod tests {
                     "src/main.rs",
                     &format!("f{i}"),
                     &format!("crate::f{i}"),
-                    Kind::Function,
+                    Kind::Callable,
                     Visibility::Public,
                     None,
                 );
@@ -2778,7 +2778,7 @@ mod tests {
                 "src/main.rs",
                 "strip_rs_extension",
                 "crate::a::strip_rs_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Private,
                 None,
             );
@@ -2787,7 +2787,7 @@ mod tests {
                 "src/main.rs",
                 "strip_ts_extension",
                 "crate::b::strip_ts_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Private,
                 None,
             );
@@ -2796,7 +2796,7 @@ mod tests {
                 "src/main.rs",
                 "compute_path",
                 "crate::c::compute_path",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2818,7 +2818,7 @@ mod tests {
                 "src/main.rs",
                 "do_a",
                 "myapp::utils::do_a",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2827,7 +2827,7 @@ mod tests {
                 "src/main.rs",
                 "do_b",
                 "myapp::utils::do_b",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2836,7 +2836,7 @@ mod tests {
                 "src/main.rs",
                 "do_c",
                 "other::do_c",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2858,7 +2858,7 @@ mod tests {
                 "src/main.rs",
                 "helper_one",
                 "crate::helper_one",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Private,
                 None,
             );
@@ -2867,7 +2867,7 @@ mod tests {
                 "src/main.rs",
                 "helper_two",
                 "crate::helper_two",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2892,7 +2892,7 @@ mod tests {
                 "src/main.rs",
                 "foo",
                 "crate::foo",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2912,7 +2912,7 @@ mod tests {
                 "src/main.rs",
                 "strip_rs_extension",
                 "crate::a::strip_rs_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2921,7 +2921,7 @@ mod tests {
                 "src/main.rs",
                 "strip_ts_extension",
                 "crate::b::strip_ts_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2930,7 +2930,7 @@ mod tests {
                 "src/main.rs",
                 "strip_lua_extension",
                 "crate::c::strip_lua_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2939,7 +2939,7 @@ mod tests {
                 "src/main.rs",
                 "render_widget",
                 "crate::d::render_widget",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2974,7 +2974,7 @@ mod tests {
                 "src/main.rs",
                 "strip_rs_extension",
                 "crate::a::strip_rs_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2983,7 +2983,7 @@ mod tests {
                 "src/main.rs",
                 "strip_rs_extension",
                 "crate::b::strip_rs_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -2992,7 +2992,7 @@ mod tests {
                 "src/main.rs",
                 "strip_ts_extension",
                 "crate::c::strip_ts_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -3023,7 +3023,7 @@ mod tests {
                 "src/main.rs",
                 "strip_ts_extension",
                 "crate::a::strip_ts_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -3033,7 +3033,7 @@ mod tests {
                 "src/main.rs",
                 "strip_lua_extension",
                 "crate::b::strip_lua_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -3063,7 +3063,7 @@ mod tests {
                 "src/main.rs",
                 "buy_apple",
                 "crate::a::buy_apple",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -3084,7 +3084,7 @@ mod tests {
                 "src/main.rs",
                 "strip_ts_extension",
                 "crate::a::strip_ts_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 None,
             );
@@ -3093,7 +3093,7 @@ mod tests {
                 "src/main.rs",
                 "strip_lua_extension",
                 "crate::b::strip_lua_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Private,
                 None,
             );
@@ -3121,7 +3121,7 @@ mod tests {
                     "src/main.rs",
                     &name,
                     &fqdn,
-                    Kind::Function,
+                    Kind::Callable,
                     Visibility::Public,
                     None,
                 );
@@ -3156,7 +3156,7 @@ mod tests {
                 "src/main.rs",
                 "strip_ts_extension",
                 "crate::a::strip_ts_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 Some("crate::a"),
             );
@@ -3165,7 +3165,7 @@ mod tests {
                 "src/main.rs",
                 "strip_lua_extension",
                 "crate::b::strip_lua_extension",
-                Kind::Function,
+                Kind::Callable,
                 Visibility::Public,
                 Some("crate::b"),
             );
@@ -3231,7 +3231,7 @@ mod tests {
                 receiver_type: None,
                 name: "boot".into(),
                 fqdn: "crate::boot".into(),
-                kind: Kind::Function,
+                kind: Kind::Callable,
                 language_kind: LanguageKind::from("fn_item"),
                 module: None,
                 visibility: Visibility::Public,
@@ -3322,7 +3322,7 @@ mod tests {
             insert_ranged_symbol(
                 &conn,
                 "crate::foo",
-                Kind::Function,
+                Kind::Callable,
                 ranged_loc("src/main.rs", 10, 20, 0, 1),
             );
         }
@@ -3347,7 +3347,7 @@ mod tests {
             insert_ranged_symbol(
                 &conn,
                 "crate::outer::inner",
-                Kind::Function,
+                Kind::Callable,
                 ranged_loc("src/lib.rs", 10, 20, 4, 1),
             );
         }
@@ -3366,7 +3366,7 @@ mod tests {
             insert_ranged_symbol(
                 &conn,
                 "crate::foo",
-                Kind::Function,
+                Kind::Callable,
                 ranged_loc("src/main.rs", 10, 20, 0, 1),
             );
         }

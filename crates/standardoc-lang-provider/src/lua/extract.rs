@@ -165,7 +165,7 @@ pub(crate) fn extract_local_function(ctx: &mut LuaWalkContext, lf: &LocalFunctio
         receiver_type: None,
         name,
         fqdn: fqdn.clone(),
-        kind: Kind::Function,
+        kind: Kind::Callable,
         language_kind: LanguageKind::from("local_function"),
         module: Some(ctx.core.file_module_fqdn.clone()),
         visibility: Visibility::Private,
@@ -218,7 +218,7 @@ pub(crate) fn extract_function_declaration(
         receiver_type: None,
         name: leaf_name,
         fqdn: fqdn.clone(),
-        kind: Kind::Function,
+        kind: Kind::Callable,
         language_kind,
         module: Some(parent_module_fqdn),
         visibility,
@@ -343,7 +343,7 @@ pub(crate) fn extract_assignment(ctx: &mut LuaWalkContext, a: &Assignment, conte
             receiver_type: None,
             name: leaf.to_string(),
             fqdn: fqdn.clone(),
-            kind: Kind::Function,
+            kind: Kind::Callable,
             language_kind: LanguageKind::from("function"),
             module: Some(parent_fqdn),
             visibility: Visibility::Public,
@@ -968,7 +968,7 @@ mod tests {
             .find(|s| s.name == "helper")
             .expect("helper");
         assert_eq!(sym.fqdn, "myapp::main::helper");
-        assert_eq!(sym.kind, Kind::Function);
+        assert_eq!(sym.kind, Kind::Callable);
         assert_eq!(sym.visibility, Visibility::Private);
         let sig = sym.signature.as_ref().expect("sig");
         assert_eq!(sig.params.len(), 2);
@@ -1045,7 +1045,7 @@ mod tests {
         let r = extract(src, "lib.lua", "lib.lua");
         let a = r.symbols.iter().find(|s| s.name == "alpha").expect("alpha");
         assert_eq!(a.fqdn, "myapp::lib::M::alpha");
-        assert_eq!(a.kind, Kind::Function);
+        assert_eq!(a.kind, Kind::Callable);
         assert_eq!(a.visibility, Visibility::Public);
     }
 
@@ -1523,7 +1523,7 @@ mod tests {
 
     #[test]
     fn decl_kind_function_for_table_assignment_with_function_rhs() {
-        // `M.foo = function() end` — extract_assignment emits as Kind::Function
+        // `M.foo = function() end` — extract_assignment emits as Kind::Callable
         // because the RHS is a function literal.
         let src = "local M = {}\nM.foo = function() end\n";
         let r = extract(src, "lib.lua", "lib.lua");

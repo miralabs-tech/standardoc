@@ -351,7 +351,7 @@ mod tests {
             "INSERT INTO symbols (fqdn, name, kind, language_kind, language, file_path, \
                                   start_line, end_line, start_col, end_col, \
                                   is_external, source_origin) \
-             VALUES (?1, ?2, 'function', 'fn', 'rust', ?1, 0, 0, 0, 0, 1, ?3)",
+             VALUES (?1, ?2, 'callable', 'fn', 'rust', ?1, 0, 0, 0, 0, 1, ?3)",
             params![fqdn, fqdn, source_origin_to_sql_text(origin)],
         )
         .unwrap();

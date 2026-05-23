@@ -140,7 +140,7 @@ mod tests {
         BuiltinEntry::new(
             name,
             lang,
-            Kind::Function,
+            Kind::Callable,
             BuiltinTag::Console,
             BuiltinTier::Edge,
         )

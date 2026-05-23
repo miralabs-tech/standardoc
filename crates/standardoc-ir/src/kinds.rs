@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
-    Function,
+    /// Coarse "this is callable" bucket — `DeclKind::{Function, Method,
+    /// Constructor, Getter, Setter}` all live under this `Kind`. Phase 2
+    /// K-Step-D renamed from `Function` to clarify the umbrella role.
+    Callable,
     Type,
     Value,
     Module,
@@ -71,7 +74,7 @@ pub enum Language {
 ///   - `Kind::Type`     → `Struct` / `Enum` / `Union` / `Class` /
 ///                        `Interface` (Rust trait collapses here) /
 ///                        `TypeAlias`
-///   - `Kind::Function` → `Function` / `Method` / `Constructor` /
+///   - `Kind::Callable` → `Function` / `Method` / `Constructor` /
 ///                        `Getter` / `Setter`
 ///   - `Kind::Value`    → `Const` / `Static` / `Var` / `Field` /
 ///                        `EnumVariant`
@@ -115,8 +118,8 @@ mod tests {
     #[test]
     fn kind_lowercase() {
         assert_eq!(
-            serde_json::to_string(&Kind::Function).unwrap(),
-            "\"function\""
+            serde_json::to_string(&Kind::Callable).unwrap(),
+            "\"callable\""
         );
         assert_eq!(serde_json::to_string(&Kind::Macro).unwrap(), "\"macro\"");
     }
@@ -201,7 +204,7 @@ mod tests {
     #[test]
     fn round_trip_all_kinds() {
         for kind in [
-            Kind::Function,
+            Kind::Callable,
             Kind::Type,
             Kind::Value,
             Kind::Module,

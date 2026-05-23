@@ -132,7 +132,7 @@ return M
         .expect("trim");
     assert_eq!(trim.fqdn, "strings::src::strings::M::trim");
     assert_eq!(trim.visibility, Visibility::Public);
-    assert_eq!(trim.kind, Kind::Function);
+    assert_eq!(trim.kind, Kind::Callable);
 
     let uppercase = extracted
         .symbols

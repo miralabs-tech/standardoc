@@ -502,7 +502,7 @@ mod tests {
                 receiver_type: None,
                 name: fqdn.rsplit("::").next().unwrap_or(fqdn).into(),
                 fqdn: fqdn.into(),
-                kind: Kind::Function,
+                kind: Kind::Callable,
                 language_kind: LanguageKind::from("fn_item"),
                 module: None,
                 visibility: Visibility::Public,

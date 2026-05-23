@@ -44,7 +44,7 @@ fn query_fqdn_returns_symbol_after_index() {
         .assert()
         .success()
         .stdout(predicate::str::contains("sample::alpha"))
-        .stdout(predicate::str::contains("Function"));
+        .stdout(predicate::str::contains("Callable"));
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn cli_index_then_query_on_mixed_workspace() {
         .assert()
         .success()
         .stdout(predicate::str::contains("@app/web::src::main"))
-        .stdout(predicate::str::contains("Function"));
+        .stdout(predicate::str::contains("Callable"));
 
     standardoc()
         .arg("query")

@@ -318,7 +318,7 @@ fn location_at(
 
 const fn kind_to_lsp(kind: Kind) -> SymbolKind {
     match kind {
-        Kind::Function => SymbolKind::FUNCTION,
+        Kind::Callable => SymbolKind::FUNCTION,
         Kind::Type => SymbolKind::CLASS,
         Kind::Value => SymbolKind::VARIABLE,
         Kind::Module => SymbolKind::MODULE,
@@ -517,7 +517,7 @@ mod tests {
         let inner = sym(
             "inner",
             "crate::outer::inner",
-            Kind::Function,
+            Kind::Callable,
             loc(10, 20, 4, 1),
         );
         let nested = nest_document_symbols(vec![outer, inner]);
@@ -531,8 +531,8 @@ mod tests {
 
     #[test]
     fn nest_document_symbols_keeps_siblings_at_root_when_disjoint() {
-        let a = sym("a", "crate::a", Kind::Function, loc(1, 5, 0, 1));
-        let b = sym("b", "crate::b", Kind::Function, loc(10, 15, 0, 1));
+        let a = sym("a", "crate::a", Kind::Callable, loc(1, 5, 0, 1));
+        let b = sym("b", "crate::b", Kind::Callable, loc(10, 15, 0, 1));
         let nested = nest_document_symbols(vec![a, b]);
         assert_eq!(nested.len(), 2);
         assert_eq!(nested[0].name, "a");
@@ -559,7 +559,7 @@ mod tests {
 
     #[test]
     fn kind_to_lsp_maps_each_variant() {
-        assert_eq!(kind_to_lsp(Kind::Function), SymbolKind::FUNCTION);
+        assert_eq!(kind_to_lsp(Kind::Callable), SymbolKind::FUNCTION);
         assert_eq!(kind_to_lsp(Kind::Type), SymbolKind::CLASS);
         assert_eq!(kind_to_lsp(Kind::Value), SymbolKind::VARIABLE);
         assert_eq!(kind_to_lsp(Kind::Module), SymbolKind::MODULE);
@@ -568,7 +568,7 @@ mod tests {
 
     #[test]
     fn render_hover_markdown_includes_signature_and_descriptions() {
-        let mut s = sym("foo", "crate::foo", Kind::Function, loc(1, 5, 0, 1));
+        let mut s = sym("foo", "crate::foo", Kind::Callable, loc(1, 5, 0, 1));
         s.signature = Some(Signature {
             params: vec![],
             returns: None,

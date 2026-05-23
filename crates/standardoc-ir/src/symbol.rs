@@ -68,7 +68,7 @@ mod tests {
         let s = RawSymbol {
             name: "foo".into(),
             fqdn: "crate::foo".into(),
-            kind: Kind::Function,
+            kind: Kind::Callable,
             language_kind: LanguageKind::from("function"),
             decl_kind: None,
             implements_trait: None,
@@ -126,7 +126,7 @@ mod tests {
         let s = RawSymbol {
             name: "fetchUser".into(),
             fqdn: "app::api::fetchUser".into(),
-            kind: Kind::Function,
+            kind: Kind::Callable,
             language_kind: LanguageKind::from("function"),
             decl_kind: None,
             implements_trait: None,
@@ -159,7 +159,7 @@ mod tests {
         let s = RawSymbol {
             name: "plain".into(),
             fqdn: "x::plain".into(),
-            kind: Kind::Function,
+            kind: Kind::Callable,
             language_kind: LanguageKind::from("function"),
             decl_kind: None,
             implements_trait: None,
@@ -190,7 +190,7 @@ mod tests {
         let s = RawSymbol {
             name: "method".into(),
             fqdn: "crate::Type::method".into(),
-            kind: Kind::Function,
+            kind: Kind::Callable,
             language_kind: LanguageKind::from("impl_fn"),
             decl_kind: Some(DeclKind::Method),
             implements_trait: Some("crate::Trait".into()),
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn missing_decl_kind_defaults_to_none() {
         let legacy_json = r#"{
-            "name":"old","fqdn":"x::old","kind":"function","language_kind":"fn",
+            "name":"old","fqdn":"x::old","kind":"callable","language_kind":"fn",
             "visibility":"public",
             "location":{"file":"src/x.rs","start_line":1,"end_line":1,"start_col":0,"end_col":1}
         }"#;
@@ -231,7 +231,7 @@ mod tests {
         // Forward-compat: rows persisted before Stage 3e-1b have no
         // `flags` field. Deserialization must default to `vec![]`.
         let legacy_json = r#"{
-            "name":"old","fqdn":"x::old","kind":"function","language_kind":"fn",
+            "name":"old","fqdn":"x::old","kind":"callable","language_kind":"fn",
             "visibility":"public",
             "location":{"file":"src/x.rs","start_line":1,"end_line":1,"start_col":0,"end_col":1}
         }"#;

@@ -96,7 +96,7 @@ mod tests {
                 file_path, start_line, end_line, start_col, end_col, \
                 signature_json, body_hash, is_external, source_origin, \
                 last_modified_revision, flags, workspace_id\
-             ) VALUES (?1, ?2, 'function', 'fn', 'c', NULL, 'public', \
+             ) VALUES (?1, ?2, 'callable', 'fn', 'c', NULL, 'public', \
                 'src/x.c', 1, 5, 0, 1, NULL, NULL, 0, 'workspace', 0, '[]', 'primary') \
              RETURNING id",
             rusqlite::params![fqdn, name],

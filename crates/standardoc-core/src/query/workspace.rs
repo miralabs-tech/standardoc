@@ -527,7 +527,7 @@ mod tests {
                 receiver_type: None,
                 name: "peer_only_marker".into(),
                 fqdn: "crate::peer_only_marker".into(),
-                kind: Kind::Function,
+                kind: Kind::Callable,
                 language_kind: LanguageKind::from("fn_item"),
                 module: None,
                 visibility: Visibility::Public,

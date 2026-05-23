@@ -731,7 +731,7 @@ fn process_export_default_decl(
                     receiver_type: None,
                     fqdn: format!("{current_module}::{name}"),
                     name,
-                    kind: Kind::Function,
+                    kind: Kind::Callable,
                     language_kind: LanguageKind::from("function"),
                     module: Some(current_module.to_string()),
                     visibility: Visibility::Public,
@@ -877,7 +877,7 @@ fn extract_fn_decl(
         receiver_type: None,
         name,
         fqdn,
-        kind: Kind::Function,
+        kind: Kind::Callable,
         language_kind: LanguageKind::from("function"),
         module: Some(parent_fqdn.to_string()),
         visibility: map_access_modifier(None, exported),
@@ -1060,7 +1060,7 @@ fn extract_constructor(
         receiver_type: None,
         name: "constructor".to_string(),
         fqdn,
-        kind: Kind::Function,
+        kind: Kind::Callable,
         language_kind: LanguageKind::from("constructor"),
         module: Some(class_fqdn.to_string()),
         visibility,
@@ -1128,7 +1128,7 @@ fn extract_private_method(
         receiver_type: None,
         name: method_name.to_string(),
         fqdn,
-        kind: Kind::Function,
+        kind: Kind::Callable,
         language_kind: LanguageKind::from("method"),
         module: Some(class_fqdn.to_string()),
         // ECMAScript `#name` private is always private regardless of TS accessibility.
@@ -1197,7 +1197,7 @@ fn extract_method(
         receiver_type: None,
         name: method_name.to_string(),
         fqdn,
-        kind: Kind::Function,
+        kind: Kind::Callable,
         language_kind: LanguageKind::from("method"),
         module: Some(class_fqdn.to_string()),
         visibility,
@@ -1228,7 +1228,7 @@ fn extract_var_decl(
             swc_core::ecma::ast::VarDeclKind::Let => "let",
             swc_core::ecma::ast::VarDeclKind::Var => "var",
         };
-        let kind = signature.as_ref().map_or(Kind::Value, |_| Kind::Function);
+        let kind = signature.as_ref().map_or(Kind::Value, |_| Kind::Callable);
         let decl_kind = if signature.is_some() {
             DeclKind::Function
         } else {
@@ -1395,7 +1395,7 @@ fn extract_interface_decl(
                         receiver_type: None,
                         name: member_name,
                         fqdn: member_fqdn.clone(),
-                        kind: Kind::Function,
+                        kind: Kind::Callable,
                         language_kind: LanguageKind::from("interface_method"),
                         module: Some(fqdn.clone()),
                         visibility: map_access_modifier(None, exported),
@@ -1450,7 +1450,7 @@ fn extract_interface_decl(
                         receiver_type: None,
                         name: member_name,
                         fqdn: member_fqdn.clone(),
-                        kind: Kind::Function,
+                        kind: Kind::Callable,
                         language_kind: LanguageKind::from("interface_getter"),
                         module: Some(fqdn.clone()),
                         visibility: map_access_modifier(None, exported),
@@ -1487,7 +1487,7 @@ fn extract_interface_decl(
                         receiver_type: None,
                         name: member_name,
                         fqdn: member_fqdn.clone(),
-                        kind: Kind::Function,
+                        kind: Kind::Callable,
                         language_kind: LanguageKind::from("interface_setter"),
                         module: Some(fqdn.clone()),
                         visibility: map_access_modifier(None, exported),
@@ -1883,7 +1883,7 @@ mod tests {
     fn function_decl_emits_function_symbol() {
         let (symbols, edges, _docs, _) = run("function foo() {}");
         assert_eq!(symbols.len(), 1);
-        assert_eq!(symbols[0].kind, Kind::Function);
+        assert_eq!(symbols[0].kind, Kind::Callable);
         assert_eq!(symbols[0].fqdn, "src::foo");
         assert_eq!(symbols[0].visibility, Visibility::Private);
         assert!(edges.is_empty());
@@ -1948,7 +1948,7 @@ mod tests {
         assert_eq!(foo.kind, Kind::Type);
         assert_eq!(foo.language_kind.as_str(), "class");
         let run = symbols.iter().find(|s| s.fqdn == "src::Foo::run").unwrap();
-        assert_eq!(run.kind, Kind::Function);
+        assert_eq!(run.kind, Kind::Callable);
         assert_eq!(run.language_kind.as_str(), "method");
     }
 
@@ -2041,7 +2041,7 @@ mod tests {
     #[test]
     fn arrow_const_emits_function_symbol() {
         let (symbols, _, _, _) = run("export const add = (a: number, b: number): number => a + b;");
-        assert_eq!(symbols[0].kind, Kind::Function);
+        assert_eq!(symbols[0].kind, Kind::Callable);
         assert_eq!(symbols[0].language_kind.as_str(), "function");
         let sig = symbols[0].signature.as_ref().unwrap();
         assert_eq!(sig.params.len(), 2);
@@ -2085,7 +2085,7 @@ mod tests {
     fn export_default_function_named() {
         let (symbols, _, _, _) = run("export default function foo() {}");
         let foo = symbols.iter().find(|s| s.fqdn == "src::foo").unwrap();
-        assert_eq!(foo.kind, Kind::Function);
+        assert_eq!(foo.kind, Kind::Callable);
         assert_eq!(foo.visibility, Visibility::Public);
     }
 
@@ -2308,7 +2308,7 @@ mod tests {
             receiver_type: None,
             name: "doStuff".into(),
             fqdn: "src::doStuff".into(),
-            kind: Kind::Function,
+            kind: Kind::Callable,
             language_kind: LanguageKind::from("function"),
             module: Some("src".into()),
             visibility: Visibility::Public,

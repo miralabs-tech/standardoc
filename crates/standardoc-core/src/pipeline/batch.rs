@@ -356,7 +356,7 @@ mod tests {
             receiver_type: None,
             name: name.into(),
             fqdn: fqdn.into(),
-            kind: Kind::Function,
+            kind: Kind::Callable,
             language_kind: LanguageKind::from("fn_item"),
             module: None,
             visibility: Visibility::Public,

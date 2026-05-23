@@ -85,7 +85,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
             "getc",
             "perror",
         ],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Console,
         BuiltinTier::Edge,
     );
@@ -96,7 +96,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
             "feof", "ferror", "clearerr", "remove", "rename", "tmpfile", "tmpnam", "setbuf",
             "setvbuf", "fgetpos", "fsetpos",
         ],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::FileSystem,
         BuiltinTier::Edge,
     );
@@ -114,7 +114,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
     add(
         reg,
         &["malloc", "calloc", "realloc", "free", "aligned_alloc"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Memory,
         BuiltinTier::Edge,
     );
@@ -130,7 +130,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
             "system",
             "getenv",
         ],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Process,
         BuiltinTier::Edge,
     );
@@ -140,21 +140,21 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
             "atoi", "atol", "atoll", "atof", "strtol", "strtoll", "strtoul", "strtoull", "strtod",
             "strtof", "strtold",
         ],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Decode,
         BuiltinTier::Edge,
     );
     add(
         reg,
         &["qsort", "bsearch"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Custom { tag: "sort".into() },
         BuiltinTier::Edge,
     );
     add(
         reg,
         &["rand", "srand"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Custom {
             tag: "random".into(),
         },
@@ -163,7 +163,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
     add(
         reg,
         &["abs", "labs", "llabs", "div", "ldiv", "lldiv"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Math,
         BuiltinTier::Edge,
     );
@@ -183,7 +183,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
             "strrchr", "strstr", "strpbrk", "strspn", "strcspn", "strtok", "strtok_r", "strdup",
             "strndup", "strerror", "strxfrm", "strcoll",
         ],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Custom {
             tag: "string".into(),
         },
@@ -192,7 +192,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
     add(
         reg,
         &["memcpy", "memmove", "memcmp", "memset", "memchr"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Memory,
         BuiltinTier::Edge,
     );
@@ -206,7 +206,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
             "acosh", "atanh", "ceil", "floor", "round", "trunc", "fabs", "fmod", "fmax", "fmin",
             "fma", "hypot", "copysign", "nan", "isnan", "isinf", "isfinite", "signbit",
         ],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Math,
         BuiltinTier::Edge,
     );
@@ -241,7 +241,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
             "strftime",
             "nanosleep",
         ],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Time,
         BuiltinTier::Edge,
     );
@@ -266,7 +266,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
             "isalpha", "isdigit", "isalnum", "isspace", "isupper", "islower", "isprint", "isgraph",
             "ispunct", "iscntrl", "isxdigit", "toupper", "tolower",
         ],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Custom {
             tag: "ctype".into(),
         },
@@ -299,7 +299,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
     add(
         reg,
         &["signal", "raise"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Process,
         BuiltinTier::Edge,
     );

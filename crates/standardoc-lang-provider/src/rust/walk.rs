@@ -538,7 +538,7 @@ fn extract_fn(item: &syn::ItemFn, parent_fqdn: &str, path: &str) -> RawSymbol {
         receiver_type: None,
         name,
         fqdn,
-        kind: Kind::Function,
+        kind: Kind::Callable,
         language_kind: LanguageKind::from("fn"),
         module: Some(parent_fqdn.to_string()),
         visibility: visibility::map(&item.vis),
@@ -883,7 +883,7 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
                     receiver_type: Some(TypeRef::new(&trait_fqdn)),
                     name: fn_name,
                     fqdn: fn_fqdn.clone(),
-                    kind: Kind::Function,
+                    kind: Kind::Callable,
                     language_kind: LanguageKind::from("trait_fn"),
                     module: Some(trait_fqdn.clone()),
                     visibility: trait_visibility,
@@ -983,7 +983,7 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
                     receiver_type: Some(TypeRef::new(&target_fqdn)),
                     name: fn_name,
                     fqdn: fn_fqdn.clone(),
-                    kind: Kind::Function,
+                    kind: Kind::Callable,
                     language_kind: LanguageKind::from("impl_fn"),
                     module: Some(target_fqdn.clone()),
                     visibility: visibility::map(&item_fn.vis),
@@ -1256,7 +1256,7 @@ mod tests {
         let parsed = parse("fn foo() {}");
         let (symbols, edges, _docs, _) = walk(&parsed, "mycrate", "src/lib.rs", "mycrate");
         assert_eq!(symbols.len(), 1);
-        assert_eq!(symbols[0].kind, Kind::Function);
+        assert_eq!(symbols[0].kind, Kind::Callable);
         assert_eq!(symbols[0].fqdn, "mycrate::foo");
         assert_eq!(symbols[0].name, "foo");
         assert_eq!(symbols[0].visibility, Visibility::Private);
@@ -1414,7 +1414,7 @@ mod tests {
         assert_eq!(symbols[0].kind, Kind::Type);
         assert_eq!(symbols[0].language_kind.as_str(), "trait");
         assert_eq!(symbols[0].fqdn, "c::T");
-        assert_eq!(symbols[1].kind, Kind::Function);
+        assert_eq!(symbols[1].kind, Kind::Callable);
         assert_eq!(symbols[1].fqdn, "c::T::foo");
         assert_eq!(symbols[1].language_kind.as_str(), "trait_fn");
         assert_eq!(symbols[1].visibility, Visibility::Public);
@@ -1552,7 +1552,7 @@ mod tests {
             1,
             "only the deep fn — no Module symbol for inline mod"
         );
-        assert_eq!(symbols[0].kind, Kind::Function);
+        assert_eq!(symbols[0].kind, Kind::Callable);
         assert_eq!(symbols[0].fqdn, "c::inner::deep");
     }
 

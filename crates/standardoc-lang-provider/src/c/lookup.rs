@@ -102,7 +102,7 @@ fn is_root_level(symbol: &RawSymbol, module_fqdn: &str) -> bool {
 /// `language_kind` where the IR is too coarse.
 fn local_decl_kind_for(symbol: &RawSymbol) -> LocalDeclKind {
     match symbol.kind {
-        Kind::Function => LocalDeclKind::Function,
+        Kind::Callable => LocalDeclKind::Function,
         Kind::Module => LocalDeclKind::Module,
         Kind::Macro => LocalDeclKind::Macro,
         Kind::Value => LocalDeclKind::Var,
@@ -247,7 +247,7 @@ mod tests {
             sym(
                 "do_work",
                 "pkg::a::do_work",
-                Kind::Function,
+                Kind::Callable,
                 "fn",
                 Visibility::Public,
             ),
@@ -273,7 +273,7 @@ mod tests {
             sym(
                 "internal",
                 "pkg::a::internal",
-                Kind::Function,
+                Kind::Callable,
                 "fn",
                 Visibility::Private,
             ),

@@ -39,7 +39,7 @@ pub(crate) fn sample_symbol(name: &str, fqdn: &str) -> RawSymbol {
         receiver_type: None,
         name: name.into(),
         fqdn: fqdn.into(),
-        kind: Kind::Function,
+        kind: Kind::Callable,
         language_kind: LanguageKind::from("fn_item"),
         module: None,
         visibility: Visibility::Public,

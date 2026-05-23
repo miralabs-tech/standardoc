@@ -141,7 +141,7 @@ fn emit_function_definition(node: Node, src: &str, ctx: &mut CWalkContext) {
     push_symbol(
         ctx,
         name,
-        Kind::Function,
+        Kind::Callable,
         LanguageKind::from("fn"),
         DeclKind::Function,
         visibility,
@@ -210,7 +210,7 @@ fn emit_declaration(node: Node, src: &str, ctx: &mut CWalkContext) {
         push_symbol(
             ctx,
             name,
-            Kind::Function,
+            Kind::Callable,
             LanguageKind::from("fn_decl"),
             DeclKind::Function,
             visibility,

@@ -187,7 +187,7 @@ mod tests {
                 receiver_type: None,
                 name: "foo".into(),
                 fqdn: "crate::foo".into(),
-                kind: Kind::Function,
+                kind: Kind::Callable,
                 language_kind: LanguageKind::from("fn_item"),
                 module: None,
                 visibility: Visibility::Public,

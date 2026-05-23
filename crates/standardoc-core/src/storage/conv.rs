@@ -77,7 +77,7 @@ pub(crate) fn language_from_sql_text(s: &str) -> Result<Language, StorageError> 
 
 pub(crate) const fn kind_to_sql_text(k: Kind) -> &'static str {
     match k {
-        Kind::Function => "function",
+        Kind::Callable => "callable",
         Kind::Type => "type",
         Kind::Value => "value",
         Kind::Module => "module",
@@ -87,7 +87,7 @@ pub(crate) const fn kind_to_sql_text(k: Kind) -> &'static str {
 
 pub(crate) fn kind_from_sql_text(s: &str) -> Result<Kind, StorageError> {
     match s {
-        "function" => Ok(Kind::Function),
+        "callable" => Ok(Kind::Callable),
         "type" => Ok(Kind::Type),
         "value" => Ok(Kind::Value),
         "module" => Ok(Kind::Module),
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn kind_round_trip_all_variants() {
         for k in [
-            Kind::Function,
+            Kind::Callable,
             Kind::Type,
             Kind::Value,
             Kind::Module,
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn kind_to_sql_text_lowercase() {
-        assert_eq!(kind_to_sql_text(Kind::Function), "function");
+        assert_eq!(kind_to_sql_text(Kind::Callable), "callable");
         assert_eq!(kind_to_sql_text(Kind::Macro), "macro");
     }
 

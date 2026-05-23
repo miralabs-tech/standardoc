@@ -71,7 +71,7 @@ mod tests {
         let src = "int lur_vm_run(int x) { return x + 1; }\n";
         let file = run(src, "runtime/vm.c");
         let s = find(&file, "lurlang::runtime::vm::lur_vm_run");
-        assert_eq!(s.kind, Kind::Function);
+        assert_eq!(s.kind, Kind::Callable);
         assert_eq!(s.language_kind.as_str(), "fn");
         assert_eq!(s.visibility, Visibility::Public);
         assert!(s.body_hash.is_some());
@@ -91,7 +91,7 @@ mod tests {
         let src = "int lur_compile(const char* src);\n";
         let file = run(src, "include/lur.h");
         let s = find(&file, "lurlang::include::lur::lur_compile");
-        assert_eq!(s.kind, Kind::Function);
+        assert_eq!(s.kind, Kind::Callable);
         assert_eq!(s.language_kind.as_str(), "fn_decl");
         assert!(s.body_hash.is_none());
     }

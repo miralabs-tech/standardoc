@@ -90,21 +90,21 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
     add(
         reg,
         &["parseInt", "parseFloat"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Decode,
         BuiltinTier::Edge,
     );
     add(
         reg,
         &["encodeURI", "encodeURIComponent"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Encode,
         BuiltinTier::Edge,
     );
     add(
         reg,
         &["decodeURI", "decodeURIComponent"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Decode,
         BuiltinTier::Edge,
     );
@@ -152,7 +152,7 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
     add(
         reg,
         &["isNaN", "isFinite"],
-        Kind::Function,
+        Kind::Callable,
         BuiltinTag::Reflection,
         BuiltinTier::Drop,
     );

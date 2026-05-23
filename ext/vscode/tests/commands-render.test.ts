@@ -16,7 +16,7 @@ import type {
 const sampleSymbol: RawSymbolJson = {
   name: 'parse_workspace',
   fqdn: 'standardoc_core::pipeline::parse_workspace',
-  kind: 'function',
+  kind: 'callable',
   language_kind: 'rust',
   module: 'standardoc_core::pipeline',
   visibility: 'public',
@@ -76,7 +76,7 @@ describe('formatSymbolHeader', () => {
   test('contains fqdn, kind, visibility, location', () => {
     const s = formatSymbolHeader(sampleSymbol);
     expect(s).toContain(sampleSymbol.fqdn);
-    expect(s).toContain('function');
+    expect(s).toContain('callable');
     expect(s).toContain('public');
     expect(s).toContain('crates/standardoc-core/src/pipeline/mod.rs:42');
   });
