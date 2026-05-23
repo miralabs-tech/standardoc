@@ -3,10 +3,10 @@ use std::collections::{HashMap, HashSet};
 use proc_macro2::Span;
 use quote::ToTokens;
 use standardoc_ir::{
-    AliasMutability, BuiltinTag, BuiltinTier, EdgeKind, Kind, Language, LanguageKind, Modifiers,
-    ModuleLookup, Param, RawAttribute, RawAttributeArg, RawCallSite, RawDocument, RawEdge,
-    RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation, TypeRef,
-    Visibility, compact_rust_tokens,
+    AliasMutability, BuiltinTag, BuiltinTier, DeclKind, EdgeKind, Kind, Language, LanguageKind,
+    Modifiers, ModuleLookup, Param, RawAttribute, RawAttributeArg, RawCallSite, RawDocument,
+    RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation,
+    TypeRef, Visibility, compact_rust_tokens,
 };
 use syn::spanned::Spanned;
 
@@ -533,7 +533,7 @@ fn extract_fn(item: &syn::ItemFn, parent_fqdn: &str, path: &str) -> RawSymbol {
     let mut sig = extract_signature(&item.sig);
     sig.modifiers.deprecated = extract_deprecated(&item.attrs);
     RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(DeclKind::Function),
         name,
         fqdn,
         kind: Kind::Function,
@@ -566,6 +566,7 @@ fn extract_struct(ctx: &mut WalkContext, item: &syn::ItemStruct, parent_fqdn: &s
         parent_fqdn,
         &path,
         "struct",
+        DeclKind::Struct,
         &item.vis,
         item.span(),
         &item.to_token_stream(),
@@ -600,6 +601,7 @@ fn extract_enum(ctx: &mut WalkContext, item: &syn::ItemEnum, parent_fqdn: &str) 
         parent_fqdn,
         &path,
         "enum",
+        DeclKind::Enum,
         &item.vis,
         item.span(),
         &item.to_token_stream(),
@@ -614,7 +616,7 @@ fn extract_enum(ctx: &mut WalkContext, item: &syn::ItemEnum, parent_fqdn: &str) 
         let variant_fqdn = format!("{enum_fqdn}::{variant_name}");
         ctx.push_symbol_with_doc(
             RawSymbol {
-                decl_kind: None,
+                decl_kind: Some(DeclKind::EnumVariant),
                 name: variant_name,
                 fqdn: variant_fqdn.clone(),
                 kind: Kind::Type,
@@ -734,7 +736,7 @@ fn push_field(
     };
     ctx.push_symbol_with_doc(
         RawSymbol {
-            decl_kind: None,
+            decl_kind: Some(DeclKind::Field),
             name: name.to_string(),
             fqdn: field_fqdn.clone(),
             kind: Kind::Value,
@@ -767,6 +769,7 @@ fn extract_union(item: &syn::ItemUnion, parent_fqdn: &str, path: &str) -> RawSym
         parent_fqdn,
         path,
         "union",
+        DeclKind::Union,
         &item.vis,
         item.span(),
         &item.to_token_stream(),
@@ -780,6 +783,7 @@ fn extract_type_alias(item: &syn::ItemType, parent_fqdn: &str, path: &str) -> Ra
         parent_fqdn,
         path,
         "type_alias",
+        DeclKind::TypeAlias,
         &item.vis,
         item.span(),
         &item.to_token_stream(),
@@ -793,6 +797,7 @@ fn type_def_symbol(
     parent_fqdn: &str,
     path: &str,
     language_kind: &str,
+    decl_kind: DeclKind,
     vis: &syn::Visibility,
     span: Span,
     tokens: &proc_macro2::TokenStream,
@@ -800,7 +805,7 @@ fn type_def_symbol(
 ) -> RawSymbol {
     let fqdn = format!("{parent_fqdn}::{name}");
     RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(decl_kind),
         name,
         fqdn,
         kind: Kind::Type,
@@ -823,7 +828,7 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
 
     ctx.push_symbol_with_doc(
         RawSymbol {
-            decl_kind: None,
+            decl_kind: Some(DeclKind::Interface),
             name,
             fqdn: trait_fqdn.clone(),
             kind: Kind::Type,
@@ -863,7 +868,7 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
             sig.modifiers.deprecated = extract_deprecated(&item_fn.attrs);
             ctx.push_symbol_with_doc(
                 RawSymbol {
-                    decl_kind: None,
+                    decl_kind: Some(DeclKind::Method),
                     name: fn_name,
                     fqdn: fn_fqdn.clone(),
                     kind: Kind::Function,
@@ -952,7 +957,7 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
             sig.modifiers.deprecated = extract_deprecated(&item_fn.attrs);
             ctx.push_symbol_with_doc(
                 RawSymbol {
-                    decl_kind: None,
+                    decl_kind: Some(DeclKind::Method),
                     name: fn_name,
                     fqdn: fn_fqdn.clone(),
                     kind: Kind::Function,
@@ -981,6 +986,7 @@ fn extract_const(item: &syn::ItemConst, parent_fqdn: &str, path: &str) -> RawSym
         parent_fqdn,
         path,
         "const",
+        DeclKind::Const,
         &item.vis,
         item.span(),
         &item.to_token_stream(),
@@ -994,6 +1000,7 @@ fn extract_static(item: &syn::ItemStatic, parent_fqdn: &str, path: &str) -> RawS
         parent_fqdn,
         path,
         "static",
+        DeclKind::Static,
         &item.vis,
         item.span(),
         &item.to_token_stream(),
@@ -1007,6 +1014,7 @@ fn value_def_symbol(
     parent_fqdn: &str,
     path: &str,
     language_kind: &str,
+    decl_kind: DeclKind,
     vis: &syn::Visibility,
     span: Span,
     tokens: &proc_macro2::TokenStream,
@@ -1014,7 +1022,7 @@ fn value_def_symbol(
 ) -> RawSymbol {
     let fqdn = format!("{parent_fqdn}::{name}");
     RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(decl_kind),
         name,
         fqdn,
         kind: Kind::Value,
@@ -1039,7 +1047,7 @@ fn extract_macro_def(item: &syn::ItemMacro, parent_fqdn: &str, path: &str) -> Op
         Visibility::Private
     };
     Some(RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(DeclKind::DeclarativeMacro),
         name,
         fqdn,
         kind: Kind::Macro,
@@ -2216,6 +2224,90 @@ mod tests {
         assert!(
             leaked.is_empty(),
             "shadowed T should still be a local TypeParam: {leaked:?}",
+        );
+    }
+
+    fn decl_kind_of(symbols: &[RawSymbol], fqdn: &str) -> Option<DeclKind> {
+        symbols
+            .iter()
+            .find(|s| s.fqdn == fqdn)
+            .unwrap_or_else(|| panic!("symbol {fqdn} not found in {symbols:?}"))
+            .decl_kind
+            .clone()
+    }
+
+    #[test]
+    fn decl_kind_function_for_top_level_fn() {
+        let parsed = parse("pub fn foo() {}");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert_eq!(decl_kind_of(&symbols, "c::foo"), Some(DeclKind::Function));
+    }
+
+    #[test]
+    fn decl_kind_struct_and_field() {
+        let parsed = parse("pub struct S { pub x: u32 }");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert_eq!(decl_kind_of(&symbols, "c::S"), Some(DeclKind::Struct));
+        assert_eq!(decl_kind_of(&symbols, "c::S::x"), Some(DeclKind::Field));
+    }
+
+    #[test]
+    fn decl_kind_enum_and_variant() {
+        let parsed = parse("pub enum E { A, B }");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert_eq!(decl_kind_of(&symbols, "c::E"), Some(DeclKind::Enum));
+        assert_eq!(
+            decl_kind_of(&symbols, "c::E::A"),
+            Some(DeclKind::EnumVariant)
+        );
+    }
+
+    #[test]
+    fn decl_kind_union_and_type_alias() {
+        let parsed = parse("pub union U { i: u32 } pub type Alias = u32;");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert_eq!(decl_kind_of(&symbols, "c::U"), Some(DeclKind::Union));
+        assert_eq!(
+            decl_kind_of(&symbols, "c::Alias"),
+            Some(DeclKind::TypeAlias)
+        );
+    }
+
+    #[test]
+    fn decl_kind_trait_collapses_to_interface_with_method_items() {
+        let parsed = parse("pub trait Tr { fn m(&self); }");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert_eq!(decl_kind_of(&symbols, "c::Tr"), Some(DeclKind::Interface));
+        assert_eq!(decl_kind_of(&symbols, "c::Tr::m"), Some(DeclKind::Method));
+    }
+
+    #[test]
+    fn decl_kind_impl_methods_are_methods_no_impl_symbol() {
+        // `impl` blocks do not emit a symbol — only the methods do.
+        let parsed = parse("struct F; impl F { pub fn run(&self) {} }");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert!(
+            !symbols.iter().any(|s| s.fqdn.contains("::impl")),
+            "no impl-block symbol expected: {symbols:?}",
+        );
+        assert_eq!(decl_kind_of(&symbols, "c::F::run"), Some(DeclKind::Method));
+    }
+
+    #[test]
+    fn decl_kind_const_and_static() {
+        let parsed = parse("pub const C: u32 = 1; pub static S: u32 = 2;");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert_eq!(decl_kind_of(&symbols, "c::C"), Some(DeclKind::Const));
+        assert_eq!(decl_kind_of(&symbols, "c::S"), Some(DeclKind::Static));
+    }
+
+    #[test]
+    fn decl_kind_declarative_macro() {
+        let parsed = parse("macro_rules! mac { () => {} }");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        assert_eq!(
+            decl_kind_of(&symbols, "c::mac"),
+            Some(DeclKind::DeclarativeMacro)
         );
     }
 }

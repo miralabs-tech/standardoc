@@ -1,6 +1,7 @@
 use standardoc_core::ExtractError;
 use standardoc_ir::{
-    ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol, SourceOrigin, Visibility,
+    DeclKind, ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol, SourceOrigin,
+    Visibility,
 };
 
 use super::{extract_doc, module_path, walk};
@@ -24,7 +25,7 @@ pub(crate) fn extract_file(
     let content_hash = hash_bytes(content.as_bytes());
 
     let module_symbol = RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(DeclKind::Module),
         name,
         fqdn: module_fqdn.clone(),
         kind: Kind::Module,
