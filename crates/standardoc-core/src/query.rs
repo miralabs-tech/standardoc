@@ -18,7 +18,7 @@ use rusqlite::{Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use standardoc_ir::{
     Blake3Hash, EdgeKind, Kind, Language, LanguageKind, RawEdge, RawSymbol, ResolvedOrUnresolved,
-    Site, SymbolLocation, Visibility,
+    Site, SymbolLocation, TypeRef, Visibility,
 };
 
 use crate::storage::conv::{
@@ -96,7 +96,7 @@ pub struct SymbolContextWithNeighbors {
 
 const SYMBOL_COLUMNS: &str = "fqdn, name, kind, language_kind, module, visibility, \
      file_path, start_line, end_line, start_col, end_col, \
-     signature_json, body_hash, flags, decl_kind";
+     signature_json, body_hash, flags, decl_kind, implements_trait, receiver_type";
 
 fn with_conn<F, R>(handle: &IndexHandle, f: F) -> Result<R, StorageError>
 where
@@ -287,7 +287,8 @@ pub fn search_text(
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
-                    s.signature_json, s.body_hash, s.flags, s.decl_kind \
+                    s.signature_json, s.body_hash, s.flags, s.decl_kind, \
+                    s.implements_trait, s.receiver_type \
              FROM symbols_fts f \
              JOIN symbols s ON s.id = f.rowid \
              WHERE symbols_fts MATCH ?1 \
@@ -379,7 +380,8 @@ pub fn list_symbols(
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
-                    s.signature_json, s.body_hash, s.flags, s.decl_kind \
+                    s.signature_json, s.body_hash, s.flags, s.decl_kind, \
+                    s.implements_trait, s.receiver_type \
              FROM symbols s \
              WHERE (?1 IS NULL OR s.kind       = ?1) \
                AND (?2 IS NULL OR s.visibility = ?2) \
@@ -443,7 +445,8 @@ pub fn find_by_pattern(
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
-                    s.signature_json, s.body_hash, s.flags, s.decl_kind \
+                    s.signature_json, s.body_hash, s.flags, s.decl_kind, \
+                    s.implements_trait, s.receiver_type \
              FROM symbols s \
              WHERE (s.name GLOB ?1 OR s.fqdn GLOB ?1) \
                AND (?2 IS NULL OR s.kind       = ?2) \
@@ -507,7 +510,8 @@ pub fn find_similar(
         let mut stmt = conn.prepare(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
-                    s.signature_json, s.body_hash, s.flags, s.decl_kind \
+                    s.signature_json, s.body_hash, s.flags, s.decl_kind, \
+                    s.implements_trait, s.receiver_type \
              FROM symbols s \
              WHERE (?1 IS NULL OR s.kind       = ?1) \
                AND (?2 IS NULL OR s.visibility = ?2) \
@@ -597,8 +601,8 @@ pub fn context_for_symbol(
                 |row| {
                     Ok((
                         read_symbol_row(row)?,
-                        row.get::<_, Option<String>>(15)?,
-                        row.get::<_, Option<String>>(16)?,
+                        row.get::<_, Option<String>>(17)?,
+                        row.get::<_, Option<String>>(18)?,
                     ))
                 },
             )
@@ -1391,6 +1395,8 @@ struct SymbolRowRaw {
     body_hash_hex: Option<String>,
     flags_json: String,
     decl_kind_text: Option<String>,
+    implements_trait: Option<String>,
+    receiver_type_text: Option<String>,
 }
 
 fn read_symbol_row(row: &Row<'_>) -> rusqlite::Result<SymbolRowRaw> {
@@ -1410,6 +1416,8 @@ fn read_symbol_row(row: &Row<'_>) -> rusqlite::Result<SymbolRowRaw> {
         body_hash_hex: row.get(12)?,
         flags_json: row.get(13)?,
         decl_kind_text: row.get(14)?,
+        implements_trait: row.get(15)?,
+        receiver_type_text: row.get(16)?,
     })
 }
 
@@ -1447,6 +1455,8 @@ fn build_symbol(raw: SymbolRowRaw) -> Result<RawSymbol, StorageError> {
         kind,
         language_kind: LanguageKind::from(raw.language_kind_text),
         decl_kind,
+        implements_trait: raw.implements_trait,
+        receiver_type: raw.receiver_type_text.map(TypeRef::new),
         module: raw.module,
         visibility,
         location,
@@ -1873,6 +1883,8 @@ mod tests {
     ) -> (i64, RawSymbol) {
         let sym = RawSymbol {
             decl_kind: None,
+            implements_trait: None,
+            receiver_type: None,
             name: name.into(),
             fqdn: fqdn.into(),
             kind: Kind::Function,
@@ -1937,6 +1949,8 @@ mod tests {
             seed_file(&conn, "src/main.rs");
             let sym = RawSymbol {
                 decl_kind: None,
+                implements_trait: None,
+                receiver_type: None,
                 name: "f".into(),
                 fqdn: "crate::f".into(),
                 kind: Kind::Function,
@@ -2005,6 +2019,8 @@ mod tests {
     ) -> i64 {
         let sym = RawSymbol {
             decl_kind: None,
+            implements_trait: None,
+            receiver_type: None,
             name: name.into(),
             fqdn: fqdn.into(),
             kind: Kind::Function,
@@ -2433,6 +2449,8 @@ mod tests {
     ) -> i64 {
         let sym = RawSymbol {
             decl_kind: None,
+            implements_trait: None,
+            receiver_type: None,
             name: name.into(),
             fqdn: fqdn.into(),
             kind,
@@ -3209,6 +3227,8 @@ mod tests {
             module_lookup: None,
             symbols: vec![RawSymbol {
                 decl_kind: None,
+                implements_trait: None,
+                receiver_type: None,
                 name: "boot".into(),
                 fqdn: "crate::boot".into(),
                 kind: Kind::Function,
@@ -3264,6 +3284,8 @@ mod tests {
         let file = location.file.clone();
         let sym = RawSymbol {
             decl_kind: None,
+            implements_trait: None,
+            receiver_type: None,
             name: fqdn.rsplit("::").next().unwrap_or(fqdn).into(),
             fqdn: fqdn.into(),
             kind,

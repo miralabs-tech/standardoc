@@ -118,6 +118,8 @@ fn emit_import(
         let phantom_fqdn = format!("{from}::{alias_name}");
         ctx.push_symbol(RawSymbol {
             decl_kind: None,
+            implements_trait: None,
+            receiver_type: None,
             name: alias_name.to_string(),
             fqdn: phantom_fqdn,
             kind: Kind::Type,

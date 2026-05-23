@@ -120,6 +120,8 @@ fn extract_file_inner(
     let content_hash = hash_bytes(content.as_bytes());
     let module_symbol = RawSymbol {
         decl_kind: Some(DeclKind::Module),
+        implements_trait: None,
+        receiver_type: None,
         name: last_segment(&module_fqdn).to_string(),
         fqdn: module_fqdn.clone(),
         kind: Kind::Module,

@@ -45,6 +45,8 @@ pub(crate) fn extract_file(
 
     let module_symbol = RawSymbol {
         decl_kind: Some(DeclKind::Module),
+        implements_trait: None,
+        receiver_type: None,
         name: last_segment(&module_fqdn).to_string(),
         fqdn: module_fqdn.clone(),
         kind: Kind::Module,

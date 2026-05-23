@@ -534,6 +534,8 @@ fn extract_fn(item: &syn::ItemFn, parent_fqdn: &str, path: &str) -> RawSymbol {
     sig.modifiers.deprecated = extract_deprecated(&item.attrs);
     RawSymbol {
         decl_kind: Some(DeclKind::Function),
+        implements_trait: None,
+        receiver_type: None,
         name,
         fqdn,
         kind: Kind::Function,
@@ -617,6 +619,8 @@ fn extract_enum(ctx: &mut WalkContext, item: &syn::ItemEnum, parent_fqdn: &str) 
         ctx.push_symbol_with_doc(
             RawSymbol {
                 decl_kind: Some(DeclKind::EnumVariant),
+                implements_trait: None,
+                receiver_type: None,
                 name: variant_name,
                 fqdn: variant_fqdn.clone(),
                 kind: Kind::Type,
@@ -737,6 +741,8 @@ fn push_field(
     ctx.push_symbol_with_doc(
         RawSymbol {
             decl_kind: Some(DeclKind::Field),
+            implements_trait: None,
+            receiver_type: None,
             name: name.to_string(),
             fqdn: field_fqdn.clone(),
             kind: Kind::Value,
@@ -806,6 +812,8 @@ fn type_def_symbol(
     let fqdn = format!("{parent_fqdn}::{name}");
     RawSymbol {
         decl_kind: Some(decl_kind),
+        implements_trait: None,
+        receiver_type: None,
         name,
         fqdn,
         kind: Kind::Type,
@@ -829,6 +837,8 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
     ctx.push_symbol_with_doc(
         RawSymbol {
             decl_kind: Some(DeclKind::Interface),
+            implements_trait: None,
+            receiver_type: None,
             name,
             fqdn: trait_fqdn.clone(),
             kind: Kind::Type,
@@ -869,6 +879,8 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
             ctx.push_symbol_with_doc(
                 RawSymbol {
                     decl_kind: Some(DeclKind::Method),
+                    implements_trait: None,
+                    receiver_type: Some(TypeRef::new(&trait_fqdn)),
                     name: fn_name,
                     fqdn: fn_fqdn.clone(),
                     kind: Kind::Function,
@@ -902,6 +914,15 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
         return;
     };
     let target_fqdn = format!("{parent_fqdn}::{target_name}");
+
+    // K-Step-C: capture the raw trait path so impl_fn emission below
+    // can stamp `implements_trait` on each method. Resolution to a
+    // canonical FQDN happens later in the pipeline (mirrors the
+    // `Implements` edge's `to: ResolvedOrUnresolved` shape).
+    let implements_trait_str = item
+        .trait_
+        .as_ref()
+        .map(|(_, trait_path, _)| path_to_string(trait_path));
 
     if let Some((_, trait_path, _)) = &item.trait_ {
         let trait_str = path_to_string(trait_path);
@@ -958,6 +979,8 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
             ctx.push_symbol_with_doc(
                 RawSymbol {
                     decl_kind: Some(DeclKind::Method),
+                    implements_trait: implements_trait_str.clone(),
+                    receiver_type: Some(TypeRef::new(&target_fqdn)),
                     name: fn_name,
                     fqdn: fn_fqdn.clone(),
                     kind: Kind::Function,
@@ -1023,6 +1046,8 @@ fn value_def_symbol(
     let fqdn = format!("{parent_fqdn}::{name}");
     RawSymbol {
         decl_kind: Some(decl_kind),
+        implements_trait: None,
+        receiver_type: None,
         name,
         fqdn,
         kind: Kind::Value,
@@ -1048,6 +1073,8 @@ fn extract_macro_def(item: &syn::ItemMacro, parent_fqdn: &str, path: &str) -> Op
     };
     Some(RawSymbol {
         decl_kind: Some(DeclKind::DeclarativeMacro),
+        implements_trait: None,
+        receiver_type: None,
         name,
         fqdn,
         kind: Kind::Macro,
@@ -2309,5 +2336,60 @@ mod tests {
             decl_kind_of(&symbols, "c::mac"),
             Some(DeclKind::DeclarativeMacro)
         );
+    }
+
+    fn find_sym<'a>(symbols: &'a [RawSymbol], fqdn: &str) -> &'a RawSymbol {
+        symbols
+            .iter()
+            .find(|s| s.fqdn == fqdn)
+            .unwrap_or_else(|| panic!("symbol {fqdn} not found in {symbols:?}"))
+    }
+
+    #[test]
+    fn receiver_type_set_on_inherent_impl_method() {
+        let parsed = parse("struct F; impl F { fn run(&self) {} }");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let m = find_sym(&symbols, "c::F::run");
+        assert_eq!(
+            m.receiver_type.as_ref().map(|t| t.display.as_str()),
+            Some("c::F"),
+        );
+        assert_eq!(m.implements_trait, None);
+    }
+
+    #[test]
+    fn implements_trait_and_receiver_type_set_on_trait_impl_method() {
+        let parsed = parse("trait Tr { fn run(&self); } struct F; impl Tr for F { fn run(&self) {} }");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let m = find_sym(&symbols, "c::F::run");
+        assert_eq!(
+            m.receiver_type.as_ref().map(|t| t.display.as_str()),
+            Some("c::F"),
+        );
+        assert_eq!(m.implements_trait.as_deref(), Some("Tr"));
+    }
+
+    #[test]
+    fn receiver_type_set_on_trait_method_definition() {
+        // Trait method definitions carry `Self : Trait` as receiver —
+        // expose the trait FQDN so consumers can group by receiver
+        // uniformly with impl methods.
+        let parsed = parse("trait Tr { fn run(&self); }");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let m = find_sym(&symbols, "c::Tr::run");
+        assert_eq!(
+            m.receiver_type.as_ref().map(|t| t.display.as_str()),
+            Some("c::Tr"),
+        );
+        assert_eq!(m.implements_trait, None);
+    }
+
+    #[test]
+    fn free_function_has_no_receiver_or_trait() {
+        let parsed = parse("fn foo() {}");
+        let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let f = find_sym(&symbols, "c::foo");
+        assert_eq!(f.receiver_type, None);
+        assert_eq!(f.implements_trait, None);
     }
 }

@@ -478,6 +478,8 @@ mod tests {
     fn sym(name: &str, fqdn: &str, kind: Kind, loc: SymbolLocation) -> RawSymbol {
         RawSymbol {
             decl_kind: None,
+            implements_trait: None,
+            receiver_type: None,
             name: name.into(),
             fqdn: fqdn.into(),
             kind,

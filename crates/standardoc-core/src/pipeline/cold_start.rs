@@ -332,6 +332,8 @@ mod tests {
             module_lookup: None,
             symbols: vec![RawSymbol {
                 decl_kind: None,
+                implements_trait: None,
+                receiver_type: None,
                 name: fqdn.rsplit("::").next().unwrap_or(fqdn).into(),
                 fqdn: fqdn.into(),
                 kind: Kind::Function,
@@ -544,6 +546,8 @@ mod tests {
             module_lookup: None,
             symbols: vec![RawSymbol {
                 decl_kind: None,
+                implements_trait: None,
+                receiver_type: None,
                 name: "caller".into(),
                 fqdn: "crate::caller".into(),
                 kind: Kind::Function,

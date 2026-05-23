@@ -278,6 +278,8 @@ mod tests {
             let fqdn = format!("{path}::stub");
             let symbol = RawSymbol {
                 decl_kind: None,
+                implements_trait: None,
+                receiver_type: None,
                 name: "stub".into(),
                 fqdn,
                 kind: Kind::Function,
@@ -387,6 +389,8 @@ mod tests {
             module_lookup: None,
             symbols: vec![RawSymbol {
                 decl_kind: None,
+                implements_trait: None,
+                receiver_type: None,
                 name: "f".into(),
                 fqdn: "x::f".into(),
                 kind: Kind::Function,

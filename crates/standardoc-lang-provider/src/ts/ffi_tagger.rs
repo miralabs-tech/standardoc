@@ -223,6 +223,8 @@ impl FfiVisitor<'_> {
             let fqdn = format!("{}::{}", self.module_fqdn, name);
             self.symbols.push(RawSymbol {
                 decl_kind: None,
+                implements_trait: None,
+                receiver_type: None,
                 name: name.clone(),
                 fqdn: fqdn.clone(),
                 kind: Kind::Value,
@@ -317,6 +319,8 @@ impl FfiVisitor<'_> {
         let location = self.span_location(span);
         self.symbols.push(RawSymbol {
             decl_kind: None,
+            implements_trait: None,
+            receiver_type: None,
             name: local_name.to_owned(),
             fqdn: fqdn.clone(),
             kind: Kind::Value,

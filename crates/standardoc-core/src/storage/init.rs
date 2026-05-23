@@ -60,7 +60,7 @@ mod tests {
     }
 
     #[test]
-    fn init_seeds_schema_version_at_v1() {
+    fn init_seeds_schema_version_at_v2() {
         let conn = fresh_conn();
         run_init_schema(&conn).unwrap();
         let v: String = conn
@@ -70,7 +70,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(v, "1");
+        assert_eq!(v, "2");
     }
 
     #[test]

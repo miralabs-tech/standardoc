@@ -72,6 +72,8 @@ pub(crate) fn seed_into(
         for entry in lang_entries {
             let sym = RawSymbol {
                 decl_kind: None,
+                implements_trait: None,
+                receiver_type: None,
                 name: entry.name.clone(),
                 fqdn: entry.synthetic_fqdn.clone(),
                 kind: entry.kind,

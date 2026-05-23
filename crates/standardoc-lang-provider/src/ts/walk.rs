@@ -727,6 +727,8 @@ fn process_export_default_decl(
             ctx.push_symbol_with_doc(
                 RawSymbol {
                     decl_kind: Some(DeclKind::Function),
+                    implements_trait: None,
+                    receiver_type: None,
                     fqdn: format!("{current_module}::{name}"),
                     name,
                     kind: Kind::Function,
@@ -763,6 +765,8 @@ fn process_export_default_decl(
             ctx.push_symbol_with_doc(
                 RawSymbol {
                     decl_kind: Some(DeclKind::Interface),
+                    implements_trait: None,
+                    receiver_type: None,
                     fqdn: format!("{current_module}::{name}"),
                     name,
                     kind: Kind::Type,
@@ -869,6 +873,8 @@ fn extract_fn_decl(
     let signature = build_function_signature(ctx, &item.function);
     RawSymbol {
         decl_kind: Some(DeclKind::Function),
+        implements_trait: None,
+        receiver_type: None,
         name,
         fqdn,
         kind: Kind::Function,
@@ -907,6 +913,8 @@ fn extract_class_inner(
     ctx.push_symbol_with_doc(
         RawSymbol {
             decl_kind: Some(DeclKind::Class),
+            implements_trait: None,
+            receiver_type: None,
             name: name.to_string(),
             fqdn: class_fqdn.clone(),
             kind: Kind::Type,
@@ -1048,6 +1056,8 @@ fn extract_constructor(
     let visibility = map_access_modifier(raw_access, raw_access.is_none());
     RawSymbol {
         decl_kind: Some(DeclKind::Constructor),
+        implements_trait: None,
+        receiver_type: None,
         name: "constructor".to_string(),
         fqdn,
         kind: Kind::Function,
@@ -1083,6 +1093,8 @@ fn extract_class_prop(
     };
     RawSymbol {
         decl_kind: Some(DeclKind::Field),
+        implements_trait: None,
+        receiver_type: None,
         name: prop_name.to_string(),
         fqdn,
         kind: Kind::Value,
@@ -1112,6 +1124,8 @@ fn extract_private_method(
     };
     RawSymbol {
         decl_kind: Some(decl_kind),
+        implements_trait: None,
+        receiver_type: None,
         name: method_name.to_string(),
         fqdn,
         kind: Kind::Function,
@@ -1142,6 +1156,8 @@ fn extract_private_prop(
     };
     RawSymbol {
         decl_kind: Some(DeclKind::Field),
+        implements_trait: None,
+        receiver_type: None,
         name: prop_name.to_string(),
         fqdn,
         kind: Kind::Value,
@@ -1177,6 +1193,8 @@ fn extract_method(
     };
     RawSymbol {
         decl_kind: Some(decl_kind),
+        implements_trait: None,
+        receiver_type: None,
         name: method_name.to_string(),
         fqdn,
         kind: Kind::Function,
@@ -1229,6 +1247,8 @@ fn extract_var_decl(
         ctx.push_symbol_with_doc(
             RawSymbol {
                 decl_kind: Some(decl_kind),
+                implements_trait: None,
+                receiver_type: None,
                 name,
                 fqdn: fqdn.clone(),
                 kind,
@@ -1273,6 +1293,8 @@ fn extract_interface_decl(
     ctx.push_symbol_with_doc(
         RawSymbol {
             decl_kind: Some(DeclKind::Interface),
+            implements_trait: None,
+            receiver_type: None,
             name,
             fqdn: fqdn.clone(),
             kind: Kind::Type,
@@ -1332,6 +1354,8 @@ fn extract_interface_decl(
                 ctx.push_symbol_with_doc(
                     RawSymbol {
                         decl_kind: Some(DeclKind::Field),
+                        implements_trait: None,
+                        receiver_type: None,
                         name: member_name,
                         fqdn: member_fqdn.clone(),
                         kind: Kind::Value,
@@ -1367,6 +1391,8 @@ fn extract_interface_decl(
                 ctx.push_symbol_with_doc(
                     RawSymbol {
                         decl_kind: Some(DeclKind::Method),
+                        implements_trait: None,
+                        receiver_type: None,
                         name: member_name,
                         fqdn: member_fqdn.clone(),
                         kind: Kind::Function,
@@ -1420,6 +1446,8 @@ fn extract_interface_decl(
                 ctx.push_symbol_with_doc(
                     RawSymbol {
                         decl_kind: Some(DeclKind::Getter),
+                        implements_trait: None,
+                        receiver_type: None,
                         name: member_name,
                         fqdn: member_fqdn.clone(),
                         kind: Kind::Function,
@@ -1455,6 +1483,8 @@ fn extract_interface_decl(
                 ctx.push_symbol_with_doc(
                     RawSymbol {
                         decl_kind: Some(DeclKind::Setter),
+                        implements_trait: None,
+                        receiver_type: None,
                         name: member_name,
                         fqdn: member_fqdn.clone(),
                         kind: Kind::Function,
@@ -1500,6 +1530,8 @@ fn extract_type_alias_decl(
     let span = item.span;
     RawSymbol {
         decl_kind: Some(DeclKind::TypeAlias),
+        implements_trait: None,
+        receiver_type: None,
         name,
         fqdn,
         kind: Kind::Type,
@@ -1531,6 +1563,8 @@ fn extract_enum_decl(
     ctx.push_symbol_with_doc(
         RawSymbol {
             decl_kind: Some(DeclKind::Enum),
+            implements_trait: None,
+            receiver_type: None,
             name,
             fqdn: enum_fqdn.clone(),
             kind: Kind::Type,
@@ -1551,6 +1585,8 @@ fn extract_enum_decl(
         ctx.push_symbol_with_doc(
             RawSymbol {
                 decl_kind: Some(DeclKind::EnumVariant),
+                implements_trait: None,
+                receiver_type: None,
                 name: member_name,
                 fqdn: member_fqdn,
                 kind: Kind::Value,
@@ -2268,6 +2304,8 @@ mod tests {
         );
         ctx.push_symbol(RawSymbol {
             decl_kind: None,
+            implements_trait: None,
+            receiver_type: None,
             name: "doStuff".into(),
             fqdn: "src::doStuff".into(),
             kind: Kind::Function,

@@ -50,6 +50,8 @@ pub(crate) fn extract_file(
 
     let module_symbol = RawSymbol {
         decl_kind: Some(DeclKind::Module),
+        implements_trait: None,
+        receiver_type: None,
         name: last_segment(&module_fqdn).to_string(),
         fqdn: module_fqdn.clone(),
         kind: Kind::Module,
@@ -159,6 +161,8 @@ pub(crate) fn extract_local_function(ctx: &mut LuaWalkContext, lf: &LocalFunctio
 
     let sym = RawSymbol {
         decl_kind: Some(DeclKind::Function),
+        implements_trait: None,
+        receiver_type: None,
         name,
         fqdn: fqdn.clone(),
         kind: Kind::Function,
@@ -210,6 +214,8 @@ pub(crate) fn extract_function_declaration(
 
     let sym = RawSymbol {
         decl_kind: Some(decl_kind),
+        implements_trait: None,
+        receiver_type: None,
         name: leaf_name,
         fqdn: fqdn.clone(),
         kind: Kind::Function,
@@ -270,6 +276,8 @@ pub(crate) fn extract_local_assignment(
 
         let sym = RawSymbol {
             decl_kind: Some(DeclKind::Var),
+            implements_trait: None,
+            receiver_type: None,
             name,
             fqdn: fqdn.clone(),
             kind: Kind::Value,
@@ -331,6 +339,8 @@ pub(crate) fn extract_assignment(ctx: &mut LuaWalkContext, a: &Assignment, conte
 
         let sym = RawSymbol {
             decl_kind: Some(DeclKind::Function),
+            implements_trait: None,
+            receiver_type: None,
             name: leaf.to_string(),
             fqdn: fqdn.clone(),
             kind: Kind::Function,

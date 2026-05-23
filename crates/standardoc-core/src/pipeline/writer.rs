@@ -183,6 +183,8 @@ mod tests {
             byte_size: 100,
             symbols: vec![RawSymbol {
                 decl_kind: None,
+                implements_trait: None,
+                receiver_type: None,
                 name: "foo".into(),
                 fqdn: "crate::foo".into(),
                 kind: Kind::Function,

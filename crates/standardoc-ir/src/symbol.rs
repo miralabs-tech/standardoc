@@ -5,7 +5,7 @@ use crate::hash::Blake3Hash;
 use crate::kinds::{DeclKind, Kind, Visibility};
 use crate::language_kind::LanguageKind;
 use crate::location::SymbolLocation;
-use crate::signature::Signature;
+use crate::signature::{Signature, TypeRef};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RawSymbol {
@@ -19,6 +19,21 @@ pub struct RawSymbol {
     /// not been migrated yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decl_kind: Option<DeclKind>,
+    /// Phase 2 K-Step-C — when this symbol is a `Method` declared
+    /// inside `impl Trait for Type { ... }`, this carries the trait
+    /// FQDN. Inherent impl methods and free functions leave this
+    /// `None`. The relation is also visible as an `EdgeKind::Implements`
+    /// edge from the receiver type to the trait; this field is the
+    /// per-method projection of that relationship.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implements_trait: Option<String>,
+    /// Phase 2 K-Step-C — for `DeclKind::Method` symbols, the type
+    /// that the method dispatches on. Rust: the impl-er (`Bar` for
+    /// `impl Foo for Bar { fn baz }`); for trait method definitions
+    /// (`trait Foo { fn baz }`) the trait itself, as the receiver is
+    /// `Self : Foo`. Free functions leave this `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_type: Option<TypeRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     pub visibility: Visibility,
@@ -56,6 +71,8 @@ mod tests {
             kind: Kind::Function,
             language_kind: LanguageKind::from("function"),
             decl_kind: None,
+            implements_trait: None,
+            receiver_type: None,
             module: None,
             visibility: Visibility::Public,
             location: SymbolLocation {
@@ -83,6 +100,8 @@ mod tests {
             kind: Kind::Type,
             language_kind: LanguageKind::from("trait"),
             decl_kind: None,
+            implements_trait: None,
+            receiver_type: None,
             module: Some("serde".into()),
             visibility: Visibility::Public,
             location: SymbolLocation {
@@ -110,6 +129,8 @@ mod tests {
             kind: Kind::Function,
             language_kind: LanguageKind::from("function"),
             decl_kind: None,
+            implements_trait: None,
+            receiver_type: None,
             module: Some("app::api".into()),
             visibility: Visibility::Public,
             location: SymbolLocation {
@@ -141,6 +162,8 @@ mod tests {
             kind: Kind::Function,
             language_kind: LanguageKind::from("function"),
             decl_kind: None,
+            implements_trait: None,
+            receiver_type: None,
             module: None,
             visibility: Visibility::Public,
             location: SymbolLocation {
@@ -170,6 +193,8 @@ mod tests {
             kind: Kind::Function,
             language_kind: LanguageKind::from("impl_fn"),
             decl_kind: Some(DeclKind::Method),
+            implements_trait: Some("crate::Trait".into()),
+            receiver_type: Some(TypeRef::new("crate::Type")),
             module: Some("crate::Type".into()),
             visibility: Visibility::Public,
             location: SymbolLocation {

@@ -285,6 +285,8 @@ fn emit_enum(node: Node, src: &str, ctx: &mut CWalkContext) {
         let enum_fqdn = format!("{}::{}", ctx.core.file_module_fqdn, enum_name);
         ctx.core.push_symbol(RawSymbol {
             decl_kind: Some(DeclKind::Enum),
+            implements_trait: None,
+            receiver_type: None,
             name: enum_name.clone(),
             fqdn: enum_fqdn.clone(),
             kind: Kind::Type,
@@ -318,6 +320,8 @@ fn emit_enum(node: Node, src: &str, ctx: &mut CWalkContext) {
         let fqdn = format!("{parent_fqdn}::{name}");
         ctx.core.push_symbol(RawSymbol {
             decl_kind: Some(DeclKind::EnumVariant),
+            implements_trait: None,
+            receiver_type: None,
             name,
             fqdn,
             kind: Kind::Value,
@@ -373,6 +377,8 @@ fn emit_typedef(node: Node, src: &str, ctx: &mut CWalkContext) {
             let fqdn = format!("{parent_fqdn}::{var_name}");
             ctx.core.push_symbol(RawSymbol {
                 decl_kind: Some(DeclKind::EnumVariant),
+                implements_trait: None,
+                receiver_type: None,
                 name: var_name,
                 fqdn,
                 kind: Kind::Value,
@@ -438,6 +444,8 @@ fn push_symbol(
     let module = parent_module(&fqdn);
     ctx.core.push_symbol(RawSymbol {
         decl_kind: Some(decl_kind),
+        implements_trait: None,
+        receiver_type: None,
         name: name.to_string(),
         fqdn,
         kind,
