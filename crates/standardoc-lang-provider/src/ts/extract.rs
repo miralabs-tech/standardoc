@@ -2,7 +2,8 @@ use std::path::Path;
 
 use standardoc_core::ExtractError;
 use standardoc_ir::{
-    ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol, SourceOrigin, Visibility,
+    DeclKind, ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol, SourceOrigin,
+    Visibility,
 };
 use swc_core::common::comments::SingleThreadedComments;
 use swc_core::common::{FileName, SourceMap, Spanned, sync::Lrc};
@@ -118,7 +119,7 @@ fn extract_file_inner(
 
     let content_hash = hash_bytes(content.as_bytes());
     let module_symbol = RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(DeclKind::Module),
         name: last_segment(&module_fqdn).to_string(),
         fqdn: module_fqdn.clone(),
         kind: Kind::Module,

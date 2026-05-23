@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use standardoc_ir::{
-    Blake3Hash, BuiltinTag, BuiltinTier, EdgeKind, Kind, Language, LanguageKind, Modifiers,
-    ModuleLookup, Param, RawCallSite, RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved,
-    Signature, SignatureMeta, Site, SymbolLocation, TypeRef, Visibility,
+    Blake3Hash, BuiltinTag, BuiltinTier, DeclKind, EdgeKind, Kind, Language, LanguageKind,
+    Modifiers, ModuleLookup, Param, RawCallSite, RawDocument, RawEdge, RawSymbol,
+    ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation, TypeRef, Visibility,
 };
 use swc_core::common::BytePos;
 use swc_core::common::comments::SingleThreadedComments;
@@ -726,7 +726,7 @@ fn process_export_default_decl(
             let body_hash = ctx.body_hash_of(span);
             ctx.push_symbol_with_doc(
                 RawSymbol {
-                    decl_kind: None,
+                    decl_kind: Some(DeclKind::Function),
                     fqdn: format!("{current_module}::{name}"),
                     name,
                     kind: Kind::Function,
@@ -762,7 +762,7 @@ fn process_export_default_decl(
             let name = interface.id.sym.to_string();
             ctx.push_symbol_with_doc(
                 RawSymbol {
-                    decl_kind: None,
+                    decl_kind: Some(DeclKind::Interface),
                     fqdn: format!("{current_module}::{name}"),
                     name,
                     kind: Kind::Type,
@@ -868,7 +868,7 @@ fn extract_fn_decl(
     let span = item.function.span;
     let signature = build_function_signature(ctx, &item.function);
     RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(DeclKind::Function),
         name,
         fqdn,
         kind: Kind::Function,
@@ -906,7 +906,7 @@ fn extract_class_inner(
     let class_span = class.span;
     ctx.push_symbol_with_doc(
         RawSymbol {
-            decl_kind: None,
+            decl_kind: Some(DeclKind::Class),
             name: name.to_string(),
             fqdn: class_fqdn.clone(),
             kind: Kind::Type,
@@ -1047,7 +1047,7 @@ fn extract_constructor(
     });
     let visibility = map_access_modifier(raw_access, raw_access.is_none());
     RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(DeclKind::Constructor),
         name: "constructor".to_string(),
         fqdn,
         kind: Kind::Function,
@@ -1082,7 +1082,7 @@ fn extract_class_prop(
         LanguageKind::from("property")
     };
     RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(DeclKind::Field),
         name: prop_name.to_string(),
         fqdn,
         kind: Kind::Value,
@@ -1105,8 +1105,13 @@ fn extract_private_method(
 ) -> RawSymbol {
     let fqdn = format!("{class_fqdn}::{method_name}");
     let span = method.span;
+    let decl_kind = match method.kind {
+        swc_core::ecma::ast::MethodKind::Getter => DeclKind::Getter,
+        swc_core::ecma::ast::MethodKind::Setter => DeclKind::Setter,
+        swc_core::ecma::ast::MethodKind::Method => DeclKind::Method,
+    };
     RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(decl_kind),
         name: method_name.to_string(),
         fqdn,
         kind: Kind::Function,
@@ -1136,7 +1141,7 @@ fn extract_private_prop(
         LanguageKind::from("property")
     };
     RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(DeclKind::Field),
         name: prop_name.to_string(),
         fqdn,
         kind: Kind::Value,
@@ -1165,8 +1170,13 @@ fn extract_method(
         swc_core::ecma::ast::Accessibility::Protected => "protected",
     });
     let visibility = map_access_modifier(raw_access, raw_access.is_none());
+    let decl_kind = match method.kind {
+        swc_core::ecma::ast::MethodKind::Getter => DeclKind::Getter,
+        swc_core::ecma::ast::MethodKind::Setter => DeclKind::Setter,
+        swc_core::ecma::ast::MethodKind::Method => DeclKind::Method,
+    };
     RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(decl_kind),
         name: method_name.to_string(),
         fqdn,
         kind: Kind::Function,
@@ -1201,6 +1211,16 @@ fn extract_var_decl(
             swc_core::ecma::ast::VarDeclKind::Var => "var",
         };
         let kind = signature.as_ref().map_or(Kind::Value, |_| Kind::Function);
+        let decl_kind = if signature.is_some() {
+            DeclKind::Function
+        } else {
+            match item.kind {
+                swc_core::ecma::ast::VarDeclKind::Const => DeclKind::Const,
+                swc_core::ecma::ast::VarDeclKind::Let | swc_core::ecma::ast::VarDeclKind::Var => {
+                    DeclKind::Var
+                }
+            }
+        };
         let language_kind = if signature.is_some() {
             LanguageKind::from("function")
         } else {
@@ -1208,7 +1228,7 @@ fn extract_var_decl(
         };
         ctx.push_symbol_with_doc(
             RawSymbol {
-                decl_kind: None,
+                decl_kind: Some(decl_kind),
                 name,
                 fqdn: fqdn.clone(),
                 kind,
@@ -1252,7 +1272,7 @@ fn extract_interface_decl(
     let span = item.span;
     ctx.push_symbol_with_doc(
         RawSymbol {
-            decl_kind: None,
+            decl_kind: Some(DeclKind::Interface),
             name,
             fqdn: fqdn.clone(),
             kind: Kind::Type,
@@ -1311,7 +1331,7 @@ fn extract_interface_decl(
                 let member_fqdn = format!("{fqdn}::{member_name}");
                 ctx.push_symbol_with_doc(
                     RawSymbol {
-                        decl_kind: None,
+                        decl_kind: Some(DeclKind::Field),
                         name: member_name,
                         fqdn: member_fqdn.clone(),
                         kind: Kind::Value,
@@ -1346,7 +1366,7 @@ fn extract_interface_decl(
                 let member_fqdn = format!("{fqdn}::{member_name}");
                 ctx.push_symbol_with_doc(
                     RawSymbol {
-                        decl_kind: None,
+                        decl_kind: Some(DeclKind::Method),
                         name: member_name,
                         fqdn: member_fqdn.clone(),
                         kind: Kind::Function,
@@ -1399,7 +1419,7 @@ fn extract_interface_decl(
                 let member_fqdn = format!("{fqdn}::{member_name}");
                 ctx.push_symbol_with_doc(
                     RawSymbol {
-                        decl_kind: None,
+                        decl_kind: Some(DeclKind::Getter),
                         name: member_name,
                         fqdn: member_fqdn.clone(),
                         kind: Kind::Function,
@@ -1434,7 +1454,7 @@ fn extract_interface_decl(
                 let member_fqdn = format!("{fqdn}::{member_name}");
                 ctx.push_symbol_with_doc(
                     RawSymbol {
-                        decl_kind: None,
+                        decl_kind: Some(DeclKind::Setter),
                         name: member_name,
                         fqdn: member_fqdn.clone(),
                         kind: Kind::Function,
@@ -1479,7 +1499,7 @@ fn extract_type_alias_decl(
     let fqdn = format!("{parent_fqdn}::{name}");
     let span = item.span;
     RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(DeclKind::TypeAlias),
         name,
         fqdn,
         kind: Kind::Type,
@@ -1510,7 +1530,7 @@ fn extract_enum_decl(
     let span = item.span;
     ctx.push_symbol_with_doc(
         RawSymbol {
-            decl_kind: None,
+            decl_kind: Some(DeclKind::Enum),
             name,
             fqdn: enum_fqdn.clone(),
             kind: Kind::Type,
@@ -1530,7 +1550,7 @@ fn extract_enum_decl(
         let member_fqdn = format!("{enum_fqdn}::{member_name}");
         ctx.push_symbol_with_doc(
             RawSymbol {
-                decl_kind: None,
+                decl_kind: Some(DeclKind::EnumVariant),
                 name: member_name,
                 fqdn: member_fqdn,
                 kind: Kind::Value,
@@ -2324,5 +2344,124 @@ mod tests {
         // Touch BytePos to keep the import warning-free if test setup grows.
         let _ = BytePos(0);
         let _ = Span::default().lo();
+    }
+
+    fn decl_kind_of(symbols: &[RawSymbol], fqdn: &str) -> Option<DeclKind> {
+        symbols
+            .iter()
+            .find(|s| s.fqdn == fqdn)
+            .unwrap_or_else(|| panic!("symbol {fqdn} not found in {symbols:?}"))
+            .decl_kind
+            .clone()
+    }
+
+    #[test]
+    fn decl_kind_function_for_function_decl() {
+        let (symbols, _, _, _) = run("export function foo() {}");
+        assert_eq!(decl_kind_of(&symbols, "src::foo"), Some(DeclKind::Function));
+    }
+
+    #[test]
+    fn decl_kind_class_with_constructor_method_field() {
+        let (symbols, _, _, _) = run(
+            "export class C { \
+               x: number = 1; \
+               constructor() {} \
+               run() {} \
+             }",
+        );
+        assert_eq!(decl_kind_of(&symbols, "src::C"), Some(DeclKind::Class));
+        assert_eq!(
+            decl_kind_of(&symbols, "src::C::constructor"),
+            Some(DeclKind::Constructor),
+        );
+        assert_eq!(decl_kind_of(&symbols, "src::C::run"), Some(DeclKind::Method));
+        assert_eq!(decl_kind_of(&symbols, "src::C::x"), Some(DeclKind::Field));
+    }
+
+    #[test]
+    fn decl_kind_class_getter_and_setter() {
+        let (symbols, _, _, _) = run(
+            "export class C { \
+               get value() { return 1; } \
+               set value(v: number) {} \
+             }",
+        );
+        // Getter + setter share the FQDN; just check at least one Getter/Setter exists.
+        let getters = symbols
+            .iter()
+            .filter(|s| s.decl_kind == Some(DeclKind::Getter))
+            .count();
+        let setters = symbols
+            .iter()
+            .filter(|s| s.decl_kind == Some(DeclKind::Setter))
+            .count();
+        assert_eq!(getters, 1, "want one Getter, got {symbols:?}");
+        assert_eq!(setters, 1, "want one Setter, got {symbols:?}");
+    }
+
+    #[test]
+    fn decl_kind_interface_with_members() {
+        let (symbols, _, _, _) = run(
+            "export interface I { \
+               x: number; \
+               run(): void; \
+               get y(): number; \
+               set y(v: number); \
+             }",
+        );
+        assert_eq!(decl_kind_of(&symbols, "src::I"), Some(DeclKind::Interface));
+        assert_eq!(decl_kind_of(&symbols, "src::I::x"), Some(DeclKind::Field));
+        assert_eq!(decl_kind_of(&symbols, "src::I::run"), Some(DeclKind::Method));
+        let getters = symbols
+            .iter()
+            .filter(|s| s.decl_kind == Some(DeclKind::Getter))
+            .count();
+        let setters = symbols
+            .iter()
+            .filter(|s| s.decl_kind == Some(DeclKind::Setter))
+            .count();
+        assert_eq!(getters, 1, "want one interface Getter, got {symbols:?}");
+        assert_eq!(setters, 1, "want one interface Setter, got {symbols:?}");
+    }
+
+    #[test]
+    fn decl_kind_enum_with_variants() {
+        let (symbols, _, _, _) = run("export enum E { A, B }");
+        assert_eq!(decl_kind_of(&symbols, "src::E"), Some(DeclKind::Enum));
+        assert_eq!(
+            decl_kind_of(&symbols, "src::E::A"),
+            Some(DeclKind::EnumVariant),
+        );
+        assert_eq!(
+            decl_kind_of(&symbols, "src::E::B"),
+            Some(DeclKind::EnumVariant),
+        );
+    }
+
+    #[test]
+    fn decl_kind_type_alias() {
+        let (symbols, _, _, _) = run("export type Id = string;");
+        assert_eq!(
+            decl_kind_of(&symbols, "src::Id"),
+            Some(DeclKind::TypeAlias),
+        );
+    }
+
+    #[test]
+    fn decl_kind_var_const_vs_let() {
+        let (symbols, _, _, _) = run("const PI = 3; let counter = 0; var legacy = 1;");
+        assert_eq!(decl_kind_of(&symbols, "src::PI"), Some(DeclKind::Const));
+        assert_eq!(decl_kind_of(&symbols, "src::counter"), Some(DeclKind::Var));
+        assert_eq!(decl_kind_of(&symbols, "src::legacy"), Some(DeclKind::Var));
+    }
+
+    #[test]
+    fn decl_kind_arrow_function_const_is_function() {
+        let (symbols, _, _, _) = run("export const greet = (name: string) => name;");
+        assert_eq!(
+            decl_kind_of(&symbols, "src::greet"),
+            Some(DeclKind::Function),
+        );
     }
 }
