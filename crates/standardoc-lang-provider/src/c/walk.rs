@@ -1,6 +1,6 @@
 use standardoc_ir::{
-    EdgeKind, FfiAbi, FfiDirection, Kind, Language, LanguageKind, RawEdge, RawFfiBinding,
-    RawSymbol, ResolvedOrUnresolved, Site, SymbolLocation, Visibility,
+    DeclKind, EdgeKind, FfiAbi, FfiDirection, Kind, Language, LanguageKind, RawEdge,
+    RawFfiBinding, RawSymbol, ResolvedOrUnresolved, Site, SymbolLocation, Visibility,
 };
 use tree_sitter::{Node, TreeCursor};
 
@@ -56,8 +56,8 @@ fn visit_top_level(node: Node, src: &str, ctx: &mut CWalkContext) {
     match node.kind() {
         "function_definition" => emit_function_definition(node, src, ctx),
         "declaration" => emit_declaration(node, src, ctx),
-        "struct_specifier" => emit_struct_like(node, src, ctx, "struct"),
-        "union_specifier" => emit_struct_like(node, src, ctx, "union"),
+        "struct_specifier" => emit_struct_like(node, src, ctx, "struct", DeclKind::Struct),
+        "union_specifier" => emit_struct_like(node, src, ctx, "union", DeclKind::Union),
         "enum_specifier" => emit_enum(node, src, ctx),
         "type_definition" => emit_typedef(node, src, ctx),
         "preproc_def" => emit_macro_object(node, src, ctx),
@@ -143,6 +143,7 @@ fn emit_function_definition(node: Node, src: &str, ctx: &mut CWalkContext) {
         name,
         Kind::Function,
         LanguageKind::from("fn"),
+        DeclKind::Function,
         visibility,
         location_from_node(&ctx.core.file_path.clone(), node),
         body_hash,
@@ -211,6 +212,7 @@ fn emit_declaration(node: Node, src: &str, ctx: &mut CWalkContext) {
             name,
             Kind::Function,
             LanguageKind::from("fn_decl"),
+            DeclKind::Function,
             visibility,
             loc,
             None,
@@ -239,6 +241,7 @@ fn emit_declaration(node: Node, src: &str, ctx: &mut CWalkContext) {
             name,
             Kind::Value,
             LanguageKind::from("global"),
+            DeclKind::Static,
             visibility,
             loc,
             None,
@@ -246,7 +249,13 @@ fn emit_declaration(node: Node, src: &str, ctx: &mut CWalkContext) {
     }
 }
 
-fn emit_struct_like(node: Node, src: &str, ctx: &mut CWalkContext, lang_kind: &str) {
+fn emit_struct_like(
+    node: Node,
+    src: &str,
+    ctx: &mut CWalkContext,
+    lang_kind: &str,
+    decl_kind: DeclKind,
+) {
     // Anonymous structs/unions (no `name` field) have no FQDN of their own —
     // they only exist as part of a typedef, which is handled by emit_typedef.
     let Some(name_node) = node.child_by_field_name("name") else {
@@ -258,6 +267,7 @@ fn emit_struct_like(node: Node, src: &str, ctx: &mut CWalkContext, lang_kind: &s
         name,
         Kind::Type,
         LanguageKind::from(lang_kind),
+        decl_kind,
         Visibility::Public,
         location_from_node(&ctx.core.file_path.clone(), node),
         None,
@@ -274,7 +284,7 @@ fn emit_enum(node: Node, src: &str, ctx: &mut CWalkContext) {
     let parent_fqdn = if let Some(ref enum_name) = enum_name_opt {
         let enum_fqdn = format!("{}::{}", ctx.core.file_module_fqdn, enum_name);
         ctx.core.push_symbol(RawSymbol {
-            decl_kind: None,
+            decl_kind: Some(DeclKind::Enum),
             name: enum_name.clone(),
             fqdn: enum_fqdn.clone(),
             kind: Kind::Type,
@@ -307,7 +317,7 @@ fn emit_enum(node: Node, src: &str, ctx: &mut CWalkContext) {
         let name = node_text(name_node, src).to_string();
         let fqdn = format!("{parent_fqdn}::{name}");
         ctx.core.push_symbol(RawSymbol {
-            decl_kind: None,
+            decl_kind: Some(DeclKind::EnumVariant),
             name,
             fqdn,
             kind: Kind::Value,
@@ -338,6 +348,7 @@ fn emit_typedef(node: Node, src: &str, ctx: &mut CWalkContext) {
         name,
         Kind::Type,
         LanguageKind::from("type_alias"),
+        DeclKind::TypeAlias,
         Visibility::Public,
         location_from_node(&ctx.core.file_path.clone(), node),
         None,
@@ -361,7 +372,7 @@ fn emit_typedef(node: Node, src: &str, ctx: &mut CWalkContext) {
             let var_name = node_text(var_name_node, src).to_string();
             let fqdn = format!("{parent_fqdn}::{var_name}");
             ctx.core.push_symbol(RawSymbol {
-                decl_kind: None,
+                decl_kind: Some(DeclKind::EnumVariant),
                 name: var_name,
                 fqdn,
                 kind: Kind::Value,
@@ -388,6 +399,7 @@ fn emit_macro_object(node: Node, src: &str, ctx: &mut CWalkContext) {
         name,
         Kind::Macro,
         LanguageKind::from("macro_object"),
+        DeclKind::DeclarativeMacro,
         Visibility::Public,
         location_from_node(&ctx.core.file_path.clone(), node),
         None,
@@ -404,6 +416,7 @@ fn emit_macro_fn(node: Node, src: &str, ctx: &mut CWalkContext) {
         name,
         Kind::Macro,
         LanguageKind::from("macro_fn"),
+        DeclKind::DeclarativeMacro,
         Visibility::Public,
         location_from_node(&ctx.core.file_path.clone(), node),
         None,
@@ -416,6 +429,7 @@ fn push_symbol(
     name: &str,
     kind: Kind,
     language_kind: LanguageKind,
+    decl_kind: DeclKind,
     visibility: Visibility,
     location: SymbolLocation,
     body_hash: Option<standardoc_ir::Blake3Hash>,
@@ -423,7 +437,7 @@ fn push_symbol(
     let fqdn = format!("{}::{}", ctx.core.file_module_fqdn, name);
     let module = parent_module(&fqdn);
     ctx.core.push_symbol(RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(decl_kind),
         name: name.to_string(),
         fqdn,
         kind,

@@ -1,6 +1,6 @@
 use standardoc_core::ExtractError;
 use standardoc_ir::{
-    ExtractedFile, Kind, Language, LanguageKind, RawSymbol, SourceOrigin, Visibility,
+    DeclKind, ExtractedFile, Kind, Language, LanguageKind, RawSymbol, SourceOrigin, Visibility,
 };
 use tree_sitter::Parser;
 
@@ -44,7 +44,7 @@ pub(crate) fn extract_file(
     let content_hash = hash_bytes(content.as_bytes());
 
     let module_symbol = RawSymbol {
-        decl_kind: None,
+        decl_kind: Some(DeclKind::Module),
         name: last_segment(&module_fqdn).to_string(),
         fqdn: module_fqdn.clone(),
         kind: Kind::Module,

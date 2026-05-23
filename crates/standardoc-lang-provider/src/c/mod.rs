@@ -397,4 +397,74 @@ mod tests {
         // Source layout: line 1 = signature, 2 = no_op, 3 = target.
         assert_eq!(target.site.line, 3);
     }
+
+    #[test]
+    fn decl_kind_function_for_fn_def_and_prototype() {
+        let src = "int impl_fn(int x) { return x; }\nint proto_fn(int);\n";
+        let file = run(src, "runtime/vm.c");
+        assert_eq!(
+            find(&file, "lurlang::runtime::vm::impl_fn").decl_kind,
+            Some(standardoc_ir::DeclKind::Function),
+        );
+        assert_eq!(
+            find(&file, "lurlang::runtime::vm::proto_fn").decl_kind,
+            Some(standardoc_ir::DeclKind::Function),
+        );
+    }
+
+    #[test]
+    fn decl_kind_struct_and_union() {
+        let src = "struct S { int x; };\nunion U { int i; float f; };\n";
+        let file = run(src, "runtime/vm.c");
+        assert_eq!(
+            find(&file, "lurlang::runtime::vm::S").decl_kind,
+            Some(standardoc_ir::DeclKind::Struct),
+        );
+        assert_eq!(
+            find(&file, "lurlang::runtime::vm::U").decl_kind,
+            Some(standardoc_ir::DeclKind::Union),
+        );
+    }
+
+    #[test]
+    fn decl_kind_enum_and_variants() {
+        let src = "enum E { A, B };\n";
+        let file = run(src, "runtime/vm.c");
+        assert_eq!(
+            find(&file, "lurlang::runtime::vm::E").decl_kind,
+            Some(standardoc_ir::DeclKind::Enum),
+        );
+        assert_eq!(
+            find(&file, "lurlang::runtime::vm::E::A").decl_kind,
+            Some(standardoc_ir::DeclKind::EnumVariant),
+        );
+        assert_eq!(
+            find(&file, "lurlang::runtime::vm::E::B").decl_kind,
+            Some(standardoc_ir::DeclKind::EnumVariant),
+        );
+    }
+
+    #[test]
+    fn decl_kind_typedef_is_type_alias() {
+        let src = "typedef int MyInt;\n";
+        let file = run(src, "runtime/vm.c");
+        assert_eq!(
+            find(&file, "lurlang::runtime::vm::MyInt").decl_kind,
+            Some(standardoc_ir::DeclKind::TypeAlias),
+        );
+    }
+
+    #[test]
+    fn decl_kind_macros_are_declarative_macro() {
+        let src = "#define MAX_LEN 256\n#define MIN(a,b) ((a)<(b)?(a):(b))\n";
+        let file = run(src, "runtime/vm.c");
+        assert_eq!(
+            find(&file, "lurlang::runtime::vm::MAX_LEN").decl_kind,
+            Some(standardoc_ir::DeclKind::DeclarativeMacro),
+        );
+        assert_eq!(
+            find(&file, "lurlang::runtime::vm::MIN").decl_kind,
+            Some(standardoc_ir::DeclKind::DeclarativeMacro),
+        );
+    }
 }
