@@ -11,6 +11,7 @@ export type ExplorerNodeKind =
 	| 'workspace'
 	| 'project'
 	| 'folder'
+	| 'file'
 	| 'module'
 	| 'struct'
 	| 'enum'

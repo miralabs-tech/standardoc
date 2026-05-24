@@ -81,6 +81,7 @@ const kindIconClass: Record<ExplorerNodeKind, string> = {
 	workspace: C.kindModule,
 	project: C.kindModule,
 	folder: C.kindUnknown,
+	file: C.kindUnknown,
 	module: C.kindModule,
 	struct: C.kindType,
 	enum: C.kindType,

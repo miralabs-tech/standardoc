@@ -19,13 +19,13 @@ import '@standarx/standardoc-viz/components/graph';
 import { focusStore } from '@standarx/standardoc-viz/focus-store';
 import { McpBrowse } from '@standarx/standardoc-viz/mcp-client';
 import type {
+	BrowseSymbol,
 	GetContextResponse,
 	RawSymbol,
 } from '@standarx/standardoc-viz/mcp-client';
 import type {
 	ExplorerElement,
 	ExplorerEntryPoint,
-	ExplorerExpandDetail,
 	ExplorerNodeKind,
 	ExplorerTreeNode,
 	EntryPointKind,
@@ -81,53 +81,12 @@ async function boot(): Promise<void> {
 		focusStore.setFocus(fqdn);
 	});
 
-	// Mount projects into the Explorer tree. Projects are marked
-	// `expandable` so the first click triggers a lazy fetch of their
-	// root-level symbols via `list_symbols(module=project.label)`.
+	// Project list — we keep the full project records around because
+	// building the IDE-style file tree needs each project's rel_path to
+	// strip the workspace prefix off symbol file paths.
 	setStatus('list projects…');
 	const projectsRes = await mcp.listProjects().catch(() => null);
-	const projectByNodeId = new Map<string, { label: string }>();
-	let tree: ExplorerTreeNode[] = projectsRes
-		? projectsRes.projects.map(p => {
-			const id = `project:${p.project_id}`;
-			projectByNodeId.set(id, { label: p.label });
-			return {
-				id,
-				label: p.label,
-				kind: 'project' as ExplorerNodeKind,
-				expandable: true,
-			};
-		})
-		: [];
-	explorerEl.tree = tree;
-
-	// Lazy tree expansion. When the user expands a project node we
-	// fetch list_symbols(module=label) — exact-match returns root-level
-	// items of the project (re-exports, top-level fns, root structs).
-	// Deeper module navigation needs a different IR query and is left
-	// for Phase 3 alongside the Overview canvas.
-	explorerEl.addEventListener('sd-explorer-expand', async ev => {
-		const detail = (ev as CustomEvent<ExplorerExpandDetail>).detail;
-		const project = projectByNodeId.get(detail.id);
-		if (project === undefined) return;
-		// Optimistically render a loading placeholder.
-		tree = mutateNode(tree, detail.id, n => ({ ...n, loading: true }));
-		explorerEl.tree = tree;
-		try {
-			const res = await mcp.listSymbols({ module: project.label, limit: 200 });
-			const children: ExplorerTreeNode[] = res.items.map(s => ({
-				id: `sym:${s.fqdn}`,
-				label: s.name,
-				kind: mapRawKind(s),
-				fqdn: s.fqdn,
-			}));
-			tree = mutateNode(tree, detail.id, n => ({ ...n, children, loading: false }));
-			explorerEl.tree = tree;
-		} catch {
-			tree = mutateNode(tree, detail.id, n => ({ ...n, loading: false }));
-			explorerEl.tree = tree;
-		}
-	});
+	const projects = projectsRes?.projects ?? [];
 
 	// Entry points — list_symbols doesn't expose an entry_point filter
 	// yet, so we walk every page via the cursor and filter client-side.
@@ -138,7 +97,9 @@ async function boot(): Promise<void> {
 	const entryPoints = await collectEntryPoints(mcp, status => setStatus(status));
 	explorerEl.entryPoints = entryPoints;
 
-	// Load the full workspace graph into the overview canvas.
+	// Load the full workspace graph into the overview canvas. We reuse
+	// the same symbol set to build the Explorer file tree below — one
+	// fetch feeds both the canvas and the navigation panel.
 	setStatus('fetch graph…');
 	const graph = await mcp.fetchGraph(false).catch(() => null);
 	if (graph !== null) {
@@ -149,6 +110,16 @@ async function boot(): Promise<void> {
 		}));
 		engine.fit();
 	}
+
+	// IDE-style file tree per project, built synchronously from the
+	// already-fetched symbol set (no extra round-trip). Each project
+	// expands into its folder/file hierarchy; each file expands into the
+	// symbols defined inside it (sorted by start_line for source order).
+	setStatus('build tree…');
+	const tree: ExplorerTreeNode[] = projects.map(p =>
+		buildProjectNode(p, graph?.symbols ?? []),
+	);
+	explorerEl.tree = tree;
 
 	// Wire search.
 	searchEl.addEventListener('sd-search-query', async (ev: Event) => {
@@ -255,14 +226,107 @@ async function collectEntryPoints(
 	return found;
 }
 
-function mapRawKind(s: RawSymbol): ExplorerNodeKind {
-	const decl = s.decl_kind ?? '';
-	if (decl === 'struct') return 'struct';
-	if (decl === 'enum') return 'enum';
-	if (decl === 'function' || decl === 'method') return 'function';
-	if (decl === 'trait' || decl === 'interface') return 'trait';
-	if (decl === 'const' || decl === 'static') return 'value';
-	if (decl === 'macro') return 'macro';
+interface DirNode {
+	readonly children: Map<string, DirNode>;
+	readonly files: Map<string, BrowseSymbol[]>;
+}
+
+function emptyDir(): DirNode {
+	return { children: new Map(), files: new Map() };
+}
+
+function buildProjectNode(
+	project: { project_id: number; label: string; rel_path: string },
+	allSymbols: ReadonlyArray<BrowseSymbol>,
+): ExplorerTreeNode {
+	const root = emptyDir();
+	let touchedFiles = 0;
+	for (const s of allSymbols) {
+		if (s.project_id !== project.project_id) continue;
+		if (!s.file || s.file.length === 0) continue;
+		const rel = stripProjectPrefix(s.file, project.rel_path);
+		if (rel === null || rel.length === 0) continue;
+		const parts = rel.split(/[/\\]/).filter(p => p.length > 0);
+		if (parts.length === 0) continue;
+		const fileName = parts[parts.length - 1];
+		if (fileName === undefined) continue;
+		const dirs = parts.slice(0, -1);
+		let cur = root;
+		for (const d of dirs) {
+			let next = cur.children.get(d);
+			if (next === undefined) {
+				next = emptyDir();
+				cur.children.set(d, next);
+			}
+			cur = next;
+		}
+		const bucket = cur.files.get(fileName);
+		if (bucket === undefined) {
+			cur.files.set(fileName, [s]);
+			touchedFiles++;
+		} else {
+			bucket.push(s);
+		}
+	}
+	const id = `project:${project.project_id}`;
+	const children = touchedFiles > 0 ? dirToNodes(root, id) : undefined;
+	return {
+		id,
+		label: project.label,
+		kind: 'project',
+		children,
+	};
+}
+
+function dirToNodes(dir: DirNode, idPrefix: string): ExplorerTreeNode[] {
+	const out: ExplorerTreeNode[] = [];
+	for (const name of [...dir.children.keys()].sort()) {
+		const child = dir.children.get(name);
+		if (child === undefined) continue;
+		const id = `${idPrefix}/${name}`;
+		out.push({
+			id,
+			label: name,
+			kind: 'folder',
+			children: dirToNodes(child, id),
+		});
+	}
+	for (const name of [...dir.files.keys()].sort()) {
+		const symbols = (dir.files.get(name) ?? []).slice().sort((a, b) => a.start_line - b.start_line);
+		const id = `${idPrefix}/${name}`;
+		out.push({
+			id,
+			label: name,
+			kind: 'file',
+			children: symbols.map(s => ({
+				id: `sym:${s.fqdn}`,
+				label: s.name,
+				kind: mapBrowseSymbolKind(s),
+				fqdn: s.fqdn,
+			})),
+		});
+	}
+	return out;
+}
+
+function stripProjectPrefix(filePath: string, projectRelPath: string): string | null {
+	const norm = (p: string) => p.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+	const file = norm(filePath);
+	const prefix = norm(projectRelPath);
+	if (prefix.length === 0) return file;
+	if (file === prefix) return '';
+	if (file.startsWith(`${prefix}/`)) return file.slice(prefix.length + 1);
+	return null;
+}
+
+function mapBrowseSymbolKind(s: BrowseSymbol): ExplorerNodeKind {
+	const lk = s.language_kind;
+	if (lk === 'struct') return 'struct';
+	if (lk === 'enum') return 'enum';
+	if (lk === 'fn' || lk === 'function' || lk === 'method') return 'function';
+	if (lk === 'trait' || lk === 'interface') return 'trait';
+	if (lk === 'const' || lk === 'static') return 'value';
+	if (lk === 'macro' || lk === 'macro_rules') return 'macro';
 	switch (s.kind) {
 		case 'type': return 'struct';
 		case 'callable': return 'function';
@@ -270,20 +334,6 @@ function mapRawKind(s: RawSymbol): ExplorerNodeKind {
 		case 'macro': return 'macro';
 		default: return 'unknown';
 	}
-}
-
-function mutateNode(
-	tree: ReadonlyArray<ExplorerTreeNode>,
-	id: string,
-	patch: (n: ExplorerTreeNode) => ExplorerTreeNode,
-): ExplorerTreeNode[] {
-	return tree.map(n => {
-		if (n.id === id) return patch(n);
-		if (n.children !== undefined && n.children.length > 0) {
-			return { ...n, children: mutateNode(n.children, id, patch) };
-		}
-		return n;
-	});
 }
 
 function shortFqdn(fqdn: string): string {
