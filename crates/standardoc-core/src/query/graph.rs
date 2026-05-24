@@ -31,10 +31,15 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use standardoc_ir::{DeclKind, EdgeKind, Kind, LanguageKind, ResolvedOrUnresolved, Visibility};
+use standardoc_ir::{
+    DeclKind, EdgeKind, EntryPointKind, Kind, LanguageKind, ResolvedOrUnresolved, Visibility,
+};
 
 use crate::query::{edges_from, edges_to};
-use crate::storage::conv::{decl_kind_from_sql_text, kind_from_sql_text, visibility_from_sql_text};
+use crate::storage::conv::{
+    decl_kind_from_sql_text, entry_point_from_sql_text, kind_from_sql_text,
+    visibility_from_sql_text,
+};
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
 use crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
@@ -116,6 +121,10 @@ pub struct GraphSymbol {
     pub implements_trait: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receiver_type: Option<String>,
+    /// Phase 3 (Flow) — when set, this symbol is an entry-point the
+    /// viz can highlight as a flow root. `None` for internal symbols.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_point: Option<EntryPointKind>,
 }
 
 /// Edge record paired with an `outbound` hint relative to the focal
@@ -445,7 +454,7 @@ fn load_graph_symbols(
     let mut stmt = conn.prepare(
         "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.language, s.module, \
                 s.visibility, s.file_path, s.start_line, s.is_external, f.project_id, \
-                s.decl_kind, s.implements_trait, s.receiver_type \
+                s.decl_kind, s.implements_trait, s.receiver_type, s.entry_point \
          FROM symbols s \
          LEFT JOIN files f ON f.path = s.file_path \
          WHERE s.workspace_id = ?1 \
@@ -466,6 +475,11 @@ fn load_graph_symbols(
                 .as_deref()
                 .map(decl_kind_from_sql_text)
                 .transpose()?;
+            let entry_point = raw
+                .entry_point
+                .as_deref()
+                .map(entry_point_from_sql_text)
+                .transpose()?;
             Ok(GraphSymbol {
                 fqdn: raw.fqdn,
                 name: raw.name,
@@ -481,6 +495,7 @@ fn load_graph_symbols(
                 decl_kind,
                 implements_trait: raw.implements_trait,
                 receiver_type: raw.receiver_type,
+                entry_point,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -502,6 +517,7 @@ struct GraphSymbolRowRaw {
     decl_kind: Option<String>,
     implements_trait: Option<String>,
     receiver_type: Option<String>,
+    entry_point: Option<String>,
 }
 
 fn read_graph_symbol(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSymbolRowRaw> {
@@ -520,6 +536,7 @@ fn read_graph_symbol(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSymbolRow
         decl_kind: row.get(11)?,
         implements_trait: row.get(12)?,
         receiver_type: row.get(13)?,
+        entry_point: row.get(14)?,
     })
 }
 
@@ -830,6 +847,31 @@ mod tests {
         assert!(entry.get("decl_kind").is_none());
         assert!(entry.get("implements_trait").is_none());
         assert!(entry.get("receiver_type").is_none());
+        // Phase 3 (Flow): entry_point is skipped when NULL too.
+        assert!(entry.get("entry_point").is_none());
+    }
+
+    #[test]
+    fn wire_shape_carries_entry_point_when_set() {
+        let (_d, h) = fresh_handle();
+        seed_file(&h, "src/a.rs");
+        seed_symbol(&h, "runme::main", "main", Kind::Callable, false);
+        // Backfill the Phase 3 entry_point column directly — the seed
+        // helper has no knob for it, mirroring how the K-Step-E test
+        // backfills decl_kind / implements_trait / receiver_type.
+        let conn = h.pool().unwrap().get().unwrap();
+        conn.execute(
+            "UPDATE symbols SET entry_point = 'binary_main' \
+             WHERE workspace_id = ?1 AND fqdn = 'runme::main'",
+            rusqlite::params![PRIMARY_WORKSPACE_ID],
+        )
+        .unwrap();
+
+        let resp = fetch_graph(&h, req(None)).unwrap();
+        let json = serde_json::to_value(&resp).unwrap();
+        let entry = &json["symbols"][0];
+        assert_eq!(entry["fqdn"], "runme::main");
+        assert_eq!(entry["entry_point"], "binary_main");
     }
 
     #[test]

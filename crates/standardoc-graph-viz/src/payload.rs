@@ -95,6 +95,13 @@ pub(crate) struct SymbolEntry {
     /// overloaded method names across receivers.
     #[serde(default)]
     pub receiver_type: Option<String>,
+    /// Phase 3 (Flow) — when set, this symbol is an entry-point (one
+    /// of `binary_main` / `public_api` / `ffi_export`). The flow viz
+    /// uses this to identify roots; internal symbols are `None`.
+    /// String type mirrors the `decl_kind` choice — viz consumes the
+    /// snake_case wire value without pulling `standardoc_ir::EntryPointKind`.
+    #[serde(default)]
+    pub entry_point: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -248,6 +248,7 @@ impl StandardocMcp {
                         "decl_kind": ctx.context.symbol.decl_kind,
                         "implements_trait": ctx.context.symbol.implements_trait,
                         "receiver_type": ctx.context.symbol.receiver_type.as_ref().map(|t| &t.display),
+                        "entry_point": ctx.context.symbol.entry_point,
                     },
                     "neighbor_counts": {
                         "callers": ctx.callers.len(),

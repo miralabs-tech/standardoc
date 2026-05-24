@@ -19,6 +19,8 @@ export type LanguageJson =
   | 'svelte'
   | 'c';
 
+export type EntryPointKindJson = 'binary_main' | 'public_api' | 'ffi_export';
+
 export type DeclKindJson =
   | 'module'
   | 'namespace'
@@ -67,6 +69,7 @@ export interface RawSymbolJson {
   decl_kind?: DeclKindJson;
   implements_trait?: string;
   receiver_type?: string;
+  entry_point?: EntryPointKindJson;
 }
 
 export type ResolvedOrUnresolvedJson =
