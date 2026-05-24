@@ -11,3 +11,4 @@ export * from './components/hud';
 export * from './components/graph';
 export * from './profiler';
 export * from './mcp-client';
+export * from './focus-store';
