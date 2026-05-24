@@ -16,6 +16,8 @@
     "./components/explorer": "./src/components/explorer/index.ts",
     "./components/symbol-details": "./src/components/symbol-details/index.ts",
     "./components/search": "./src/components/search/index.ts",
+    "./components/overview": "./src/components/overview/index.ts",
+    "./components/focus-graph": "./src/components/focus-graph/index.ts",
     "./profiler": "./src/profiler/index.ts",
     "./mcp-client": "./src/mcp-client/index.ts",
     "./focus-store": "./src/focus-store/index.ts",

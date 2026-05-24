@@ -8,13 +8,14 @@
  *   /shell.html → multi-panel shell (shell.html + this file)
  */
 
-import init, { GraphEngine } from '../pkg/standardoc_graph_viz.js';
+import init, { FocusGraphCanvas, OverviewCanvas } from '../pkg/standardoc_graph_viz.js';
 
 import '@standarx/standardoc-viz/components/panel-layout';
 import '@standarx/standardoc-viz/components/explorer';
 import '@standarx/standardoc-viz/components/symbol-details';
 import '@standarx/standardoc-viz/components/search';
-import '@standarx/standardoc-viz/components/graph';
+import '@standarx/standardoc-viz/components/overview';
+import '@standarx/standardoc-viz/components/focus-graph';
 
 import { focusStore } from '@standarx/standardoc-viz/focus-store';
 import { McpBrowse } from '@standarx/standardoc-viz/mcp-client';
@@ -29,9 +30,12 @@ import type {
 	ExplorerNodeKind,
 	ExplorerTreeNode,
 	EntryPointKind,
-	GraphClickDetail,
-	GraphElement,
-	GraphErrorDetail,
+	FocusGraphElement,
+	FocusGraphErrorDetail,
+	FocusGraphNodeClickDetail,
+	OverviewClusterClickDetail,
+	OverviewElement,
+	OverviewErrorDetail,
 	SearchElement,
 	SymbolDetail,
 	SymbolDetailsElement,
@@ -44,7 +48,8 @@ import type {
 const explorerEl = document.getElementById('explorer') as ExplorerElement;
 const detailsEl = document.getElementById('details') as SymbolDetailsElement;
 const searchEl = document.getElementById('search') as SearchElement;
-const overviewEl = document.getElementById('overview') as GraphElement;
+const overviewEl = document.getElementById('overview') as OverviewElement;
+const focusEl = document.getElementById('focus') as FocusGraphElement;
 const statusEl = document.getElementById('status') as HTMLSpanElement;
 
 function setStatus(text: string): void {
@@ -61,23 +66,41 @@ async function boot(): Promise<void> {
 		version: '0.0.1',
 	});
 
-	// Engine factory + ready handshake. The component owns canvases +
-	// pointer events; it calls back into us to instantiate the engine
-	// once they're in the DOM.
-	const ready = new Promise<void>((resolve, reject) => {
-		overviewEl.addEventListener('sd-graph-ready', () => resolve(), { once: true });
-		overviewEl.addEventListener('sd-graph-error', e => {
-			const { source, message } = (e as CustomEvent<GraphErrorDetail>).detail;
-			if (source === 'engine-init') reject(new Error(message));
+	// Canvas factories + ready handshakes for the two split canvases.
+	// Overview owns the workspace nebula; FocusGraph owns the symbol-
+	// local neighbourhood. Both components own pointer + rAF; we just
+	// hand them a factory and wait for `*-ready`.
+	const overviewReady = new Promise<void>((resolve, reject) => {
+		overviewEl.addEventListener('sd-overview-ready', () => resolve(), { once: true });
+		overviewEl.addEventListener('sd-overview-error', e => {
+			const { source, message } = (e as CustomEvent<OverviewErrorDetail>).detail;
+			if (source === 'canvas-init') reject(new Error(message));
 		}, { once: true });
 	});
-	overviewEl.engineFactory = (canvas, w, h, dpr) => new GraphEngine(canvas, w, h, dpr);
-	await ready;
-	const engine = overviewEl.engine!;
+	const focusReady = new Promise<void>((resolve, reject) => {
+		focusEl.addEventListener('sd-focus-graph-ready', () => resolve(), { once: true });
+		focusEl.addEventListener('sd-focus-graph-error', e => {
+			const { source, message } = (e as CustomEvent<FocusGraphErrorDetail>).detail;
+			if (source === 'canvas-init') reject(new Error(message));
+		}, { once: true });
+	});
+	overviewEl.canvasFactory = (canvas, w, h, dpr) => new OverviewCanvas(canvas, w, h, dpr);
+	focusEl.canvasFactory = (canvas, w, h, dpr) => new FocusGraphCanvas(canvas, w, h, dpr);
+	await Promise.all([overviewReady, focusReady]);
+	const overview = overviewEl.canvas!;
+	const focusCanvas = focusEl.canvas!;
 
-	// Click on a graph node → shift global focus.
-	overviewEl.addEventListener('sd-graph-click', e => {
-		const { fqdn } = (e as CustomEvent<GraphClickDetail>).detail;
+	// Click on an overview cluster → drill into focus on a representative
+	// symbol (Phase 3c lands the cluster→symbol lookup; for now we don't
+	// drill until that resolution is wired).
+	overviewEl.addEventListener('sd-overview-cluster-click', e => {
+		const _detail = (e as CustomEvent<OverviewClusterClickDetail>).detail;
+		// Phase 3c: focusStore.setFocus(representativeFqdnFor(_detail.clusterId));
+	});
+
+	// Click on a focus-graph node → shift global focus.
+	focusEl.addEventListener('sd-focus-graph-node-click', e => {
+		const { fqdn } = (e as CustomEvent<FocusGraphNodeClickDetail>).detail;
 		focusStore.setFocus(fqdn);
 	});
 
@@ -102,13 +125,11 @@ async function boot(): Promise<void> {
 	// fetch feeds both the canvas and the navigation panel.
 	setStatus('fetch graph…');
 	const graph = await mcp.fetchGraph(false).catch(() => null);
+	const symbolByFqdn = new Map<string, BrowseSymbol>();
+	for (const s of graph?.symbols ?? []) symbolByFqdn.set(s.fqdn, s);
 	if (graph !== null) {
-		engine.load_graph(JSON.stringify({
-			symbols: graph.symbols,
-			projects: graph.projects ?? [],
-			edges: graph.edges,
-		}));
-		engine.fit();
+		overview.set_payload(buildOverviewPayload(projects, graph.symbols, graph.edges, symbolByFqdn));
+		overview.fit();
 	}
 
 	// IDE-style file tree per project, built synchronously from the
@@ -184,6 +205,11 @@ async function boot(): Promise<void> {
 			mcp.fetchNeighborhood(fqdn, false).catch(() => null),
 		]);
 		if (myToken !== focusToken) return; // a newer focus arrived
+		// Push the focal payload into the FocusGraph canvas alongside the
+		// SymbolDetails update — both panels react to the same focus shift
+		// off the same fetched neighborhood snapshot.
+		focusCanvas.set_payload(buildFocusPayload(fqdn, ctx, neighborhood?.edges ?? [], neighborhood?.symbols ?? []));
+		focusCanvas.fit();
 		if (ctx === null) {
 			setStatus(`get_context failed for ${shortFqdn(fqdn)}`);
 			return;
@@ -334,6 +360,71 @@ function mapBrowseSymbolKind(s: BrowseSymbol): ExplorerNodeKind {
 		case 'macro': return 'macro';
 		default: return 'unknown';
 	}
+}
+
+function buildOverviewPayload(
+	projects: ReadonlyArray<{ project_id: number; label: string; kind: { kind: string } }>,
+	symbols: ReadonlyArray<BrowseSymbol>,
+	edges: ReadonlyArray<{ from: string; to: string; kind: string; outbound: boolean }>,
+	symbolByFqdn: Map<string, BrowseSymbol>,
+): string {
+	const counts = new Map<number, number>();
+	for (const s of symbols) {
+		if (s.project_id === undefined || s.project_id === null) continue;
+		counts.set(s.project_id, (counts.get(s.project_id) ?? 0) + 1);
+	}
+	const clusters = projects.map(p => ({
+		id: p.project_id,
+		label: p.label,
+		kind: p.kind.kind,
+		symbol_count: counts.get(p.project_id) ?? 0,
+	}));
+	const aggregated = new Map<string, { from: number; to: number; weight: number }>();
+	for (const e of edges) {
+		const from = symbolByFqdn.get(e.from)?.project_id;
+		const to = symbolByFqdn.get(e.to)?.project_id;
+		if (from === undefined || from === null) continue;
+		if (to === undefined || to === null) continue;
+		if (from === to) continue;
+		const key = `${from}->${to}`;
+		const bucket = aggregated.get(key);
+		if (bucket === undefined) aggregated.set(key, { from, to, weight: 1 });
+		else bucket.weight += 1;
+	}
+	return JSON.stringify({
+		clusters,
+		edges: [...aggregated.values()],
+	});
+}
+
+function buildFocusPayload(
+	fqdn: string,
+	ctx: GetContextResponse | null,
+	neighborhoodEdges: ReadonlyArray<{ from: string; to: string; kind: string; outbound: boolean }>,
+	neighborhoodSymbols: ReadonlyArray<BrowseSymbol>,
+): string {
+	const centerSym = ctx?.context.symbol;
+	const center = centerSym !== undefined ? {
+		fqdn: centerSym.fqdn,
+		name: centerSym.name,
+		kind: centerSym.decl_kind ?? centerSym.language_kind ?? centerSym.kind,
+		depth: 0,
+	} : null;
+	const neighbors = neighborhoodSymbols
+		.filter(s => s.fqdn !== fqdn)
+		.map(s => ({
+			fqdn: s.fqdn,
+			name: s.name,
+			kind: s.language_kind ?? s.kind,
+			depth: 1,
+		}));
+	const focalEdges = neighborhoodEdges.map(e => ({
+		from: e.from,
+		to: e.to,
+		kind: e.kind,
+		depth: 1,
+	}));
+	return JSON.stringify({ center, neighbors, edges: focalEdges });
 }
 
 function shortFqdn(fqdn: string): string {

@@ -28,11 +28,13 @@
 #![allow(clippy::cast_lossless)]
 
 mod camera;
+mod focus;
 mod force3d;
 mod gpu;
 mod interaction;
 mod kind;
 mod layout;
+mod overview;
 mod palette;
 mod payload;
 mod render;
@@ -1336,7 +1338,7 @@ fn satellite_position_3d(parent_center: Vec3, parent_size: [f32; 2], angle: f32)
 /// where every resize tick makes the canvas (and its scroll overflow)
 /// a few pixels bigger. Firefox is more lenient and didn't surface
 /// the bug, which is how it stayed hidden until now.
-fn apply_canvas_size(canvas: &HtmlCanvasElement, width: u32, height: u32, dpr: f64) {
+pub(crate) fn apply_canvas_size(canvas: &HtmlCanvasElement, width: u32, height: u32, dpr: f64) {
     canvas.set_width((f64::from(width) * dpr) as u32);
     canvas.set_height((f64::from(height) * dpr) as u32);
     let style = canvas.style();

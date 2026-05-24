@@ -13,6 +13,8 @@ export * from './components/panel-layout';
 export * from './components/explorer';
 export * from './components/symbol-details';
 export * from './components/search';
+export * from './components/overview';
+export * from './components/focus-graph';
 export * from './profiler';
 export * from './mcp-client';
 export * from './focus-store';

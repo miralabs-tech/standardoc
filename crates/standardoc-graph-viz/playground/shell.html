@@ -131,11 +131,8 @@
         <span id="status" style="font-size: 11px; color: #9d9d9d;">booting…</span>
       </div>
       <standardoc-explorer id="explorer" data-slot="explorer"></standardoc-explorer>
-      <standardoc-graph id="overview" data-slot="overview"></standardoc-graph>
-      <div data-slot="focus" class="sd-shell-panel-placeholder">
-        Focus Graph — Phase 3 (specialized FocusGraphCanvas).<br />
-        For now the overview canvas above carries the whole graph.
-      </div>
+      <standardoc-overview id="overview" data-slot="overview"></standardoc-overview>
+      <standardoc-focus-graph id="focus" data-slot="focus"></standardoc-focus-graph>
       <standardoc-symbol-details id="details" data-slot="details"></standardoc-symbol-details>
     </standardoc-panel-layout>
     <script type="module" src="/shell.js"></script>
