@@ -14,6 +14,7 @@
     "./components/graph": "./src/components/graph/index.ts",
     "./components/panel-layout": "./src/components/panel-layout/index.ts",
     "./components/explorer": "./src/components/explorer/index.ts",
+    "./components/symbol-details": "./src/components/symbol-details/index.ts",
     "./profiler": "./src/profiler/index.ts",
     "./mcp-client": "./src/mcp-client/index.ts",
     "./focus-store": "./src/focus-store/index.ts",

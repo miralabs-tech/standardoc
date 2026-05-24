@@ -11,6 +11,7 @@ export * from './components/hud';
 export * from './components/graph';
 export * from './components/panel-layout';
 export * from './components/explorer';
+export * from './components/symbol-details';
 export * from './profiler';
 export * from './mcp-client';
 export * from './focus-store';
