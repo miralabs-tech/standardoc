@@ -28,6 +28,7 @@ pub(crate) fn extract_file(
         decl_kind: Some(DeclKind::Module),
         implements_trait: None,
         receiver_type: None,
+        entry_point: None,
         name,
         fqdn: module_fqdn.clone(),
         kind: Kind::Module,

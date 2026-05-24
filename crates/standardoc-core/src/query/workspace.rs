@@ -525,6 +525,7 @@ mod tests {
                 decl_kind: None,
                 implements_trait: None,
                 receiver_type: None,
+                entry_point: None,
                 name: "peer_only_marker".into(),
                 fqdn: "crate::peer_only_marker".into(),
                 kind: Kind::Callable,

@@ -1,6 +1,6 @@
 use standardoc_ir::{
-    DeclKind, EdgeKind, FfiAbi, FfiDirection, Kind, Language, LanguageKind, RawEdge,
-    RawFfiBinding, RawSymbol, ResolvedOrUnresolved, Site, SymbolLocation, Visibility,
+    DeclKind, EdgeKind, EntryPointKind, FfiAbi, FfiDirection, Kind, Language, LanguageKind,
+    RawEdge, RawFfiBinding, RawSymbol, ResolvedOrUnresolved, Site, SymbolLocation, Visibility,
 };
 use tree_sitter::{Node, TreeCursor};
 
@@ -138,7 +138,8 @@ fn emit_function_definition(node: Node, src: &str, ctx: &mut CWalkContext) {
     let body_hash = body_node.map(|b| hash_bytes(node_text(b, src).as_bytes()));
 
     let fqdn = format!("{}::{}", ctx.core.file_module_fqdn, name);
-    push_symbol(
+    let entry_point = classify_c_fn_entry_point(name, is_static);
+    push_symbol_with_entry(
         ctx,
         name,
         Kind::Callable,
@@ -147,6 +148,7 @@ fn emit_function_definition(node: Node, src: &str, ctx: &mut CWalkContext) {
         visibility,
         location_from_node(&ctx.core.file_path.clone(), node),
         body_hash,
+        entry_point,
     );
 
     // Stage 2 — C ABI export. Every non-`static` function in a C
@@ -287,6 +289,7 @@ fn emit_enum(node: Node, src: &str, ctx: &mut CWalkContext) {
             decl_kind: Some(DeclKind::Enum),
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             name: enum_name.clone(),
             fqdn: enum_fqdn.clone(),
             kind: Kind::Type,
@@ -322,6 +325,7 @@ fn emit_enum(node: Node, src: &str, ctx: &mut CWalkContext) {
             decl_kind: Some(DeclKind::EnumVariant),
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             name,
             fqdn,
             kind: Kind::Value,
@@ -379,6 +383,7 @@ fn emit_typedef(node: Node, src: &str, ctx: &mut CWalkContext) {
                 decl_kind: Some(DeclKind::EnumVariant),
                 implements_trait: None,
                 receiver_type: None,
+                entry_point: None,
                 name: var_name,
                 fqdn,
                 kind: Kind::Value,
@@ -440,12 +445,38 @@ fn push_symbol(
     location: SymbolLocation,
     body_hash: Option<standardoc_ir::Blake3Hash>,
 ) {
+    push_symbol_with_entry(
+        ctx,
+        name,
+        kind,
+        language_kind,
+        decl_kind,
+        visibility,
+        location,
+        body_hash,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_symbol_with_entry(
+    ctx: &mut CWalkContext,
+    name: &str,
+    kind: Kind,
+    language_kind: LanguageKind,
+    decl_kind: DeclKind,
+    visibility: Visibility,
+    location: SymbolLocation,
+    body_hash: Option<standardoc_ir::Blake3Hash>,
+    entry_point: Option<EntryPointKind>,
+) {
     let fqdn = format!("{}::{}", ctx.core.file_module_fqdn, name);
     let module = parent_module(&fqdn);
     ctx.core.push_symbol(RawSymbol {
         decl_kind: Some(decl_kind),
         implements_trait: None,
         receiver_type: None,
+        entry_point,
         name: name.to_string(),
         fqdn,
         kind,
@@ -458,4 +489,32 @@ fn push_symbol(
         attributes: vec![],
         flags: vec![],
     });
+}
+
+/// Phase 3 (Flow) — first-pass entry-point classification for C
+/// function DEFINITIONS (not prototypes — `.h` declarations are not
+/// the actual flow root). Conservative coverage:
+///
+///   - `BinaryMain`: `main` — the kernel-launched entry of every
+///     C binary. We don't check the signature shape (`int(int,
+///     char**)` is the convention but freestanding / hosted variants
+///     differ); the name at file scope is the canonical marker.
+///   - `FfiExport`: `luaopen_*` — the Lua C-API contract for native
+///     module loading. `static luaopen_*` would be a code smell but
+///     is technically valid; we still tag it as the contract is
+///     name-based.
+///
+/// `PublicApi` for plain non-`static` C functions is **deferred**.
+/// Almost every non-static C function in a multi-file project is
+/// also non-static for intra-project cross-TU calls — marking them
+/// all as entry-points would drown the signal. A future pass can
+/// refine this with header-visibility / call-graph analysis.
+fn classify_c_fn_entry_point(name: &str, _is_static: bool) -> Option<EntryPointKind> {
+    if name == "main" {
+        return Some(EntryPointKind::BinaryMain);
+    }
+    if name.starts_with("luaopen_") {
+        return Some(EntryPointKind::FfiExport);
+    }
+    None
 }

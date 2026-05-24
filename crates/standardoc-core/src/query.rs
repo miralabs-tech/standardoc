@@ -23,8 +23,8 @@ use standardoc_ir::{
 
 use crate::storage::conv::{
     decl_kind_from_sql_text, edge_confidence_from_sql_text, edge_kind_from_sql_text,
-    json_to_signature, kind_from_sql_text, kind_to_sql_text, language_from_sql_text,
-    visibility_from_sql_text, visibility_to_sql_text,
+    entry_point_from_sql_text, json_to_signature, kind_from_sql_text, kind_to_sql_text,
+    language_from_sql_text, visibility_from_sql_text, visibility_to_sql_text,
 };
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
@@ -96,7 +96,7 @@ pub struct SymbolContextWithNeighbors {
 
 const SYMBOL_COLUMNS: &str = "fqdn, name, kind, language_kind, module, visibility, \
      file_path, start_line, end_line, start_col, end_col, \
-     signature_json, body_hash, flags, decl_kind, implements_trait, receiver_type";
+     signature_json, body_hash, flags, decl_kind, implements_trait, receiver_type, entry_point";
 
 fn with_conn<F, R>(handle: &IndexHandle, f: F) -> Result<R, StorageError>
 where
@@ -288,7 +288,7 @@ pub fn search_text(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
                     s.signature_json, s.body_hash, s.flags, s.decl_kind, \
-                    s.implements_trait, s.receiver_type \
+                    s.implements_trait, s.receiver_type, s.entry_point \
              FROM symbols_fts f \
              JOIN symbols s ON s.id = f.rowid \
              WHERE symbols_fts MATCH ?1 \
@@ -381,7 +381,7 @@ pub fn list_symbols(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
                     s.signature_json, s.body_hash, s.flags, s.decl_kind, \
-                    s.implements_trait, s.receiver_type \
+                    s.implements_trait, s.receiver_type, s.entry_point \
              FROM symbols s \
              WHERE (?1 IS NULL OR s.kind       = ?1) \
                AND (?2 IS NULL OR s.visibility = ?2) \
@@ -446,7 +446,7 @@ pub fn find_by_pattern(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
                     s.signature_json, s.body_hash, s.flags, s.decl_kind, \
-                    s.implements_trait, s.receiver_type \
+                    s.implements_trait, s.receiver_type, s.entry_point \
              FROM symbols s \
              WHERE (s.name GLOB ?1 OR s.fqdn GLOB ?1) \
                AND (?2 IS NULL OR s.kind       = ?2) \
@@ -511,7 +511,7 @@ pub fn find_similar(
             "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, s.visibility, \
                     s.file_path, s.start_line, s.end_line, s.start_col, s.end_col, \
                     s.signature_json, s.body_hash, s.flags, s.decl_kind, \
-                    s.implements_trait, s.receiver_type \
+                    s.implements_trait, s.receiver_type, s.entry_point \
              FROM symbols s \
              WHERE (?1 IS NULL OR s.kind       = ?1) \
                AND (?2 IS NULL OR s.visibility = ?2) \
@@ -601,8 +601,8 @@ pub fn context_for_symbol(
                 |row| {
                     Ok((
                         read_symbol_row(row)?,
-                        row.get::<_, Option<String>>(17)?,
                         row.get::<_, Option<String>>(18)?,
+                        row.get::<_, Option<String>>(19)?,
                     ))
                 },
             )
@@ -1397,6 +1397,7 @@ struct SymbolRowRaw {
     decl_kind_text: Option<String>,
     implements_trait: Option<String>,
     receiver_type_text: Option<String>,
+    entry_point_text: Option<String>,
 }
 
 fn read_symbol_row(row: &Row<'_>) -> rusqlite::Result<SymbolRowRaw> {
@@ -1418,6 +1419,7 @@ fn read_symbol_row(row: &Row<'_>) -> rusqlite::Result<SymbolRowRaw> {
         decl_kind_text: row.get(14)?,
         implements_trait: row.get(15)?,
         receiver_type_text: row.get(16)?,
+        entry_point_text: row.get(17)?,
     })
 }
 
@@ -1442,6 +1444,11 @@ fn build_symbol(raw: SymbolRowRaw) -> Result<RawSymbol, StorageError> {
         .as_deref()
         .map(decl_kind_from_sql_text)
         .transpose()?;
+    let entry_point = raw
+        .entry_point_text
+        .as_deref()
+        .map(entry_point_from_sql_text)
+        .transpose()?;
     let location = SymbolLocation {
         file: raw.file_path,
         start_line: position_to_u32("start_line", raw.start_line)?,
@@ -1457,6 +1464,7 @@ fn build_symbol(raw: SymbolRowRaw) -> Result<RawSymbol, StorageError> {
         decl_kind,
         implements_trait: raw.implements_trait,
         receiver_type: raw.receiver_type_text.map(TypeRef::new),
+        entry_point,
         module: raw.module,
         visibility,
         location,
@@ -1885,6 +1893,7 @@ mod tests {
             decl_kind: None,
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             name: name.into(),
             fqdn: fqdn.into(),
             kind: Kind::Callable,
@@ -1951,6 +1960,7 @@ mod tests {
                 decl_kind: None,
                 implements_trait: None,
                 receiver_type: None,
+                entry_point: None,
                 name: "f".into(),
                 fqdn: "crate::f".into(),
                 kind: Kind::Callable,
@@ -2021,6 +2031,7 @@ mod tests {
             decl_kind: None,
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             name: name.into(),
             fqdn: fqdn.into(),
             kind: Kind::Callable,
@@ -2451,6 +2462,7 @@ mod tests {
             decl_kind: None,
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             name: name.into(),
             fqdn: fqdn.into(),
             kind,
@@ -3229,6 +3241,7 @@ mod tests {
                 decl_kind: None,
                 implements_trait: None,
                 receiver_type: None,
+                entry_point: None,
                 name: "boot".into(),
                 fqdn: "crate::boot".into(),
                 kind: Kind::Callable,
@@ -3286,6 +3299,7 @@ mod tests {
             decl_kind: None,
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             name: fqdn.rsplit("::").next().unwrap_or(fqdn).into(),
             fqdn: fqdn.into(),
             kind,

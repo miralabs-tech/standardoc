@@ -354,6 +354,7 @@ mod tests {
             decl_kind: None,
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             name: name.into(),
             fqdn: fqdn.into(),
             kind: Kind::Callable,

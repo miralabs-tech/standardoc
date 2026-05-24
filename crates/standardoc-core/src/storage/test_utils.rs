@@ -37,6 +37,7 @@ pub(crate) fn sample_symbol(name: &str, fqdn: &str) -> RawSymbol {
         decl_kind: None,
         implements_trait: None,
         receiver_type: None,
+        entry_point: None,
         name: name.into(),
         fqdn: fqdn.into(),
         kind: Kind::Callable,

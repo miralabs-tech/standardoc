@@ -120,6 +120,7 @@ fn emit_import(
             decl_kind: None,
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             name: alias_name.to_string(),
             fqdn: phantom_fqdn,
             kind: Kind::Type,

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::attribute::RawAttribute;
 use crate::hash::Blake3Hash;
-use crate::kinds::{DeclKind, Kind, Visibility};
+use crate::kinds::{DeclKind, EntryPointKind, Kind, Visibility};
 use crate::language_kind::LanguageKind;
 use crate::location::SymbolLocation;
 use crate::signature::{Signature, TypeRef};
@@ -34,6 +34,11 @@ pub struct RawSymbol {
     /// `Self : Foo`. Free functions leave this `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receiver_type: Option<TypeRef>,
+    /// Phase 3 (Flow) — when set, this symbol is an entry-point
+    /// (binary `main`, public crate API, FFI export). Populated per
+    /// language. `None` for internal symbols.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_point: Option<EntryPointKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     pub visibility: Visibility,
@@ -73,6 +78,7 @@ mod tests {
             decl_kind: None,
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             module: None,
             visibility: Visibility::Public,
             location: SymbolLocation {
@@ -102,6 +108,7 @@ mod tests {
             decl_kind: None,
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             module: Some("serde".into()),
             visibility: Visibility::Public,
             location: SymbolLocation {
@@ -131,6 +138,7 @@ mod tests {
             decl_kind: None,
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             module: Some("app::api".into()),
             visibility: Visibility::Public,
             location: SymbolLocation {
@@ -164,6 +172,7 @@ mod tests {
             decl_kind: None,
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             module: None,
             visibility: Visibility::Public,
             location: SymbolLocation {
@@ -195,6 +204,7 @@ mod tests {
             decl_kind: Some(DeclKind::Method),
             implements_trait: Some("crate::Trait".into()),
             receiver_type: Some(TypeRef::new("crate::Type")),
+            entry_point: None,
             module: Some("crate::Type".into()),
             visibility: Visibility::Public,
             location: SymbolLocation {

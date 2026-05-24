@@ -207,6 +207,7 @@ impl Visitor for FfiVisitor<'_> {
                 decl_kind: None,
                 implements_trait: None,
                 receiver_type: None,
+                entry_point: None,
                 name: name.clone(),
                 fqdn: fqdn.clone(),
                 kind: Kind::Value,

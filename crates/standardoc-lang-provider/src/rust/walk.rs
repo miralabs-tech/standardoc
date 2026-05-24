@@ -3,10 +3,10 @@ use std::collections::{HashMap, HashSet};
 use proc_macro2::Span;
 use quote::ToTokens;
 use standardoc_ir::{
-    AliasMutability, BuiltinTag, BuiltinTier, DeclKind, EdgeKind, Kind, Language, LanguageKind,
-    Modifiers, ModuleLookup, Param, RawAttribute, RawAttributeArg, RawCallSite, RawDocument,
-    RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation,
-    TypeRef, Visibility, compact_rust_tokens,
+    AliasMutability, BuiltinTag, BuiltinTier, DeclKind, EdgeKind, EntryPointKind, Kind, Language,
+    LanguageKind, Modifiers, ModuleLookup, Param, RawAttribute, RawAttributeArg, RawCallSite,
+    RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site,
+    SymbolLocation, TypeRef, Visibility, compact_rust_tokens,
 };
 use syn::spanned::Spanned;
 
@@ -532,10 +532,12 @@ fn extract_fn(item: &syn::ItemFn, parent_fqdn: &str, path: &str) -> RawSymbol {
     let fqdn = format!("{parent_fqdn}::{name}");
     let mut sig = extract_signature(&item.sig);
     sig.modifiers.deprecated = extract_deprecated(&item.attrs);
+    let entry_point = classify_fn_entry_point(item, parent_fqdn, &name);
     RawSymbol {
         decl_kind: Some(DeclKind::Function),
         implements_trait: None,
         receiver_type: None,
+        entry_point,
         name,
         fqdn,
         kind: Kind::Callable,
@@ -548,6 +550,35 @@ fn extract_fn(item: &syn::ItemFn, parent_fqdn: &str, path: &str) -> RawSymbol {
         attributes: extract_attributes(&item.attrs, path),
         flags: vec![],
     }
+}
+
+/// Phase 3 (Flow) — first-pass entry-point detector for Rust free
+/// functions. Recognises two unambiguous shapes:
+///
+///   - `BinaryMain`: a fn literally named `main` sitting at the crate
+///     root (parent fqdn has no `::`, i.e. it IS the crate name).
+///     Works for any binary target — `src/main.rs` or `src/bin/*.rs`.
+///   - `FfiExport`: any fn carrying `#[no_mangle]`. The `pub extern`
+///     part is the C-callable shape but `#[no_mangle]` is the
+///     definitive opt-in marker — checking it alone avoids false
+///     positives from `extern "Rust" fn` (no-op ABI tag).
+///
+/// `PublicApi` (a `pub fn` re-exported up to the crate root) is
+/// deferred — detecting it needs the resolver's transitive
+/// `pub mod` chain, not just the immediate parent module.
+fn classify_fn_entry_point(
+    item: &syn::ItemFn,
+    parent_fqdn: &str,
+    name: &str,
+) -> Option<EntryPointKind> {
+    if name == "main" && !parent_fqdn.contains("::") {
+        return Some(EntryPointKind::BinaryMain);
+    }
+    let has_no_mangle = item.attrs.iter().any(|a| a.path().is_ident("no_mangle"));
+    if has_no_mangle {
+        return Some(EntryPointKind::FfiExport);
+    }
+    None
 }
 
 /// Bug C-2 — push the struct symbol AND one `RawSymbol` per field.
@@ -621,6 +652,7 @@ fn extract_enum(ctx: &mut WalkContext, item: &syn::ItemEnum, parent_fqdn: &str) 
                 decl_kind: Some(DeclKind::EnumVariant),
                 implements_trait: None,
                 receiver_type: None,
+                entry_point: None,
                 name: variant_name,
                 fqdn: variant_fqdn.clone(),
                 kind: Kind::Type,
@@ -743,6 +775,7 @@ fn push_field(
             decl_kind: Some(DeclKind::Field),
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             name: name.to_string(),
             fqdn: field_fqdn.clone(),
             kind: Kind::Value,
@@ -814,6 +847,7 @@ fn type_def_symbol(
         decl_kind: Some(decl_kind),
         implements_trait: None,
         receiver_type: None,
+        entry_point: None,
         name,
         fqdn,
         kind: Kind::Type,
@@ -839,6 +873,7 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
             decl_kind: Some(DeclKind::Interface),
             implements_trait: None,
             receiver_type: None,
+            entry_point: None,
             name,
             fqdn: trait_fqdn.clone(),
             kind: Kind::Type,
@@ -881,6 +916,7 @@ fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str
                     decl_kind: Some(DeclKind::Method),
                     implements_trait: None,
                     receiver_type: Some(TypeRef::new(&trait_fqdn)),
+                    entry_point: None,
                     name: fn_name,
                     fqdn: fn_fqdn.clone(),
                     kind: Kind::Callable,
@@ -981,6 +1017,7 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
                     decl_kind: Some(DeclKind::Method),
                     implements_trait: implements_trait_str.clone(),
                     receiver_type: Some(TypeRef::new(&target_fqdn)),
+                    entry_point: None,
                     name: fn_name,
                     fqdn: fn_fqdn.clone(),
                     kind: Kind::Callable,
@@ -1048,6 +1085,7 @@ fn value_def_symbol(
         decl_kind: Some(decl_kind),
         implements_trait: None,
         receiver_type: None,
+        entry_point: None,
         name,
         fqdn,
         kind: Kind::Value,
@@ -1075,6 +1113,7 @@ fn extract_macro_def(item: &syn::ItemMacro, parent_fqdn: &str, path: &str) -> Op
         decl_kind: Some(DeclKind::DeclarativeMacro),
         implements_trait: None,
         receiver_type: None,
+        entry_point: None,
         name,
         fqdn,
         kind: Kind::Macro,

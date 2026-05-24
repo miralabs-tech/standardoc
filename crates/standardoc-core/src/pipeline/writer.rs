@@ -185,6 +185,7 @@ mod tests {
                 decl_kind: None,
                 implements_trait: None,
                 receiver_type: None,
+                entry_point: None,
                 name: "foo".into(),
                 fqdn: "crate::foo".into(),
                 kind: Kind::Callable,

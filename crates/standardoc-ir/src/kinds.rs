@@ -111,6 +111,33 @@ pub enum DeclKind {
     Custom { lang: Language, tag: String },
 }
 
+/// Phase 3 (Flow) — classifies a symbol as an entry-point into the
+/// codebase, answering the viz question "where does flow start?".
+/// `None` on `RawSymbol.entry_point` means "this is an internal
+/// symbol, not an entry-point"; otherwise the variant tells the
+/// consumer (viz, agent, MCP) what kind of entry-point this is so it
+/// can be highlighted / grouped / used as a flow root.
+///
+/// Population is per-language (extractor-side) — first-pass coverage
+/// is Rust + C; TS / Lua follow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryPointKind {
+    /// Binary entry-point — Rust `fn main()` in a `bin` crate, C
+    /// `int main(int, char**)`. The kernel hands the program here.
+    BinaryMain,
+    /// Public API surface of a library — a `pub` symbol at the crate
+    /// root (or transitively re-exported there) for Rust, a
+    /// non-static top-level declaration for C. External consumers
+    /// can name this from outside the crate / translation unit.
+    PublicApi,
+    /// FFI-visible export — Rust `#[no_mangle] pub extern fn …`,
+    /// C `luaopen_*` (Lua C-API entrypoint), JNI / NAPI exports. A
+    /// foreign runtime (the dynamic linker, a Lua VM, a Node addon
+    /// loader) calls in here across the substrate boundary.
+    FfiExport,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +324,34 @@ mod tests {
         let s = serde_json::to_string(&dk).unwrap();
         let back: DeclKind = serde_json::from_str(&s).unwrap();
         assert_eq!(dk, back);
+    }
+
+    #[test]
+    fn entry_point_kind_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&EntryPointKind::BinaryMain).unwrap(),
+            "\"binary_main\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EntryPointKind::PublicApi).unwrap(),
+            "\"public_api\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EntryPointKind::FfiExport).unwrap(),
+            "\"ffi_export\""
+        );
+    }
+
+    #[test]
+    fn entry_point_kind_round_trip_all() {
+        for k in [
+            EntryPointKind::BinaryMain,
+            EntryPointKind::PublicApi,
+            EntryPointKind::FfiExport,
+        ] {
+            let s = serde_json::to_string(&k).unwrap();
+            let back: EntryPointKind = serde_json::from_str(&s).unwrap();
+            assert_eq!(k, back);
+        }
     }
 }

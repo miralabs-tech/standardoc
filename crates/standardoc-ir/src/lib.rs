@@ -29,7 +29,9 @@ pub use edge::{RawEdge, ResolvedOrUnresolved};
 pub use extracted::ExtractedFile;
 pub use ffi::{FfiAbi, FfiDirection, RawFfiBinding};
 pub use hash::{Blake3Hash, ParseHashError};
-pub use kinds::{DeclKind, EdgeConfidence, EdgeKind, Kind, Language, SourceOrigin, Visibility};
+pub use kinds::{
+    DeclKind, EdgeConfidence, EdgeKind, EntryPointKind, Kind, Language, SourceOrigin, Visibility,
+};
 pub use language_kind::LanguageKind;
 pub use location::{Site, SymbolLocation};
 pub use lookup::{

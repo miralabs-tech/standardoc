@@ -79,6 +79,28 @@ mod tests {
     }
 
     #[test]
+    fn extract_tags_c_main_as_binary_main_entry_point() {
+        use standardoc_ir::EntryPointKind;
+        let src = "int main(int argc, char** argv) { return 0; }\nvoid helper(void) {}\n";
+        let file = run(src, "runtime/cli.c");
+        let main_sym = find(&file, "lurlang::runtime::cli::main");
+        assert_eq!(main_sym.entry_point, Some(EntryPointKind::BinaryMain));
+        let helper = find(&file, "lurlang::runtime::cli::helper");
+        assert_eq!(helper.entry_point, None);
+    }
+
+    #[test]
+    fn extract_tags_luaopen_prefixed_fn_as_ffi_export() {
+        use standardoc_ir::EntryPointKind;
+        // Lua C-API contract — `require("foo")` calls a symbol named
+        // `luaopen_foo`. The prefix is the entry-point marker.
+        let src = "int luaopen_matchigo(void* L) { return 1; }\n";
+        let file = run(src, "matchigo.c");
+        let s = find(&file, "lurlang::matchigo::luaopen_matchigo");
+        assert_eq!(s.entry_point, Some(EntryPointKind::FfiExport));
+    }
+
+    #[test]
     fn static_function_is_private_visibility() {
         let src = "static void internal_reset(int* p) { *p = 0; }\n";
         let file = run(src, "runtime/vm.c");

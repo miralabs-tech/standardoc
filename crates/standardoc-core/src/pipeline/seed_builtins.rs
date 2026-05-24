@@ -74,6 +74,7 @@ pub(crate) fn seed_into(
                 decl_kind: None,
                 implements_trait: None,
                 receiver_type: None,
+                entry_point: None,
                 name: entry.name.clone(),
                 fqdn: entry.synthetic_fqdn.clone(),
                 kind: entry.kind,

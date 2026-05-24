@@ -1,6 +1,6 @@
 use standardoc_ir::{
-    DeclKind, EdgeConfidence, EdgeKind, Kind, Language, ResolvedOrUnresolved, Signature,
-    SourceOrigin, Visibility,
+    DeclKind, EdgeConfidence, EdgeKind, EntryPointKind, Kind, Language, ResolvedOrUnresolved,
+    Signature, SourceOrigin, Visibility,
 };
 
 use crate::storage::error::StorageError;
@@ -174,6 +174,28 @@ pub(crate) fn decl_kind_from_sql_text(s: &str) -> Result<DeclKind, StorageError>
                 detail: format!("unknown decl_kind: {other:?}"),
             }),
         },
+    }
+}
+
+/// Phase 3 (Flow) — Encodes an [`EntryPointKind`] as flat SQL text
+/// (`binary_main` / `public_api` / `ffi_export`). Matches the SQL
+/// CHECK in `init_v0.sql`.
+pub(crate) const fn entry_point_to_sql_text(e: EntryPointKind) -> &'static str {
+    match e {
+        EntryPointKind::BinaryMain => "binary_main",
+        EntryPointKind::PublicApi => "public_api",
+        EntryPointKind::FfiExport => "ffi_export",
+    }
+}
+
+pub(crate) fn entry_point_from_sql_text(s: &str) -> Result<EntryPointKind, StorageError> {
+    match s {
+        "binary_main" => Ok(EntryPointKind::BinaryMain),
+        "public_api" => Ok(EntryPointKind::PublicApi),
+        "ffi_export" => Ok(EntryPointKind::FfiExport),
+        other => Err(StorageError::InvalidStoredData {
+            detail: format!("unknown entry_point: {other:?}"),
+        }),
     }
 }
 

@@ -244,6 +244,109 @@ mod tests {
     }
 
     #[test]
+    fn extract_tags_main_at_crate_root_as_binary_main_entry_point() {
+        use standardoc_ir::EntryPointKind;
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "Cargo.toml",
+            "[package]\nname = \"runme\"\nversion = \"0.1.0\"\n",
+        );
+        let src = "fn main() {}\nfn helper() {}\npub fn other_top_level() {}\n";
+        write(root, "src/main.rs", src);
+
+        let provider = RustProvider::new();
+        let ctx = ExtractContext {
+            workspace_root: root,
+            cross_workspace: None,
+        };
+        let extracted = provider.extract(src, "src/main.rs", &ctx).unwrap();
+
+        let main_sym = extracted
+            .symbols
+            .iter()
+            .find(|s| s.name == "main")
+            .expect("main symbol");
+        assert_eq!(main_sym.entry_point, Some(EntryPointKind::BinaryMain));
+
+        // Sibling free functions at crate root must NOT be tagged.
+        for name in ["helper", "other_top_level"] {
+            let s = extracted
+                .symbols
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("{name} symbol"));
+            assert_eq!(s.entry_point, None, "{name} must not be an entry-point");
+        }
+    }
+
+    #[test]
+    fn extract_tags_no_mangle_fn_as_ffi_export_entry_point() {
+        use standardoc_ir::EntryPointKind;
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "Cargo.toml",
+            "[package]\nname = \"bridged\"\nversion = \"0.1.0\"\n",
+        );
+        let src = "#[no_mangle]\npub extern \"C\" fn exported() {}\npub fn plain() {}\n";
+        write(root, "src/lib.rs", src);
+
+        let provider = RustProvider::new();
+        let ctx = ExtractContext {
+            workspace_root: root,
+            cross_workspace: None,
+        };
+        let extracted = provider.extract(src, "src/lib.rs", &ctx).unwrap();
+
+        let exp = extracted
+            .symbols
+            .iter()
+            .find(|s| s.name == "exported")
+            .expect("exported symbol");
+        assert_eq!(exp.entry_point, Some(EntryPointKind::FfiExport));
+
+        let plain = extracted
+            .symbols
+            .iter()
+            .find(|s| s.name == "plain")
+            .expect("plain symbol");
+        assert_eq!(plain.entry_point, None);
+    }
+
+    #[test]
+    fn extract_does_not_tag_nested_main_as_binary_main() {
+        use standardoc_ir::EntryPointKind;
+        // A `fn main` nested in a submodule is NOT the program entry-point —
+        // only the crate-root one is. This guards against false positives
+        // in test fixtures, embedded examples, and `mod tests { fn main … }`.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "Cargo.toml",
+            "[package]\nname = \"nested\"\nversion = \"0.1.0\"\n",
+        );
+        let src = "pub mod inner { pub fn main() {} }\n";
+        write(root, "src/lib.rs", src);
+
+        let provider = RustProvider::new();
+        let ctx = ExtractContext {
+            workspace_root: root,
+            cross_workspace: None,
+        };
+        let extracted = provider.extract(src, "src/lib.rs", &ctx).unwrap();
+        let nested = extracted
+            .symbols
+            .iter()
+            .find(|s| s.name == "main" && s.module.as_deref() == Some("nested::inner"))
+            .expect("nested main symbol");
+        assert_ne!(nested.entry_point, Some(EntryPointKind::BinaryMain));
+    }
+
+    #[test]
     fn provider_is_send_sync_via_arc() {
         let provider: Arc<dyn LanguageProvider> = Arc::new(RustProvider::new());
         // Compile-time assertion via Arc<dyn LanguageProvider> (trait requires Send + Sync).

@@ -653,6 +653,7 @@ mod tests {
                 decl_kind: None,
                 implements_trait: None,
                 receiver_type: None,
+                entry_point: None,
                 name: fqdn.rsplit("::").next().unwrap_or(fqdn).into(),
                 fqdn: fqdn.into(),
                 kind: Kind::Callable,
