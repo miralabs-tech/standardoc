@@ -27,6 +27,7 @@ import classigo from 'classigo';
 import { focusStore, type FocusState } from '../../focus-store';
 import type {
 	ExplorerEntryPoint,
+	ExplorerExpandDetail,
 	ExplorerNodeKind,
 	ExplorerSearchDetail,
 	ExplorerSelectDetail,
@@ -236,6 +237,7 @@ export class ExplorerElement extends HTMLElement {
 		const li = document.createElement('li');
 		li.className = C.node;
 		const hasChildren = node.children !== undefined && node.children.length > 0;
+		const canExpand = hasChildren || node.expandable === true;
 		const isExpanded = this.#expanded.has(node.id);
 		const isSelected = node.fqdn !== null && node.fqdn !== undefined && node.fqdn === this.#focus.current;
 
@@ -245,7 +247,7 @@ export class ExplorerElement extends HTMLElement {
 
 		const twisty = document.createElement('span');
 		twisty.className = C.nodeTwisty;
-		twisty.textContent = hasChildren ? (isExpanded ? '▾' : '▸') : '';
+		twisty.textContent = canExpand ? (isExpanded ? '▾' : '▸') : '';
 
 		const icon = document.createElement('span');
 		icon.className = classigo(C.nodeIcon, this.#iconClassFor(node.kind));
@@ -258,9 +260,20 @@ export class ExplorerElement extends HTMLElement {
 		row.appendChild(icon);
 		row.appendChild(label);
 		row.addEventListener('click', () => {
-			if (hasChildren) {
-				if (isExpanded) this.#expanded.delete(node.id);
-				else this.#expanded.add(node.id);
+			if (canExpand) {
+				if (isExpanded) {
+					this.#expanded.delete(node.id);
+				} else {
+					this.#expanded.add(node.id);
+					// Lazy-load: first expansion of a node declared expandable
+					// but with no children yet → ask the host to populate.
+					if (!hasChildren && node.expandable === true) {
+						const detail: ExplorerExpandDetail = { id: node.id, fqdn: node.fqdn ?? null };
+						this.dispatchEvent(new CustomEvent('sd-explorer-expand', {
+							detail, bubbles: true, composed: true,
+						}));
+					}
+				}
 				this.#renderTree();
 			}
 			if (node.fqdn) this.#select(node.fqdn, 'tree');
@@ -268,10 +281,18 @@ export class ExplorerElement extends HTMLElement {
 
 		li.appendChild(row);
 
-		if (hasChildren && isExpanded) {
+		if (canExpand && isExpanded) {
 			const childUl = document.createElement('ul');
 			childUl.className = C.nodeChildren;
-			for (const child of node.children!) childUl.appendChild(this.#renderNode(child, depth + 1));
+			if (hasChildren) {
+				for (const child of node.children!) childUl.appendChild(this.#renderNode(child, depth + 1));
+			} else if (node.loading === true) {
+				const loadingLi = document.createElement('li');
+				loadingLi.className = classigo(C.node, C.empty);
+				loadingLi.style.paddingLeft = `${12 + (depth + 1) * 12}px`;
+				loadingLi.textContent = 'Loading…';
+				childUl.appendChild(loadingLi);
+			}
 			li.appendChild(childUl);
 		}
 		return li;

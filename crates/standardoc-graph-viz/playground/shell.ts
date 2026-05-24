@@ -25,6 +25,8 @@ import type {
 import type {
 	ExplorerElement,
 	ExplorerEntryPoint,
+	ExplorerExpandDetail,
+	ExplorerNodeKind,
 	ExplorerTreeNode,
 	EntryPointKind,
 	GraphClickDetail,
@@ -78,18 +80,53 @@ async function boot(): Promise<void> {
 		focusStore.setFocus(fqdn);
 	});
 
-	// Mount projects into the Explorer tree (top-level only for v1; deeper
-	// drilling lands in a follow-up when module-walking is wired).
+	// Mount projects into the Explorer tree. Projects are marked
+	// `expandable` so the first click triggers a lazy fetch of their
+	// root-level symbols via `list_symbols(module=project.label)`.
 	setStatus('list projects…');
 	const projectsRes = await mcp.listProjects().catch(() => null);
-	const tree: ExplorerTreeNode[] = projectsRes
-		? projectsRes.projects.map(p => ({
-			id: `project:${p.project_id}`,
-			label: p.label,
-			kind: 'project',
-		}))
+	const projectByNodeId = new Map<string, { label: string }>();
+	let tree: ExplorerTreeNode[] = projectsRes
+		? projectsRes.projects.map(p => {
+			const id = `project:${p.project_id}`;
+			projectByNodeId.set(id, { label: p.label });
+			return {
+				id,
+				label: p.label,
+				kind: 'project' as ExplorerNodeKind,
+				expandable: true,
+			};
+		})
 		: [];
 	explorerEl.tree = tree;
+
+	// Lazy tree expansion. When the user expands a project node we
+	// fetch list_symbols(module=label) — exact-match returns root-level
+	// items of the project (re-exports, top-level fns, root structs).
+	// Deeper module navigation needs a different IR query and is left
+	// for Phase 3 alongside the Overview canvas.
+	explorerEl.addEventListener('sd-explorer-expand', async ev => {
+		const detail = (ev as CustomEvent<ExplorerExpandDetail>).detail;
+		const project = projectByNodeId.get(detail.id);
+		if (project === undefined) return;
+		// Optimistically render a loading placeholder.
+		tree = mutateNode(tree, detail.id, n => ({ ...n, loading: true }));
+		explorerEl.tree = tree;
+		try {
+			const res = await mcp.listSymbols({ module: project.label, limit: 200 });
+			const children: ExplorerTreeNode[] = res.items.map(s => ({
+				id: `sym:${s.fqdn}`,
+				label: s.name,
+				kind: mapRawKind(s),
+				fqdn: s.fqdn,
+			}));
+			tree = mutateNode(tree, detail.id, n => ({ ...n, children, loading: false }));
+			explorerEl.tree = tree;
+		} catch {
+			tree = mutateNode(tree, detail.id, n => ({ ...n, loading: false }));
+			explorerEl.tree = tree;
+		}
+	});
 
 	// Entry points — list_symbols doesn't expose an entry_point filter
 	// yet, so we pull a bounded slice and filter client-side. Good enough
@@ -167,6 +204,37 @@ async function boot(): Promise<void> {
 	});
 
 	setStatus(`ready (${entryPoints.length} entry points)`);
+}
+
+function mapRawKind(s: RawSymbol): ExplorerNodeKind {
+	const decl = s.decl_kind ?? '';
+	if (decl === 'struct') return 'struct';
+	if (decl === 'enum') return 'enum';
+	if (decl === 'function' || decl === 'method') return 'function';
+	if (decl === 'trait' || decl === 'interface') return 'trait';
+	if (decl === 'const' || decl === 'static') return 'value';
+	if (decl === 'macro') return 'macro';
+	switch (s.kind) {
+		case 'type': return 'struct';
+		case 'callable': return 'function';
+		case 'value': return 'value';
+		case 'macro': return 'macro';
+		default: return 'unknown';
+	}
+}
+
+function mutateNode(
+	tree: ReadonlyArray<ExplorerTreeNode>,
+	id: string,
+	patch: (n: ExplorerTreeNode) => ExplorerTreeNode,
+): ExplorerTreeNode[] {
+	return tree.map(n => {
+		if (n.id === id) return patch(n);
+		if (n.children !== undefined && n.children.length > 0) {
+			return { ...n, children: mutateNode(n.children, id, patch) };
+		}
+		return n;
+	});
 }
 
 function shortFqdn(fqdn: string): string {

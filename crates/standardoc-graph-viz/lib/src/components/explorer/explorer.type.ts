@@ -27,6 +27,19 @@ export interface ExplorerTreeNode {
 	/** Resolved FQDN if this node maps to a symbol. Folders/projects leave this null. */
 	readonly fqdn?: string | null;
 	readonly children?: ReadonlyArray<ExplorerTreeNode>;
+	/**
+	 * `true` when this node should render as expandable even though
+	 * `children` is undefined — the host will lazily populate them in
+	 * response to `sd-explorer-expand`.
+	 */
+	readonly expandable?: boolean;
+	/** Optional loading marker — renders as a `…` child placeholder. */
+	readonly loading?: boolean;
+}
+
+export interface ExplorerExpandDetail {
+	readonly id: string;
+	readonly fqdn?: string | null;
 }
 
 export type EntryPointKind = 'binary_main' | 'public_api' | 'ffi_export';
