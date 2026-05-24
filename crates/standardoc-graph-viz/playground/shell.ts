@@ -129,21 +129,12 @@ async function boot(): Promise<void> {
 	});
 
 	// Entry points — list_symbols doesn't expose an entry_point filter
-	// yet, so we pull a bounded slice and filter client-side. Good enough
-	// for shell validation; a server-side filter is wish-list when the IR
-	// surfaces one.
+	// yet, so we walk every page via the cursor and filter client-side.
+	// Bounded above by PAGE_SIZE * MAX_PAGES so a runaway daemon can't
+	// hang the boot path; the limit is generous enough for realistic
+	// workspaces.
 	setStatus('entry points…');
-	const epRes = await mcp.listSymbols({ limit: 1000 }).catch(() => null);
-	const entryPoints: ExplorerEntryPoint[] = epRes
-		? epRes.items
-			.filter((s): s is RawSymbol & { entry_point: string } =>
-				typeof s.entry_point === 'string' && s.entry_point.length > 0)
-			.map(s => ({
-				fqdn: s.fqdn,
-				label: shortFqdn(s.fqdn),
-				kind: s.entry_point as EntryPointKind,
-			}))
-		: [];
+	const entryPoints = await collectEntryPoints(mcp, status => setStatus(status));
 	explorerEl.entryPoints = entryPoints;
 
 	// Load the full workspace graph into the overview canvas.
@@ -204,6 +195,36 @@ async function boot(): Promise<void> {
 	});
 
 	setStatus(`ready (${entryPoints.length} entry points)`);
+}
+
+const EP_PAGE_SIZE = 500;
+const EP_MAX_PAGES = 50; // 25k symbols ceiling, generous for any realistic workspace
+
+async function collectEntryPoints(
+	mcp: McpBrowse,
+	report: (status: string) => void,
+): Promise<ExplorerEntryPoint[]> {
+	const found: ExplorerEntryPoint[] = [];
+	let cursor: string | undefined;
+	let page = 0;
+	while (page < EP_MAX_PAGES) {
+		page++;
+		const res = await mcp.listSymbols({ limit: EP_PAGE_SIZE, cursor }).catch(() => null);
+		if (res === null) break;
+		for (const s of res.items) {
+			if (typeof s.entry_point === 'string' && s.entry_point.length > 0) {
+				found.push({
+					fqdn: s.fqdn,
+					label: shortFqdn(s.fqdn),
+					kind: s.entry_point as EntryPointKind,
+				});
+			}
+		}
+		report(`entry points… (page ${page}, ${found.length} found)`);
+		if (res.next_cursor === undefined || res.next_cursor === null || res.next_cursor.length === 0) break;
+		cursor = res.next_cursor;
+	}
+	return found;
 }
 
 function mapRawKind(s: RawSymbol): ExplorerNodeKind {
