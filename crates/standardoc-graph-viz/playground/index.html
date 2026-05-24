@@ -13,9 +13,20 @@
       status-kind="booting"
       status-text="booting…"
     ></standardoc-toolbar>
-    <nav id="breadcrumb" class="breadcrumb" aria-label="graph focus"></nav>
+    <header class="graph-header">
+      <nav id="breadcrumb" class="breadcrumb" aria-label="graph focus"></nav>
+      <nav id="filters" class="filters" aria-label="graph filters">
+        <label class="filter-toggle">
+          <input type="checkbox" id="toggle-tests" />
+          <span>Include tests</span>
+        </label>
+      </nav>
+    </header>
     <main>
-      <standardoc-graph id="graph"></standardoc-graph>
+      <div class="graph-wrap">
+        <standardoc-graph id="graph"></standardoc-graph>
+        <div id="node-labels" class="node-labels"></div>
+      </div>
       <standardoc-hud id="hud"></standardoc-hud>
       <aside id="legend" class="legend">
         <button id="legend-toggle" class="legend-toggle" type="button">Legend</button>
@@ -25,6 +36,14 @@
         <h3>Pick a symbol</h3>
         <p class="empty">Hover a chip in the canvas to inspect its edges; click to log its FQDN.</p>
       </aside>
+      <nav id="camera-presets" class="camera-presets" aria-label="camera + drill controls" hidden>
+        <button type="button" data-action="up">↑ Up</button>
+        <span class="camera-presets-sep"></span>
+        <button type="button" data-preset="orbit">Orbit</button>
+        <button type="button" data-preset="top">Top</button>
+        <button type="button" data-preset="front">Front</button>
+        <button type="button" data-preset="side">Side</button>
+      </nav>
     </main>
     <script type="module" src="/main.js"></script>
   </body>

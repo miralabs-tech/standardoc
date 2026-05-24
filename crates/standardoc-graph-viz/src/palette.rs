@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::kind::Kind;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Palette {
     #[serde(default = "default_background")]
@@ -34,12 +36,8 @@ pub(crate) struct Palette {
     pub edge_implements: String,
     #[serde(default = "default_edge_references")]
     pub edge_references: String,
-    #[serde(default = "default_edge_defines")]
-    pub edge_defines: String,
     #[serde(default = "default_edge_uses_type")]
     pub edge_uses_type: String,
-    #[serde(default = "default_edge_exposes_api")]
-    pub edge_exposes_api: String,
     #[serde(default = "default_lang_rust")]
     pub lang_rust: String,
     #[serde(default = "default_lang_typescript")]
@@ -92,9 +90,7 @@ impl Default for Palette {
             edge_extends: default_edge_extends(),
             edge_implements: default_edge_implements(),
             edge_references: default_edge_references(),
-            edge_defines: default_edge_defines(),
             edge_uses_type: default_edge_uses_type(),
-            edge_exposes_api: default_edge_exposes_api(),
             lang_rust: default_lang_rust(),
             lang_typescript: default_lang_typescript(),
             lang_javascript: default_lang_javascript(),
@@ -128,9 +124,7 @@ impl Palette {
             "EXTENDS" => &self.edge_extends,
             "IMPLEMENTS" => &self.edge_implements,
             "REFERENCES" => &self.edge_references,
-            "DEFINES" => &self.edge_defines,
             "USES_TYPE" => &self.edge_uses_type,
-            "EXPOSES_API" => &self.edge_exposes_api,
             _ => &self.foreground,
         }
     }
@@ -174,6 +168,38 @@ impl Palette {
     }
 }
 
+/// Per-`Kind` header / sphere colour for symbol cards. Hardcoded
+/// because the JSON `Palette` contract is host-driven and we don't
+/// want to grow it for V2 — promote these to palette fields if the
+/// scheme needs to be themable. Shared by the 2D card renderer and
+/// the 3D upload path so the two views read with one identity.
+pub(crate) fn kind_color_hex(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Module => "#b180d7",   // purple — namespaces
+        Kind::Type => "#cca700",     // yellow — declarations
+        Kind::Callable => "#3794ff", // blue — behaviour
+        Kind::Value => "#89d185",    // green — values / consts
+        Kind::Macro => "#f48771",    // orange — meta
+        Kind::Unknown => "#9d9d9d",  // grey — catch-all
+    }
+}
+
+/// Halo colour for Phase 3 (Flow) entry-point highlight, keyed on
+/// the snake_case `EntryPointKind` wire tag (`binary_main` /
+/// `public_api` / `ffi_export`). Returns `None` for any unknown tag
+/// so a future IR variant simply paints no halo until the renderer
+/// learns about it. Hardcoded for the same reason as `kind_color_hex`
+/// — the JSON `Palette` is host-driven and we don't want to grow it
+/// just for V3. Shared by the 2D card renderer and the 3D upload path.
+pub(crate) fn entry_point_halo_color(tag: &str) -> Option<&'static str> {
+    match tag {
+        "binary_main" => Some("#4a9eff"), // cornflower blue — the program's root
+        "public_api" => Some("#f5b942"),  // amber — public surface
+        "ffi_export" => Some("#ff8a3a"),  // orange — foreign boundary
+        _ => None,
+    }
+}
+
 fn default_background() -> String {
     "#1e1e1e".into()
 }
@@ -213,14 +239,8 @@ fn default_edge_implements() -> String {
 fn default_edge_references() -> String {
     "#cccccc".into()
 }
-fn default_edge_defines() -> String {
-    "#89d185".into()
-}
 fn default_edge_uses_type() -> String {
     "#f48771".into()
-}
-fn default_edge_exposes_api() -> String {
-    "#b180d7".into()
 }
 
 // Language accent colors — GitHub linguist palette.

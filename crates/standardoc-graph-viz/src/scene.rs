@@ -1,11 +1,11 @@
-//! Laid-out scene: every node has a world-space rectangle, edges
-//! reference nodes by index. Built from a [`GraphPayload`] in one pass
-//! by the [`crate::layout`] module.
+//! Renderable snapshot of the **current drill level**.
 //!
-//! `Node::visibility` / `language_kind` / `owner_index` are stored
-//! today even though the renderer ignores them — the upcoming filter
-//! chips (kind / visibility / language) read them, as does the focal
-//! mode for the within-cluster anchoring.
+//! A `Scene` holds the children of the focused tree node laid out as
+//! cards, plus the cross-link edges aggregated to this altitude. It is
+//! rebuilt from scratch every time the drill focus moves (descend /
+//! ascend / focus_to) — there is no workspace-wide layout cache. The
+//! single source of truth for hierarchy is [`crate::tree::DrillTree`];
+//! `Scene` is a *dumb projection* the 2D renderer consumes.
 
 #![allow(dead_code)]
 
@@ -13,64 +13,85 @@ use std::collections::HashMap;
 
 use web_sys::CanvasRenderingContext2d;
 
-use crate::hierarchy::Hierarchy;
 use crate::kind::Kind;
 use crate::layout;
-use crate::payload::{EdgeEntry, GraphPayload};
+use crate::payload::EdgeEntry;
 use crate::render::truncate_to_width;
+use crate::tree::DrillTree;
 
 #[derive(Debug, Default)]
 pub(crate) struct Scene {
-    pub hierarchy: Hierarchy,
-    pub nodes: Vec<Node>,
+    pub cards: Vec<Card>,
     pub edges: Vec<Edge>,
-    /// fqdn → index in `nodes`. Built once, used both by hit-testing
-    /// and by edge resolution. Hot path on every pointer-move so we
-    /// keep it as a `HashMap` rather than a linear scan.
-    pub node_by_fqdn: HashMap<String, usize>,
-    /// Cached AABB over all nodes — used by the viewport's `fit_to`.
+    /// `tree.nodes` index → index in `cards`. Built once per level
+    /// rebuild; used by hit-testing and by `replace_edges` to map
+    /// hover-fetched edges back to visible cards.
+    pub card_by_tree_idx: HashMap<u32, usize>,
+    /// fqdn → index in `cards`. Only populated for leaf cards (with
+    /// a non-empty `fqdn`). Used by `replace_edges` to resolve a
+    /// hover-fetched edge set against the current level.
+    pub card_by_fqdn: HashMap<String, usize>,
+    /// Cached AABB over all cards — used by `Viewport::fit_to`.
     pub bounds: Bounds,
-    /// `(foundation, dependant)` pairs of `hierarchy.nodes` indices —
-    /// the aggregated frame-tier dependencies the renderer draws as
-    /// persistent wires.
-    pub frame_edges: Vec<(u32, u32)>,
 }
 
+/// One renderable card in the current drill level. Each card stands
+/// for one child of the focused tree node. Container cards (with
+/// children of their own) descend on click; leaf cards (no children)
+/// fire the node-click callback with their `fqdn`.
 #[derive(Debug, Clone)]
-pub(crate) struct Node {
-    pub fqdn: String,
-    pub name: String,
-    pub kind: Kind,
-    pub visibility: String,
-    pub language_kind: String,
-    /// Broad source language (`rust` / `typescript` / `c` / `lua` /
-    /// …) — the serde-lowercased IR `Language`. Drives the chip's
-    /// left accent bar via `Palette::language_color`.
+pub(crate) struct Card {
+    /// Back-pointer into `DrillTree.nodes`. Stable across renders for
+    /// the same workspace — the renderer round-trips this through
+    /// hover / focus callbacks rather than relying on positional
+    /// indices that shift with every layout.
+    pub tree_idx: u32,
+    /// Display name (project label or symbol name).
+    pub label: String,
+    /// Broad language tag (`rust` / `typescript` / `bun` / …) used by
+    /// the palette to colour the card header.
     pub language: String,
-    pub is_external: bool,
-    /// Index into `Scene.hierarchy.nodes` of the container node that
-    /// owns this chip. Usually a leaf, but can be an intermediate
-    /// node when a module path is both a terminal (own items) and a
-    /// parent (sub-modules) — e.g. `std::io` carries `Read` AND
-    /// parents `std::io::BufReader`. `u32` keeps the per-node
-    /// back-pointer compact at scale (vs. `String` full-paths which
-    /// blow up to ~100 MB on 500 k-symbol workspaces).
-    pub owner_index: u32,
+    /// Source-symbol FQDN — empty for synthetic project cards. The
+    /// node-click callback fires with this value for leaf cards.
+    pub fqdn: String,
+    /// Symbol kind — drives the per-card header colour and the
+    /// per-Kind grouping the level layout applies (Modules first,
+    /// then Types / Functions / Values / Macros / Unknown).
+    /// `Unknown` for project cards.
+    pub kind: Kind,
+    pub is_container: bool,
+    /// Number of nodes in this subtree (excluding self). Drives the
+    /// card's intrinsic size — projects with more symbols read larger.
+    pub descendant_count: u32,
+    /// `true` for ghost cards materialised from `tree.cross_edges()`
+    /// — siblings of the focused node that the focused subtree
+    /// couples to. Drawn dashed + semi-transparent so the eye reads
+    /// them as "context, not current level". Clicking one refocuses.
+    pub is_ghost: bool,
     pub x: f64,
     pub y: f64,
     pub w: f64,
     pub h: f64,
-    /// Pre-truncated chip label, computed once after layout via
-    /// `Scene::prepare_labels`. Empty until that pass runs; the
-    /// renderer falls back to `name` when empty so a forgotten
-    /// `prepare_labels` call still draws (just less compact).
-    pub display_name: String,
+    /// Pre-truncated label, computed once by `prepare_labels`. Empty
+    /// until that pass runs; the renderer falls back to `label` so a
+    /// forgotten call still draws.
+    pub display_label: String,
+    /// Phase 3 (Flow) entry-point tag, mirrored from `TreeNode`. The
+    /// 2D renderer paints a coloured halo behind cards where this is
+    /// `Some(_)` so program roots / public-API surfaces / FFI exports
+    /// pop visually. `None` for synthetic project / virtual-module
+    /// cards and for any internal symbol.
+    pub entry_point: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Edge {
-    pub from_node: usize,
-    pub to_node: usize,
+    pub from_card: usize,
+    pub to_card: usize,
+    /// Aggregated edges (from `tree.level_edges()`) carry an empty
+    /// kind — they sum every cross-link kind between two subtrees.
+    /// Hover-specific edges (from `replace_edges`) keep the original
+    /// kind (`CALLS` / `IMPORTS` / …) so the renderer can colour them.
     pub kind: String,
 }
 
@@ -130,95 +151,150 @@ impl Default for Bounds {
 }
 
 impl Scene {
-    pub(crate) fn from_payload(payload: GraphPayload) -> Self {
-        let (hierarchy, nodes, frame_edges) =
-            layout::pack(payload.symbols, payload.projects, &payload.edges);
+    /// Build a fresh scene for the tree's current drill focus. Lays
+    /// the focused node's children out as cards (grid sized by
+    /// subtree weight) and aggregates the cross-link edges to this
+    /// altitude via [`DrillTree::level_edges`]. On top of that,
+    /// materialises **ghost cards** for every sibling of the focused
+    /// node that the focused subtree couples to (via
+    /// [`DrillTree::cross_edges`]); ghosts are positioned in a ring
+    /// around the primary grid so the user sees the cross-project /
+    /// cross-module relations the previous version dropped.
+    pub(crate) fn from_level(tree: &DrillTree, ctx: &CanvasRenderingContext2d) -> Self {
+        let (mut cards, mut bounds) = layout::layout_level(tree);
+        let primary_count = cards.len();
 
-        let mut node_by_fqdn = HashMap::with_capacity(nodes.len());
-        let mut bounds = Bounds::EMPTY;
-        for (idx, n) in nodes.iter().enumerate() {
-            node_by_fqdn.insert(n.fqdn.clone(), idx);
+        // Build the primary `tree_idx → card_index` lookup before any
+        // ghost cards land — `tree.level_edges` references primaries
+        // only, and ghost cross-edges resolve their inside endpoint
+        // through this same map.
+        let mut card_by_tree_idx: HashMap<u32, usize> = HashMap::with_capacity(primary_count);
+        for (i, c) in cards.iter().enumerate() {
+            card_by_tree_idx.insert(c.tree_idx, i);
         }
-        // Bounds is the union of all roots. Each root container
-        // transitively encloses every chip beneath it, so the union
-        // of roots is the world AABB.
-        for &r in &hierarchy.roots {
-            let n = &hierarchy.nodes[r as usize];
-            bounds.extend_rect(n.x as f64, n.y as f64, n.w as f64, n.h as f64);
+
+        let mut edges: Vec<Edge> = tree
+            .level_edges()
+            .into_iter()
+            .map(|(a, b)| Edge {
+                from_card: a as usize,
+                to_card: b as usize,
+                kind: String::new(),
+            })
+            .collect();
+
+        // Ghost cards — one per distinct sibling of the focused node
+        // that the focused subtree couples to. Stays empty at the
+        // root level (root has no siblings) and on leaf focus.
+        for (inside_tree_idx, sibling_tree_idx) in tree.cross_edges() {
+            let Some(&inside_card) = card_by_tree_idx.get(&inside_tree_idx) else {
+                continue;
+            };
+            let ghost_card = match card_by_tree_idx.get(&sibling_tree_idx).copied() {
+                Some(idx) => idx,
+                None => {
+                    let node = tree.node(sibling_tree_idx);
+                    let idx = cards.len();
+                    cards.push(Card {
+                        tree_idx: sibling_tree_idx,
+                        label: node.label.clone(),
+                        language: node.language.clone(),
+                        fqdn: node.fqdn.clone(),
+                        kind: node.kind,
+                        is_container: tree.is_container(sibling_tree_idx),
+                        descendant_count: node.descendant_count,
+                        is_ghost: true,
+                        x: 0.0,
+                        y: 0.0,
+                        w: 0.0,
+                        h: 0.0,
+                        display_label: String::new(),
+                        entry_point: node.entry_point.clone(),
+                    });
+                    card_by_tree_idx.insert(sibling_tree_idx, idx);
+                    idx
+                }
+            };
+            edges.push(Edge {
+                from_card: inside_card,
+                to_card: ghost_card,
+                kind: String::new(),
+            });
         }
 
-        let edges = resolve_edges(payload.edges, &node_by_fqdn);
+        // Place ghosts in a ring around the primary grid, expanding
+        // `bounds` to cover them so `Viewport::fit_to` frames the
+        // full context (primaries + ghosts) at once.
+        layout::place_ghosts(&mut cards, primary_count, &mut bounds);
 
-        Self {
-            hierarchy,
-            nodes,
+        // fqdn lookup (for `replace_edges` hover-edge resolution) —
+        // populated after ghosts so a sibling project's fqdn (empty
+        // for projects, so this row is a no-op) doesn't accidentally
+        // hijack the primary lookup.
+        let mut card_by_fqdn: HashMap<String, usize> = HashMap::with_capacity(cards.len());
+        for (i, c) in cards.iter().enumerate() {
+            if !c.fqdn.is_empty() && !c.is_ghost {
+                card_by_fqdn.insert(c.fqdn.clone(), i);
+            }
+        }
+
+        let mut scene = Self {
+            cards,
             edges,
-            node_by_fqdn,
+            card_by_tree_idx,
+            card_by_fqdn,
             bounds,
-            frame_edges,
-        }
+        };
+        scene.prepare_labels(ctx);
+        scene
     }
 
-    /// Replace the edge set without touching nodes, hierarchy, or the
-    /// `node_by_fqdn` index. Called from `GraphEngine::set_edges` so
-    /// the caller can stream in lazily-fetched edges (e.g. via hover)
-    /// without resetting the viewport.
+    /// Replace the drawn edge set with a hover-fetched neighborhood.
+    /// Endpoints not currently visible as leaf cards (no matching
+    /// `fqdn` at the current level) are dropped silently — a future
+    /// follow-up could surface them as off-card ghost markers.
     pub(crate) fn replace_edges(&mut self, raw: Vec<EdgeEntry>) {
-        self.edges = resolve_edges(raw, &self.node_by_fqdn);
+        self.edges = raw
+            .into_iter()
+            .filter_map(|e| {
+                let from = *self.card_by_fqdn.get(e.from.as_str())?;
+                let to = *self.card_by_fqdn.get(e.to.as_str())?;
+                if from == to {
+                    return None;
+                }
+                Some(Edge {
+                    from_card: from,
+                    to_card: to,
+                    kind: e.kind,
+                })
+            })
+            .collect();
     }
 
-    /// One-shot pass that runs `measure_text`-driven truncation for
-    /// every node and leaf title. Without this, the renderer would
-    /// call `ctx.measure_text` thousands of times PER FRAME — the
-    /// dominant cost for medium-sized graphs (>1 k symbols). Called
-    /// from `GraphEngine::load_graph` after `Scene::from_payload`.
-    /// Idempotent: re-running it with the same font + ctx is a no-op
-    /// in terms of output, just recomputes the same strings.
+    /// One-shot truncation pass — pre-computes `display_label` for
+    /// every card so the render hot path never calls `measure_text`.
+    /// Called from `from_level` after layout completes; safe to
+    /// re-run after a palette/theme change (idempotent for the same
+    /// ctx font).
     pub(crate) fn prepare_labels(&mut self, ctx: &CanvasRenderingContext2d) {
-        // Chip name truncation. CHIP_W and chip padding from
-        // `layout.rs` are duplicated as constants here to keep `scene`
-        // free of a circular dependency on the layout module's
-        // internals; if those change, bump these in lock-step (small
-        // surface, two consts).
-        const CHIP_TEXT_MAX_WIDTH: f64 = 200.0 - 50.0;
-        ctx.set_font("12px system-ui, sans-serif");
-        for n in &mut self.nodes {
-            n.display_name = truncate_to_width(ctx, &n.name, CHIP_TEXT_MAX_WIDTH);
-        }
-
-        // Header title (segment) and subtitle (full path), truncated
-        // for every node — leaves AND intermediates. The subtitle is
-        // skipped at draw time when it equals the title (root nodes
-        // whose only segment IS the full path).
-        ctx.set_font("600 12px system-ui, sans-serif");
-        for idx in 0..self.hierarchy.nodes.len() {
-            let title = {
-                let n = &self.hierarchy.nodes[idx];
-                truncate_to_width(ctx, &n.segment, n.w as f64 - 60.0)
-            };
-            self.hierarchy.nodes[idx].display_title = title;
-        }
-        ctx.set_font("10px system-ui, sans-serif");
-        for idx in 0..self.hierarchy.nodes.len() {
-            let i = idx as u32;
-            let full = self.hierarchy.full_path(i);
-            let n = &self.hierarchy.nodes[idx];
-            let subtitle = if full == n.segment {
-                String::new()
-            } else {
-                truncate_to_width(ctx, &full, n.w as f64 - 24.0)
-            };
-            self.hierarchy.nodes[idx].display_subtitle = subtitle;
+        ctx.set_font("600 14px system-ui, sans-serif");
+        for c in &mut self.cards {
+            let max_w = (c.w - 24.0).max(20.0);
+            c.display_label = truncate_to_width(ctx, &c.label, max_w);
         }
     }
 
-    pub(crate) fn hit_test(&self, world_x: f64, world_y: f64) -> Option<String> {
-        // Linear scan over nodes. Sufficient for the prototype scale
-        // (~10k nodes worst case). Spatial index (quadtree) lands
-        // with Round 6 when 100k+ workspaces become a real target.
-        for n in &self.nodes {
-            if world_x >= n.x && world_x <= n.x + n.w && world_y >= n.y && world_y <= n.y + n.h {
-                return Some(n.fqdn.clone());
+    /// Pick the card under a world-space coordinate, or `None` for a
+    /// hit on the void. Linear scan — at the current-level only, so
+    /// card counts stay bounded (~k entries, not workspace-wide).
+    pub(crate) fn hit_test(&self, world_x: f64, world_y: f64) -> Option<usize> {
+        for (i, c) in self.cards.iter().enumerate() {
+            if world_x >= c.x
+                && world_x <= c.x + c.w
+                && world_y >= c.y
+                && world_y <= c.y + c.h
+            {
+                return Some(i);
             }
         }
         None
@@ -228,93 +304,11 @@ impl Scene {
         self.bounds
     }
 
-    /// Bounds of the deepest hierarchy frame whose rectangle contains
-    /// the world point, or `None` when the point hits no frame. Drives
-    /// double-click zoom-to-fit navigation.
-    pub(crate) fn frame_bounds_at(&self, world_x: f64, world_y: f64) -> Option<Bounds> {
-        self.hierarchy
-            .nodes
-            .iter()
-            .filter(|n| {
-                let (x, y) = (n.x as f64, n.y as f64);
-                world_x >= x
-                    && world_x <= x + n.w as f64
-                    && world_y >= y
-                    && world_y <= y + n.h as f64
-            })
-            .max_by_key(|n| n.depth)
-            .map(|n| Bounds {
-                min_x: n.x as f64,
-                min_y: n.y as f64,
-                max_x: (n.x + n.w) as f64,
-                max_y: (n.y + n.h) as f64,
-            })
-    }
-
-    /// Bounds of the hierarchy frame at arena index `id`, or `None`
-    /// when `id` is out of range. Drives breadcrumb `fit_to_frame`.
-    pub(crate) fn frame_bounds(&self, id: u32) -> Option<Bounds> {
-        self.hierarchy.nodes.get(id as usize).map(|n| Bounds {
-            min_x: n.x as f64,
-            min_y: n.y as f64,
-            max_x: (n.x + n.w) as f64,
-            max_y: (n.y + n.h) as f64,
-        })
-    }
-
-    /// Breadcrumb trail (root → deepest) of frames whose rectangle
-    /// fully contains the world-space viewbox. Empty when the viewbox
-    /// is larger than every frame (full overview). Each entry is the
-    /// frame's `(segment, arena_index)`.
-    pub(crate) fn focus_path(&self, vx0: f64, vy0: f64, vx1: f64, vy1: f64) -> Vec<(String, u32)> {
-        let deepest = self
-            .hierarchy
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| {
-                (n.x as f64) <= vx0
-                    && (n.y as f64) <= vy0
-                    && (n.x + n.w) as f64 >= vx1
-                    && (n.y + n.h) as f64 >= vy1
-            })
-            .max_by_key(|(_, n)| n.depth)
-            .map(|(i, _)| i as u32);
-        let Some(mut cur) = deepest else {
-            return Vec::new();
-        };
-        let mut path: Vec<(String, u32)> = Vec::new();
-        loop {
-            let n = &self.hierarchy.nodes[cur as usize];
-            path.push((n.segment.clone(), cur));
-            match n.parent {
-                Some(p) => cur = p,
-                None => break,
-            }
-        }
-        path.reverse();
-        path
-    }
-
     pub(crate) fn symbol_count(&self) -> usize {
-        self.nodes.len()
+        self.cards.len()
     }
 
     pub(crate) fn edge_count(&self) -> usize {
         self.edges.len()
     }
-}
-
-fn resolve_edges(raw: Vec<EdgeEntry>, by_fqdn: &HashMap<String, usize>) -> Vec<Edge> {
-    raw.into_iter()
-        .filter_map(|e| {
-            let from = *by_fqdn.get(&e.from)?;
-            let to = *by_fqdn.get(&e.to)?;
-            Some(Edge {
-                from_node: from,
-                to_node: to,
-                kind: e.kind,
-            })
-        })
-        .collect()
 }

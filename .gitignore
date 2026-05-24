@@ -10,6 +10,7 @@ target-dev/
 # Refacto v1.0.0-beta.1: legacy crates parked here for cherry-pick during the
 # rewrite. Local-only — never committed.
 .old/
+.projects/
 
 # Standardoc runtime artifacts (created by the daemon when dogfooding the
 # tool on its own repo). User projects WILL want to commit `.standardoc/pages/`

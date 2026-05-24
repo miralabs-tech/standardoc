@@ -35,6 +35,10 @@ export interface GraphEngineFacade {
 
 	set_mode(mode: string): void;
 	enable_webgpu(canvas: HTMLCanvasElement): Promise<void>;
+	set_camera_preset(preset: string): void;
+	drill_up(): void;
+	reset_focus(): void;
+	label_layout(): string;
 
 	set_on_node_hover(cb: (fqdn: string | null) => void): void;
 	set_on_node_click(cb: (fqdn: string) => void): void;

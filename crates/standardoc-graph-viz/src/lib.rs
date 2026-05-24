@@ -27,8 +27,9 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_lossless)]
 
+mod camera;
+mod force3d;
 mod gpu;
-mod hierarchy;
 mod interaction;
 mod kind;
 mod layout;
@@ -36,35 +37,69 @@ mod palette;
 mod payload;
 mod render;
 mod scene;
+mod tree;
 mod viewport;
 
-/// One breadcrumb crumb — a frame's display label and its hierarchy
-/// arena index. Serialised into the `focus_path` JSON the host renders
-/// as a clickable breadcrumb; `id` round-trips back through
-/// `fit_to_frame`.
+/// One breadcrumb crumb — a tree node's display label and its
+/// `DrillTree.nodes` index. Serialised into the `focus_path` JSON
+/// the host renders as a clickable breadcrumb; `id` round-trips
+/// back through `fit_to_frame` to refocus that node.
 #[derive(serde::Serialize)]
 struct FocusCrumb {
     label: String,
     id: u32,
 }
 
+/// One projected node label for the WebGPU view's DOM overlay. The
+/// host pins a text element at `(x, y)` (CSS pixels) when `on` is
+/// true; `on` is false when the node sits behind the camera.
+#[derive(serde::Serialize)]
+struct LabelPos {
+    text: String,
+    x: f32,
+    y: f32,
+    on: bool,
+}
+
+use std::collections::HashMap;
+
+use glam::Vec3;
 use wasm_bindgen::prelude::*;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, Performance, window};
 
-use crate::gpu::WebGpuBackend;
+use crate::camera::Camera3D;
+use crate::force3d::Force3D;
+use crate::gpu::{LevelNode, WebGpuBackend};
 use crate::interaction::InteractionState;
 use crate::palette::Palette;
 use crate::payload::{EdgesPayload, GraphPayload};
 use crate::scene::Scene;
+use crate::tree::DrillTree;
 use crate::viewport::Viewport;
+
+/// Multiplier on the primary force-cloud radius for the ghost ring
+/// in the 3D view. Picked empirically so ghosts sit clearly outside
+/// the cloud even with sparse levels.
+const GHOST_RING_RADIUS_FACTOR: f32 = 1.8;
+/// Additive margin (world units) on the ghost ring, on top of the
+/// scaled primary radius — keeps small clouds from making ghosts
+/// land on top of primaries.
+const GHOST_RING_MARGIN: f32 = 120.0;
+/// Minimum subtree size for a container's label to be painted
+/// permanently (without hover) in the 3D view. Below this, the
+/// label only surfaces on hover — keeps the canvas from becoming a
+/// wall of text while still pinning the high-signal anchors
+/// (projects + heavy modules) so the user can orient without
+/// scrubbing every node.
+const LABEL_VISIBLE_THRESHOLD: u32 = 15;
 
 /// Active render backend. Mirrored to JS as `"canvas2d"` / `"webgpu"`
 /// via [`GraphEngine::mode`] so the host UI can reflect which path
 /// the engine is currently driving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackendMode {
-    Canvas2D,
-    WebGpu,
+enum RenderMode {
+    Blueprint2D,
+    Force3D,
 }
 
 /// Called automatically the first time `init()` runs on the JS side.
@@ -104,14 +139,42 @@ pub struct GraphEngine {
     /// frames, not the trivial pass-through case.
     last_tick_us: u32,
     perf: Option<Performance>,
-    /// Active render path. Defaults to Canvas2D; flips to WebGpu
+    /// Active render path. Defaults to Blueprint2D; flips to Force3D
     /// after a successful `enable_webgpu(canvas)` round-trip.
-    mode: BackendMode,
+    mode: RenderMode,
     /// Lazily-initialised WebGPU backend. `None` until the host calls
     /// `enable_webgpu` and the async init completes. Holding both
     /// backends warm lets the host toggle between them with a single
     /// `set_mode` call.
     gpu: Option<WebGpuBackend>,
+    /// Orbit camera driving the WebGPU 3D path. Independent of the 2D
+    /// `viewport`; `frame`d to the scene on `load_graph` and steered by
+    /// the pointer handlers while `mode` is `WebGpu`.
+    camera: Camera3D,
+    /// Per-level force-directed layout for the WebGPU path. Rebuilt
+    /// every drill (`load_graph` / descend / ascend); stepped once per
+    /// `tick` until it settles.
+    force3d: Force3D,
+    /// Drill-down hierarchy backing the WebGPU view — built from the
+    /// payload, navigated by clicks.
+    tree: DrillTree,
+    /// Aggregated edges of the currently-focused drill level, cached
+    /// so `tick` need not recompute them every settling frame.
+    /// Primary-to-primary only — cross-level edges (to ghost nodes)
+    /// are computed lazily in `build_gpu_edges` so they don't
+    /// pollute the force-spring set.
+    level_edges: Vec<(u32, u32)>,
+    /// `DrillTree.nodes` indices of the ghost nodes the 3D view
+    /// materialises around the primary force cloud — siblings of
+    /// the focused node that have cross-level edges into it. Mirrors
+    /// the 2D `Scene` ghost cards. Populated in `rebuild_current_level`,
+    /// consumed by `build_level_nodes`, `build_gpu_edges`,
+    /// `label_layout`, and `pick`.
+    ghost_tree_idxs: Vec<u32>,
+    /// Screen position of a pending click in `WebGpu` mode — `Some`
+    /// between `pointer_down` and `pointer_up` while no drag has
+    /// happened, so `pointer_up` can tell a click from an orbit.
+    drill_press: Option<(f32, f32)>,
 }
 
 #[wasm_bindgen]
@@ -156,8 +219,14 @@ impl GraphEngine {
             needs_redraw: true,
             last_tick_us: 0,
             perf,
-            mode: BackendMode::Canvas2D,
+            mode: RenderMode::Blueprint2D,
             gpu: None,
+            camera: Camera3D::identity(),
+            force3d: Force3D::empty(),
+            tree: DrillTree::empty(),
+            level_edges: Vec::new(),
+            ghost_tree_idxs: Vec::new(),
+            drill_press: None,
         })
     }
 
@@ -176,12 +245,10 @@ impl GraphEngine {
             .round()
             .clamp(1.0, f64::from(u32::MAX)) as u32;
         let mut backend = WebGpuBackend::init(canvas, backing_w, backing_h).await?;
-        backend.upload_scene(&self.scene, &self.palette);
-        backend.upload_view(
-            &self.viewport,
-            self.width * self.device_pixel_ratio,
-            self.height * self.device_pixel_ratio,
-        );
+        let level = self.build_level_nodes();
+        let edges = self.build_gpu_edges();
+        backend.upload_scene(&level, &edges, &self.palette);
+        backend.upload_view(&self.camera);
         self.gpu = Some(backend);
         self.needs_redraw = true;
         Ok(())
@@ -194,14 +261,14 @@ impl GraphEngine {
     /// warm so the toggle is instantaneous.
     pub fn set_mode(&mut self, mode: &str) -> Result<(), JsValue> {
         let next = match mode {
-            "canvas2d" => BackendMode::Canvas2D,
+            "canvas2d" => RenderMode::Blueprint2D,
             "webgpu" => {
                 if self.gpu.is_none() {
                     return Err(JsValue::from_str(
                         "WebGPU backend not initialised — call enable_webgpu(canvas) first.",
                     ));
                 }
-                BackendMode::WebGpu
+                RenderMode::Force3D
             }
             other => {
                 return Err(JsValue::from_str(&format!(
@@ -220,9 +287,85 @@ impl GraphEngine {
     /// host's UI (toggle buttons read the canonical state).
     pub fn mode(&self) -> String {
         match self.mode {
-            BackendMode::Canvas2D => "canvas2d".into(),
-            BackendMode::WebGpu => "webgpu".into(),
+            RenderMode::Blueprint2D => "canvas2d".into(),
+            RenderMode::Force3D => "webgpu".into(),
         }
+    }
+
+    /// Animate the orbit camera to a named preset angle for the WebGPU
+    /// 3D view — `"orbit"`, `"top"`, `"front"` or `"side"`. Unknown
+    /// names are ignored; the transition eases in over the next ~30
+    /// `tick`s.
+    pub fn set_camera_preset(&mut self, preset: &str) {
+        self.camera.apply_preset(preset);
+        self.needs_redraw = true;
+    }
+
+    /// Ascend one level in the WebGPU drill view — back toward the
+    /// projects. No-op at the root.
+    pub fn drill_up(&mut self) {
+        if self.tree.ascend() {
+            self.rebuild_current_level();
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Screen positions of the current drill level's node labels, as
+    /// JSON `[{text, x, y, on}]` — `(x, y)` in CSS pixels, `on` false
+    /// when the node is behind the camera. The host pins one DOM text
+    /// element per entry over the WebGPU canvas; call it every frame
+    /// so labels track orbit / dolly / layout settling.
+    pub fn label_layout(&self) -> String {
+        if !matches!(self.mode, RenderMode::Force3D) {
+            return "[]".to_string();
+        }
+        let w = self.width as f32;
+        let h = self.height.max(1.0) as f32;
+        let view_proj = self.camera.proj(w / h) * self.camera.view();
+        // Only the hovered node's label is emitted with `on = true`.
+        // The host pool keeps every DOM element but hides those whose
+        // `on` is false, so cluttering the 3D scene with permanent
+        // labels (the previous behaviour) is gone.
+        let hovered = self.interaction.hovered_tree_idx();
+        let project_label_pos = |pos: Vec3, idx: u32| -> LabelPos {
+            let clip = view_proj * pos.extend(1.0);
+            let visible = clip.w > 0.001;
+            let node = self.tree.node(idx);
+            // Pin a permanent label on heavy containers so the user
+            // can orient without scrubbing every node. Hover always
+            // wins regardless of weight.
+            let is_anchor = self.tree.is_container(idx)
+                && node.descendant_count >= LABEL_VISIBLE_THRESHOLD;
+            let on = visible && (Some(idx) == hovered || is_anchor);
+            let (x, y) = if on {
+                (
+                    (clip.x / clip.w * 0.5 + 0.5) * w,
+                    (1.0 - (clip.y / clip.w * 0.5 + 0.5)) * h,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            LabelPos {
+                text: node.label.clone(),
+                x,
+                y,
+                on,
+            }
+        };
+        let mut labels: Vec<LabelPos> = self
+            .tree
+            .current_level()
+            .iter()
+            .zip(self.force3d.positions())
+            .map(|(&idx, pos)| project_label_pos(*pos, idx))
+            .collect();
+        // Ghost labels — same hover gating as primaries, so a
+        // sibling-of-focus card only surfaces its name when the user
+        // points at it.
+        for (i, &tree_idx) in self.ghost_tree_idxs.iter().enumerate() {
+            labels.push(project_label_pos(self.ghost_position_3d(i), tree_idx));
+        }
+        serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// Load (or replace) the graph data the engine renders. The
@@ -234,15 +377,12 @@ impl GraphEngine {
     pub fn load_graph(&mut self, json: &str) -> Result<(), JsValue> {
         let payload: GraphPayload = serde_json::from_str(json)
             .map_err(|e| JsValue::from_str(&format!("load_graph parse: {e}")))?;
-        let mut scene = Scene::from_payload(payload);
-        // One-shot truncation pass. Without this the render loop would
-        // call `measure_text` once per chip, per frame — the dominant
-        // cost we measured at ~1 k symbols.
-        scene.prepare_labels(&self.ctx);
-        self.scene = scene;
-        if let Some(gpu) = &mut self.gpu {
-            gpu.upload_scene(&self.scene, &self.palette);
-        }
+        // Single source of truth for hierarchy + focus. The 2D scene
+        // and the 3D layout are both projections of this tree —
+        // `rebuild_current_level` builds them.
+        self.tree = DrillTree::build(&payload);
+        self.tree.reset_focus();
+        self.rebuild_current_level();
         self.fit();
         self.needs_redraw = true;
         Ok(())
@@ -268,8 +408,10 @@ impl GraphEngine {
         let next: Palette = serde_json::from_str(json)
             .map_err(|e| JsValue::from_str(&format!("set_palette parse: {e}")))?;
         self.palette = next;
+        let level = self.build_level_nodes();
+        let edges = self.build_gpu_edges();
         if let Some(gpu) = &mut self.gpu {
-            gpu.upload_scene(&self.scene, &self.palette);
+            gpu.upload_scene(&level, &edges, &self.palette);
         }
         self.needs_redraw = true;
         Ok(())
@@ -287,6 +429,23 @@ impl GraphEngine {
     /// has changed since the last paint, so a quiescent loop costs
     /// essentially nothing.
     pub fn tick(&mut self) {
+        // While the 3D layout is still settling, advance it once per
+        // frame and re-upload — keeps the WebGPU view animating even
+        // with no pointer input.
+        if matches!(self.mode, RenderMode::Force3D) && !self.force3d.settled() {
+            self.force3d.step();
+            let level = self.build_level_nodes();
+            let edges = self.build_gpu_edges();
+            if let Some(gpu) = &mut self.gpu {
+                gpu.upload_scene(&level, &edges, &self.palette);
+            }
+            self.needs_redraw = true;
+        }
+        // Advance an in-flight camera preset transition.
+        if self.camera.animating() {
+            self.camera.step_animation();
+            self.needs_redraw = true;
+        }
         if !self.needs_redraw {
             return;
         }
@@ -304,7 +463,7 @@ impl GraphEngine {
 
     fn dispatch_draw(&mut self) {
         match self.mode {
-            BackendMode::Canvas2D => render::draw(
+            RenderMode::Blueprint2D => render::draw(
                 &self.ctx,
                 self.width,
                 self.height,
@@ -314,13 +473,9 @@ impl GraphEngine {
                 &self.interaction,
                 &self.palette,
             ),
-            BackendMode::WebGpu => {
+            RenderMode::Force3D => {
                 if let Some(gpu) = &mut self.gpu {
-                    gpu.upload_view(
-                        &self.viewport,
-                        self.width * self.device_pixel_ratio,
-                        self.height * self.device_pixel_ratio,
-                    );
+                    gpu.upload_view(&self.camera);
                     if let Err(e) = gpu.render() {
                         web_sys::console::error_1(&e);
                     }
@@ -398,14 +553,61 @@ impl GraphEngine {
         if let Some((origin_x, origin_y)) = self.interaction.pan_origin() {
             let dx = sx - origin_x;
             let dy = sy - origin_y;
-            self.viewport.pan(dx, dy);
+            match self.mode {
+                RenderMode::Force3D => {
+                    self.camera.orbit(dx, dy);
+                    // A drag is an orbit, not a click — drop the pick.
+                    self.drill_press = None;
+                }
+                RenderMode::Blueprint2D => self.viewport.pan(dx, dy),
+            }
             self.interaction.set_pan_origin(Some((sx, sy)));
             self.needs_redraw = true;
             return;
         }
+        // 3D path: pick a level node in screen space, then set both
+        // the leaf-fqdn hover (drives the JS callback + detail panel)
+        // AND the universal tree-idx hover (drives the label layer's
+        // hover-only filter, which covers containers AND ghosts).
+        if matches!(self.mode, RenderMode::Force3D) {
+            let primary_count = self.tree.current_level().len() as u32;
+            let (next_tree_idx, next_fqdn) = match self.pick(x, y) {
+                Some(combined_idx) => {
+                    // `pick` returns a combined index — primaries
+                    // first then ghosts. Resolve to the underlying
+                    // `DrillTree.nodes` index without panicking on
+                    // ghost hits (the old `current_level()[idx]`
+                    // would have OOB'd and stuck the wasm borrow).
+                    let tree_idx = if combined_idx < primary_count {
+                        self.tree.current_level()[combined_idx as usize]
+                    } else {
+                        let ghost_i = (combined_idx - primary_count) as usize;
+                        match self.ghost_tree_idxs.get(ghost_i).copied() {
+                            Some(t) => t,
+                            None => return,
+                        }
+                    };
+                    let fqdn = self.tree.node(tree_idx).fqdn.clone();
+                    let fqdn_opt = if fqdn.is_empty() { None } else { Some(fqdn) };
+                    (Some(tree_idx), fqdn_opt)
+                }
+                None => (None, None),
+            };
+            let changed = next_tree_idx != self.interaction.hovered_tree_idx()
+                || next_fqdn != self.interaction.hovered();
+            if changed {
+                self.interaction.set_hovered_tree_idx(next_tree_idx);
+                self.interaction.set_hovered(next_fqdn.clone());
+                self.needs_redraw = true;
+                if let (Some(cb), Some(fqdn)) = (&self.on_node_hover, next_fqdn) {
+                    defer_callback(cb.clone(), Some(fqdn));
+                }
+            }
+            return;
+        }
         // A pointer over the minimap panel must not hover-select the
         // chips painted behind it.
-        let over_minimap = crate::render::minimap_world_target(
+        let over_minimap = render::minimap_world_target(
             self.width,
             self.height,
             self.scene.bounds(),
@@ -414,15 +616,27 @@ impl GraphEngine {
         )
         .is_some();
         let (wx, wy) = self.viewport.screen_to_world(sx, sy);
-        let hit = if over_minimap {
+        // hit_test now returns a card index into the current-level
+        // `scene.cards`. Convert to an fqdn for the hover state, but
+        // only for leaf cards — container cards carry an empty fqdn
+        // and don't fire the hover callback.
+        let hit_idx = if over_minimap {
             None
         } else {
             self.scene.hit_test(wx, wy)
         };
-        if hit != self.interaction.hovered() {
-            self.interaction.set_hovered(hit.clone());
+        let hit_fqdn = hit_idx.and_then(|i| {
+            let c = &self.scene.cards[i];
+            if c.fqdn.is_empty() {
+                None
+            } else {
+                Some(c.fqdn.clone())
+            }
+        });
+        if hit_fqdn != self.interaction.hovered() {
+            self.interaction.set_hovered(hit_fqdn.clone());
             self.needs_redraw = true;
-            if let (Some(cb), Some(fqdn)) = (&self.on_node_hover, hit) {
+            if let (Some(cb), Some(fqdn)) = (&self.on_node_hover, hit_fqdn) {
                 defer_callback(cb.clone(), Some(fqdn));
             }
         }
@@ -434,9 +648,16 @@ impl GraphEngine {
         }
         let sx = f64::from(x);
         let sy = f64::from(y);
+        // WebGPU path: a still press is a drill click, a press+drag is
+        // a camera orbit — `pointer_up` decides which from `drill_press`.
+        if matches!(self.mode, RenderMode::Force3D) {
+            self.interaction.set_pan_origin(Some((sx, sy)));
+            self.drill_press = Some((x, y));
+            return;
+        }
         // A click inside the minimap teleports the viewport (recenter,
         // keep zoom) instead of starting a pan or selecting a chip.
-        if let Some((wx, wy)) = crate::render::minimap_world_target(
+        if let Some((wx, wy)) = render::minimap_world_target(
             self.width,
             self.height,
             self.scene.bounds(),
@@ -449,68 +670,129 @@ impl GraphEngine {
             return;
         }
         let (wx, wy) = self.viewport.screen_to_world(sx, sy);
-        if let Some(fqdn) = self.scene.hit_test(wx, wy) {
-            self.interaction.set_click_candidate(Some((fqdn, sx, sy)));
+        if let Some(i) = self.scene.hit_test(wx, wy) {
+            // Stash the stable tree-node index; `on_pointer_up`
+            // resolves it back to a card to decide drill vs callback.
+            let tree_idx = self.scene.cards[i].tree_idx;
+            self.interaction
+                .set_click_candidate(Some((tree_idx, sx, sy)));
         } else {
             self.interaction.set_pan_origin(Some((sx, sy)));
         }
     }
 
     pub fn on_pointer_up(&mut self, x: f32, y: f32, _button: u8) {
-        if let Some((fqdn, dx, dy)) = self.interaction.take_click_candidate() {
+        if matches!(self.mode, RenderMode::Force3D) {
+            // `drill_press` survives only when no orbit drag happened
+            // between down and up — i.e. this was a click.
+            if self.drill_press.take().is_some() {
+                self.drill_pick(x, y);
+            }
+            self.interaction.set_pan_origin(None);
+            return;
+        }
+        if let Some((tree_idx, dx, dy)) = self.interaction.take_click_candidate() {
             let moved = (f64::from(x) - dx).hypot(f64::from(y) - dy);
             if moved < 5.0 {
-                if let Some(cb) = &self.on_node_click {
-                    defer_callback(cb.clone(), Some(fqdn));
+                // Ghost card ⇒ refocus on the sibling it represents
+                // (a one-shot drill-out-and-into-sibling). Regular
+                // container ⇒ drill descend (parity with the 3D
+                // click-to-drill path). Leaf ⇒ fire the click
+                // callback with the card's fqdn.
+                let is_ghost = self
+                    .scene
+                    .card_by_tree_idx
+                    .get(&tree_idx)
+                    .map(|&i| self.scene.cards[i].is_ghost)
+                    .unwrap_or(false);
+                if is_ghost {
+                    if self.tree.focus_to(tree_idx) {
+                        self.rebuild_current_level();
+                        self.needs_redraw = true;
+                    }
+                } else if self.tree.is_container(tree_idx) {
+                    if self.tree.descend(tree_idx) {
+                        self.rebuild_current_level();
+                        self.needs_redraw = true;
+                    }
+                } else {
+                    let fqdn = self.tree.node(tree_idx).fqdn.clone();
+                    if !fqdn.is_empty() {
+                        if let Some(cb) = &self.on_node_click {
+                            defer_callback(cb.clone(), Some(fqdn));
+                        }
+                    }
                 }
             }
         }
         self.interaction.set_pan_origin(None);
     }
 
-    /// JS double-click → zoom-to-fit the deepest frame under the
-    /// cursor. Coordinates are CSS pixels relative to the canvas's
-    /// bounding rect, same convention as `on_pointer_*`.
+    /// JS double-click → drill UP gesture. In 2D Blueprint mode a
+    /// double-click on the empty space between cards ascends one
+    /// level (descend is already handled by single-click on a
+    /// container, so dblclick on a card would otherwise produce a
+    /// double-descend after the layout rebuilds). The 3D path is
+    /// inert here — it has its own up affordance.
     pub fn on_double_click(&mut self, x: f32, y: f32) {
+        if matches!(self.mode, RenderMode::Force3D) {
+            return;
+        }
         let (wx, wy) = self
             .viewport
             .screen_to_world(f64::from(x), f64::from(y));
-        if let Some(bounds) = self.scene.frame_bounds_at(wx, wy) {
-            self.viewport.fit_to(bounds, self.width, self.height);
+        if self.scene.hit_test(wx, wy).is_some() {
+            return;
+        }
+        if self.tree.ascend() {
+            self.rebuild_current_level();
             self.needs_redraw = true;
         }
     }
 
-    /// Breadcrumb trail for the current viewport as a JSON array
-    /// `[{label, id}]`, root → deepest. The host renders it as a
-    /// clickable breadcrumb; each `id` feeds `fit_to_frame`. Empty
-    /// array at full overview (no frame contains the viewport).
+    /// Breadcrumb trail for the current drill focus as a JSON array
+    /// `[{label, id}]`, root → focus. The host renders it as a
+    /// clickable breadcrumb; each `id` is a `DrillTree.nodes` index
+    /// that round-trips through `fit_to_frame` to refocus that node.
+    /// Empty array at the root level (no project descended into).
     pub fn focus_path(&self) -> String {
-        let (vx0, vy0) = self.viewport.screen_to_world(0.0, 0.0);
-        let (vx1, vy1) = self
-            .viewport
-            .screen_to_world(self.width, self.height);
         let crumbs: Vec<FocusCrumb> = self
-            .scene
-            .focus_path(vx0, vy0, vx1, vy1)
+            .tree
+            .breadcrumb()
             .into_iter()
             .map(|(label, id)| FocusCrumb { label, id })
             .collect();
         serde_json::to_string(&crumbs).unwrap_or_else(|_| "[]".to_string())
     }
 
-    /// Zoom-to-fit a frame by its hierarchy arena index (a breadcrumb
-    /// crumb `id`). No-op for an out-of-range id.
+    /// Refocus the drill view on the tree node `id` (a breadcrumb
+    /// crumb's id). The 2D scene + 3D layout rebuild around it. The
+    /// method name is kept for backwards compatibility with the JS
+    /// host; semantically it drives drill navigation now, not a 2D
+    /// viewport fit.
     pub fn fit_to_frame(&mut self, id: u32) {
-        if let Some(bounds) = self.scene.frame_bounds(id) {
-            self.viewport.fit_to(bounds, self.width, self.height);
+        if self.tree.focus_to(id) {
+            self.rebuild_current_level();
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Reset the drill focus to the root level (projects). The host's
+    /// "workspace" breadcrumb crumb feeds this. No-op when the focus
+    /// already sits at the root.
+    pub fn reset_focus(&mut self) {
+        if self.tree.reset_focus() {
+            self.rebuild_current_level();
             self.needs_redraw = true;
         }
     }
 
     pub fn on_pointer_leave(&mut self) {
-        if self.interaction.hovered().is_some() {
+        let had_hover = self.interaction.hovered().is_some()
+            || self.interaction.hovered_tree_idx().is_some();
+        if had_hover {
             self.interaction.set_hovered(None);
+            self.interaction.set_hovered_tree_idx(None);
             self.needs_redraw = true;
         }
         self.interaction.set_pan_origin(None);
@@ -518,8 +800,13 @@ impl GraphEngine {
 
     pub fn on_wheel(&mut self, x: f32, y: f32, delta_y: f32) {
         let factor = if delta_y < 0.0 { 1.15 } else { 1.0 / 1.15 };
-        self.viewport
-            .zoom_around(f64::from(x), f64::from(y), factor);
+        match self.mode {
+            RenderMode::Force3D => self.camera.dolly(factor as f32),
+            RenderMode::Blueprint2D => {
+                self.viewport
+                    .zoom_around(f64::from(x), f64::from(y), factor);
+            }
+        }
         self.needs_redraw = true;
     }
 
@@ -543,7 +830,7 @@ impl GraphEngine {
     /// engine is currently dispatching to it. The HUD uses this to
     /// decide whether to surface the GPU stat row at all.
     pub fn gpu_active(&self) -> bool {
-        matches!(self.mode, BackendMode::WebGpu) && self.gpu.is_some()
+        matches!(self.mode, RenderMode::Force3D) && self.gpu.is_some()
     }
 
     /// Number of instances rendered in the last WebGPU pass. Zero when
@@ -572,6 +859,239 @@ impl GraphEngine {
         self.viewport
             .center_on(self.scene.bounds(), self.width, self.height);
     }
+
+    /// Rebuild every per-level cache: the 2D card scene, the cached
+    /// aggregated edges, the 3D force layout + ghost ring, and the
+    /// orbit camera framing. Called whenever the drill focus moves
+    /// (`load_graph`, `descend`, `ascend`, `focus_to`) AND after a
+    /// `set_mode` flip — both backends are kept warm so toggling
+    /// between them is instantaneous. The GPU backend is pushed too
+    /// when present.
+    fn rebuild_current_level(&mut self) {
+        // Primary-to-primary level edges — consumed by the 3D force
+        // springs AND by the 2D scene. Cross-level (primary→ghost)
+        // edges are computed lazily in `build_gpu_edges` so they
+        // don't pollute the spring set.
+        self.level_edges = self.tree.level_edges();
+        // 3D ghost set — sibling-of-focus tree indices the focused
+        // subtree couples to. Deduplicated, order = first-seen.
+        let cross = self.tree.cross_edges();
+        let mut ghosts: Vec<u32> = Vec::new();
+        let mut ghost_seen: HashMap<u32, ()> = HashMap::new();
+        for &(_, sibling) in &cross {
+            if ghost_seen.insert(sibling, ()).is_none() {
+                ghosts.push(sibling);
+            }
+        }
+        self.ghost_tree_idxs = ghosts;
+        // 2D scene — cards + level edges + bounds + label truncation.
+        // Scene independently materialises its own 2D ghost cards
+        // via `tree.cross_edges()`; the 3D ghost list above is for
+        // the 3D ring placement only.
+        self.scene = Scene::from_level(&self.tree, &self.ctx);
+        // 3D primary layout — seeded on a sphere, settles over the
+        // next ticks.
+        let n = self.tree.current_level().len();
+        self.force3d = Force3D::for_level(n, self.level_edges.clone());
+        // Camera frames the union of primary cloud + ghost ring so
+        // the user sees the full context (including off-focus
+        // dependencies) at once.
+        let (center, radius) = self.force3d.bounding_sphere();
+        let frame_radius = if self.ghost_tree_idxs.is_empty() {
+            radius
+        } else {
+            ghost_ring_radius(radius) + radius * 0.3
+        };
+        self.camera.frame(center, frame_radius);
+        // Push to GPU — primaries + ghosts + combined edges.
+        if self.gpu.is_some() {
+            let nodes = self.build_level_nodes();
+            let edges = self.build_gpu_edges();
+            if let Some(gpu) = &mut self.gpu {
+                gpu.upload_scene(&nodes, &edges, &self.palette);
+            }
+        }
+    }
+
+    /// Snapshot the focused level's children + the ghost ring as
+    /// renderable nodes. Primaries come first (indices 0..n_primary,
+    /// matching `tree.current_level()`), ghosts next (indices
+    /// `n_primary..` matching `self.ghost_tree_idxs`). The ghost
+    /// positions are deterministic — a planar ring around the
+    /// primary cloud's bounding sphere.
+    fn build_level_nodes(&self) -> Vec<LevelNode> {
+        let mut nodes: Vec<LevelNode> = self
+            .tree
+            .current_level()
+            .iter()
+            .zip(self.force3d.positions())
+            .map(|(&idx, pos)| {
+                let node = self.tree.node(idx);
+                LevelNode {
+                    center: *pos,
+                    size: level_node_size(node.descendant_count),
+                    language: node.language.clone(),
+                    kind: node.kind,
+                    is_project: node.fqdn.is_empty(),
+                    is_container: self.tree.is_container(idx),
+                    is_ghost: false,
+                    entry_point: node.entry_point.clone(),
+                }
+            })
+            .collect();
+        for (i, &tree_idx) in self.ghost_tree_idxs.iter().enumerate() {
+            let node = self.tree.node(tree_idx);
+            nodes.push(LevelNode {
+                center: self.ghost_position_3d(i),
+                size: level_node_size(node.descendant_count),
+                language: node.language.clone(),
+                kind: node.kind,
+                is_project: node.fqdn.is_empty(),
+                is_container: self.tree.is_container(tree_idx),
+                is_ghost: true,
+                entry_point: node.entry_point.clone(),
+            });
+        }
+        nodes
+    }
+
+    /// Deterministic 3D position for a ghost node — a planar ring at
+    /// `y = center.y` orbiting the primary cloud's bounding sphere.
+    /// Same formula consumed by `build_level_nodes`, `label_layout`,
+    /// and `pick` so the three views stay in lockstep without
+    /// caching positions in `self`.
+    fn ghost_position_3d(&self, ghost_index: usize) -> Vec3 {
+        let count = self.ghost_tree_idxs.len().max(1) as f32;
+        let theta = std::f32::consts::TAU * (ghost_index as f32) / count;
+        let (center, radius) = self.force3d.bounding_sphere();
+        let ring = ghost_ring_radius(radius);
+        Vec3::new(
+            center.x + ring * theta.cos(),
+            center.y,
+            center.z + ring * theta.sin(),
+        )
+    }
+
+    /// Combined edges for GPU upload — primary-to-primary
+    /// (`self.level_edges`) plus primary-to-ghost (remapped from
+    /// `tree.cross_edges()` to indices in `build_level_nodes`'s
+    /// output: ghosts occupy `n_primary..`).
+    fn build_gpu_edges(&self) -> Vec<(u32, u32)> {
+        let primary_count = self.tree.current_level().len() as u32;
+        if self.ghost_tree_idxs.is_empty() {
+            return self.level_edges.clone();
+        }
+        let primary_lookup: HashMap<u32, u32> = self
+            .tree
+            .current_level()
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| (t, i as u32))
+            .collect();
+        let ghost_lookup: HashMap<u32, u32> = self
+            .ghost_tree_idxs
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| (t, primary_count + i as u32))
+            .collect();
+        let mut out = self.level_edges.clone();
+        for (inside, sibling) in self.tree.cross_edges() {
+            if let (Some(&i), Some(&g)) =
+                (primary_lookup.get(&inside), ghost_lookup.get(&sibling))
+            {
+                out.push((i, g));
+            }
+        }
+        out
+    }
+
+    /// Screen-space pick over BOTH primary nodes and ghost ring. The
+    /// returned index is into the combined `build_level_nodes()`
+    /// order — primaries first (`0..primary_count`), ghosts next
+    /// (`primary_count..`). `None` for a click on the void.
+    fn pick(&self, sx: f32, sy: f32) -> Option<u32> {
+        let primaries = self.force3d.positions();
+        let primary_count = primaries.len();
+        let w = self.width as f32;
+        let h = self.height.max(1.0) as f32;
+        let view_proj = self.camera.proj(w / h) * self.camera.view();
+        let mut best_idx: Option<u32> = None;
+        let mut best_d = 90.0_f32;
+        let consider = |idx: u32, pos: Vec3, best_idx: &mut Option<u32>, best_d: &mut f32| {
+            let clip = view_proj * pos.extend(1.0);
+            if clip.w <= 0.0 {
+                return;
+            }
+            let px = (clip.x / clip.w * 0.5 + 0.5) * w;
+            let py = (1.0 - (clip.y / clip.w * 0.5 + 0.5)) * h;
+            let d = (px - sx).hypot(py - sy);
+            if d < *best_d {
+                *best_d = d;
+                *best_idx = Some(idx);
+            }
+        };
+        for (i, pos) in primaries.iter().enumerate() {
+            consider(i as u32, *pos, &mut best_idx, &mut best_d);
+        }
+        for (i, _) in self.ghost_tree_idxs.iter().enumerate() {
+            let combined = (primary_count + i) as u32;
+            consider(combined, self.ghost_position_3d(i), &mut best_idx, &mut best_d);
+        }
+        best_idx
+    }
+
+    /// Resolve a click in `Force3D` mode. Primary container ⇒ drill
+    /// descend, primary leaf ⇒ fire the node-click callback. Ghost
+    /// (sibling-of-focus context node, drawn in the ring around the
+    /// primary cloud) ⇒ refocus the drill on that sibling.
+    fn drill_pick(&mut self, sx: f32, sy: f32) {
+        let Some(combined_idx) = self.pick(sx, sy) else {
+            return;
+        };
+        let primary_count = self.tree.current_level().len() as u32;
+        if combined_idx >= primary_count {
+            let ghost_idx = (combined_idx - primary_count) as usize;
+            let Some(&tree_idx) = self.ghost_tree_idxs.get(ghost_idx) else {
+                return;
+            };
+            if self.tree.focus_to(tree_idx) {
+                self.rebuild_current_level();
+                self.needs_redraw = true;
+            }
+            return;
+        }
+        let tree_idx = self.tree.current_level()[combined_idx as usize];
+        if self.tree.is_container(tree_idx) {
+            if self.tree.descend(tree_idx) {
+                self.rebuild_current_level();
+                self.needs_redraw = true;
+            }
+        } else if let Some(cb) = &self.on_node_click {
+            let fqdn = self.tree.node(tree_idx).fqdn.clone();
+            if !fqdn.is_empty() {
+                defer_callback(cb.clone(), Some(fqdn));
+            }
+        }
+    }
+}
+
+/// Billboard size for a drill node — gently scaled by subtree weight
+/// so a project full of symbols reads larger than a lone leaf. The
+/// quad is square so the impostor shapes (sphere / cube SDFs in
+/// `chip.wgsl` operate on a uniform `[-1, 1]²` parameter space)
+/// render as round circles / square boxes rather than the previous
+/// flattened ovals.
+fn level_node_size(descendant_count: u32) -> [f32; 2] {
+    let s = 60.0 + (1.0 + descendant_count as f32).ln() * 26.0;
+    [s, s]
+}
+
+/// World-space radius of the ghost ring around a primary cloud of
+/// `primary_radius`. Same factor + margin combination used by
+/// `build_level_nodes`, `label_layout`, and `pick` so the three
+/// views agree on where ghosts sit.
+fn ghost_ring_radius(primary_radius: f32) -> f32 {
+    primary_radius * GHOST_RING_RADIUS_FACTOR + GHOST_RING_MARGIN
 }
 
 /// Resize the canvas. The bitmap (backing store) is set to

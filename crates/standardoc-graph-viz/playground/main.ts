@@ -77,6 +77,14 @@ const graphEl = document.getElementById('graph') as GraphElement;
 const detailEl = document.getElementById('detail') as HTMLElement;
 const breadcrumbEl = document.getElementById('breadcrumb') as HTMLElement;
 
+// Module-level state consumed by both `main()` and the top-level
+// `renderDetail` panel renderer. `symbolByFqdn` is replaced on every
+// `loadGraph` cycle; `projectLabelById` is repopulated in the same
+// pass and lets the panel resolve cross-project edges to their
+// human-readable labels (`#3` → `standardoc-ir`).
+let symbolByFqdn = new Map<string, BrowseSymbol>();
+const projectLabelById = new Map<number, string>();
+
 interface FocusCrumb {
 	readonly label: string;
 	readonly id: number;
@@ -103,7 +111,7 @@ function paletteFromCss(): string {
 }
 
 class McpBrowse {
-	private constructor(private readonly client: Client) {}
+	private constructor(private readonly client: Client) { }
 
 	static async connect(): Promise<McpBrowse> {
 		const transport = new StreamableHTTPClientTransport(new URL('/mcp', window.location.origin));
@@ -129,8 +137,8 @@ class McpBrowse {
 	 * Depth-1 BFS expansion around `fqdn`. Unlike `get_context` (which
 	 * only surfaces callers/callees/imports/imported_by — i.e. CALLS +
 	 * IMPORTS), `fetch_graph` focal mode carries every edge kind:
-	 * EXTENDS / IMPLEMENTS / USES_TYPE / REFERENCES / DEFINES /
-	 * EXPOSES_API too. The hover panel needs all of them.
+	 * EXTENDS / IMPLEMENTS / USES_TYPE / REFERENCES too. The hover
+	 * panel needs all of them.
 	 */
 	async fetchNeighborhood(fqdn: string, includeExternal: boolean): Promise<FetchGraphResponse> {
 		const raw = await this.callTool('fetch_graph', {
@@ -181,29 +189,129 @@ async function fetchEdgesFor(
 	return graph?.edges ?? [];
 }
 
-function renderDetail(symbol: BrowseSymbol | null): void {
+interface ProjectSummary {
+	readonly id: number;
+	readonly label: string;
+}
+
+function shortFqdn(fqdn: string): string {
+	// Drop the project segment so the listed neighbour reads
+	// "graph::dedupe_location" rather than the redundant full path
+	// (the project of the hovered symbol is already on the panel).
+	const idx = fqdn.indexOf('::');
+	return idx >= 0 ? fqdn.slice(idx + 2) : fqdn;
+}
+
+function renderEdgeSection(
+	title: string,
+	totalLabel: string,
+	edges: ReadonlyArray<BrowseEdge>,
+	otherSide: (e: BrowseEdge) => string,
+): string {
+	if (edges.length === 0) return '';
+	// Bucket by edge kind so the panel surfaces "CALLS · 12" rather
+	// than one flat list — gives the reader the dependency type
+	// breakdown at a glance.
+	const byKind = new Map<string, BrowseEdge[]>();
+	for (const e of edges) {
+		const bucket = byKind.get(e.kind) ?? [];
+		bucket.push(e);
+		byKind.set(e.kind, bucket);
+	}
+	// Sort kinds by descending count so the heaviest bucket leads.
+	const kinds = [...byKind.entries()].sort((a, b) => b[1].length - a[1].length);
+	const blocks = kinds
+		.map(([kind, items]) => {
+			const top = items
+				.slice(0, 5)
+				.map(e => `<li><code>${escapeHtml(shortFqdn(otherSide(e)))}</code></li>`)
+				.join('');
+			const extra = items.length > 5 ? `<li class="detail-edge-more">+${items.length - 5} more…</li>` : '';
+			return `
+				<div class="detail-kind-row">
+					<span class="detail-kind-label">${escapeHtml(kind)}</span>
+					<span class="detail-kind-count">${items.length}</span>
+				</div>
+				<ul class="detail-edge-list">${top}${extra}</ul>
+			`;
+		})
+		.join('');
+	return `
+		<section class="detail-section">
+			<h4 class="detail-section-title">${title} · ${totalLabel}</h4>
+			${blocks}
+		</section>
+	`;
+}
+
+function renderDetail(
+	symbol: BrowseSymbol | null,
+	edges: ReadonlyArray<BrowseEdge> | null,
+): void {
 	if (symbol === null) {
-		detailEl.innerHTML = '<h3>Pick a symbol</h3><p class="empty">Hover a chip in the canvas to inspect its edges; click to log its FQDN.</p>';
+		detailEl.innerHTML = '<h3>Pick a symbol</h3><p class="empty">Hover a card in the canvas to inspect its dependencies; click to log its FQDN.</p>';
 		return;
 	}
+	const out = edges?.filter(e => e.outbound) ?? [];
+	const inb = edges?.filter(e => !e.outbound) ?? [];
+	// Cross-project context: count distinct projects touched on the
+	// other side of every edge. The hovered symbol's own project is
+	// excluded so "0 projects touched" means strictly intra-project.
+	const own = symbol.project_id ?? null;
+	const touched = new Map<number, ProjectSummary>();
+	if (edges) {
+		for (const e of edges) {
+			const other = symbolByFqdn.get(e.outbound ? e.to : e.from);
+			const pid = other?.project_id;
+			if (pid === null || pid === undefined) continue;
+			if (pid === own) continue;
+			if (!touched.has(pid)) {
+				touched.set(pid, { id: pid, label: projectLabelById.get(pid) ?? `#${pid}` });
+			}
+		}
+	}
+	const contextBlock = (() => {
+		if (edges === null) {
+			return '<section class="detail-section"><p class="detail-loading">Loading edges…</p></section>';
+		}
+		if (touched.size === 0) {
+			return `
+				<section class="detail-section">
+					<h4 class="detail-section-title">Context</h4>
+					<p class="detail-context-empty">No cross-project edges from this symbol.</p>
+				</section>
+			`;
+		}
+		const labels = [...touched.values()].map(p => escapeHtml(p.label)).join(', ');
+		return `
+			<section class="detail-section">
+				<h4 class="detail-section-title">Context</h4>
+				<p class="detail-context-count">${touched.size} project${touched.size === 1 ? '' : 's'} touched</p>
+				<p class="detail-context-list">${labels}</p>
+			</section>
+		`;
+	})();
+
 	detailEl.innerHTML = `
-		<h3>${escapeHtml(symbol.name)}</h3>
-		<dl>
-			<dt>fqdn</dt><dd><code>${escapeHtml(symbol.fqdn)}</code></dd>
-			<dt>kind</dt><dd>${escapeHtml(symbol.kind)} (${escapeHtml(symbol.language_kind)})</dd>
-			<dt>lang</dt><dd>${escapeHtml(symbol.language || '(unknown)')}</dd>
-			<dt>vis</dt><dd>${escapeHtml(symbol.visibility)}</dd>
-			<dt>module</dt><dd><code>${escapeHtml(symbol.module ?? '(root)')}</code></dd>
-			<dt>project</dt><dd>${symbol.project_id ?? '(orphan)'}</dd>
-			<dt>loc</dt><dd><code>${escapeHtml(symbol.file)}:${symbol.start_line}</code></dd>
-			${symbol.is_external ? '<dt>ext</dt><dd>yes</dd>' : ''}
-		</dl>
+		<header class="detail-header">
+			<h3>${escapeHtml(symbol.name)}</h3>
+			<p class="detail-fqdn"><code>${escapeHtml(symbol.fqdn)}</code></p>
+		</header>
+		<section class="detail-section detail-meta">
+			<p>${escapeHtml(symbol.kind)} · ${escapeHtml(symbol.visibility)} · ${escapeHtml(symbol.language || 'unknown')}${symbol.is_external ? ' · external' : ''}</p>
+			<p><code>${escapeHtml(symbol.file)}:${symbol.start_line}</code></p>
+		</section>
+		${renderEdgeSection('Outbound', String(out.length), out, e => e.to)}
+		${renderEdgeSection('Inbound', String(inb.length), inb, e => e.from)}
+		${contextBlock}
 	`;
 }
 
 const legendEl = document.getElementById('legend') as HTMLElement;
 const legendBodyEl = document.getElementById('legend-body') as HTMLElement;
 const legendToggleEl = document.getElementById('legend-toggle') as HTMLElement;
+const cameraPresetsEl = document.getElementById('camera-presets') as HTMLElement;
+const nodeLabelsEl = document.getElementById('node-labels') as HTMLElement;
 
 type PaletteMap = Record<string, string>;
 
@@ -213,45 +321,43 @@ const LEGEND_SECTIONS: ReadonlyArray<{
 	readonly title: string;
 	readonly rows: ReadonlyArray<readonly [string, string]>;
 }> = [
-	{
-		title: 'Languages',
-		rows: [
-			['lang_rust', 'Rust'],
-			['lang_typescript', 'TypeScript'],
-			['lang_javascript', 'JavaScript'],
-			['lang_c', 'C'],
-			['lang_lua', 'Lua'],
-			['lang_vue', 'Vue'],
-			['lang_svelte', 'Svelte'],
-		],
-	},
-	{
-		title: 'Project kinds',
-		rows: [
-			['proj_rust', 'Cargo'],
-			['proj_node', 'Node'],
-			['proj_bun', 'Bun'],
-			['proj_deno', 'Deno'],
-			['proj_python', 'Python'],
-			['proj_lua', 'Lua'],
-			['proj_c', 'C'],
-			['proj_cpp', 'C++'],
-		],
-	},
-	{
-		title: 'Edge kinds',
-		rows: [
-			['edge_calls', 'Calls'],
-			['edge_imports', 'Imports'],
-			['edge_extends', 'Extends'],
-			['edge_implements', 'Implements'],
-			['edge_references', 'References'],
-			['edge_defines', 'Defines'],
-			['edge_uses_type', 'Uses type'],
-			['edge_exposes_api', 'Exposes API'],
-		],
-	},
-];
+		{
+			title: 'Languages',
+			rows: [
+				['lang_rust', 'Rust'],
+				['lang_typescript', 'TypeScript'],
+				['lang_javascript', 'JavaScript'],
+				['lang_c', 'C'],
+				['lang_lua', 'Lua'],
+				['lang_vue', 'Vue'],
+				['lang_svelte', 'Svelte'],
+			],
+		},
+		{
+			title: 'Project kinds',
+			rows: [
+				['proj_rust', 'Cargo'],
+				['proj_node', 'Node'],
+				['proj_bun', 'Bun'],
+				['proj_deno', 'Deno'],
+				['proj_python', 'Python'],
+				['proj_lua', 'Lua'],
+				['proj_c', 'C'],
+				['proj_cpp', 'C++'],
+			],
+		},
+		{
+			title: 'Edge kinds',
+			rows: [
+				['edge_calls', 'Calls'],
+				['edge_imports', 'Imports'],
+				['edge_extends', 'Extends'],
+				['edge_implements', 'Implements'],
+				['edge_references', 'References'],
+				['edge_uses_type', 'Uses type'],
+			],
+		},
+	];
 
 function buildLegend(palette: PaletteMap): void {
 	legendBodyEl.replaceChildren();
@@ -326,6 +432,16 @@ async function main(): Promise<void> {
 	toolbarEl.setAttribute('webgpu-available', String(graphEl.webgpuAvailable));
 	toolbarEl.setAttribute('mode', graphEl.currentMode);
 
+	// Camera preset bar — 3D-only. Each button re-aims the orbit
+	// camera; visible only while the WebGPU view is active.
+	cameraPresetsEl.hidden = graphEl.currentMode !== 'webgpu';
+	cameraPresetsEl.addEventListener('click', e => {
+		const btn = (e.target as HTMLElement).closest('button');
+		if (!btn) return;
+		if (btn.dataset.action === 'up') engine.drill_up();
+		else if (btn.dataset.preset) engine.set_camera_preset(btn.dataset.preset);
+	});
+
 	setStatus('connecting MCP…', 'loading');
 	let mcp: McpBrowse;
 	try {
@@ -336,20 +452,56 @@ async function main(): Promise<void> {
 		return;
 	}
 
-	let symbolByFqdn = new Map<string, BrowseSymbol>();
 	let includeExternal = false;
+	let includeTests = false;
+
+	// Heuristics for test detection. Two passes — one over the file
+	// path (catches dedicated test files), one over the FQDN (catches
+	// Rust `#[cfg(test)] mod tests { ... }` inline in regular source
+	// files: the file path is `query/similarity.rs` but the FQDN
+	// nests under `::tests::`, so the path regex misses them).
+	//   TS file: `.test.ts(x)?` / `.spec.ts(x)?` (jest/vitest)
+	//   Rust file: anything under `tests/` (integration tests) or
+	//              ending in `_test.rs`
+	//   C file: `test_*.c|h`, `*_test.c|h`, or under `tests/`
+	//   FQDN: any segment named exactly `tests` (Rust convention) —
+	//         covers `standardoc-core::query::similarity::tests::*`
+	const TEST_FILE_RE =
+		/(\.(test|spec)\.(ts|tsx|js|jsx)$)|(\/tests\/)|(_test\.(rs|c|h)$)|(\/test_[^/]+\.(c|h)$)/;
+	const TEST_FQDN_RE = /(^|::)tests(::|$)/;
+	function isTestSymbol(s: BrowseSymbol): boolean {
+		if (s.file && TEST_FILE_RE.test(s.file)) return true;
+		if (TEST_FQDN_RE.test(s.fqdn)) return true;
+		return false;
+	}
 
 	const loadGraph = async (): Promise<void> => {
 		setStatus('fetching graph…', 'loading');
-		const { symbols, projects, edges } = await mcp.fetchGraph(includeExternal);
+		const fetched = await mcp.fetchGraph(includeExternal);
+		const { projects } = fetched;
+		let symbols = fetched.symbols;
+		let edges = fetched.edges;
+		if (!includeTests) {
+			const testFqdns = new Set<string>();
+			for (const s of symbols) if (isTestSymbol(s)) testFqdns.add(s.fqdn);
+			if (testFqdns.size > 0) {
+				symbols = symbols.filter(s => !testFqdns.has(s.fqdn));
+				edges = edges.filter(e => !testFqdns.has(e.from) && !testFqdns.has(e.to));
+			}
+		}
 		symbolByFqdn = new Map(symbols.map(s => [s.fqdn, s]));
+		projectLabelById.clear();
+		for (const p of projects ?? []) {
+			projectLabelById.set(p.project_id, p.label);
+		}
 		// Push symbols + projects + edges. Edges are needed at load
 		// time now: the layout lays root projects out in dependency
 		// columns, so `pack` must see the edge set. The hover handler
 		// still narrows the *drawn* edges via `set_edges`.
 		engine.load_graph(JSON.stringify({ symbols, projects: projects ?? [], edges }));
 		engine.fit();
-		setStatus(`${symbols.length} symbols loaded`, 'ready');
+		const suffix = includeTests ? '' : ' (tests hidden)';
+		setStatus(`${symbols.length} symbols loaded${suffix}`, 'ready');
 	};
 
 	await loadGraph();
@@ -362,10 +514,14 @@ async function main(): Promise<void> {
 		if (fqdn === null) return;
 		lastHovered = fqdn;
 		const symbol = symbolByFqdn.get(fqdn);
-		renderDetail(symbol ?? null);
+		// First paint: header + meta only, edges section says
+		// "Loading…" so the user sees the panel update instantly even
+		// if the neighbourhood fetch takes a moment.
+		const cached = edgesByFqdn.get(fqdn) ?? null;
+		renderDetail(symbol ?? null, cached);
 
-		let edges = edgesByFqdn.get(fqdn);
-		if (edges === undefined) {
+		let edges = cached;
+		if (edges === null) {
 			edges = await fetchEdgesFor(mcp, fqdn, includeExternal);
 			edgesByFqdn.set(fqdn, edges);
 		}
@@ -374,18 +530,22 @@ async function main(): Promise<void> {
 		// the scene to its own edge set.
 		if (lastHovered !== fqdn) return;
 		engine.set_edges(JSON.stringify({ edges }));
+		// Re-render the panel with the fully resolved edge set —
+		// surfaces the dependency breakdown + cross-project counts.
+		renderDetail(symbol ?? null, edges);
 	});
 
 	graphEl.addEventListener('sd-graph-click', e => {
 		const { fqdn } = (e as CustomEvent<GraphClickDetail>).detail;
 		console.log('[playground] click', fqdn);
 		const symbol = symbolByFqdn.get(fqdn);
-		renderDetail(symbol ?? null);
+		renderDetail(symbol ?? null, edgesByFqdn.get(fqdn) ?? null);
 	});
 
 	graphEl.addEventListener('sd-graph-mode-change', e => {
 		const { mode } = (e as CustomEvent<GraphModeChangeDetail>).detail;
 		toolbarEl.setAttribute('mode', mode);
+		cameraPresetsEl.hidden = mode !== 'webgpu';
 		setStatus(`${symbolByFqdn.size} symbols loaded`, 'ready');
 	});
 
@@ -421,6 +581,18 @@ async function main(): Promise<void> {
 		const { value } = (e as CustomEvent<ToolbarFlagChangeDetail>).detail;
 		includeExternal = value;
 		toolbarEl.setAttribute('externals', String(includeExternal));
+		edgesByFqdn.clear();
+		void loadGraph();
+	});
+
+	// "Include tests" toggle — purely client-side. Refilter the
+	// fetched payload before pushing to the engine; cheap enough at
+	// our current scale (<5k symbols) that no daemon-side support is
+	// needed. Edges to/from filtered symbols cascade-drop.
+	const toggleTestsEl = document.getElementById('toggle-tests') as HTMLInputElement;
+	toggleTestsEl.checked = includeTests;
+	toggleTestsEl.addEventListener('change', () => {
+		includeTests = toggleTestsEl.checked;
 		edgesByFqdn.clear();
 		void loadGraph();
 	});
@@ -485,9 +657,9 @@ async function main(): Promise<void> {
 			mode: currentMode(),
 			gpu: engine.gpu_active()
 				? {
-						instanceCount: engine.gpu_instance_count(),
-						instanceCapacity: engine.gpu_instance_capacity(),
-					}
+					instanceCount: engine.gpu_instance_count(),
+					instanceCapacity: engine.gpu_instance_capacity(),
+				}
 				: null,
 		}),
 	});
@@ -510,8 +682,8 @@ async function main(): Promise<void> {
 		URL.revokeObjectURL(url);
 		console.info(
 			`[playground] recording: ${result.totalEvents} events ` +
-				`over ${(result.durationMs / 1000).toFixed(1)}s ` +
-				`(throttled=${result.skippedByThrottle}, coalesced=${result.coalescedByDedup})`,
+			`over ${(result.durationMs / 1000).toFixed(1)}s ` +
+			`(throttled=${result.skippedByThrottle}, coalesced=${result.coalescedByDedup})`,
 		);
 	});
 	hudEl.addEventListener('sd-hud-copy', e => {
@@ -537,14 +709,51 @@ async function main(): Promise<void> {
 			b.addEventListener('click', onClick);
 			breadcrumbEl.appendChild(b);
 		};
-		// Static root crumb — clicking it fits the whole workspace.
-		addCrumb('workspace', () => engine.fit());
+		// Static root crumb — clicking it resets the drill focus to
+		// the root level (projects). With the cards-only refactor the
+		// breadcrumb is driven by the DrillTree focus, not by the
+		// viewport zoom — `fit()` wouldn't move the focus, so we use
+		// the dedicated `reset_focus` API.
+		addCrumb('workspace', () => engine.reset_focus());
 		for (const c of crumbs) {
 			const sep = document.createElement('span');
 			sep.className = 'crumb-sep';
 			sep.textContent = '›';
 			breadcrumbEl.appendChild(sep);
 			addCrumb(c.label, () => engine.fit_to_frame(c.id));
+		}
+	};
+
+	// DOM label layer for the WebGPU 3D view. The engine projects each
+	// drill-level node centre to screen coords; we pin one pooled text
+	// element per node so the names are real, crisp HTML over the canvas.
+	const labelPool: HTMLElement[] = [];
+	const syncLabels = (): void => {
+		if (graphEl.currentMode !== 'webgpu') {
+			for (const d of labelPool) d.style.display = 'none';
+			return;
+		}
+		const labels = JSON.parse(engine.label_layout()) as ReadonlyArray<{
+			text: string;
+			x: number;
+			y: number;
+			on: boolean;
+		}>;
+		while (labelPool.length < labels.length) {
+			const d = document.createElement('div');
+			d.className = 'node-label';
+			nodeLabelsEl.appendChild(d);
+			labelPool.push(d);
+		}
+		for (const [i, d] of labelPool.entries()) {
+			const l = labels[i];
+			if (l && l.on) {
+				if (d.textContent !== l.text) d.textContent = l.text;
+				d.style.transform = `translate(${l.x}px, ${l.y}px) translate(-50%, -50%)`;
+				d.style.display = '';
+			} else {
+				d.style.display = 'none';
+			}
 		}
 	};
 
@@ -556,6 +765,7 @@ async function main(): Promise<void> {
 		// don't race the async webgpu init.
 		if (!graphEl.engineBusy) engine.tick();
 		syncBreadcrumb();
+		syncLabels();
 		profiler.tick(now);
 		requestAnimationFrame(loop);
 	};

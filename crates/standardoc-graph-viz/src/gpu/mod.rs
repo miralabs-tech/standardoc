@@ -15,4 +15,4 @@
 
 mod backend;
 
-pub(crate) use backend::WebGpuBackend;
+pub(crate) use backend::{LevelNode, WebGpuBackend};
