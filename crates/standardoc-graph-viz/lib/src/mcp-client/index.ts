@@ -16,6 +16,7 @@ export type {
 	ContextEdgeKind,
 	ContextEdgeTarget,
 	ContextEdge,
+	GetBodyResponse,
 	GetContextResponse,
 } from './types';
 export { McpBrowse, type McpClientInfo } from './mcp-client';

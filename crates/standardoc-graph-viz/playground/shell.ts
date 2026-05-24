@@ -35,6 +35,7 @@ import type {
 	SearchElement,
 	SymbolDetail,
 	SymbolDetailsElement,
+	SymbolDetailsTabChangeDetail,
 	SymbolRelationBucket,
 	SymbolRelationKind,
 	SymbolSearchResult,
@@ -165,6 +166,33 @@ async function boot(): Promise<void> {
 			searchEl.results = [];
 		} finally {
 			searchEl.loading = false;
+		}
+	});
+
+	// Source tab → lazy fetch get_body. Cached against the symbol FQDN
+	// so re-selecting the same tab on the same symbol skips the round-
+	// trip; symbol changes invalidate the cache via the panel's own
+	// `symbol` setter (which clears its sourceBody).
+	const sourceCache = new Map<string, string>();
+	detailsEl.addEventListener('sd-symbol-tab-change', async ev => {
+		const detail = (ev as CustomEvent<SymbolDetailsTabChangeDetail>).detail;
+		if (detail.tab !== 'source') return;
+		const sym = detailsEl.symbol;
+		if (sym === null) return;
+		const cached = sourceCache.get(sym.fqdn);
+		if (cached !== undefined) {
+			detailsEl.sourceBody = cached;
+			return;
+		}
+		detailsEl.sourceLoading = true;
+		try {
+			const res = await mcp.getBody(sym.fqdn);
+			sourceCache.set(sym.fqdn, res.body);
+			if (detailsEl.symbol?.fqdn === sym.fqdn) detailsEl.sourceBody = res.body;
+		} catch {
+			if (detailsEl.symbol?.fqdn === sym.fqdn) detailsEl.sourceBody = null;
+		} finally {
+			if (detailsEl.symbol?.fqdn === sym.fqdn) detailsEl.sourceLoading = false;
 		}
 	});
 

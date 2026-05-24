@@ -126,6 +126,8 @@ function shortFqdn(fqdn: string): string {
 export class SymbolDetailsElement extends HTMLElement {
 	#mounted = false;
 	#symbol: SymbolDetail | null = null;
+	#sourceBody: string | null = null;
+	#sourceLoading = false;
 	#tab: SymbolDetailsTab = 'overview';
 	#docExpanded = false;
 	#unsubscribeFocus: (() => void) | null = null;
@@ -142,11 +144,27 @@ export class SymbolDetailsElement extends HTMLElement {
 	set symbol(next: SymbolDetail | null) {
 		this.#symbol = next;
 		if (next !== null) this.#docExpanded = false;
+		// Symbol change invalidates the Source-tab cache so the host
+		// doesn't surface a stale body while a fresh fetch is in flight.
+		this.#sourceBody = null;
+		this.#sourceLoading = false;
 		this.#refresh();
 	}
 
 	get symbol(): SymbolDetail | null {
 		return this.#symbol;
+	}
+
+	set sourceBody(next: string | null) {
+		this.#sourceBody = next;
+		this.#sourceLoading = false;
+		if (this.#tab === 'source') this.#renderBody();
+	}
+
+	set sourceLoading(next: boolean) {
+		if (next === this.#sourceLoading) return;
+		this.#sourceLoading = next;
+		if (this.#tab === 'source') this.#renderBody();
 	}
 
 	set tab(next: SymbolDetailsTab) {
@@ -296,9 +314,47 @@ export class SymbolDetailsElement extends HTMLElement {
 				n.body.innerHTML = `<div class="${C.empty}">Methods tab — coming in Phase 4.</div>`;
 				break;
 			case 'source':
-				n.body.innerHTML = `<div class="${C.empty}">Source view — coming in Phase 4 (Shiki / Monaco integration).</div>`;
+				this.#renderSource(n.body, sym);
 				break;
 		}
+	}
+
+	#renderSource(mount: HTMLElement, sym: SymbolDetail): void {
+		mount.innerHTML = '';
+		const header = document.createElement('div');
+		header.className = C.section;
+		const title = document.createElement('div');
+		title.className = C.sectionTitle;
+		title.textContent = `${sym.file}:${sym.startLine}`;
+		header.appendChild(title);
+		mount.appendChild(header);
+
+		if (this.#sourceLoading) {
+			const loading = document.createElement('div');
+			loading.className = C.empty;
+			loading.textContent = 'Loading source…';
+			mount.appendChild(loading);
+			return;
+		}
+		if (this.#sourceBody === null) {
+			const empty = document.createElement('div');
+			empty.className = C.empty;
+			empty.textContent = 'No source loaded — host should fetch via getBody.';
+			mount.appendChild(empty);
+			return;
+		}
+		const pre = document.createElement('pre');
+		pre.style.margin = '0';
+		pre.style.padding = 'var(--sd-space-3, 12px)';
+		pre.style.background = 'var(--sd-bg-elevated, #252526)';
+		pre.style.borderRadius = 'var(--sd-radius-md, 6px)';
+		pre.style.fontFamily = 'var(--sd-font-mono, ui-monospace, monospace)';
+		pre.style.fontSize = 'var(--sd-text-sm, 11px)';
+		pre.style.color = 'var(--sd-fg, #cccccc)';
+		pre.style.overflow = 'auto';
+		pre.style.whiteSpace = 'pre';
+		pre.textContent = this.#sourceBody;
+		mount.appendChild(pre);
 	}
 
 	#renderOverview(mount: HTMLElement, sym: SymbolDetail): void {

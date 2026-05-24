@@ -18,6 +18,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type {
 	CurrentRevision,
 	FetchGraphResponse,
+	GetBodyResponse,
 	GetContextResponse,
 	ListProjectsResponse,
 	ListSymbolsOptions,
@@ -97,6 +98,17 @@ export class McpBrowse {
 	async getContext(fqdn: string): Promise<GetContextResponse> {
 		const raw = await this.callTool('get_context', { fqdn });
 		return JSON.parse(raw) as GetContextResponse;
+	}
+
+	/**
+	 * Source body for a symbol. The daemon strips any common leading
+	 * indentation (returned via `dedented_prefix_len` for callers that
+	 * want to reconstruct the original) and may truncate very long
+	 * bodies — check `truncated` on the response.
+	 */
+	async getBody(fqdn: string): Promise<GetBodyResponse> {
+		const raw = await this.callTool('get_body', { fqdn });
+		return JSON.parse(raw) as GetBodyResponse;
 	}
 
 	/** Workspace project listing — feeds the Explorer tree top-level. */

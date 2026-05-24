@@ -137,6 +137,20 @@ export interface ContextEdge {
 	readonly resolved_symbol?: RawSymbol | null;
 }
 
+export interface GetBodyResponse {
+	readonly fqdn: string;
+	readonly file: string;
+	readonly start_line: number;
+	readonly end_line: number;
+	readonly body: string;
+	readonly truncated?: boolean;
+	readonly total_body_lines?: number;
+	readonly stripped_lines?: number;
+	readonly signature_only?: boolean;
+	readonly dedented_prefix_len?: number;
+	readonly indent_unit?: string;
+}
+
 export interface GetContextResponse {
 	readonly context: {
 		readonly symbol: RawSymbol;
