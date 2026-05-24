@@ -15,7 +15,15 @@ import { Client } from '@modelcontextprotocol/sdk/client';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
-import type { CurrentRevision, FetchGraphResponse } from './types';
+import type {
+	CurrentRevision,
+	FetchGraphResponse,
+	GetContextResponse,
+	ListProjectsResponse,
+	ListSymbolsOptions,
+	ListSymbolsResponse,
+	RawSymbol,
+} from './types';
 
 export interface McpClientInfo {
 	readonly name: string;
@@ -75,6 +83,55 @@ export class McpBrowse {
 			include_external: includeExternal,
 		});
 		return JSON.parse(raw) as FetchGraphResponse;
+	}
+
+	/**
+	 * Rich per-symbol context — symbol metadata + documentation
+	 * + callers + callees + imports + imported_by. Used by the Symbol
+	 * Details panel for the Overview tab.
+	 *
+	 * Note: this surfaces CALLS / IMPORTS edges only. For the full
+	 * relation breakdown including USES_TYPE / TESTS / IMPLEMENTS /
+	 * EXTENDS / REFERENCES, pair this with `fetchNeighborhood(fqdn, ...)`.
+	 */
+	async getContext(fqdn: string): Promise<GetContextResponse> {
+		const raw = await this.callTool('get_context', { fqdn });
+		return JSON.parse(raw) as GetContextResponse;
+	}
+
+	/** Workspace project listing — feeds the Explorer tree top-level. */
+	async listProjects(): Promise<ListProjectsResponse> {
+		const raw = await this.callTool('list_projects', {});
+		return JSON.parse(raw) as ListProjectsResponse;
+	}
+
+	/**
+	 * Paginated structured listing. Use the `kind` / `module` /
+	 * `visibility` / `externals` filters to narrow; loop on `next_cursor`
+	 * for large modules. Default daemon limit applies when `limit` is
+	 * omitted.
+	 */
+	async listSymbols(options: ListSymbolsOptions = {}): Promise<ListSymbolsResponse> {
+		const args: Record<string, unknown> = {};
+		if (options.kind !== undefined) args.kind = options.kind;
+		if (options.module !== undefined) args.module = options.module;
+		if (options.visibility !== undefined) args.visibility = options.visibility;
+		if (options.externals !== undefined) args.externals = options.externals;
+		if (options.limit !== undefined) args.limit = options.limit;
+		if (options.cursor !== undefined) args.cursor = options.cursor;
+		const raw = await this.callTool('list_symbols', args);
+		return JSON.parse(raw) as ListSymbolsResponse;
+	}
+
+	/**
+	 * Fuzzy / glob pattern match. Feeds the global search autocomplete.
+	 * Daemon caps the result count; `limit` lets the caller request fewer.
+	 */
+	async findSymbolsByPattern(pattern: string, limit?: number): Promise<ReadonlyArray<RawSymbol>> {
+		const args: Record<string, unknown> = { pattern };
+		if (limit !== undefined) args.limit = limit;
+		const raw = await this.callTool('find_symbols_by_pattern', args);
+		return JSON.parse(raw) as ReadonlyArray<RawSymbol>;
 	}
 
 	/**

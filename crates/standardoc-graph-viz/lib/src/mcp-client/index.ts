@@ -4,5 +4,18 @@ export type {
 	BrowseProject,
 	FetchGraphResponse,
 	CurrentRevision,
+	SymbolLocation,
+	SymbolSignature,
+	SymbolSignatureParam,
+	RawSymbol,
+	ListSymbolsOptions,
+	ListSymbolsResponse,
+	ProjectKind,
+	RawProject,
+	ListProjectsResponse,
+	ContextEdgeKind,
+	ContextEdgeTarget,
+	ContextEdge,
+	GetContextResponse,
 } from './types';
 export { McpBrowse, type McpClientInfo } from './mcp-client';
