@@ -93,6 +93,13 @@ pub(crate) struct Edge {
     /// Hover-specific edges (from `replace_edges`) keep the original
     /// kind (`CALLS` / `IMPORTS` / …) so the renderer can colour them.
     pub kind: String,
+    /// Phase 3 (Flow) 3.4 — count of distinct underlying symbol→symbol
+    /// cross-links collapsed into this edge. `1` for hover-specific or
+    /// ghost cross-edges (those are already per-link); `≥1` for
+    /// `level_edges()` aggregates. 2D renderer maps to `set_line_width`,
+    /// 3D maps to alpha intensity (wgpu line topology can't vary width
+    /// per segment).
+    pub weight: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -176,10 +183,11 @@ impl Scene {
         let mut edges: Vec<Edge> = tree
             .level_edges()
             .into_iter()
-            .map(|(a, b)| Edge {
+            .map(|(a, b, w)| Edge {
                 from_card: a as usize,
                 to_card: b as usize,
                 kind: String::new(),
+                weight: w,
             })
             .collect();
 
@@ -219,6 +227,7 @@ impl Scene {
                 from_card: inside_card,
                 to_card: ghost_card,
                 kind: String::new(),
+                weight: 1,
             });
         }
 
@@ -266,6 +275,7 @@ impl Scene {
                     from_card: from,
                     to_card: to,
                     kind: e.kind,
+                    weight: 1,
                 })
             })
             .collect();

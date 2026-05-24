@@ -47,6 +47,11 @@ pub(crate) struct DrillTree {
     edges: Vec<(u32, u32)>,
     /// `None` = root level (projects). `Some(i)` = node `i`'s children.
     focus: Option<u32>,
+    /// Project tree index → sorted list of entry-point symbol tree
+    /// indices anywhere in that project's subtree. Empty entry / absent
+    /// key both mean "no entry-points known". Sort key is fqdn so the
+    /// satellite ring is stable across rebuilds.
+    entry_points_by_project: HashMap<u32, Vec<u32>>,
 }
 
 impl DrillTree {
@@ -57,6 +62,7 @@ impl DrillTree {
             root_children: Vec::new(),
             edges: Vec::new(),
             focus: None,
+            entry_points_by_project: HashMap::new(),
         }
     }
 
@@ -170,11 +176,64 @@ impl DrillTree {
             }
         }
 
+        // Local project_of[] — for each tree node index, the index of
+        // the project ancestor (or u32::MAX for root-orphan symbols
+        // whose `project_id` couldn't be resolved). Walks each node's
+        // parent chain until landing on a project node (`idx <
+        // n_projects`) or the root. Done after all parents are
+        // resolved (including symbols pointing into virtual modules
+        // created higher in the vec). Consumed below to bucket
+        // entry-points by project, then discarded — the bucket map is
+        // the only durable state.
+        let n_projects = payload.projects.len();
+        let mut project_of: Vec<u32> = vec![u32::MAX; nodes.len()];
+        for (i, p) in project_of.iter_mut().enumerate().take(n_projects) {
+            *p = i as u32;
+        }
+        for i in n_projects..nodes.len() {
+            let mut cur = i as u32;
+            loop {
+                match nodes[cur as usize].parent {
+                    None => break, // root-orphan: project_of[i] stays MAX
+                    Some(p) => {
+                        if (p as usize) < n_projects {
+                            project_of[i] = p;
+                            break;
+                        }
+                        cur = p;
+                    }
+                }
+            }
+        }
+
+        // Group entry-points by their owning project. Symbols with no
+        // resolvable project are dropped — they would have no cube to
+        // satellite from. Sort each project's list by fqdn so the ring
+        // placement is stable rebuild-to-rebuild.
+        let mut entry_points_by_project: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (i, node) in nodes.iter().enumerate() {
+            if node.entry_point.is_none() {
+                continue;
+            }
+            let pi = project_of[i];
+            if pi == u32::MAX {
+                continue;
+            }
+            entry_points_by_project
+                .entry(pi)
+                .or_default()
+                .push(i as u32);
+        }
+        for v in entry_points_by_project.values_mut() {
+            v.sort_by(|&a, &b| nodes[a as usize].fqdn.cmp(&nodes[b as usize].fqdn));
+        }
+
         let mut tree = Self {
             nodes,
             root_children,
             edges,
             focus: None,
+            entry_points_by_project,
         };
         for r in tree.root_children.clone() {
             tree.fill_counts(r);
@@ -347,11 +406,16 @@ impl DrillTree {
         out
     }
 
-    /// Edges between the current level's siblings, as index pairs into
-    /// `current_level()`. Two siblings are linked when any cross-link
-    /// joins a node in one's subtree to a node in the other's — i.e.
-    /// the dependency graph aggregated to this altitude.
-    pub(crate) fn level_edges(&self) -> Vec<(u32, u32)> {
+    /// Edges between the current level's siblings, as `(from_level_idx,
+    /// to_level_idx, weight)` triples directed along their original
+    /// cross-link direction. `weight` is the count of distinct
+    /// underlying symbol→symbol cross-links collapsed to this altitude
+    /// — at the workspace root, that's how many times any symbol in
+    /// project A links to any symbol in project B, separately counted
+    /// from B→A. Renderers map weight to stroke thickness (2D) or
+    /// alpha intensity (3D, where wgpu line topology can't vary width
+    /// per segment).
+    pub(crate) fn level_edges(&self) -> Vec<(u32, u32, u32)> {
         let level = self.current_level();
         // tree-node index → the sibling (level index) owning it.
         let mut owner: HashMap<u32, u32> = HashMap::new();
@@ -362,19 +426,35 @@ impl DrillTree {
                 stack.extend_from_slice(&self.nodes[n as usize].children);
             }
         }
-        let mut seen: HashSet<(u32, u32)> = HashSet::new();
-        let mut out = Vec::new();
+        let mut weights: HashMap<(u32, u32), u32> = HashMap::new();
         for &(from, to) in &self.edges {
             if let (Some(&a), Some(&b)) = (owner.get(&from), owner.get(&to)) {
                 if a != b {
-                    let key = if a < b { (a, b) } else { (b, a) };
-                    if seen.insert(key) {
-                        out.push(key);
-                    }
+                    *weights.entry((a, b)).or_insert(0) += 1;
                 }
             }
         }
-        out
+        weights.into_iter().map(|((a, b), w)| (a, b, w)).collect()
+    }
+
+    /// Entry-point symbol tree indices anywhere inside `project_idx`'s
+    /// subtree, sorted by fqdn. Empty when the project has no
+    /// entry-points or when `project_idx` is not a project node. Used
+    /// by the workspace-overview renderer to materialise satellite
+    /// nodes around each project cube.
+    pub(crate) fn entry_points_for_project(&self, project_idx: u32) -> &[u32] {
+        self.entry_points_by_project
+            .get(&project_idx)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// `true` when no node is currently focused — the rendered level
+    /// is the project list. Workspace-overview-only enrichments
+    /// (project→project edge aggregation, entry-point satellites,
+    /// kind-mix glyphs…) gate on this.
+    pub(crate) fn is_root_level(&self) -> bool {
+        self.focus.is_none()
     }
 }
 

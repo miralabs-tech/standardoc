@@ -101,7 +101,18 @@ fn draw_edges(
             palette.edge_color(&e.kind)
         };
         ctx.set_stroke_style_str(color);
-        ctx.set_line_width(if involved { highlight_w } else { base_w });
+        // Phase 3 (Flow) 3.4 — edge weight modulates thickness so the
+        // dependency density between two subtrees reads at a glance.
+        // `weight == 1` keeps the existing base_w; each extra link
+        // grows the line by ~25%, capped at 3× so a 50-link edge isn't
+        // overwhelming. Hover override still uses highlight_w.
+        let weight_factor = (1.0 + f64::from(e.weight.saturating_sub(1)) * 0.25).min(3.0);
+        let edge_w = if involved {
+            highlight_w
+        } else {
+            base_w * weight_factor
+        };
+        ctx.set_line_width(edge_w);
         let base_alpha = if touches_ghost { 0.45 } else { 0.75 };
         ctx.set_global_alpha(if hovered.is_some() && !involved { 0.25 } else { base_alpha });
         let _ = ctx.set_line_dash(if touches_ghost { dash_ghost.as_ref() } else { dash_solid.as_ref() });

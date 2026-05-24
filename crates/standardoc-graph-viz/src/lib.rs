@@ -93,6 +93,40 @@ const GHOST_RING_MARGIN: f32 = 120.0;
 /// scrubbing every node.
 const LABEL_VISIBLE_THRESHOLD: u32 = 15;
 
+/// Phase 3 (Flow) 3.4 — maximum number of entry-point satellites
+/// rendered around a single project cube at the workspace overview
+/// level. Surplus collapses into a single `+N` overflow badge so a
+/// large binary with many `main` / `luaopen_*` exports doesn't drown
+/// its own cube. Picked empirically: 5 is the sweet spot for an even
+/// hexagonal ring (5 satellites + 1 badge = 6 slots).
+const SATELLITE_CAP: usize = 5;
+
+/// One Phase 3 (Flow) 3.4 satellite — an entry-point sphere orbiting
+/// a project cube at the workspace overview level. `tree_idx ==
+/// u32::MAX` flags an overflow badge (`overflow_count` tells the
+/// label layer how many entry-points were elided). All other
+/// satellites map to a real entry-point symbol whose fqdn drives the
+/// click drill.
+#[derive(Debug, Clone)]
+struct SatelliteSpec {
+    /// Index into `current_level()` of the project this satellite
+    /// orbits. The satellite's world position is `parent_center +
+    /// ring_offset`, so it follows the parent as the force layout
+    /// settles.
+    parent_primary: u32,
+    /// `DrillTree.nodes` index of the entry-point symbol, or
+    /// `u32::MAX` for an overflow badge. Real EP tree_idx ⇒ click
+    /// fires `focus_to(fqdn)`. Sentinel ⇒ click is a no-op.
+    tree_idx: u32,
+    /// Orbit angle (radians) around the parent cube. Combined with
+    /// `parent_primary`'s current center each frame so the ring
+    /// tracks the parent through force settling.
+    angle: f32,
+    /// `0` for a real entry-point satellite, `> 0` for the overflow
+    /// badge — number of entry-points hidden behind the `+N` glyph.
+    overflow_count: u32,
+}
+
 /// Active render backend. Mirrored to JS as `"canvas2d"` / `"webgpu"`
 /// via [`GraphEngine::mode`] so the host UI can reflect which path
 /// the engine is currently driving.
@@ -159,11 +193,13 @@ pub struct GraphEngine {
     /// payload, navigated by clicks.
     tree: DrillTree,
     /// Aggregated edges of the currently-focused drill level, cached
-    /// so `tick` need not recompute them every settling frame.
-    /// Primary-to-primary only — cross-level edges (to ghost nodes)
-    /// are computed lazily in `build_gpu_edges` so they don't
-    /// pollute the force-spring set.
-    level_edges: Vec<(u32, u32)>,
+    /// so `tick` need not recompute them every settling frame. Each
+    /// triple is `(from_level_idx, to_level_idx, weight)` — weight is
+    /// the count of underlying symbol→symbol cross-links collapsed
+    /// into this aggregate edge (always `>= 1`). Primary-to-primary
+    /// only — cross-level edges (to ghost nodes) are computed lazily
+    /// in `build_gpu_edges` so they don't pollute the force-spring set.
+    level_edges: Vec<(u32, u32, u32)>,
     /// `DrillTree.nodes` indices of the ghost nodes the 3D view
     /// materialises around the primary force cloud — siblings of
     /// the focused node that have cross-level edges into it. Mirrors
@@ -171,6 +207,14 @@ pub struct GraphEngine {
     /// consumed by `build_level_nodes`, `build_gpu_edges`,
     /// `label_layout`, and `pick`.
     ghost_tree_idxs: Vec<u32>,
+    /// Phase 3 (Flow) 3.4 — workspace-overview satellites: small
+    /// spheres orbiting each project cube to surface its entry-points
+    /// (`main` / `luaopen_*` / …) without forcing the user to drill.
+    /// Populated only at the root level (`tree.is_root_level()`),
+    /// cleared otherwise. Layered behind ghosts in the combined
+    /// `build_level_nodes()` output (primaries → ghosts → satellites),
+    /// so picking maps the third zone to satellite specs.
+    satellites: Vec<SatelliteSpec>,
     /// Screen position of a pending click in `WebGpu` mode — `Some`
     /// between `pointer_down` and `pointer_up` while no drag has
     /// happened, so `pointer_up` can tell a click from an orbit.
@@ -226,6 +270,7 @@ impl GraphEngine {
             tree: DrillTree::empty(),
             level_edges: Vec::new(),
             ghost_tree_idxs: Vec::new(),
+            satellites: Vec::new(),
             drill_press: None,
         })
     }
@@ -364,6 +409,35 @@ impl GraphEngine {
         // points at it.
         for (i, &tree_idx) in self.ghost_tree_idxs.iter().enumerate() {
             labels.push(project_label_pos(self.ghost_position_3d(i), tree_idx));
+        }
+        // Phase 3 (Flow) 3.4 satellite labels. Real entry-point
+        // satellites surface their symbol name on hover only — keeps
+        // the workspace overview from drowning in floating text when
+        // a big workspace has dozens of `main` / `luaopen_*`. Overflow
+        // badges (`+N`) are always-on: there's at most one per cube
+        // and the count IS the whole point of the badge.
+        for spec in &self.satellites {
+            let Some(pos) = self.satellite_position(spec) else {
+                continue;
+            };
+            let clip = view_proj * pos.extend(1.0);
+            let visible = clip.w > 0.001;
+            let (text, always_on) = if spec.overflow_count > 0 {
+                (format!("+{}", spec.overflow_count), true)
+            } else {
+                (self.tree.node(spec.tree_idx).label.clone(), false)
+            };
+            let is_hovered = spec.overflow_count == 0 && Some(spec.tree_idx) == hovered;
+            let on = visible && (always_on || is_hovered);
+            let (x, y) = if on {
+                (
+                    (clip.x / clip.w * 0.5 + 0.5) * w,
+                    (1.0 - (clip.y / clip.w * 0.5 + 0.5)) * h,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            labels.push(LabelPos { text, x, y, on });
         }
         serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string())
     }
@@ -884,15 +958,61 @@ impl GraphEngine {
             }
         }
         self.ghost_tree_idxs = ghosts;
+        // Phase 3 (Flow) 3.4 — workspace-overview satellites. Only at
+        // root level; deeper levels keep their primary+ghost layout
+        // intact. Each project gets up to `SATELLITE_CAP` entry-point
+        // satellites placed evenly around it; the cap+1 slot is the
+        // overflow badge when there are more entry-points than the
+        // cap allows. Positions are recomputed each frame from the
+        // parent's settling center, so the ring tracks the layout.
+        self.satellites = Vec::new();
+        if self.tree.is_root_level() {
+            for (primary_idx, &tree_idx) in self.tree.current_level().iter().enumerate() {
+                let node = self.tree.node(tree_idx);
+                // Only projects orbit satellites — orphan symbols at
+                // root (no `project_id` resolved) have no children
+                // to surface as entry-points.
+                if !node.fqdn.is_empty() {
+                    continue;
+                }
+                let eps = self.tree.entry_points_for_project(tree_idx);
+                if eps.is_empty() {
+                    continue;
+                }
+                let shown = eps.len().min(SATELLITE_CAP);
+                let overflow = eps.len().saturating_sub(shown);
+                let total_slots = shown + usize::from(overflow > 0);
+                for (k, &ep_idx) in eps.iter().take(shown).enumerate() {
+                    self.satellites.push(SatelliteSpec {
+                        parent_primary: primary_idx as u32,
+                        tree_idx: ep_idx,
+                        angle: std::f32::consts::TAU * (k as f32) / total_slots as f32,
+                        overflow_count: 0,
+                    });
+                }
+                if overflow > 0 {
+                    self.satellites.push(SatelliteSpec {
+                        parent_primary: primary_idx as u32,
+                        tree_idx: u32::MAX,
+                        angle: std::f32::consts::TAU * (shown as f32) / total_slots as f32,
+                        overflow_count: overflow as u32,
+                    });
+                }
+            }
+        }
         // 2D scene — cards + level edges + bounds + label truncation.
         // Scene independently materialises its own 2D ghost cards
         // via `tree.cross_edges()`; the 3D ghost list above is for
         // the 3D ring placement only.
         self.scene = Scene::from_level(&self.tree, &self.ctx);
         // 3D primary layout — seeded on a sphere, settles over the
-        // next ticks.
+        // next ticks. Weight is dropped here — force springs treat
+        // every edge equally; the weight only modulates the renderer's
+        // alpha so the visual hierarchy doesn't drag the layout.
         let n = self.tree.current_level().len();
-        self.force3d = Force3D::for_level(n, self.level_edges.clone());
+        let spring_edges: Vec<(u32, u32)> =
+            self.level_edges.iter().map(|&(a, b, _)| (a, b)).collect();
+        self.force3d = Force3D::for_level(n, spring_edges);
         // Camera frames the union of primary cloud + ghost ring so
         // the user sees the full context (including off-focus
         // dependencies) at once.
@@ -952,6 +1072,44 @@ impl GraphEngine {
                 entry_point: node.entry_point.clone(),
             });
         }
+        // Phase 3 (Flow) 3.4 satellite layer — entry-point spheres
+        // orbiting each project cube. Read parent positions from the
+        // already-built primary slice so the ring tracks the parent
+        // through force-layout settling.
+        for spec in &self.satellites {
+            let parent = match nodes.get(spec.parent_primary as usize) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            let pos = satellite_position_3d(parent.center, parent.size, spec.angle);
+            let size = satellite_size_3d(parent.size);
+            if spec.overflow_count > 0 {
+                // Overflow badge — grey leaf, no halo. The `+N` text
+                // is surfaced via `label_layout`.
+                nodes.push(LevelNode {
+                    center: pos,
+                    size,
+                    language: parent.language.clone(),
+                    kind: kind::Kind::Unknown,
+                    is_project: false,
+                    is_container: false,
+                    is_ghost: false,
+                    entry_point: None,
+                });
+            } else {
+                let ep = self.tree.node(spec.tree_idx);
+                nodes.push(LevelNode {
+                    center: pos,
+                    size,
+                    language: ep.language.clone(),
+                    kind: ep.kind,
+                    is_project: false,
+                    is_container: false,
+                    is_ghost: false,
+                    entry_point: ep.entry_point.clone(),
+                });
+            }
+        }
         nodes
     }
 
@@ -972,11 +1130,30 @@ impl GraphEngine {
         )
     }
 
+    /// Resolve a satellite's parent position the way the renderer
+    /// sees it — read the primary slice from `build_level_nodes`
+    /// inline rather than re-running `force3d.positions()`, so a
+    /// satellite shifted mid-frame by force settling tracks its
+    /// parent. Used by `pick` and `label_layout` to compute satellite
+    /// screen positions without duplicating the ring-offset math.
+    fn satellite_position(&self, spec: &SatelliteSpec) -> Option<Vec3> {
+        let parent_pos = self.force3d.positions().get(spec.parent_primary as usize).copied()?;
+        let parent_node = self
+            .tree
+            .current_level()
+            .get(spec.parent_primary as usize)
+            .map(|&t| self.tree.node(t))?;
+        let parent_size = level_node_size(parent_node.descendant_count);
+        Some(satellite_position_3d(parent_pos, parent_size, spec.angle))
+    }
+
     /// Combined edges for GPU upload — primary-to-primary
-    /// (`self.level_edges`) plus primary-to-ghost (remapped from
-    /// `tree.cross_edges()` to indices in `build_level_nodes`'s
-    /// output: ghosts occupy `n_primary..`).
-    fn build_gpu_edges(&self) -> Vec<(u32, u32)> {
+    /// (`self.level_edges`, carrying their aggregated weight) plus
+    /// primary-to-ghost (remapped from `tree.cross_edges()` to
+    /// indices in `build_level_nodes`'s output: ghosts occupy
+    /// `n_primary..`). Ghost edges carry weight 1 — they are
+    /// per-link by construction, not aggregated.
+    fn build_gpu_edges(&self) -> Vec<(u32, u32, u32)> {
         let primary_count = self.tree.current_level().len() as u32;
         if self.ghost_tree_idxs.is_empty() {
             return self.level_edges.clone();
@@ -999,19 +1176,22 @@ impl GraphEngine {
             if let (Some(&i), Some(&g)) =
                 (primary_lookup.get(&inside), ghost_lookup.get(&sibling))
             {
-                out.push((i, g));
+                out.push((i, g, 1));
             }
         }
         out
     }
 
-    /// Screen-space pick over BOTH primary nodes and ghost ring. The
-    /// returned index is into the combined `build_level_nodes()`
-    /// order — primaries first (`0..primary_count`), ghosts next
-    /// (`primary_count..`). `None` for a click on the void.
+    /// Screen-space pick over primary nodes, the ghost ring AND the
+    /// Phase 3.4 satellite layer. The returned index is into the
+    /// combined `build_level_nodes()` order:
+    /// `primaries (0..primary_count)`, then `ghosts
+    /// (primary_count..primary_count+ghost_count)`, then `satellites
+    /// (primary_count+ghost_count..)`. `None` for a click on the void.
     fn pick(&self, sx: f32, sy: f32) -> Option<u32> {
         let primaries = self.force3d.positions();
         let primary_count = primaries.len();
+        let ghost_count = self.ghost_tree_idxs.len();
         let w = self.width as f32;
         let h = self.height.max(1.0) as f32;
         let view_proj = self.camera.proj(w / h) * self.camera.view();
@@ -1037,18 +1217,45 @@ impl GraphEngine {
             let combined = (primary_count + i) as u32;
             consider(combined, self.ghost_position_3d(i), &mut best_idx, &mut best_d);
         }
+        for (i, spec) in self.satellites.iter().enumerate() {
+            let Some(pos) = self.satellite_position(spec) else {
+                continue;
+            };
+            let combined = (primary_count + ghost_count + i) as u32;
+            consider(combined, pos, &mut best_idx, &mut best_d);
+        }
         best_idx
     }
 
     /// Resolve a click in `Force3D` mode. Primary container ⇒ drill
     /// descend, primary leaf ⇒ fire the node-click callback. Ghost
     /// (sibling-of-focus context node, drawn in the ring around the
-    /// primary cloud) ⇒ refocus the drill on that sibling.
+    /// primary cloud) ⇒ refocus the drill on that sibling. Satellite
+    /// (Phase 3.4 entry-point sphere orbiting a project cube) ⇒
+    /// focus_to the entry-point symbol so the user lands inside the
+    /// program right at the natural starting point. Overflow badge
+    /// (`tree_idx == u32::MAX`) ⇒ no-op (it's a count glyph, not a
+    /// link).
     fn drill_pick(&mut self, sx: f32, sy: f32) {
         let Some(combined_idx) = self.pick(sx, sy) else {
             return;
         };
         let primary_count = self.tree.current_level().len() as u32;
+        let ghost_count = self.ghost_tree_idxs.len() as u32;
+        if combined_idx >= primary_count + ghost_count {
+            let sat_idx = (combined_idx - primary_count - ghost_count) as usize;
+            let Some(spec) = self.satellites.get(sat_idx).cloned() else {
+                return;
+            };
+            if spec.overflow_count > 0 {
+                return; // overflow badge — not clickable
+            }
+            if self.tree.focus_to(spec.tree_idx) {
+                self.rebuild_current_level();
+                self.needs_redraw = true;
+            }
+            return;
+        }
         if combined_idx >= primary_count {
             let ghost_idx = (combined_idx - primary_count) as usize;
             let Some(&tree_idx) = self.ghost_tree_idxs.get(ghost_idx) else {
@@ -1092,6 +1299,31 @@ fn level_node_size(descendant_count: u32) -> [f32; 2] {
 /// views agree on where ghosts sit.
 fn ghost_ring_radius(primary_radius: f32) -> f32 {
     primary_radius * GHOST_RING_RADIUS_FACTOR + GHOST_RING_MARGIN
+}
+
+/// Phase 3 (Flow) 3.4 — world-space size of a satellite sphere.
+/// A fraction of the parent cube's apparent size so the satellite
+/// reads as "an exit point of this thing" rather than a peer.
+fn satellite_size_3d(parent_size: [f32; 2]) -> [f32; 2] {
+    let s = parent_size[0].max(parent_size[1]) * 0.28;
+    [s, s]
+}
+
+/// Phase 3 (Flow) 3.4 — world-space position of a satellite at
+/// `angle` radians around `parent_center`. Orbits in the XZ plane
+/// (Y kept at the parent's altitude) so the satellite ring stays
+/// horizontal relative to the camera's up-vector, matching the
+/// ghost-ring orientation. Radius = the parent cube's apparent
+/// half-extent + a small clearance margin so the satellite sits
+/// outside the cube silhouette without being thrown into the void.
+fn satellite_position_3d(parent_center: Vec3, parent_size: [f32; 2], angle: f32) -> Vec3 {
+    let half = parent_size[0].max(parent_size[1]) * 0.5;
+    let radius = half + 18.0;
+    Vec3::new(
+        parent_center.x + radius * angle.cos(),
+        parent_center.y,
+        parent_center.z + radius * angle.sin(),
+    )
 }
 
 /// Resize the canvas. The bitmap (backing store) is set to

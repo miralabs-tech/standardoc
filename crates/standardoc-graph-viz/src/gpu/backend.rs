@@ -93,6 +93,7 @@ struct EdgeVertex {
 /// the fragment shader between a sphere impostor (leaves) and a
 /// stylised cube (containers); `is_ghost` dims the body alpha so
 /// sibling-of-focus context reads as "outside the current level".
+#[derive(Clone)]
 pub(crate) struct LevelNode {
     pub center: Vec3,
     pub size: [f32; 2],
@@ -425,7 +426,7 @@ impl WebGpuBackend {
     pub(crate) fn upload_scene(
         &mut self,
         nodes: &[LevelNode],
-        edges: &[(u32, u32)],
+        edges: &[(u32, u32, u32)],
         palette: &Palette,
     ) {
         let stroke = parse_hex(&palette.panel_border);
@@ -482,12 +483,21 @@ impl WebGpuBackend {
         // visually: module→function reads purple→blue, project→
         // project ecosystem-coloured, etc.
         let mut edge_verts: Vec<EdgeVertex> = Vec::with_capacity(edges.len() * 2);
-        for &(a, b) in edges {
+        for &(a, b, weight) in edges {
             let (Some(na), Some(nb)) = (nodes.get(a as usize), nodes.get(b as usize)) else {
                 continue;
             };
             let mut color_a = parse_hex(node_body_hex(na, palette));
             let mut color_b = parse_hex(node_body_hex(nb, palette));
+            // Phase 3 (Flow) 3.4 — wgpu line topology can't vary width
+            // per segment, so weight modulates alpha instead. A single
+            // link (`weight == 1`) reads faint; each extra link
+            // saturates the line until it caps at full alpha around
+            // weight 5. Logarithm-ish curve so a 50-link edge isn't
+            // dramatically louder than a 10-link one.
+            let weight_alpha = (0.4 + (weight.saturating_sub(1) as f32) * 0.15).min(1.0);
+            color_a[3] *= weight_alpha;
+            color_b[3] *= weight_alpha;
             // Ghost-touching edges fade so they read as background
             // context, matching the 2D dashed treatment.
             if na.is_ghost || nb.is_ghost {
