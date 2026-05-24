@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use standardoc_ir::{
-    Blake3Hash, BuiltinTag, BuiltinTier, DeclKind, EdgeKind, Kind, Language, LanguageKind,
-    Modifiers, ModuleLookup, Param, RawCallSite, RawDocument, RawEdge, RawSymbol,
+    Blake3Hash, BuiltinTag, BuiltinTier, DeclKind, EdgeKind, EntryPointKind, Kind, Language,
+    LanguageKind, Modifiers, ModuleLookup, Param, RawCallSite, RawDocument, RawEdge, RawSymbol,
     ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation, TypeRef, Visibility,
 };
 use swc_core::common::BytePos;
@@ -724,12 +724,13 @@ fn process_export_default_decl(
             let span = fn_expr.function.span;
             let signature = build_function_signature(ctx, &fn_expr.function);
             let body_hash = ctx.body_hash_of(span);
+            let entry_point = classify_ts_fn_entry_point(&name, current_module);
             ctx.push_symbol_with_doc(
                 RawSymbol {
                     decl_kind: Some(DeclKind::Function),
                     implements_trait: None,
                     receiver_type: None,
-                    entry_point: None,
+                    entry_point,
                     fqdn: format!("{current_module}::{name}"),
                     name,
                     kind: Kind::Callable,
@@ -863,6 +864,37 @@ fn process_import(ctx: &mut TsWalkContext<'_>, item: &ImportDecl, current_module
     }
 }
 
+/// Phase 3 (Flow) — first-pass entry-point detector for TS/JS
+/// function declarations. The Rust/C convention of a `main` symbol
+/// sitting at the crate root doesn't map cleanly to TS: there's no
+/// single declarable "binary entry" — what runs is whatever the
+/// runtime loads (Node / Bun / browser bundle), with the package's
+/// `"main"` / `"bin"` field naming a FILE, not a symbol. Without
+/// wiring that lookup through, we use a positional heuristic that
+/// catches the common script shape (`main.ts` / `index.ts` with a
+/// `function main()` at its top level) without false-positiving on
+/// nested helpers:
+///
+///   - `BinaryMain`: a fn named `main` whose `parent_fqdn` has at
+///     most one `::` segment — i.e. it sits at the project root
+///     (`<project>::main`) OR at the root of a top-level file
+///     (`<project>::<file>::main`). Deeper paths
+///     (`<project>::<dir>::<file>::main`) are *not* tagged: a `main`
+///     buried inside a subfolder almost always means "the function
+///     in this module that does the main thing", not the runtime
+///     entry-point.
+///
+/// `PublicApi` (an export that ends up re-exported from the package
+/// barrel) is deferred — it would need export-graph walking across
+/// the project. `FfiExport` has no clean TS equivalent (FFI lives in
+/// the wasm-bindgen Rust glue, already covered by the Rust pass).
+fn classify_ts_fn_entry_point(name: &str, parent_fqdn: &str) -> Option<EntryPointKind> {
+    if name == "main" && parent_fqdn.matches("::").count() <= 1 {
+        return Some(EntryPointKind::BinaryMain);
+    }
+    None
+}
+
 fn extract_fn_decl(
     ctx: &TsWalkContext<'_>,
     item: &FnDecl,
@@ -873,11 +905,12 @@ fn extract_fn_decl(
     let fqdn = format!("{parent_fqdn}::{name}");
     let span = item.function.span;
     let signature = build_function_signature(ctx, &item.function);
+    let entry_point = classify_ts_fn_entry_point(&name, parent_fqdn);
     RawSymbol {
         decl_kind: Some(DeclKind::Function),
         implements_trait: None,
         receiver_type: None,
-        entry_point: None,
+        entry_point,
         name,
         fqdn,
         kind: Kind::Callable,
@@ -2520,5 +2553,39 @@ mod tests {
             decl_kind_of(&symbols, "src::greet"),
             Some(DeclKind::Function),
         );
+    }
+
+    #[test]
+    fn entry_point_main_at_module_root_tagged_binary_main() {
+        let (symbols, _, _, _) = run("export function main() {}");
+        let m = symbols.iter().find(|s| s.fqdn == "src::main").unwrap();
+        assert_eq!(m.entry_point, Some(EntryPointKind::BinaryMain));
+    }
+
+    #[test]
+    fn entry_point_default_export_main_tagged_binary_main() {
+        let (symbols, _, _, _) = run("export default function main() {}");
+        let m = symbols.iter().find(|s| s.fqdn == "src::main").unwrap();
+        assert_eq!(m.entry_point, Some(EntryPointKind::BinaryMain));
+    }
+
+    #[test]
+    fn entry_point_non_main_function_is_none() {
+        let (symbols, _, _, _) = run("export function helper() {}");
+        let h = symbols.iter().find(|s| s.fqdn == "src::helper").unwrap();
+        assert_eq!(h.entry_point, None);
+    }
+
+    #[test]
+    fn entry_point_main_helper_inside_class_not_tagged() {
+        // Class method named `main` is parent_fqdn = `src::Runner`
+        // (1 `::`, still under the heuristic cap) BUT methods don't
+        // route through `extract_fn_decl` — they hit `extract_method`,
+        // which still carries `entry_point: None` by construction.
+        // Guards against a future drift where the method path picks
+        // up the helper and starts tagging class methods named main.
+        let (symbols, _, _, _) = run("class Runner { main() {} }");
+        let m = symbols.iter().find(|s| s.fqdn == "src::Runner::main").unwrap();
+        assert_eq!(m.entry_point, None);
     }
 }
