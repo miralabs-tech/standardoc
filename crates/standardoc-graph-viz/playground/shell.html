@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>standardoc — shell (multi-panel)</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100vh;
+        background: #161616;
+        color: #cccccc;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        overflow: hidden;
+      }
+      .sd-shell-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 0 12px;
+        background: #252526;
+        border: 1px solid #2d2d2d;
+        border-radius: 6px;
+        height: 100%;
+        box-sizing: border-box;
+      }
+      .sd-shell-toolbar__brand {
+        color: #3794ff;
+        font-family: ui-monospace, SFMono-Regular, monospace;
+        font-weight: 600;
+        font-size: 14px;
+        white-space: nowrap;
+      }
+      .sd-shell-toolbar__spacer {
+        flex: 1;
+      }
+      .sd-shell-toolbar standardoc-search {
+        flex: 0 1 380px;
+        max-width: 380px;
+      }
+      .sd-shell-panel-placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        background: #1e1e1e;
+        border: 1px solid #2d2d2d;
+        border-radius: 6px;
+        color: #9d9d9d;
+        font-style: italic;
+        padding: 16px;
+        text-align: center;
+      }
+      standardoc-graph {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #1e1e1e;
+        border: 1px solid #2d2d2d;
+        border-radius: 6px;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <standardoc-panel-layout id="shell">
+      <div data-slot="toolbar" class="sd-shell-toolbar">
+        <span class="sd-shell-toolbar__brand">standardoc</span>
+        <standardoc-search id="search" global-shortcut placeholder="Search symbols, files, types…"></standardoc-search>
+        <span class="sd-shell-toolbar__spacer"></span>
+        <span id="status" style="font-size: 11px; color: #9d9d9d;">booting…</span>
+      </div>
+      <standardoc-explorer id="explorer" data-slot="explorer"></standardoc-explorer>
+      <standardoc-graph id="overview" data-slot="overview"></standardoc-graph>
+      <div data-slot="focus" class="sd-shell-panel-placeholder">
+        Focus Graph — Phase 3 (specialized FocusGraphCanvas).<br />
+        For now the overview canvas above carries the whole graph.
+      </div>
+      <standardoc-symbol-details id="details" data-slot="details"></standardoc-symbol-details>
+    </standardoc-panel-layout>
+    <script type="module" src="/shell.js"></script>
+  </body>
+</html>

@@ -316,9 +316,12 @@ const scssModulesPlugin: BunPlugin = {
  * that editing main.ts only needs a browser refresh, no server
  * restart. Bun's transpiler is fast enough that this is a few ms
  * for the scale we're operating at.
+ *
+ * The shell bootstrap (shell.ts) uses the same machinery — both
+ * entries get bundled on-demand from their `.ts` siblings.
  */
-async function bundleMain(): Promise<Response> {
-  const entry = path.join(SERVER_DIR, 'main.ts');
+async function bundleEntry(entryFile: string): Promise<Response> {
+  const entry = path.join(SERVER_DIR, entryFile);
   const built = await Bun.build({
     entrypoints: [entry],
     target: 'browser',
@@ -372,7 +375,10 @@ const server = Bun.serve({
       return proxyMcp(req, url.pathname + url.search);
     }
     if (url.pathname === '/main.js') {
-      return bundleMain();
+      return bundleEntry('main.ts');
+    }
+    if (url.pathname === '/shell.js') {
+      return bundleEntry('shell.ts');
     }
     const served = await serveStatic(url.pathname);
     if (served !== null) return served;
