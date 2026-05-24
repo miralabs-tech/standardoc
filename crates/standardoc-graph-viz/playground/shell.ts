@@ -15,7 +15,6 @@ import '@standarx/standardoc-viz/components/explorer';
 import '@standarx/standardoc-viz/components/symbol-details';
 import '@standarx/standardoc-viz/components/search';
 import '@standarx/standardoc-viz/components/graph';
-import '@standarx/standardoc-viz/styles/tokens';
 
 import { focusStore } from '@standarx/standardoc-viz/focus-store';
 import { McpBrowse } from '@standarx/standardoc-viz/mcp-client';
