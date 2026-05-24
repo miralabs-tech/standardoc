@@ -1,4 +1,5 @@
 import type {
+  DeclKindJson,
   NeighborSymbolJson,
   RawSymbolJson,
   ResolvedOrUnresolvedJson,
@@ -24,7 +25,13 @@ export function pickTopFqdn(symbols: ReadonlyArray<RawSymbolJson>): string | nul
 
 export function formatSymbolHeader(s: RawSymbolJson): string {
   const loc = `${s.location.file}:${s.location.start_line}`;
-  return `=== ${s.fqdn} ===\nkind: ${s.kind} | visibility: ${s.visibility} | ${loc}`;
+  const kindLabel = s.decl_kind ? `${s.kind} (${formatDeclKind(s.decl_kind)})` : s.kind;
+  return `=== ${s.fqdn} ===\nkind: ${kindLabel} | visibility: ${s.visibility} | ${loc}`;
+}
+
+export function formatDeclKind(d: DeclKindJson): string {
+  if (typeof d === 'string') return d;
+  return `custom:${d.custom.lang}:${d.custom.tag}`;
 }
 
 export function formatSymbolContext(ctx: SymbolContextWithNeighborsJson): string {

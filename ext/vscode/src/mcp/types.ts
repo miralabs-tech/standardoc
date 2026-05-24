@@ -10,6 +10,40 @@ export type EdgeKindJson =
 
 export type VisibilityJson = 'public' | 'private' | 'crate' | 'protected';
 
+export type LanguageJson =
+  | 'rust'
+  | 'typescript'
+  | 'javascript'
+  | 'lua'
+  | 'vue'
+  | 'svelte'
+  | 'c';
+
+export type DeclKindJson =
+  | 'module'
+  | 'namespace'
+  | 'crate'
+  | 'struct'
+  | 'enum'
+  | 'union'
+  | 'class'
+  | 'interface'
+  | 'type_alias'
+  | 'function'
+  | 'method'
+  | 'constructor'
+  | 'getter'
+  | 'setter'
+  | 'const'
+  | 'static'
+  | 'var'
+  | 'field'
+  | 'enum_variant'
+  | 'declarative_macro'
+  | 'proc_macro'
+  | 'decorator'
+  | { custom: { lang: LanguageJson; tag: string } };
+
 export interface SymbolLocationJson {
   file: string;
   start_line: number;
@@ -30,6 +64,9 @@ export interface RawSymbolJson {
   body_hash: string | null;
   attributes?: unknown[];
   is_external?: boolean;
+  decl_kind?: DeclKindJson;
+  implements_trait?: string;
+  receiver_type?: string;
 }
 
 export type ResolvedOrUnresolvedJson =

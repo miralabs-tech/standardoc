@@ -31,10 +31,10 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use standardoc_ir::{EdgeKind, Kind, LanguageKind, ResolvedOrUnresolved, Visibility};
+use standardoc_ir::{DeclKind, EdgeKind, Kind, LanguageKind, ResolvedOrUnresolved, Visibility};
 
 use crate::query::{edges_from, edges_to};
-use crate::storage::conv::{kind_from_sql_text, visibility_from_sql_text};
+use crate::storage::conv::{decl_kind_from_sql_text, kind_from_sql_text, visibility_from_sql_text};
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
 use crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
@@ -110,6 +110,12 @@ pub struct GraphSymbol {
     pub start_line: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decl_kind: Option<DeclKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implements_trait: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_type: Option<String>,
 }
 
 /// Edge record paired with an `outbound` hint relative to the focal
@@ -438,7 +444,8 @@ fn load_graph_symbols(
     let fqdns_json = serde_json::to_string(fqdns)?;
     let mut stmt = conn.prepare(
         "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.language, s.module, \
-                s.visibility, s.file_path, s.start_line, s.is_external, f.project_id \
+                s.visibility, s.file_path, s.start_line, s.is_external, f.project_id, \
+                s.decl_kind, s.implements_trait, s.receiver_type \
          FROM symbols s \
          LEFT JOIN files f ON f.path = s.file_path \
          WHERE s.workspace_id = ?1 \
@@ -454,6 +461,11 @@ fn load_graph_symbols(
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
         .map(|raw| -> Result<GraphSymbol, StorageError> {
+            let decl_kind = raw
+                .decl_kind
+                .as_deref()
+                .map(decl_kind_from_sql_text)
+                .transpose()?;
             Ok(GraphSymbol {
                 fqdn: raw.fqdn,
                 name: raw.name,
@@ -466,6 +478,9 @@ fn load_graph_symbols(
                 file: raw.file_path,
                 start_line: raw.start_line,
                 project_id: raw.project_id,
+                decl_kind,
+                implements_trait: raw.implements_trait,
+                receiver_type: raw.receiver_type,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -484,6 +499,9 @@ struct GraphSymbolRowRaw {
     start_line: u32,
     is_external: bool,
     project_id: Option<u32>,
+    decl_kind: Option<String>,
+    implements_trait: Option<String>,
+    receiver_type: Option<String>,
 }
 
 fn read_graph_symbol(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSymbolRowRaw> {
@@ -499,6 +517,9 @@ fn read_graph_symbol(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSymbolRow
         start_line: row.get(8)?,
         is_external: row.get(9)?,
         project_id: row.get(10)?,
+        decl_kind: row.get(11)?,
+        implements_trait: row.get(12)?,
+        receiver_type: row.get(13)?,
     })
 }
 
@@ -805,6 +826,34 @@ mod tests {
         assert_eq!(entry["is_external"], false);
         // `location` MUST NOT be nested under symbols.
         assert!(entry.get("location").is_none());
+        // K-Step-E: nullable refinement fields are skipped when NULL.
+        assert!(entry.get("decl_kind").is_none());
+        assert!(entry.get("implements_trait").is_none());
+        assert!(entry.get("receiver_type").is_none());
+    }
+
+    #[test]
+    fn wire_shape_carries_decl_kind_and_method_refinement_when_set() {
+        let (_d, h) = fresh_handle();
+        seed_file(&h, "src/a.rs");
+        seed_symbol(&h, "crate::Foo::bar", "bar", Kind::Callable, false);
+        // Backfill the K-Step-A/C nullable refinement columns directly.
+        let conn = h.pool().unwrap().get().unwrap();
+        conn.execute(
+            "UPDATE symbols SET decl_kind = 'method', implements_trait = 'core::fmt::Debug', \
+                                receiver_type = '&Foo' \
+             WHERE workspace_id = ?1 AND fqdn = 'crate::Foo::bar'",
+            rusqlite::params![PRIMARY_WORKSPACE_ID],
+        )
+        .unwrap();
+
+        let resp = fetch_graph(&h, req(None)).unwrap();
+        let json = serde_json::to_value(&resp).unwrap();
+        let entry = &json["symbols"][0];
+        assert_eq!(entry["fqdn"], "crate::Foo::bar");
+        assert_eq!(entry["decl_kind"], "method");
+        assert_eq!(entry["implements_trait"], "core::fmt::Debug");
+        assert_eq!(entry["receiver_type"], "&Foo");
     }
 
     #[test]

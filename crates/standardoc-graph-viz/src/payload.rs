@@ -80,13 +80,28 @@ pub(crate) struct SymbolEntry {
     pub start_line: u32,
     #[serde(default)]
     pub project_id: Option<u32>,
+    /// Refined declaration kind (snake_case string from `DeclKind`,
+    /// or `custom:<lang>:<tag>` for the escape hatch). K-Step-F will
+    /// shape nodes by this; today it is just passed through.
+    #[serde(default)]
+    pub decl_kind: Option<String>,
+    /// For a method, the FQDN of the trait it implements (Rust
+    /// `impl Trait for Type`) when known. Lights up trait-grouping
+    /// in K-Step-F.
+    #[serde(default)]
+    pub implements_trait: Option<String>,
+    /// For a method, the printed receiver type (`&Foo`, `Box<Self>`,
+    /// `self`, …). Pairs with `implements_trait` to disambiguate
+    /// overloaded method names across receivers.
+    #[serde(default)]
+    pub receiver_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct EdgeEntry {
     pub from: String,
     pub to: String,
-    /// CALLS / IMPORTS / EXTENDS / IMPLEMENTS / REFERENCES / DEFINES / USES_TYPE / EXPOSES_API.
+    /// CALLS / IMPORTS / EXTENDS / IMPLEMENTS / REFERENCES / USES_TYPE.
     pub kind: String,
     #[serde(default)]
     pub outbound: bool,

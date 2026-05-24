@@ -245,6 +245,9 @@ impl StandardocMcp {
                         "language_kind": ctx.context.symbol.language_kind,
                         "visibility": ctx.context.symbol.visibility,
                         "module": ctx.context.symbol.module,
+                        "decl_kind": ctx.context.symbol.decl_kind,
+                        "implements_trait": ctx.context.symbol.implements_trait,
+                        "receiver_type": ctx.context.symbol.receiver_type.as_ref().map(|t| &t.display),
                     },
                     "neighbor_counts": {
                         "callers": ctx.callers.len(),
