@@ -13,10 +13,12 @@
     "./components/hud": "./src/components/hud/index.ts",
     "./components/graph": "./src/components/graph/index.ts",
     "./profiler": "./src/profiler/index.ts",
+    "./mcp-client": "./src/mcp-client/index.ts",
     "./styles/tokens": "./src/styles/_tokens.scss",
     "./styles/mixins": "./src/styles/_mixins.scss"
   },
   "peerDependencies": {
+    "@modelcontextprotocol/sdk": "^1",
     "classigo": "^2",
     "matchigo": "^1"
   },

@@ -10,3 +10,4 @@ export * from './components/toolbar';
 export * from './components/hud';
 export * from './components/graph';
 export * from './profiler';
+export * from './mcp-client';

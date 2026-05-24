@@ -13,13 +13,12 @@
  */
 
 import init, { GraphEngine } from '../pkg/standardoc_graph_viz.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 import '@standarx/standardoc-viz/components/toolbar';
 import '@standarx/standardoc-viz/components/hud';
 import '@standarx/standardoc-viz/components/graph';
 import { Profiler } from '@standarx/standardoc-viz/profiler';
+import { McpBrowse } from '@standarx/standardoc-viz/mcp-client';
 import type {
 	GraphClickDetail,
 	GraphElement,
@@ -35,41 +34,10 @@ import type {
 	ToolbarFlagChangeDetail,
 	ToolbarModeRequestDetail,
 } from '@standarx/standardoc-viz';
-
-interface BrowseSymbol {
-	readonly fqdn: string;
-	readonly name: string;
-	readonly kind: string;
-	readonly visibility: string;
-	readonly module: string | null;
-	readonly language_kind: string;
-	readonly language: string;
-	readonly is_external: boolean;
-	readonly file: string;
-	readonly start_line: number;
-	readonly project_id?: number | null;
-}
-
-interface BrowseEdge {
-	readonly from: string;
-	readonly to: string;
-	readonly kind: string;
-	readonly outbound: boolean;
-}
-
-interface BrowseProject {
-	readonly project_id: number;
-	readonly label: string;
-	readonly kind: string;
-	readonly rel_path: string;
-}
-
-interface FetchGraphResponse {
-	readonly symbols: ReadonlyArray<BrowseSymbol>;
-	readonly edges: ReadonlyArray<BrowseEdge>;
-	readonly projects?: ReadonlyArray<BrowseProject>;
-	readonly focal?: string | null;
-}
+import type {
+	BrowseEdge,
+	BrowseSymbol,
+} from '@standarx/standardoc-viz/mcp-client';
 
 const toolbarEl = document.getElementById('toolbar') as HTMLElement;
 const hudEl = document.getElementById('hud') as HudElement;
@@ -108,74 +76,6 @@ function paletteFromCss(): string {
 		list_hover: v('--hover', '#2a2d2e'),
 		text_link: v('--accent', '#3794ff'),
 	});
-}
-
-class McpBrowse {
-	private constructor(private readonly client: Client) { }
-
-	static async connect(): Promise<McpBrowse> {
-		const transport = new StreamableHTTPClientTransport(new URL('/mcp', window.location.origin));
-		const client = new Client({ name: 'standardoc-graph-viz-playground', version: '0.0.1' }, { capabilities: {} });
-		await client.connect(transport);
-		return new McpBrowse(client);
-	}
-
-	async fetchGraph(includeExternal: boolean): Promise<FetchGraphResponse> {
-		// Single bounded snapshot — `fetch_graph` already does the JOIN
-		// with files/projects server-side and returns the flat wire shape
-		// the WASM engine consumes directly. Replaces the previous
-		// `list_symbols(kind=module)` + per-module `list_symbols(module=)`
-		// N+1 walk and the `rawToBrowse` reshape it required.
-		const raw = await this.callTool('fetch_graph', {
-			include_external: includeExternal,
-			max_nodes: 5000,
-		});
-		return JSON.parse(raw) as FetchGraphResponse;
-	}
-
-	/**
-	 * Depth-1 BFS expansion around `fqdn`. Unlike `get_context` (which
-	 * only surfaces callers/callees/imports/imported_by — i.e. CALLS +
-	 * IMPORTS), `fetch_graph` focal mode carries every edge kind:
-	 * EXTENDS / IMPLEMENTS / USES_TYPE / REFERENCES too. The hover
-	 * panel needs all of them.
-	 */
-	async fetchNeighborhood(fqdn: string, includeExternal: boolean): Promise<FetchGraphResponse> {
-		const raw = await this.callTool('fetch_graph', {
-			focal: fqdn,
-			depth: 1,
-			include_external: includeExternal,
-		});
-		return JSON.parse(raw) as FetchGraphResponse;
-	}
-
-	/**
-	 * Lightweight liveness probe used by the revision watcher
-	 * (option (a) — client polling in lieu of SSE notifications).
-	 * Returns the current daemon revision plus whether indexing has
-	 * finished its cold-start sweep. Cheap on the server side: a
-	 * single in-memory atomic read + a capability snapshot.
-	 */
-	async currentRevision(): Promise<{ revision: number; indexingReady: boolean }> {
-		const raw = await this.callTool('current_revision', {});
-		const parsed = JSON.parse(raw) as {
-			revision: number;
-			indexing?: { ready?: boolean };
-		};
-		return {
-			revision: parsed.revision,
-			indexingReady: parsed.indexing?.ready === true,
-		};
-	}
-
-	private async callTool(name: string, args: Record<string, unknown>): Promise<string> {
-		const result = await this.client.callTool({ name, arguments: args });
-		const content = (result as { content?: ReadonlyArray<{ type?: string; text?: string }> }).content;
-		if (!content || content.length === 0) return '';
-		const first = content[0];
-		if (!first || typeof first.text !== 'string') return '';
-		return first.text;
-	}
 }
 
 async function fetchEdgesFor(
@@ -445,7 +345,10 @@ async function main(): Promise<void> {
 	setStatus('connecting MCP…', 'loading');
 	let mcp: McpBrowse;
 	try {
-		mcp = await McpBrowse.connect();
+		mcp = await McpBrowse.connectHttp(new URL('/mcp', window.location.origin), {
+			name: 'standardoc-graph-viz-playground',
+			version: '0.0.1',
+		});
 	} catch (e) {
 		const reason = e instanceof Error ? e.message : String(e);
 		setStatus(`MCP connect failed: ${reason}`, 'error');
