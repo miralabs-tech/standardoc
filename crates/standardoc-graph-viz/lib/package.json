@@ -12,6 +12,7 @@
     "./components/toolbar": "./src/components/toolbar/index.ts",
     "./components/hud": "./src/components/hud/index.ts",
     "./components/graph": "./src/components/graph/index.ts",
+    "./components/panel-layout": "./src/components/panel-layout/index.ts",
     "./profiler": "./src/profiler/index.ts",
     "./mcp-client": "./src/mcp-client/index.ts",
     "./focus-store": "./src/focus-store/index.ts",

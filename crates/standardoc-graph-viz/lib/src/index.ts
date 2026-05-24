@@ -9,6 +9,7 @@ export type { RenderMode, Status, StatusKind } from './types';
 export * from './components/toolbar';
 export * from './components/hud';
 export * from './components/graph';
+export * from './components/panel-layout';
 export * from './profiler';
 export * from './mcp-client';
 export * from './focus-store';
