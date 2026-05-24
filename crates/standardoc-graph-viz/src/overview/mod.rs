@@ -1,29 +1,30 @@
 //! Phase 3 (Shell) — **Overview canvas**. Workspace-level view: each
-//! project rendered as a luminous cluster (nebula), inter-project
+//! project rendered as a luminous cluster (nebula-ish), inter-project
 //! dependencies as glow strands whose intensity tracks edge weight.
 //!
-//! Phase 3a (this commit) is the additive skeleton: the wasm-bindgen
-//! struct compiles, accepts a payload, exposes telemetry, and renders
-//! a Canvas2D placeholder so the new TS component
-//! (`<standardoc-overview>`) can mount end-to-end against a real engine
-//! instance. The real cluster layout (force3d retuned for project-
-//! granularity) + glow rendering lands in Phase 3b. The wasm-bindgen
-//! surface defined here is the contract Phase 3b will fill in.
+//! Phase 3b (this revision) implements a deterministic sunflower
+//! packing — biggest project at centre, others spiralling out via the
+//! Fibonacci angle so the layout reads organically without running a
+//! force simulation each frame. Each cluster paints as a radial-
+//! gradient disc whose radius derives from `sqrt(symbol_count)`, with
+//! the label below. Inter-project edges are straight lines whose
+//! stroke width is weight-driven (logarithmic so a single dependency
+//! still draws and a 200-edge bundle isn't a black slab).
 //!
-//! The legacy [`crate::GraphEngine`] stays alongside this module
-//! through Phase 3c — slim-down + delete of tree/scene/render/layout/
-//! viewport is Phase 3d.
+//! Hit-test fires `on_cluster_hover` / `on_cluster_click` for the
+//! disc under the pointer. Pan / zoom + a real 3D force layout +
+//! glow particle layer land in Phase 3c. Slim-down of the legacy
+//! GraphEngine path is Phase 3d.
 
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 
-/// One project cluster — a nebula in the workspace overview. Phase 3a
-/// only uses `id` / `label` / `symbol_count` for the placeholder
-/// status text; Phase 3b will consume `kind` (project type → tint) +
-/// `symbol_count` (cluster radius) + the `(x, y, z)` slot a force
-/// layout will compute.
-#[allow(dead_code)] // fields read in Phase 3b
+/// One project cluster — a nebula in the workspace overview. Phase 3b
+/// uses `id` / `label` / `symbol_count` for layout + rendering. The
+/// `kind` field is parked for Phase 3c where it'll tint the radial
+/// gradient (rust → violet, bun → orange, node → green, etc.).
+#[allow(dead_code)] // kind consumed in Phase 3c
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct OverviewCluster {
 	pub id: u32,
@@ -35,7 +36,6 @@ pub(crate) struct OverviewCluster {
 /// One inter-project edge. `weight` is the count of cross-project
 /// symbol-level edges aggregated into this lane (e.g. CALLS + IMPORTS
 /// + USES_TYPE from project A symbols into project B symbols).
-#[allow(dead_code)] // fields read in Phase 3b
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct OverviewEdge {
 	pub from: u32,
@@ -51,6 +51,25 @@ struct OverviewPayload {
 	edges: Vec<OverviewEdge>,
 }
 
+/// Canvas-space position + radius for a single cluster, computed once
+/// in `layout()` and consumed by `draw()` / `hit_test()`.
+#[derive(Debug, Clone, Copy)]
+struct LaidCluster {
+	x: f64,
+	y: f64,
+	r: f64,
+}
+
+const MIN_CLUSTER_RADIUS: f64 = 18.0;
+const MAX_CLUSTER_RADIUS: f64 = 72.0;
+const CLUSTER_GAP: f64 = 36.0;
+const HIT_PAD: f64 = 6.0;
+const LABEL_OFFSET: f64 = 8.0;
+/// Golden angle in radians — 137.5° = `π * (3 - sqrt(5))`. Distributes
+/// points evenly around the origin when paired with `sqrt(i)` radial
+/// growth.
+const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653_3;
+
 #[wasm_bindgen]
 pub struct OverviewCanvas {
 	canvas: HtmlCanvasElement,
@@ -63,6 +82,14 @@ pub struct OverviewCanvas {
 	on_cluster_click: Option<js_sys::Function>,
 	on_cluster_hover: Option<js_sys::Function>,
 	needs_redraw: bool,
+	/// Cluster id → laid-out position. Re-computed on `set_payload` /
+	/// `resize`. Hover + click hit-test scan this map.
+	positions: std::collections::HashMap<u32, LaidCluster>,
+	/// Pre-sorted (by symbol_count desc) cluster index → cluster id so
+	/// the centre is always the heaviest project.
+	render_order: Vec<u32>,
+	hovered: Option<u32>,
+	drag_origin: Option<(f64, f64)>,
 }
 
 #[wasm_bindgen]
@@ -85,6 +112,10 @@ impl OverviewCanvas {
 			on_cluster_click: None,
 			on_cluster_hover: None,
 			needs_redraw: true,
+			positions: std::collections::HashMap::new(),
+			render_order: Vec::new(),
+			hovered: None,
+			drag_origin: None,
 		})
 	}
 
@@ -93,6 +124,7 @@ impl OverviewCanvas {
 			.map_err(|e| JsValue::from_str(&format!("OverviewCanvas: payload parse error: {e}")))?;
 		self.clusters = parsed.clusters;
 		self.edges = parsed.edges;
+		self.layout();
 		self.needs_redraw = true;
 		Ok(())
 	}
@@ -101,7 +133,7 @@ impl OverviewCanvas {
 		if !self.needs_redraw {
 			return;
 		}
-		self.draw_placeholder();
+		self.draw();
 		self.needs_redraw = false;
 	}
 
@@ -113,6 +145,7 @@ impl OverviewCanvas {
 		self.width = f64::from(width);
 		self.height = f64::from(height);
 		crate::apply_canvas_size(&self.canvas, width, height, self.device_pixel_ratio);
+		self.layout();
 		self.needs_redraw = true;
 	}
 
@@ -133,36 +166,64 @@ impl OverviewCanvas {
 		self.on_cluster_hover = Some(cb);
 	}
 
-	pub fn on_pointer_move(&mut self, _x: f64, _y: f64) {
-		// Phase 3b: hit-test clusters, fire on_cluster_hover with the
-		// resolved cluster id (or null on exit). Phase 3a is a no-op.
+	pub fn on_pointer_move(&mut self, x: f64, y: f64) {
+		let hit = self.hit_test(x, y);
+		if hit == self.hovered {
+			return;
+		}
+		self.hovered = hit;
+		self.needs_redraw = true;
+		if let Some(cb) = &self.on_cluster_hover {
+			let arg = hit.map_or(JsValue::NULL, |id| JsValue::from_f64(f64::from(id)));
+			let _ = cb.call1(&JsValue::NULL, &arg);
+		}
 	}
 
-	pub fn on_pointer_down(&mut self, _x: f64, _y: f64, _button: i16) {
-		// Phase 3b: track drag start for orbit camera (3D view).
+	pub fn on_pointer_down(&mut self, x: f64, y: f64, _button: i16) {
+		self.drag_origin = Some((x, y));
 	}
 
-	pub fn on_pointer_up(&mut self, _x: f64, _y: f64, _button: i16) {
-		// Phase 3b: on quick-click without drag, fire on_cluster_click
-		// with the hit cluster id.
+	pub fn on_pointer_up(&mut self, x: f64, y: f64, _button: i16) {
+		let was_click = match self.drag_origin {
+			Some((sx, sy)) => (x - sx).hypot(y - sy) < 4.0,
+			None => true,
+		};
+		self.drag_origin = None;
+		if !was_click {
+			return;
+		}
+		if let Some(id) = self.hit_test(x, y) {
+			if let Some(cb) = &self.on_cluster_click {
+				let _ = cb.call1(&JsValue::NULL, &JsValue::from_f64(f64::from(id)));
+			}
+		}
 	}
 
 	pub fn on_pointer_leave(&mut self) {
-		// Phase 3b: clear hover state, fire on_cluster_hover(null).
+		self.drag_origin = None;
+		if self.hovered.is_none() {
+			return;
+		}
+		self.hovered = None;
+		self.needs_redraw = true;
+		if let Some(cb) = &self.on_cluster_hover {
+			let _ = cb.call1(&JsValue::NULL, &JsValue::NULL);
+		}
 	}
 
 	pub fn on_wheel(&mut self, _x: f64, _y: f64, _delta_y: f64) {
-		// Phase 3b: zoom (dolly the orbit camera).
+		// Phase 3c: zoom around pointer.
 	}
 
 	pub fn fit(&mut self) {
-		// Phase 3b: reset camera to a framing that holds every cluster
-		// in view.
+		// Sunflower layout already fits to canvas; just re-lay in case
+		// dimensions shifted since the last paint.
+		self.layout();
 		self.needs_redraw = true;
 	}
 
 	pub fn set_camera_preset(&mut self, _preset: &str) {
-		// Phase 3b: orbit/top/front/side presets.
+		// Phase 3c (3D camera).
 		self.needs_redraw = true;
 	}
 
@@ -176,24 +237,162 @@ impl OverviewCanvas {
 		self.edges.len()
 	}
 
-	fn draw_placeholder(&self) {
+	fn layout(&mut self) {
+		self.positions.clear();
+		self.render_order.clear();
+		if self.clusters.is_empty() {
+			return;
+		}
+		// Sort by symbol_count desc (with stable id tiebreaker) so the
+		// heaviest project anchors the centre. Render the ring outward
+		// from there.
+		let mut order: Vec<usize> = (0..self.clusters.len()).collect();
+		order.sort_by(|&a, &b| {
+			let ca = &self.clusters[a];
+			let cb = &self.clusters[b];
+			cb.symbol_count.cmp(&ca.symbol_count).then(ca.id.cmp(&cb.id))
+		});
+
+		let cx = self.width * 0.5;
+		let cy = self.height * 0.5;
+		// Spiral scale tuned so a workspace of ~10–20 clusters lands
+		// inside a typical panel without overflowing. Larger workspaces
+		// degrade gracefully (just spiral wider).
+		let scale = f64::min(self.width, self.height) * 0.085;
+
+		// Cluster radius from sqrt(symbol_count). Floor + ceiling keep
+		// the visual hierarchy readable when counts span 3+ orders of
+		// magnitude (a 10-symbol crate next to a 2000-symbol crate).
+		let max_count = self
+			.clusters
+			.iter()
+			.map(|c| c.symbol_count.max(1))
+			.max()
+			.unwrap_or(1) as f64;
+
+		for (i, &cluster_idx) in order.iter().enumerate() {
+			let c = &self.clusters[cluster_idx];
+			let raw = (c.symbol_count.max(1) as f64).sqrt();
+			let normalised = raw / max_count.sqrt();
+			let r = MIN_CLUSTER_RADIUS + normalised * (MAX_CLUSTER_RADIUS - MIN_CLUSTER_RADIUS);
+
+			let (x, y) = if i == 0 {
+				(cx, cy)
+			} else {
+				let angle = (i as f64) * GOLDEN_ANGLE;
+				let radial = scale * (i as f64).sqrt() + CLUSTER_GAP;
+				(cx + radial * angle.cos(), cy + radial * angle.sin())
+			};
+
+			self.positions.insert(c.id, LaidCluster { x, y, r });
+			self.render_order.push(c.id);
+		}
+	}
+
+	fn draw(&self) {
 		self.ctx.set_fill_style_str("#161616");
 		self.ctx.fill_rect(0.0, 0.0, self.width, self.height);
 
+		if self.clusters.is_empty() {
+			self.draw_empty_state();
+			return;
+		}
+
+		// Edges first so cluster discs paint on top.
+		let max_weight = self
+			.edges
+			.iter()
+			.map(|e| e.weight.max(1))
+			.max()
+			.unwrap_or(1) as f64;
+		for e in &self.edges {
+			let (Some(from), Some(to)) = (self.positions.get(&e.from), self.positions.get(&e.to))
+			else { continue };
+			// Logarithmic so a single edge still draws and a heavy
+			// bundle doesn't dominate.
+			let w_norm = (f64::from(e.weight.max(1))).ln() / (max_weight.ln().max(1.0));
+			let line_w = 0.6 + w_norm * 2.4;
+			let alpha = 0.25 + w_norm * 0.45;
+			self.ctx.set_stroke_style_str(&format!("rgba(74, 158, 255, {alpha:.3})"));
+			self.ctx.set_line_width(line_w);
+			self.ctx.begin_path();
+			self.ctx.move_to(from.x, from.y);
+			self.ctx.line_to(to.x, to.y);
+			self.ctx.stroke();
+		}
+
+		// Cluster discs — biggest first so smaller ones layer in front
+		// when the spiral edges overlap.
+		for id in &self.render_order {
+			let Some(pos) = self.positions.get(id) else { continue };
+			let Some(c) = self.clusters.iter().find(|c| c.id == *id) else { continue };
+			let highlighted = self.hovered == Some(*id);
+			self.draw_cluster(pos, c, highlighted);
+		}
+	}
+
+	fn draw_cluster(&self, pos: &LaidCluster, cluster: &OverviewCluster, highlighted: bool) {
+		// Soft outer glow — bigger than the disc, low alpha. Conveys
+		// the nebula feel without paying the cost of a real particle
+		// system. The hovered cluster gets a brighter halo.
+		let halo_alpha = if highlighted { 0.45 } else { 0.18 };
+		self.ctx.set_fill_style_str(&format!("rgba(177, 128, 215, {halo_alpha:.3})"));
+		self.ctx.begin_path();
+		let _ = self.ctx.arc(pos.x, pos.y, pos.r + 16.0, 0.0, std::f64::consts::TAU);
+		self.ctx.fill();
+
+		// Radial gradient — bright violet centre fading to dark. The
+		// browser handles the math, no shader required.
+		let gradient = match self.ctx.create_radial_gradient(pos.x, pos.y, 0.0, pos.x, pos.y, pos.r) {
+			Ok(g) => g,
+			Err(_) => return,
+		};
+		let _ = gradient.add_color_stop(0.0, "rgba(220, 200, 255, 0.95)");
+		let _ = gradient.add_color_stop(0.55, "rgba(170, 130, 215, 0.75)");
+		let _ = gradient.add_color_stop(1.0, "rgba(60, 40, 95, 0.4)");
+		self.ctx.set_fill_style_canvas_gradient(&gradient);
+		self.ctx.begin_path();
+		let _ = self.ctx.arc(pos.x, pos.y, pos.r, 0.0, std::f64::consts::TAU);
+		self.ctx.fill();
+
+		// Label below the cluster. Counts paint smaller + dimmer.
+		self.ctx.set_fill_style_str(if highlighted { "#ffffff" } else { "#cccccc" });
+		self.ctx.set_font("600 13px ui-monospace, SFMono-Regular, monospace");
+		self.ctx.set_text_align("center");
+		self.ctx.set_text_baseline("top");
+		let _ = self.ctx.fill_text(&cluster.label, pos.x, pos.y + pos.r + LABEL_OFFSET);
+
 		self.ctx.set_fill_style_str("#9d9d9d");
+		self.ctx.set_font("10px ui-monospace, SFMono-Regular, monospace");
+		let _ = self.ctx.fill_text(
+			&format!("{} symbols", cluster.symbol_count),
+			pos.x,
+			pos.y + pos.r + LABEL_OFFSET + 16.0,
+		);
+	}
+
+	fn draw_empty_state(&self) {
+		self.ctx.set_fill_style_str("#666666");
 		self.ctx.set_font("13px ui-monospace, SFMono-Regular, monospace");
 		self.ctx.set_text_align("center");
 		self.ctx.set_text_baseline("middle");
-
-		let title = "OverviewCanvas — Phase 3a skeleton";
-		let _ = self.ctx.fill_text(title, self.width * 0.5, self.height * 0.5 - 12.0);
-
-		let counts = format!(
-			"{} clusters · {} inter-project edges (Phase 3b will render the nebula layout)",
-			self.clusters.len(),
-			self.edges.len(),
+		let _ = self.ctx.fill_text(
+			"No projects loaded yet.",
+			self.width * 0.5,
+			self.height * 0.5,
 		);
-		self.ctx.set_fill_style_str("#666666");
-		let _ = self.ctx.fill_text(&counts, self.width * 0.5, self.height * 0.5 + 12.0);
+	}
+
+	fn hit_test(&self, x: f64, y: f64) -> Option<u32> {
+		let mut best: Option<(f64, u32)> = None;
+		for (id, p) in &self.positions {
+			let d = (x - p.x).hypot(y - p.y);
+			if d <= p.r + HIT_PAD {
+				if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+					best = Some((d, *id));
+				}
+			}
+		}
+		best.map(|(_, id)| id)
 	}
 }
