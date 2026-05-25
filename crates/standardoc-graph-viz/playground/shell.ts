@@ -33,6 +33,7 @@ import type {
 	EntryPointKind,
 	FocusGraphElement,
 	FocusGraphErrorDetail,
+	FocusGraphHopChangeDetail,
 	FocusGraphNodeClickDetail,
 	OverviewClusterClickDetail,
 	OverviewElement,
@@ -211,26 +212,31 @@ async function boot(): Promise<void> {
 		}
 	});
 
+	// Hop selector drives the BFS depth on every focus fetch. Phase 3a
+	// hardcoded depth=1 on the wire; now the user's choice in the focus
+	// panel chips picks the real depth. 'All' (hops=0) caps at 5 — the
+	// daemon's fetch_graph node-count limit fires somewhere around
+	// depth=4 on hub symbols anyway, so 5 is a safe ceiling.
+	let currentHops = focusEl.hops;
+	focusEl.addEventListener('sd-focus-graph-hop-change', ev => {
+		currentHops = (ev as CustomEvent<FocusGraphHopChangeDetail>).detail.hops;
+		const fqdn = focusStore.get().current;
+		if (fqdn !== null) void refreshFocus(fqdn);
+	});
+
 	// Focus → Symbol Details. Concurrent fetch token guards against a
 	// stale response landing after the user has moved on to another FQDN.
 	let focusToken = 0;
-	focusStore.subscribe(async state => {
-		const fqdn = state.current;
-		if (fqdn === null) {
-			detailsEl.symbol = null;
-			return;
-		}
+	async function refreshFocus(fqdn: string): Promise<void> {
 		const myToken = ++focusToken;
+		const depth = currentHops === 0 ? 5 : currentHops;
 		detailsEl.symbol = null;
-		setStatus(`fetch ${shortFqdn(fqdn)}…`);
+		setStatus(`fetch ${shortFqdn(fqdn)} (depth ${depth})…`);
 		const [ctx, neighborhood] = await Promise.all([
 			mcp.getContext(fqdn).catch(() => null),
-			mcp.fetchNeighborhood(fqdn, false).catch(() => null),
+			mcp.fetchNeighborhood(fqdn, false, depth).catch(() => null),
 		]);
 		if (myToken !== focusToken) return; // a newer focus arrived
-		// Push the focal payload into the FocusGraph canvas alongside the
-		// SymbolDetails update — both panels react to the same focus shift
-		// off the same fetched neighborhood snapshot.
 		focusCanvas.set_payload(buildFocusPayload(fqdn, ctx, neighborhood?.edges ?? [], neighborhood?.symbols ?? []));
 		focusCanvas.fit();
 		if (ctx === null) {
@@ -240,6 +246,14 @@ async function boot(): Promise<void> {
 		const sym = buildSymbolDetail(ctx, neighborhood?.edges ?? [], fqdn);
 		detailsEl.symbol = sym;
 		setStatus(`ready (${entryPoints.length} entry points)`);
+	}
+	focusStore.subscribe(async state => {
+		const fqdn = state.current;
+		if (fqdn === null) {
+			detailsEl.symbol = null;
+			return;
+		}
+		await refreshFocus(fqdn);
 	});
 
 	setStatus(`ready (${entryPoints.length} entry points)`);
@@ -651,21 +665,55 @@ function buildFocusPayload(
 		kind: centerSym.decl_kind ?? centerSym.language_kind ?? centerSym.kind,
 		depth: 0,
 	} : null;
+	// BFS depth per neighbour: shortest hop count from the focal symbol.
+	// fetch_graph doesn't surface per-node depth in the wire payload,
+	// so we reconstruct it client-side by walking the edges. Phase 3c
+	// canvas only renders the data we send, no further filtering.
+	const depthByFqdn = computeDepthFromFocal(fqdn, neighborhoodEdges);
 	const neighbors = neighborhoodSymbols
 		.filter(s => s.fqdn !== fqdn)
 		.map(s => ({
 			fqdn: s.fqdn,
 			name: s.name,
 			kind: s.language_kind ?? s.kind,
-			depth: 1,
+			depth: depthByFqdn.get(s.fqdn) ?? 1,
 		}));
 	const focalEdges = neighborhoodEdges.map(e => ({
 		from: e.from,
 		to: e.to,
 		kind: e.kind,
-		depth: 1,
+		depth: Math.max(depthByFqdn.get(e.from) ?? 0, depthByFqdn.get(e.to) ?? 0),
 	}));
 	return JSON.stringify({ center, neighbors, edges: focalEdges });
+}
+
+function computeDepthFromFocal(
+	focal: string,
+	edges: ReadonlyArray<{ from: string; to: string; outbound: boolean }>,
+): Map<string, number> {
+	const adj = new Map<string, Set<string>>();
+	const pushAdj = (a: string, b: string): void => {
+		let set = adj.get(a);
+		if (set === undefined) { set = new Set(); adj.set(a, set); }
+		set.add(b);
+	};
+	for (const e of edges) {
+		pushAdj(e.from, e.to);
+		pushAdj(e.to, e.from);
+	}
+	const depths = new Map<string, number>();
+	depths.set(focal, 0);
+	const queue: string[] = [focal];
+	while (queue.length > 0) {
+		const cur = queue.shift()!;
+		const here = depths.get(cur) ?? 0;
+		for (const next of adj.get(cur) ?? []) {
+			if (depths.has(next)) continue;
+			depths.set(next, here + 1);
+			queue.push(next);
+		}
+	}
+	return depths;
 }
 
 function shortFqdn(fqdn: string): string {

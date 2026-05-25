@@ -72,15 +72,18 @@ export class McpBrowse {
 	}
 
 	/**
-	 * Depth-1 BFS expansion around `fqdn`. Unlike `get_context` (which
-	 * only surfaces callers/callees/imports/imported_by — i.e. CALLS +
-	 * IMPORTS), `fetch_graph` focal mode carries every edge kind:
-	 * EXTENDS / IMPLEMENTS / USES_TYPE / REFERENCES too.
+	 * BFS expansion around `fqdn` up to the given `depth` (default 1).
+	 * Unlike `get_context` (which only surfaces callers/callees/imports
+	 * /imported_by — i.e. CALLS + IMPORTS), `fetch_graph` focal mode
+	 * carries every edge kind: EXTENDS / IMPLEMENTS / USES_TYPE /
+	 * REFERENCES too. Larger depths fan out quickly — the daemon
+	 * caps the total node count so depth=4+ on a hub symbol may not
+	 * round-trip the full reachable set.
 	 */
-	async fetchNeighborhood(fqdn: string, includeExternal: boolean): Promise<FetchGraphResponse> {
+	async fetchNeighborhood(fqdn: string, includeExternal: boolean, depth = 1): Promise<FetchGraphResponse> {
 		const raw = await this.callTool('fetch_graph', {
 			focal: fqdn,
-			depth: 1,
+			depth,
 			include_external: includeExternal,
 		});
 		return JSON.parse(raw) as FetchGraphResponse;
