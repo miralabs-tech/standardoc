@@ -107,6 +107,7 @@ const RELATION_TITLE: Record<SymbolRelationKind, string> = {
 	testedBy: 'Tested by',
 	implements: 'Implements',
 	extends: 'Extends',
+	definedHere: 'Defined here',
 };
 
 const TOP_PER_RELATION = 5;

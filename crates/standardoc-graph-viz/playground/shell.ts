@@ -28,6 +28,7 @@ import type {
 	ExplorerElement,
 	ExplorerEntryPoint,
 	ExplorerNodeKind,
+	ExplorerSelectDetail,
 	ExplorerTreeNode,
 	EntryPointKind,
 	FocusGraphElement,
@@ -132,15 +133,32 @@ async function boot(): Promise<void> {
 		overview.fit();
 	}
 
-	// IDE-style file tree per project, built synchronously from the
-	// already-fetched symbol set (no extra round-trip). Each project
-	// expands into its folder/file hierarchy; each file expands into the
-	// symbols defined inside it (sorted by start_line for source order).
+	// IDE-style workspace tree built synchronously from the already-
+	// fetched symbol set (no extra round-trip). Top level is the
+	// workspace root; below it, projects are grouped under their first
+	// path segment (crates/, ext/, …) so the structure mirrors a real
+	// file explorer; each project then expands into its own src/tests/
+	// folder hierarchy + per-file symbol list. The fileById index lets
+	// the shell react to file clicks by spawning a synthetic SymbolDetail
+	// profile listing the symbols defined in that file.
 	setStatus('build tree…');
-	const tree: ExplorerTreeNode[] = projects.map(p =>
-		buildProjectNode(p, graph?.symbols ?? []),
-	);
-	explorerEl.tree = tree;
+	const fileById = new Map<string, FileEntry>();
+	const workspaceRoot = buildWorkspaceTree('Workspace', projects, graph?.symbols ?? [], fileById);
+	explorerEl.tree = [workspaceRoot];
+
+	// File click → synthetic SymbolDetail listing the file's symbols.
+	// Folder / workspace / project clicks just toggle expand + update
+	// the Explorer's own selection highlight; no panel cascade.
+	explorerEl.addEventListener('sd-explorer-select', ev => {
+		const detail = (ev as CustomEvent<ExplorerSelectDetail>).detail;
+		if (detail.fqdn !== null) return; // symbol click — handled by focus subscription
+		if (detail.kind === 'file') {
+			const entry = fileById.get(detail.id);
+			if (entry === undefined) return;
+			detailsEl.symbol = buildFileSyntheticDetail(entry);
+			focusCanvas.set_payload(buildEmptyFocusPayload());
+		}
+	});
 
 	// Wire search.
 	searchEl.addEventListener('sd-search-query', async (ev: Event) => {
@@ -261,9 +279,55 @@ function emptyDir(): DirNode {
 	return { children: new Map(), files: new Map() };
 }
 
+interface FileEntry {
+	readonly id: string;
+	readonly path: string;
+	readonly projectLabel: string;
+	readonly symbols: ReadonlyArray<BrowseSymbol>;
+}
+
+function buildWorkspaceTree(
+	workspaceLabel: string,
+	projects: ReadonlyArray<{ project_id: number; label: string; rel_path: string }>,
+	allSymbols: ReadonlyArray<BrowseSymbol>,
+	fileById: Map<string, FileEntry>,
+): ExplorerTreeNode {
+	// Group projects by first path segment so the workspace reads like
+	// a real file explorer (crates/, ext/, examples/, …). Within each
+	// group, projects sort alphabetically by label.
+	const groups = new Map<string, Array<{ project_id: number; label: string; rel_path: string }>>();
+	for (const p of projects) {
+		const segs = p.rel_path.replace(/\\/g, '/').split('/').filter(Boolean);
+		const first = segs[0] ?? '<root>';
+		const arr = groups.get(first) ?? [];
+		arr.push(p);
+		groups.set(first, arr);
+	}
+
+	const folderNodes: ExplorerTreeNode[] = [...groups.entries()]
+		.sort((a, b) => a[0].localeCompare(b[0]))
+		.map(([name, projs]) => ({
+			id: `wsfolder:${name}`,
+			label: name,
+			kind: 'folder',
+			children: projs
+				.slice()
+				.sort((a, b) => a.label.localeCompare(b.label))
+				.map(p => buildProjectNode(p, allSymbols, fileById)),
+		}));
+
+	return {
+		id: 'workspace',
+		label: workspaceLabel,
+		kind: 'workspace',
+		children: folderNodes,
+	};
+}
+
 function buildProjectNode(
 	project: { project_id: number; label: string; rel_path: string },
 	allSymbols: ReadonlyArray<BrowseSymbol>,
+	fileById: Map<string, FileEntry>,
 ): ExplorerTreeNode {
 	const root = emptyDir();
 	let touchedFiles = 0;
@@ -295,7 +359,9 @@ function buildProjectNode(
 		}
 	}
 	const id = `project:${project.project_id}`;
-	const children = touchedFiles > 0 ? dirToNodes(root, id) : undefined;
+	const children = touchedFiles > 0
+		? dirToNodes(root, id, project.label, project.rel_path, fileById)
+		: undefined;
 	return {
 		id,
 		label: project.label,
@@ -304,22 +370,31 @@ function buildProjectNode(
 	};
 }
 
-function dirToNodes(dir: DirNode, idPrefix: string): ExplorerTreeNode[] {
+function dirToNodes(
+	dir: DirNode,
+	idPrefix: string,
+	projectLabel: string,
+	currentPath: string,
+	fileById: Map<string, FileEntry>,
+): ExplorerTreeNode[] {
 	const out: ExplorerTreeNode[] = [];
 	for (const name of [...dir.children.keys()].sort()) {
 		const child = dir.children.get(name);
 		if (child === undefined) continue;
 		const id = `${idPrefix}/${name}`;
+		const subPath = currentPath.length > 0 ? `${currentPath}/${name}` : name;
 		out.push({
 			id,
 			label: name,
 			kind: 'folder',
-			children: dirToNodes(child, id),
+			children: dirToNodes(child, id, projectLabel, subPath, fileById),
 		});
 	}
 	for (const name of [...dir.files.keys()].sort()) {
 		const symbols = (dir.files.get(name) ?? []).slice().sort((a, b) => a.start_line - b.start_line);
 		const id = `${idPrefix}/${name}`;
+		const filePath = currentPath.length > 0 ? `${currentPath}/${name}` : name;
+		fileById.set(id, { id, path: filePath, projectLabel, symbols });
 		out.push({
 			id,
 			label: name,
@@ -333,6 +408,35 @@ function dirToNodes(dir: DirNode, idPrefix: string): ExplorerTreeNode[] {
 		});
 	}
 	return out;
+}
+
+function buildFileSyntheticDetail(file: FileEntry): SymbolDetail {
+	const name = file.path.split('/').pop() ?? file.path;
+	return {
+		fqdn: `file:${file.path}`,
+		name,
+		kindLabel: 'file',
+		visibility: null,
+		file: file.path,
+		startLine: 1,
+		documentation: `${file.symbols.length} symbol${file.symbols.length === 1 ? '' : 's'} defined in this file · project: ${file.projectLabel}`,
+		entryPointKind: null,
+		fieldCount: 0,
+		methodCount: 0,
+		relations: [{
+			kind: 'definedHere',
+			items: file.symbols.map(s => ({
+				fqdn: s.fqdn,
+				label: s.name,
+				kindLabel: s.language_kind ?? s.kind,
+			})),
+			total: file.symbols.length,
+		}],
+	};
+}
+
+function buildEmptyFocusPayload(): string {
+	return JSON.stringify({ center: null, neighbors: [], edges: [] });
 }
 
 function stripProjectPrefix(filePath: string, projectRelPath: string): string | null {

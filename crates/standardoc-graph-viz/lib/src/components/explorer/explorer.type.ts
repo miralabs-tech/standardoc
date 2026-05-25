@@ -52,7 +52,11 @@ export interface ExplorerEntryPoint {
 }
 
 export interface ExplorerSelectDetail {
-	readonly fqdn: string;
+	readonly id: string;
+	readonly kind: ExplorerNodeKind;
+	readonly label: string;
+	/** Present when the node maps to a real symbol. Folders / files / projects leave this null. */
+	readonly fqdn: string | null;
 	readonly source: 'tree' | 'entry-points' | 'recents';
 }
 

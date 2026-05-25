@@ -23,7 +23,8 @@ export type SymbolRelationKind =
 	| 'importedBy'
 	| 'testedBy'
 	| 'implements'
-	| 'extends';
+	| 'extends'
+	| 'definedHere';
 
 export interface SymbolRelationBucket {
 	readonly kind: SymbolRelationKind;

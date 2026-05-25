@@ -114,6 +114,7 @@ export class ExplorerElement extends HTMLElement {
 	#tree: ReadonlyArray<ExplorerTreeNode> = [];
 	#entryPoints: ReadonlyArray<ExplorerEntryPoint> = [];
 	#expanded = new Set<string>();
+	#selectedId: string | null = null;
 	#searchDebounceHandle: number | null = null;
 	#unsubscribeFocus: (() => void) | null = null;
 	#focus: FocusState = focusStore.get();
@@ -134,6 +135,21 @@ export class ExplorerElement extends HTMLElement {
 	set entryPoints(next: ReadonlyArray<ExplorerEntryPoint>) {
 		this.#entryPoints = next;
 		this.#renderEntryPoints();
+	}
+
+	/**
+	 * Host-set selection id — useful when the host wants the Explorer
+	 * to highlight a node that wasn't picked via a click in here
+	 * (e.g. a deep link, a synthetic file selection from another panel).
+	 */
+	set selectedId(id: string | null) {
+		if (id === this.#selectedId) return;
+		this.#selectedId = id;
+		this.#renderTree();
+	}
+
+	get selectedId(): string | null {
+		return this.#selectedId;
 	}
 
 	connectedCallback(): void {
@@ -240,7 +256,8 @@ export class ExplorerElement extends HTMLElement {
 		const hasChildren = node.children !== undefined && node.children.length > 0;
 		const canExpand = hasChildren || node.expandable === true;
 		const isExpanded = this.#expanded.has(node.id);
-		const isSelected = node.fqdn !== null && node.fqdn !== undefined && node.fqdn === this.#focus.current;
+		const isFocused = node.fqdn !== null && node.fqdn !== undefined && node.fqdn === this.#focus.current;
+		const isSelected = node.id === this.#selectedId || isFocused;
 
 		const row = document.createElement('div');
 		row.className = classigo(C.nodeRow, isSelected && C.nodeRowSelected);
@@ -277,7 +294,11 @@ export class ExplorerElement extends HTMLElement {
 				}
 				this.#renderTree();
 			}
-			if (node.fqdn) this.#select(node.fqdn, 'tree');
+			// Always emit a select event so the host can react to non-symbol
+			// clicks (file profile, folder breadcrumb) — even when there's
+			// no FQDN to push into the focus store.
+			this.#selectedId = node.id;
+			this.#selectNode(node, 'tree');
 		});
 
 		li.appendChild(row);
@@ -322,7 +343,17 @@ export class ExplorerElement extends HTMLElement {
 			badge.textContent = entryBadgeLabel[ep.kind] ?? ep.kind;
 			row.appendChild(label);
 			row.appendChild(badge);
-			row.addEventListener('click', () => this.#select(ep.fqdn, 'entry-points'));
+			row.addEventListener('click', () => {
+				this.#selectedId = `entry:${ep.fqdn}`;
+				this.#emitSelect({
+					id: `entry:${ep.fqdn}`,
+					kind: 'function',
+					label: ep.label,
+					fqdn: ep.fqdn,
+					source: 'entry-points',
+				});
+				focusStore.setFocus(ep.fqdn);
+			});
 			frag.appendChild(row);
 		}
 		n.entryPointsMount.replaceChildren(frag);
@@ -342,7 +373,17 @@ export class ExplorerElement extends HTMLElement {
 			row.className = classigo(C.recent, fqdn === this.#focus.current && C.recentCurrent);
 			row.textContent = shortFqdn(fqdn);
 			row.title = fqdn;
-			row.addEventListener('click', () => this.#select(fqdn, 'recents'));
+			row.addEventListener('click', () => {
+				this.#selectedId = `recent:${fqdn}`;
+				this.#emitSelect({
+					id: `recent:${fqdn}`,
+					kind: 'unknown',
+					label: shortFqdn(fqdn),
+					fqdn,
+					source: 'recents',
+				});
+				focusStore.setFocus(fqdn);
+			});
 			frag.appendChild(row);
 		}
 		n.recentsMount.replaceChildren(frag);
@@ -373,9 +414,20 @@ export class ExplorerElement extends HTMLElement {
 		mount.replaceChildren(frag);
 	}
 
-	#select(fqdn: string, source: ExplorerSelectDetail['source']): void {
-		focusStore.setFocus(fqdn);
-		const detail: ExplorerSelectDetail = { fqdn, source };
+	#selectNode(node: ExplorerTreeNode, source: ExplorerSelectDetail['source']): void {
+		if (node.fqdn !== null && node.fqdn !== undefined) {
+			focusStore.setFocus(node.fqdn);
+		}
+		this.#emitSelect({
+			id: node.id,
+			kind: node.kind,
+			label: node.label,
+			fqdn: node.fqdn ?? null,
+			source,
+		});
+	}
+
+	#emitSelect(detail: ExplorerSelectDetail): void {
 		this.dispatchEvent(new CustomEvent('sd-explorer-select', {
 			detail, bubbles: true, composed: true,
 		}));
