@@ -419,16 +419,40 @@ impl FocusGraphCanvas {
 
 		// Edges first so nodes paint on top. Alpha decays with depth so
 		// the outer rings don't visually dominate the focal connections.
+		// When a node is hovered, anything not connected to it dims
+		// further so the user's eye lands on the relationship subgraph.
+		let connected: Option<std::collections::HashSet<&str>> = self.hovered.as_deref().map(|h| {
+			let mut set: std::collections::HashSet<&str> = std::collections::HashSet::new();
+			set.insert(h);
+			for e in &self.edges {
+				if e.from == h {
+					set.insert(e.to.as_str());
+				} else if e.to == h {
+					set.insert(e.from.as_str());
+				}
+			}
+			set
+		});
 		self.ctx.set_line_width(EDGE_LINE_WIDTH);
 		for e in &self.edges {
 			let (Some(from), Some(to)) = (self.positions.get(&e.from), self.positions.get(&e.to))
 			else { continue };
-			let alpha = match e.depth {
+			let base_alpha: f64 = match e.depth {
 				0 | 1 => 0.95,
 				2 => 0.55,
 				_ => 0.3,
 			};
+			let touches_hover = connected
+				.as_ref()
+				.is_some_and(|set| set.contains(e.from.as_str()) && set.contains(e.to.as_str()));
+			let alpha = match (&connected, touches_hover) {
+				(Some(_), true) => 1.0,
+				(Some(_), false) => base_alpha * 0.15,
+				(None, _) => base_alpha,
+			};
+			let line_w = if touches_hover { EDGE_LINE_WIDTH * 1.8 } else { EDGE_LINE_WIDTH };
 			self.ctx.set_global_alpha(alpha);
+			self.ctx.set_line_width(line_w);
 			self.ctx.set_stroke_style_str(edge_color_for_kind(&e.kind));
 			self.ctx.begin_path();
 			self.ctx.move_to(from.x, from.y);
@@ -436,20 +460,33 @@ impl FocusGraphCanvas {
 			self.ctx.stroke();
 		}
 		self.ctx.set_global_alpha(1.0);
+		self.ctx.set_line_width(EDGE_LINE_WIDTH);
 
-		// Nodes (centre + neighbours).
+		// Nodes (centre + neighbours). When a hover is active, dim
+		// nodes that aren't in the hovered node's connected set so the
+		// eye lands on the subgraph rather than the noise around it.
+		let node_alpha = |fqdn: &str| -> f64 {
+			match &connected {
+				Some(set) if set.contains(fqdn) => 1.0,
+				Some(_) => 0.2,
+				None => 1.0,
+			}
+		};
 		if let Some(centre) = &self.center {
 			if let Some(pos) = self.positions.get(&centre.fqdn) {
 				let highlighted = self.hovered.as_deref() == Some(centre.fqdn.as_str());
+				self.ctx.set_global_alpha(node_alpha(&centre.fqdn));
 				self.draw_node(pos, centre, true, highlighted);
 			}
 		}
 		for n in &self.neighbors {
 			if let Some(pos) = self.positions.get(&n.fqdn) {
 				let highlighted = self.hovered.as_deref() == Some(n.fqdn.as_str());
+				self.ctx.set_global_alpha(node_alpha(&n.fqdn));
 				self.draw_node(pos, n, false, highlighted);
 			}
 		}
+		self.ctx.set_global_alpha(1.0);
 
 		self.ctx.restore();
 	}

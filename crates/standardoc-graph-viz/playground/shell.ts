@@ -157,16 +157,23 @@ async function boot(): Promise<void> {
 		if (best !== null) representativeByProjectId.set(p.project_id, best.fqdn);
 	}
 
-	// Load the workspace graph into the overview canvas — bounded set
-	// (5k) intentional, the nebula doesn't gain much from going wider.
+	// Load the workspace graph into the overview canvas. Edges still
+	// come from fetchGraph (bounded ~5k — adequate for cross-project
+	// aggregation), but the per-cluster symbol_count is sourced from
+	// the full paginated treeSymbols set so clusters past the fetchGraph
+	// cap don't render as '0 symbols'.
 	setStatus('fetch graph…');
 	const graph = await mcp.fetchGraph(false).catch(() => null);
 	const symbolByFqdn = new Map<string, BrowseSymbol>();
-	for (const s of graph?.symbols ?? []) symbolByFqdn.set(s.fqdn, s);
-	if (graph !== null) {
-		overview.set_payload(buildOverviewPayload(projects, graph.symbols, graph.edges, symbolByFqdn));
-		overview.fit();
+	for (const s of treeSymbols) symbolByFqdn.set(s.fqdn, s);
+	// Edges from fetch_graph reference fqdns that may not be in
+	// treeSymbols (externals). Index those into the same map so the
+	// edge endpoint→project lookup resolves cross-boundary edges too.
+	for (const s of graph?.symbols ?? []) {
+		if (!symbolByFqdn.has(s.fqdn)) symbolByFqdn.set(s.fqdn, s);
 	}
+	overview.set_payload(buildOverviewPayload(projects, treeSymbols, graph?.edges ?? [], symbolByFqdn));
+	overview.fit();
 
 	// IDE-style workspace tree built from the full paginated symbol
 	// set so every indexed file shows even when the workspace has more

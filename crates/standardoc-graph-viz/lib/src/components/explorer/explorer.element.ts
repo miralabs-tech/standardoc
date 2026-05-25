@@ -109,6 +109,29 @@ function shortFqdn(fqdn: string): string {
 	return idx >= 0 ? fqdn.slice(idx + 2) : fqdn;
 }
 
+/**
+ * Depth-first walk returning every id on the path from the top-level
+ * roots down to the first node whose `fqdn` matches `target`. Null when
+ * the tree doesn't contain the target — the host stays a no-op in
+ * that case (search hits outside the indexed tree shouldn't force the
+ * Explorer into a half-expanded mess).
+ */
+function findAncestorIds(
+	tree: ReadonlyArray<ExplorerTreeNode>,
+	target: string,
+	path: ReadonlyArray<string> = [],
+): string[] | null {
+	for (const node of tree) {
+		const mine = [...path, node.id];
+		if (node.fqdn === target) return mine;
+		if (node.children !== undefined && node.children.length > 0) {
+			const child = findAncestorIds(node.children, target, mine);
+			if (child !== null) return child;
+		}
+	}
+	return null;
+}
+
 export class ExplorerElement extends HTMLElement {
 	#mounted = false;
 	#tree: ReadonlyArray<ExplorerTreeNode> = [];
@@ -157,9 +180,24 @@ export class ExplorerElement extends HTMLElement {
 		this.#mounted = true;
 		this.#render();
 		this.#unsubscribeFocus = focusStore.subscribe(state => {
+			const prevFqdn = this.#focus.current;
 			this.#focus = state;
+			// Auto-expand the path leading to the focused symbol so its
+			// row is actually visible — useful when the focus shift
+			// originates outside the Explorer (search, focus graph click,
+			// cluster drill, recents click on a hidden node).
+			if (state.current !== null && state.current !== prevFqdn) {
+				const path = findAncestorIds(this.#tree, state.current);
+				if (path !== null) {
+					// Expand every id on the path except the leaf itself.
+					for (const id of path.slice(0, -1)) this.#expanded.add(id);
+				}
+			}
 			this.#renderRecents();
 			this.#renderTree();
+			if (state.current !== null && state.current !== prevFqdn) {
+				this.#scrollSelectedIntoView();
+			}
 		});
 	}
 
@@ -418,6 +456,15 @@ export class ExplorerElement extends HTMLElement {
 			frag.appendChild(row);
 		}
 		mount.replaceChildren(frag);
+	}
+
+	#scrollSelectedIntoView(): void {
+		const n = this.#nodes;
+		if (n === null) return;
+		const sel = n.treeMount.querySelector<HTMLElement>(`.${C.nodeRowSelected}`);
+		if (sel !== null) {
+			sel.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+		}
 	}
 
 	#selectNode(node: ExplorerTreeNode, source: ExplorerSelectDetail['source']): void {
