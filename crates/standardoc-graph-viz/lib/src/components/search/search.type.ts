@@ -6,17 +6,17 @@
 // VSCode webview, in-process call in a future native binding).
 
 export interface SymbolSearchResult {
-	readonly fqdn: string;
-	readonly name: string;
-	readonly kindLabel: string;
-	readonly file: string;
-	readonly startLine: number;
+  readonly fqdn: string;
+  readonly name: string;
+  readonly kindLabel: string;
+  readonly file: string;
+  readonly startLine: number;
 }
 
 export interface SearchQueryDetail {
-	readonly query: string;
+  readonly query: string;
 }
 
 export interface SearchSelectDetail {
-	readonly fqdn: string;
+  readonly fqdn: string;
 }

@@ -26,25 +26,25 @@ import s from './panel-layout.module.scss';
 export const STANDARDOC_PANEL_LAYOUT_TAG = 'standardoc-panel-layout';
 
 const C = {
-	layout: s.layout ?? '',
+  layout: s.layout ?? '',
 } as const;
 
 export class PanelLayoutElement extends HTMLElement {
-	#mounted = false;
+  #mounted = false;
 
-	connectedCallback(): void {
-		if (this.#mounted) return;
-		this.#mounted = true;
-		this.classList.add(C.layout);
-	}
+  connectedCallback(): void {
+    if (this.#mounted) return;
+    this.#mounted = true;
+    this.classList.add(C.layout);
+  }
 }
 
 if (typeof customElements !== 'undefined' && !customElements.get(STANDARDOC_PANEL_LAYOUT_TAG)) {
-	customElements.define(STANDARDOC_PANEL_LAYOUT_TAG, PanelLayoutElement);
+  customElements.define(STANDARDOC_PANEL_LAYOUT_TAG, PanelLayoutElement);
 }
 
 declare global {
-	interface HTMLElementTagNameMap {
-		[STANDARDOC_PANEL_LAYOUT_TAG]: PanelLayoutElement;
-	}
+  interface HTMLElementTagNameMap {
+    [STANDARDOC_PANEL_LAYOUT_TAG]: PanelLayoutElement;
+  }
 }

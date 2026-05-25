@@ -3,44 +3,44 @@
 // a specific WASM build — the host wires its own factory.
 
 export interface OverviewCanvasFacade {
-	tick(): void;
-	invalidate(): void;
-	resize(width: number, height: number): void;
-	set_device_pixel_ratio(dpr: number): void;
-	set_payload(json: string): void;
-	set_on_cluster_click(cb: (cluster_id: number) => void): void;
-	set_on_cluster_hover(cb: (cluster_id: number | null) => void): void;
-	on_pointer_move(x: number, y: number): void;
-	on_pointer_down(x: number, y: number, button: number): void;
-	on_pointer_up(x: number, y: number, button: number): void;
-	on_pointer_leave(): void;
-	on_wheel(x: number, y: number, deltaY: number): void;
-	fit(): void;
-	set_camera_preset(preset: string): void;
-	readonly cluster_count: number;
-	readonly edge_count: number;
+  tick(): void;
+  invalidate(): void;
+  resize(width: number, height: number): void;
+  set_device_pixel_ratio(dpr: number): void;
+  set_payload(json: string): void;
+  set_on_cluster_click(cb: (cluster_id: number) => void): void;
+  set_on_cluster_hover(cb: (cluster_id: number | null) => void): void;
+  on_pointer_move(x: number, y: number): void;
+  on_pointer_down(x: number, y: number, button: number): void;
+  on_pointer_up(x: number, y: number, button: number): void;
+  on_pointer_leave(): void;
+  on_wheel(x: number, y: number, deltaY: number): void;
+  fit(): void;
+  set_camera_preset(preset: string): void;
+  readonly cluster_count: number;
+  readonly edge_count: number;
 }
 
 export type OverviewCanvasFactory = (
-	canvas: HTMLCanvasElement,
-	width: number,
-	height: number,
-	dpr: number,
+  canvas: HTMLCanvasElement,
+  width: number,
+  height: number,
+  dpr: number,
 ) => OverviewCanvasFacade | Promise<OverviewCanvasFacade>;
 
 export interface OverviewReadyDetail {
-	readonly canvas: OverviewCanvasFacade;
+  readonly canvas: OverviewCanvasFacade;
 }
 
 export interface OverviewClusterClickDetail {
-	readonly clusterId: number;
+  readonly clusterId: number;
 }
 
 export interface OverviewClusterHoverDetail {
-	readonly clusterId: number | null;
+  readonly clusterId: number | null;
 }
 
 export interface OverviewErrorDetail {
-	readonly source: 'canvas-init' | 'set-payload';
-	readonly message: string;
+  readonly source: 'canvas-init' | 'set-payload';
+  readonly message: string;
 }

@@ -6,24 +6,24 @@
 export type PanelKind = 'compare';
 
 export interface PanelPropsMap {
-	readonly compare: {
-		readonly leftFqdn: string;
-		readonly rightFqdn: string;
-	};
+  readonly compare: {
+    readonly leftFqdn: string;
+    readonly rightFqdn: string;
+  };
 }
 
 export interface PanelInstance<K extends PanelKind = PanelKind> {
-	readonly id: string;
-	readonly kind: K;
-	readonly props: PanelPropsMap[K];
-	readonly title: string;
+  readonly id: string;
+  readonly kind: K;
+  readonly props: PanelPropsMap[K];
+  readonly title: string;
 }
 
 export interface PanelManagerState {
-	readonly panels: ReadonlyArray<PanelInstance>;
-	readonly activeId: string | null;
+  readonly panels: ReadonlyArray<PanelInstance>;
+  readonly activeId: string | null;
 }
 
 export interface PanelChangeDetail extends PanelManagerState {
-	readonly changedId: string | null;
+  readonly changedId: string | null;
 }
