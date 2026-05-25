@@ -305,9 +305,17 @@ impl FocusGraphCanvas {
 	/// of the edge. Coordinates are in CSS pixels with the camera
 	/// transform applied so labels track pan + zoom alongside the
 	/// canvas content.
+	///
+	/// Only first-ring edges get labelled: at BFS-2/3 the edge count
+	/// explodes and a full label set drowns the canvas in text. The
+	/// focal-to-immediate-neighbour kind is the bit a reader needs to
+	/// orient; deeper edges still draw but read by line colour alone.
 	pub fn label_layout(&self) -> String {
 		let mut out = Vec::with_capacity(self.edges.len());
 		for e in &self.edges {
+			if e.depth > 1 {
+				continue;
+			}
 			let Some(from) = self.positions.get(&e.from) else { continue };
 			let Some(to) = self.positions.get(&e.to) else { continue };
 			let wx = (from.x + to.x) * 0.5;
@@ -345,20 +353,50 @@ impl FocusGraphCanvas {
 		if self.neighbors.is_empty() {
 			return;
 		}
-		// Ring radius: 38% of the smaller dimension so even small
-		// canvases keep the ring inside the viewport with room for
-		// labels. Phase 3c will adapt this for multi-ring layouts.
-		let ring = f64::min(self.width, self.height) * 0.38;
-		let n = self.neighbors.len() as f64;
-		// Start at -π/2 (top) so the first neighbour reads at 12 o'clock
-		// instead of the conventional 3 o'clock — feels more natural for
-		// a focal-symbol view.
-		let start = -std::f64::consts::FRAC_PI_2;
-		for (i, neighbor) in self.neighbors.iter().enumerate() {
-			let angle = start + (i as f64) * std::f64::consts::TAU / n;
-			let nx = cx + ring * angle.cos();
-			let ny = cy + ring * angle.sin();
-			self.positions.insert(neighbor.fqdn.clone(), LaidNode { x: nx, y: ny, r: NEIGHBOR_RADIUS });
+
+		// Group neighbours by BFS depth so each ring carries only its
+		// own depth. Single-ring layouts at BFS-2/3 turned into spaghetti
+		// the moment the focal had >20 second-degree neighbours; one
+		// concentric ring per depth restores readability.
+		let mut by_depth: std::collections::BTreeMap<u32, Vec<&FocusNode>> = std::collections::BTreeMap::new();
+		for n in &self.neighbors {
+			by_depth.entry(n.depth.max(1)).or_default().push(n);
+		}
+		let max_depth = by_depth.keys().copied().max().unwrap_or(1);
+
+		// Ring radii: inner ring at 28% of the smaller dimension, deeper
+		// rings step outward so the outermost lands inside the canvas
+		// with room for labels. Step shrinks as max_depth grows so a
+		// BFS-5 layout still fits.
+		let inner = f64::min(self.width, self.height) * 0.26;
+		let outer = f64::min(self.width, self.height) * 0.46;
+		let step = if max_depth > 1 {
+			(outer - inner) / (max_depth as f64 - 1.0)
+		} else {
+			0.0
+		};
+
+		for (depth, nodes) in &by_depth {
+			let ring = inner + (*depth as f64 - 1.0) * step;
+			let count = nodes.len() as f64;
+			// Stagger the starting angle per ring so radial spokes don't
+			// align across depths (which used to make the eye read the
+			// outer ring as one continuous mass).
+			let offset = (*depth as f64 - 1.0) * std::f64::consts::FRAC_PI_6;
+			let start = -std::f64::consts::FRAC_PI_2 + offset;
+			let node_radius = if *depth == 1 {
+				NEIGHBOR_RADIUS
+			} else {
+				// Deeper rings get smaller discs so the eye reads the
+				// hierarchy at a glance.
+				(NEIGHBOR_RADIUS / (*depth as f64).sqrt()).max(6.0)
+			};
+			for (i, neighbor) in nodes.iter().enumerate() {
+				let angle = start + (i as f64) * std::f64::consts::TAU / count.max(1.0);
+				let nx = cx + ring * angle.cos();
+				let ny = cy + ring * angle.sin();
+				self.positions.insert(neighbor.fqdn.clone(), LaidNode { x: nx, y: ny, r: node_radius });
+			}
 		}
 	}
 
@@ -379,17 +417,25 @@ impl FocusGraphCanvas {
 		self.ctx.translate(self.cam_offset_x, self.cam_offset_y).ok();
 		self.ctx.scale(self.cam_zoom, self.cam_zoom).ok();
 
-		// Edges first so nodes paint on top.
+		// Edges first so nodes paint on top. Alpha decays with depth so
+		// the outer rings don't visually dominate the focal connections.
 		self.ctx.set_line_width(EDGE_LINE_WIDTH);
 		for e in &self.edges {
 			let (Some(from), Some(to)) = (self.positions.get(&e.from), self.positions.get(&e.to))
 			else { continue };
+			let alpha = match e.depth {
+				0 | 1 => 0.95,
+				2 => 0.55,
+				_ => 0.3,
+			};
+			self.ctx.set_global_alpha(alpha);
 			self.ctx.set_stroke_style_str(edge_color_for_kind(&e.kind));
 			self.ctx.begin_path();
 			self.ctx.move_to(from.x, from.y);
 			self.ctx.line_to(to.x, to.y);
 			self.ctx.stroke();
 		}
+		self.ctx.set_global_alpha(1.0);
 
 		// Nodes (centre + neighbours).
 		if let Some(centre) = &self.center {
