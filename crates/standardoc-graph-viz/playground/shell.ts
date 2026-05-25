@@ -29,6 +29,7 @@ import type {
 } from '@standarx/standardoc-viz/mcp-client';
 import type {
   ComparePanelElement,
+  CompareRefreshRequestDetail,
   ExplorerElement,
   ExplorerEntryPoint,
   ExplorerNodeKind,
@@ -279,6 +280,14 @@ async function boot(): Promise<void> {
     }
   });
 
+  panelsEl.addEventListener('sd-compare-refresh-request', ev => {
+    const detail = (ev as CustomEvent<CompareRefreshRequestDetail>).detail;
+    const target = panelsEl.activePanelElement as ComparePanelElement | null;
+    if (target === null) return;
+    const myToken = ++compareToken;
+    void loadComparePanel(target, detail.leftFqdn, detail.rightFqdn, myToken);
+  });
+
   async function handleCopyFqdn(fqdn: string): Promise<void> {
     try {
       await navigator.clipboard.writeText(fqdn);
@@ -312,6 +321,15 @@ async function boot(): Promise<void> {
     // compare-panel element is mounted by the time `open()` returns.
     const target = panelsEl.activePanelElement as ComparePanelElement | null;
     if (target === null) return;
+    await loadComparePanel(target, leftFqdn, rightFqdn, myToken);
+  }
+
+  async function loadComparePanel(
+    target: ComparePanelElement,
+    leftFqdn: string,
+    rightFqdn: string,
+    myToken: number,
+  ): Promise<void> {
     target.data = {
       left: { fqdn: leftFqdn, detail: null, loading: true },
       right: { fqdn: rightFqdn, detail: null, loading: true },
@@ -480,6 +498,7 @@ function rawToBrowseSymbol(s: RawSymbol, projects: ReadonlyArray<ProjectLike>): 
     file,
     start_line: s.location.start_line,
     project_id: inferProjectId(file, projects),
+    entry_point: s.entry_point ?? null,
   };
 }
 
@@ -700,6 +719,8 @@ function dirToNodes(
         label: s.name,
         kind: mapBrowseSymbolKind(s),
         fqdn: s.fqdn,
+        visibility: s.visibility,
+        entryPointKind: (s.entry_point ?? null) as EntryPointKind | null,
       })),
     });
   }
@@ -873,6 +894,19 @@ function shortFqdn(fqdn: string): string {
 }
 
 
+function formatSignature(sig: RawSymbol['signature']): string | null {
+  if (!sig) return null;
+  const params = sig.params ?? [];
+  const ret = sig.returns?.display ?? null;
+  if (params.length === 0) {
+    return ret ? `: ${ret}` : null;
+  }
+  const paramStr = params
+    .map((p) => (p.ty?.display ? `${p.name}: ${p.ty.display}` : p.name))
+    .join(', ');
+  return ret ? `(${paramStr}) → ${ret}` : `(${paramStr})`;
+}
+
 function toSymbolSearchResult(s: RawSymbol): SymbolSearchResult {
   return {
     fqdn: s.fqdn,
@@ -974,6 +1008,7 @@ function buildSymbolDetail(
       kindLabel: s.decl_kind ?? s.language_kind ?? s.kind,
       file: s.location.file,
       startLine: s.location.start_line,
+      signature: formatSignature(s.signature),
     };
     if (cls === 'field') fields.push(item);
     else methods.push(item);

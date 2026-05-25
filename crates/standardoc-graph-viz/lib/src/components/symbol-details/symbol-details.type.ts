@@ -40,6 +40,13 @@ export interface SymbolSubItem {
 	readonly kindLabel: SymbolKindLabel;
 	readonly file: string | null;
 	readonly startLine: number | null;
+	/**
+	 * Pre-formatted anatomy hint shown next to the name in Fields/Methods
+	 * tabs. Field-style `": T"` when params are absent, function-style
+	 * `"(p: T, q: U) → R"` otherwise. `null` for entries whose extractor
+	 * did not capture a signature (re-exports, builtins, externals).
+	 */
+	readonly signature: string | null;
 }
 
 export interface SymbolDetail {

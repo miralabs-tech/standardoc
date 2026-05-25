@@ -26,6 +26,31 @@
 		letter-spacing: 0.05em;
 	}
 
+	&__refresh {
+		margin-left: auto;
+		background: transparent;
+		border: 1px solid var(--sd-border-subtle, #2d2d2d);
+		color: var(--sd-fg-muted, #9d9d9d);
+		font-size: var(--sd-text-xs, 10px);
+		padding: 2px 8px;
+		border-radius: var(--sd-radius-pill, 999px);
+		cursor: pointer;
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+
+		&:hover {
+			background: var(--sd-hover, #2a2d2e);
+			color: var(--sd-fg, #cccccc);
+		}
+
+		&:disabled {
+			cursor: not-allowed;
+			opacity: 0.4;
+		}
+	}
+
 	&__grid {
 		flex: 1 1 auto;
 		display: grid;

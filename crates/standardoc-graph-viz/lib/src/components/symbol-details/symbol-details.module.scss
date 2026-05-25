@@ -244,6 +244,14 @@
 		color: var(--sd-fg, #cccccc);
 	}
 
+	&__relation-item-signature {
+		margin-left: 6px;
+		font-size: var(--sd-text-xs, 10px);
+		color: var(--sd-fg-dim, #6e7681);
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		font-weight: normal;
+	}
+
 	&__relation-item-kind {
 		flex: 0 0 auto;
 		font-size: var(--sd-text-xs, 10px);

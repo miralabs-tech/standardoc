@@ -90,6 +90,7 @@ const C = {
 	relationList: s['details__relation-list'] ?? '',
 	relationItem: s['details__relation-item'] ?? '',
 	relationItemLabel: s['details__relation-item-label'] ?? '',
+	relationItemSignature: s['details__relation-item-signature'] ?? '',
 	relationItemKind: s['details__relation-item-kind'] ?? '',
 	entryPoint: s['details__entry-point'] ?? '',
 	entryPointBadge: s['details__entry-point-badge'] ?? '',
@@ -364,7 +365,15 @@ export class SymbolDetailsElement extends HTMLElement {
 			li.title = it.fqdn;
 			const label = document.createElement('span');
 			label.className = C.relationItemLabel;
-			label.textContent = it.name;
+			const nameSpan = document.createElement('span');
+			nameSpan.textContent = it.name;
+			label.appendChild(nameSpan);
+			if (it.signature) {
+				const sig = document.createElement('span');
+				sig.className = C.relationItemSignature;
+				sig.textContent = it.signature;
+				label.appendChild(sig);
+			}
 			const k = document.createElement('span');
 			k.className = C.relationItemKind;
 			k.textContent = it.kindLabel;
