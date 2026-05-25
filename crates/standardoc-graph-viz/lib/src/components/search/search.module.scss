@@ -113,4 +113,35 @@
 		color: var(--sd-fg-muted, #9d9d9d);
 		text-align: right;
 	}
+
+	&__section-title {
+		padding: var(--sd-space-2, 8px) var(--sd-space-3, 12px) 2px;
+		font-size: 9px;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		color: var(--sd-fg-dim, #6e7681);
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		font-weight: 600;
+	}
+
+	&__section + &__section-title {
+		border-top: 1px solid var(--sd-border-subtle, #2d2d2d);
+		margin-top: 4px;
+	}
+
+	&__tip {
+		padding: 4px var(--sd-space-3, 12px) var(--sd-space-2, 8px);
+		font-size: var(--sd-text-xs, 10px);
+		color: var(--sd-fg-muted, #9d9d9d);
+		line-height: 1.5;
+		font-family: var(--sd-font-sans, sans-serif);
+
+		code {
+			font-family: var(--sd-font-mono, ui-monospace, monospace);
+			color: var(--sd-fg, #cccccc);
+			background: var(--sd-bg-deep, #161616);
+			padding: 0 4px;
+			border-radius: var(--sd-radius-sm, 3px);
+		}
+	}
 }

@@ -28,36 +28,6 @@
 		font-weight: 600;
 	}
 
-	&__search {
-		flex: 0 0 auto;
-		padding: var(--sd-space-2, 8px) var(--sd-panel-padding, 12px);
-		border-bottom: 1px solid var(--sd-border-subtle, #2d2d2d);
-		display: flex;
-		gap: var(--sd-space-2, 8px);
-		align-items: center;
-	}
-
-	&__search-input {
-		flex: 1;
-		min-width: 0;
-		background: var(--sd-bg-elevated, #252526);
-		border: 1px solid var(--sd-border, #454545);
-		border-radius: var(--sd-radius-sm, 3px);
-		color: var(--sd-fg, #cccccc);
-		font: inherit;
-		padding: 4px 8px;
-
-		&:focus {
-			outline: 1px solid var(--sd-accent, #3794ff);
-			outline-offset: -1px;
-			border-color: var(--sd-accent, #3794ff);
-		}
-
-		&::placeholder {
-			color: var(--sd-fg-muted, #9d9d9d);
-		}
-	}
-
 	&__body {
 		flex: 1 1 auto;
 		overflow: auto;

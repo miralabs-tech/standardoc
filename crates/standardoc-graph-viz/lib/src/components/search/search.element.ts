@@ -30,6 +30,7 @@ import type {
   SearchQueryDetail,
   SearchSelectDetail,
   SymbolSearchResult,
+  SymbolSearchSuggestion,
 } from './search.type';
 import s from './search.module.scss';
 
@@ -48,6 +49,9 @@ const C = {
   itemName: s['search__item-name'] ?? '',
   itemKind: s['search__item-kind'] ?? '',
   itemFqdn: s['search__item-fqdn'] ?? '',
+  section: s.search__section ?? '',
+  sectionTitle: s['search__section-title'] ?? '',
+  tip: s.search__tip ?? '',
 } as const;
 
 const QUERY_DEBOUNCE_MS = 150;
@@ -65,6 +69,9 @@ export class SearchElement extends HTMLElement {
 
   #mounted = false;
   #results: ReadonlyArray<SymbolSearchResult> = [];
+  #suggestions: ReadonlyArray<SymbolSearchSuggestion> = [];
+  #recents: ReadonlyArray<SymbolSearchResult> = [];
+  #entryPoints: ReadonlyArray<SymbolSearchResult> = [];
   #loading = false;
   #query = '';
   #open = false;
@@ -82,6 +89,36 @@ export class SearchElement extends HTMLElement {
     this.#results = next;
     this.#activeIdx = 0;
     this.#renderDropdown();
+  }
+
+  /**
+   * "Did you mean…" fallback list pushed by the host when a query
+   * returns zero direct matches but the daemon surfaced strsim-near
+   * suggestions. Rendered as a secondary section in the dropdown.
+   */
+  set suggestions(next: ReadonlyArray<SymbolSearchSuggestion>) {
+    this.#suggestions = next;
+    this.#renderDropdown();
+  }
+
+  /**
+   * Recently focused symbols (host-pushed from focusStore). Surfaces
+   * in the empty-state dropdown so users can jump back without
+   * retyping.
+   */
+  set recents(next: ReadonlyArray<SymbolSearchResult>) {
+    this.#recents = next;
+    if (this.#query.length === 0) this.#renderDropdown();
+  }
+
+  /**
+   * Workspace entry points (host-pushed). Shown in the empty-state
+   * dropdown so the API surface is one click away from focusing the
+   * search field.
+   */
+  set entryPoints(next: ReadonlyArray<SymbolSearchResult>) {
+    this.#entryPoints = next;
+    if (this.#query.length === 0) this.#renderDropdown();
   }
 
   set loading(next: boolean) {
@@ -158,11 +195,14 @@ export class SearchElement extends HTMLElement {
           detail: { query: q }, bubbles: true, composed: true,
         }));
       }, QUERY_DEBOUNCE_MS);
-      this.#setOpen(q.length > 0);
+      // Always open while focused — empty query now surfaces the
+      // recents + entry-point preview sections so the user has a
+      // starting point even before typing.
+      this.#setOpen(true);
     });
 
     n.input.addEventListener('focus', () => {
-      if (this.#query.length > 0) this.#setOpen(true);
+      this.#setOpen(true);
     });
 
     n.input.addEventListener('blur', () => {
@@ -181,46 +221,116 @@ export class SearchElement extends HTMLElement {
         }));
         return;
       }
-      if (this.#results.length === 0) return;
+      const items = this.#navigableItems();
+      if (items.length === 0) return;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        this.#activeIdx = (this.#activeIdx + 1) % this.#results.length;
+        this.#activeIdx = (this.#activeIdx + 1) % items.length;
         this.#renderDropdown();
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
-        this.#activeIdx = (this.#activeIdx - 1 + this.#results.length) % this.#results.length;
+        this.#activeIdx = (this.#activeIdx - 1 + items.length) % items.length;
         this.#renderDropdown();
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        const pick = this.#results[this.#activeIdx];
+        const pick = items[this.#activeIdx];
         if (pick) this.#select(pick.fqdn);
       }
     });
+  }
+
+  /**
+   * Flat list of currently focusable entries — drives keyboard
+   * navigation across whichever sections are visible (results,
+   * suggestions, recents, entry points).
+   */
+  #navigableItems(): ReadonlyArray<{ fqdn: string }> {
+    if (this.#query.length === 0) {
+      return [...this.#recents, ...this.#entryPoints];
+    }
+    if (this.#results.length > 0) return this.#results;
+    return this.#suggestions;
   }
 
   #renderDropdown(): void {
     const n = this.#nodes;
     if (n === null) return;
     n.dropdown.className = classigo(C.dropdown, this.#open && C.dropdownOpen);
+    n.dropdown.replaceChildren();
 
     if (this.#loading) {
       n.dropdown.innerHTML = `<div class="${C.status}">Searching…</div>`;
       return;
     }
+
+    // Empty state — surface recents + entry points + a one-liner
+    // hint so the dropdown is informative even before the user types.
     if (this.#query.length === 0) {
-      n.dropdown.innerHTML = '';
-      return;
-    }
-    if (this.#results.length === 0) {
-      n.dropdown.innerHTML = `<div class="${C.status}">No results.</div>`;
+      this.#renderEmptyState(n.dropdown);
       return;
     }
 
+    if (this.#results.length === 0) {
+      const status = document.createElement('div');
+      status.className = C.status;
+      status.textContent = 'No results.';
+      n.dropdown.appendChild(status);
+      if (this.#suggestions.length > 0) {
+        this.#appendSectionTitle(n.dropdown, 'Did you mean…');
+        this.#appendItemList(
+          n.dropdown,
+          this.#suggestions.map(s => ({ fqdn: s.fqdn, name: s.name, kindLabel: s.kindLabel })),
+          0,
+        );
+      }
+      return;
+    }
+
+    this.#appendItemList(n.dropdown, this.#results, 0);
+  }
+
+  #renderEmptyState(mount: HTMLElement): void {
+    const tip = document.createElement('div');
+    tip.className = C.tip;
+    tip.innerHTML = 'Type a name fragment. <code>⌘K</code> focuses this field from anywhere. <kbd>Esc</kbd> clears.';
+    mount.appendChild(tip);
+
+    let offset = 0;
+    if (this.#recents.length > 0) {
+      this.#appendSectionTitle(mount, 'Recently viewed');
+      this.#appendItemList(mount, this.#recents, offset);
+      offset += this.#recents.length;
+    }
+    if (this.#entryPoints.length > 0) {
+      this.#appendSectionTitle(mount, 'Entry points');
+      this.#appendItemList(mount, this.#entryPoints, offset);
+    }
+    if (this.#recents.length === 0 && this.#entryPoints.length === 0) {
+      const status = document.createElement('div');
+      status.className = C.status;
+      status.textContent = 'No history yet — start typing to search.';
+      mount.appendChild(status);
+    }
+  }
+
+  #appendSectionTitle(mount: HTMLElement, label: string): void {
+    const title = document.createElement('div');
+    title.className = C.sectionTitle;
+    title.textContent = label;
+    mount.appendChild(title);
+  }
+
+  #appendItemList(
+    mount: HTMLElement,
+    items: ReadonlyArray<SymbolSearchResult>,
+    indexOffset: number,
+  ): void {
     const ul = document.createElement('ul');
-    ul.className = C.list;
-    this.#results.forEach((r, idx) => {
+    ul.className = classigo(C.list, C.section);
+    items.forEach((r, idx) => {
+      const flatIdx = indexOffset + idx;
       const li = document.createElement('li');
-      li.className = classigo(C.item, idx === this.#activeIdx && C.itemActive);
+      li.className = classigo(C.item, flatIdx === this.#activeIdx && C.itemActive);
       li.title = r.fqdn;
       li.setAttribute('role', 'option');
       li.innerHTML = `
@@ -234,14 +344,14 @@ export class SearchElement extends HTMLElement {
         this.#select(r.fqdn);
       });
       li.addEventListener('mouseenter', () => {
-        if (this.#activeIdx !== idx) {
-          this.#activeIdx = idx;
+        if (this.#activeIdx !== flatIdx) {
+          this.#activeIdx = flatIdx;
           this.#renderDropdown();
         }
       });
       ul.appendChild(li);
     });
-    n.dropdown.replaceChildren(ul);
+    mount.appendChild(ul);
   }
 
   #setOpen(open: boolean): void {

@@ -9,8 +9,23 @@ export interface SymbolSearchResult {
   readonly fqdn: string;
   readonly name: string;
   readonly kindLabel: string;
-  readonly file: string;
-  readonly startLine: number;
+  /** Source file. Optional so suggestions / did_you_mean items (which
+   *  only carry name + fqdn from the daemon) can reuse the same shape. */
+  readonly file?: string;
+  readonly startLine?: number;
+}
+
+/**
+ * Lightweight "did you mean…" suggestion surfaced when a query
+ * returns zero direct matches. The daemon's `find_symbol` switches
+ * its response to `{ results: [], did_you_mean: [...] }` based on
+ * strsim, threshold 0.6. The shell pushes these through here so the
+ * dropdown can render a fallback list instead of a bare "No results".
+ */
+export interface SymbolSearchSuggestion {
+  readonly fqdn: string;
+  readonly name: string;
+  readonly kindLabel: string;
 }
 
 export interface SearchQueryDetail {

@@ -79,6 +79,3 @@ export interface ExplorerSelectDetail {
   readonly source: 'tree' | 'entry-points' | 'recents';
 }
 
-export interface ExplorerSearchDetail {
-  readonly query: string;
-}

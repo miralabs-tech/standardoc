@@ -1,14 +1,15 @@
 /**
- * `<standardoc-explorer>` — left-rail panel of the shell. Four sections
- * stacked top-to-bottom inside the panel body, plus a sticky search
- * field at the top and inline filter chips above the tree:
+ * `<standardoc-explorer>` — left-rail panel of the shell. Stacked
+ * inside the panel body, with inline filter chips above the tree:
  *
- *   1. SEARCH — debounced input emitting `sd-explorer-search`
- *   2. FILTER CHIPS — kind / visibility / entry-point rows, AND across
+ *   1. FILTER CHIPS — kind / visibility / entry-point rows, AND across
  *      rows, OR within a row. Doubles as the live legend.
- *   3. TREE — workspace → projects → modules → leaf symbols
- *   4. ENTRY POINTS — flat list of binary_main / public_api / ffi_export
- *   5. RECENTLY VIEWED — driven by the shared `focusStore`
+ *   2. TREE — workspace → projects → modules → leaf symbols
+ *   3. ENTRY POINTS — flat list of binary_main / public_api / ffi_export
+ *   4. RECENTLY VIEWED — driven by the shared `focusStore`
+ *
+ * Global symbol search lives in `<standardoc-search>` (header) — the
+ * Explorer no longer carries a redundant input.
  *
  * Data is injected via property setters (`tree`, `entryPoints`) — the
  * element does not call MCP itself. Recents subscribe directly to the
@@ -20,7 +21,6 @@
  *
  * Events emitted:
  *   - `sd-explorer-select` detail: ExplorerSelectDetail
- *   - `sd-explorer-search` detail: ExplorerSearchDetail
  */
 
 import classigo from 'classigo';
@@ -30,7 +30,6 @@ import type {
   ExplorerEntryPoint,
   ExplorerExpandDetail,
   ExplorerNodeKind,
-  ExplorerSearchDetail,
   ExplorerSelectDetail,
   ExplorerTreeNode,
   EntryPointKind,
@@ -42,8 +41,6 @@ export const STANDARDOC_EXPLORER_TAG = 'standardoc-explorer';
 const C = {
   explorer: s.explorer ?? '',
   header: s.explorer__header ?? '',
-  search: s.explorer__search ?? '',
-  searchInput: s['explorer__search-input'] ?? '',
   body: s.explorer__body ?? '',
   section: s.explorer__section ?? '',
   sectionTitle: s['explorer__section-title'] ?? '',
@@ -74,8 +71,6 @@ const C = {
   kindMacro: s['kind-macro'] ?? '',
   kindUnknown: s['kind-unknown'] ?? '',
 } as const;
-
-const SEARCH_DEBOUNCE_MS = 150;
 
 const kindIconClass: Record<ExplorerNodeKind, string> = {
   workspace: C.kindModule,
@@ -140,7 +135,6 @@ export class ExplorerElement extends HTMLElement {
   #userExpanded = new Set<string>();
   #autoExpanded = new Set<string>();
   #selectedId: string | null = null;
-  #searchDebounceHandle: number | null = null;
   #unsubscribeFocus: (() => void) | null = null;
   #focus: FocusState = focusStore.get();
   #kindFilter = new Set<ExplorerNodeKind>();
@@ -149,7 +143,6 @@ export class ExplorerElement extends HTMLElement {
 
   #nodes: {
     root: HTMLElement;
-    searchInput: HTMLInputElement;
     treeMount: HTMLElement;
     entryPointsMount: HTMLElement;
     recentsMount: HTMLElement;
@@ -224,10 +217,6 @@ export class ExplorerElement extends HTMLElement {
   disconnectedCallback(): void {
     this.#unsubscribeFocus?.();
     this.#unsubscribeFocus = null;
-    if (this.#searchDebounceHandle !== null) {
-      window.clearTimeout(this.#searchDebounceHandle);
-      this.#searchDebounceHandle = null;
-    }
   }
 
   #render(): void {
@@ -235,15 +224,6 @@ export class ExplorerElement extends HTMLElement {
     root.className = C.explorer;
     root.innerHTML = `
 			<div class="${C.header}">Explorer</div>
-			<div class="${C.search}">
-				<input
-					type="search"
-					class="${C.searchInput}"
-					placeholder="Search in workspace…"
-					data-role="search-input"
-					aria-label="Search symbols in workspace"
-				/>
-			</div>
 			<div data-role="filter-mount"></div>
 			<div class="${C.body}">
 				<section class="${C.section}">
@@ -264,13 +244,11 @@ export class ExplorerElement extends HTMLElement {
 
     this.#nodes = {
       root,
-      searchInput: root.querySelector<HTMLInputElement>('[data-role="search-input"]')!,
       treeMount: root.querySelector<HTMLElement>('[data-role="tree-mount"]')!,
       entryPointsMount: root.querySelector<HTMLElement>('[data-role="entry-points-mount"]')!,
       recentsMount: root.querySelector<HTMLElement>('[data-role="recents-mount"]')!,
     };
 
-    this.#wireSearch();
     this.#renderFilterChips(root.querySelector<HTMLElement>('[data-role="filter-mount"]')!);
     this.#renderTree();
     this.#renderEntryPoints();
@@ -416,21 +394,6 @@ export class ExplorerElement extends HTMLElement {
     }
     if (filteredChildren.length === 0) return null;
     return { ...node, children: filteredChildren };
-  }
-
-  #wireSearch(): void {
-    const n = this.#nodes;
-    if (n === null) return;
-    n.searchInput.addEventListener('input', () => {
-      if (this.#searchDebounceHandle !== null) window.clearTimeout(this.#searchDebounceHandle);
-      this.#searchDebounceHandle = window.setTimeout(() => {
-        this.#searchDebounceHandle = null;
-        const detail: ExplorerSearchDetail = { query: n.searchInput.value };
-        this.dispatchEvent(new CustomEvent('sd-explorer-search', {
-          detail, bubbles: true, composed: true,
-        }));
-      }, SEARCH_DEBOUNCE_MS);
-    });
   }
 
   #renderTree(): void {

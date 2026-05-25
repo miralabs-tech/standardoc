@@ -101,6 +101,29 @@ export interface ListSymbolsResponse {
   readonly next_cursor?: string | null;
 }
 
+/**
+ * Strsim "did you mean…" hit surfaced by `find_symbol` when the FTS5
+ * query returns zero direct matches (threshold 0.6, max 5).
+ */
+export interface FindSymbolSuggestion {
+  readonly fqdn: string;
+  readonly name: string;
+  readonly kind: string;
+  readonly score: number;
+}
+
+/**
+ * Normalised `find_symbol` response. The daemon returns a bare
+ * `RawSymbol[]` when at least one match is found, but switches to
+ * `{ results: [], did_you_mean: [...] }` on zero. The wrapper in
+ * `McpBrowse` normalises both into this shape so callers don't have
+ * to branch on the wire variant.
+ */
+export interface FindSymbolResponse {
+  readonly results: ReadonlyArray<RawSymbol>;
+  readonly suggestions: ReadonlyArray<FindSymbolSuggestion>;
+}
+
 export interface ProjectKind {
   readonly kind: string;
 }

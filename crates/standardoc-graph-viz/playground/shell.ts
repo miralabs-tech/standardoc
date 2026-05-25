@@ -201,6 +201,46 @@ async function boot(): Promise<void> {
   };
   applyOverviewScope({ kind: 'workspace' });
 
+  // Seed the header search empty state. Entry points (top 5,
+  // binary_main + public_api priority) surface the workspace API
+  // surface one click away; recents track focusStore so the user can
+  // jump back without retyping. Both reuse the BrowseSymbol index so
+  // file:line is resolved when known (drops gracefully to undefined
+  // for builtins / re-exports without a recorded location).
+  const browseToSearchResult = (s: BrowseSymbol): SymbolSearchResult => ({
+    fqdn: s.fqdn,
+    name: s.name,
+    kindLabel: s.kind,
+    file: s.file,
+    startLine: s.start_line,
+  });
+  const fqdnToSearchResult = (fqdn: string): SymbolSearchResult => {
+    const sym = symbolByFqdn.get(fqdn);
+    if (sym !== undefined) return browseToSearchResult(sym);
+    return { fqdn, name: shortFqdn(fqdn), kindLabel: 'symbol' };
+  };
+  // Stable entry-point ranking : binary_main → public_api → ffi_export → alpha.
+  const epRank = (k: string): number => k === 'binary_main' ? 0 : k === 'public_api' ? 1 : k === 'ffi_export' ? 2 : 3;
+  const sortedEntryPoints = [...entryPoints].sort((a, b) => {
+    const dr = epRank(a.kind) - epRank(b.kind);
+    return dr !== 0 ? dr : a.label.localeCompare(b.label);
+  });
+  searchEl.entryPoints = sortedEntryPoints.slice(0, 5).map(ep => {
+    const sym = symbolByFqdn.get(ep.fqdn);
+    return {
+      fqdn: ep.fqdn,
+      name: sym?.name ?? ep.label,
+      kindLabel: ep.kind,
+      file: sym?.file,
+      startLine: sym?.start_line,
+    };
+  });
+  const pushRecentsToSearch = () => {
+    searchEl.recents = focusStore.get().recent.slice(0, 3).map(fqdnToSearchResult);
+  };
+  pushRecentsToSearch();
+  focusStore.subscribe(() => pushRecentsToSearch());
+
   // IDE-style workspace tree built from the full paginated symbol
   // set so every indexed file shows even when the workspace has more
   // than 5000 symbols (the fetch_graph cap). The fileById index lets
@@ -249,20 +289,48 @@ async function boot(): Promise<void> {
     }
   });
 
-  // Wire search.
+  // Wire search. Fan out to both `find_symbol` (FTS5 ranked by name +
+  // fqdn tokens) and `find_symbols_by_pattern` (glob substring match)
+  // in parallel — merging the two catches a broader scoring surface
+  // than either alone (FTS misses middle-substring hits, pattern
+  // misses fuzzy / tokenized matches). FTS results lead; pattern hits
+  // fill in by fqdn dedup. When FTS returns 0, its strsim
+  // `did_you_mean` suggestions surface as a "Did you mean…" section.
   searchEl.addEventListener('sd-search-query', async (ev: Event) => {
     const detail = (ev as CustomEvent<{ query: string }>).detail;
     const q = detail.query.trim();
-    if (q.length < 2) {
+    if (q.length === 0) {
       searchEl.results = [];
+      searchEl.suggestions = [];
       return;
     }
     searchEl.loading = true;
     try {
-      const results = await mcp.findSymbolsByPattern(q, 20);
-      searchEl.results = results.map(toSymbolSearchResult);
+      const [fts, pattern] = await Promise.all([
+        mcp.findSymbol(q, 20).catch(() => ({ results: [] as ReadonlyArray<RawSymbol>, suggestions: [] })),
+        mcp.findSymbolsByPattern(`*${q}*`, 20).catch(() => [] as ReadonlyArray<RawSymbol>),
+      ]);
+      const seen = new Set<string>();
+      const merged: RawSymbol[] = [];
+      for (const r of fts.results) {
+        if (seen.has(r.fqdn)) continue;
+        seen.add(r.fqdn);
+        merged.push(r);
+      }
+      for (const r of pattern) {
+        if (seen.has(r.fqdn)) continue;
+        seen.add(r.fqdn);
+        merged.push(r);
+      }
+      searchEl.results = merged.slice(0, 20).map(toSymbolSearchResult);
+      searchEl.suggestions = fts.suggestions.map(s => ({
+        fqdn: s.fqdn,
+        name: s.name,
+        kindLabel: s.kind,
+      }));
     } catch {
       searchEl.results = [];
+      searchEl.suggestions = [];
     } finally {
       searchEl.loading = false;
     }

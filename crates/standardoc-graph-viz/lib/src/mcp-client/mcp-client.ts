@@ -18,6 +18,8 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type {
   CurrentRevision,
   FetchGraphResponse,
+  FindSymbolResponse,
+  FindSymbolSuggestion,
   GetBodyResponse,
   GetContextResponse,
   ListProjectsResponse,
@@ -154,6 +156,31 @@ export class McpBrowse {
     if (limit !== undefined) args.limit = limit;
     const raw = await this.callTool('find_symbols_by_pattern', args);
     return JSON.parse(raw) as ReadonlyArray<RawSymbol>;
+  }
+
+  /**
+   * FTS5 full-text search over symbol `name` + `fqdn`. Tokenizes
+   * snake_case / camelCase. The daemon switches its response shape
+   * on zero results to surface strsim "did you mean…" suggestions;
+   * this wrapper normalises both variants into `{results, suggestions}`
+   * so the caller never branches on the wire format.
+   */
+  async findSymbol(query: string, limit?: number): Promise<FindSymbolResponse> {
+    const args: Record<string, unknown> = { query };
+    if (limit !== undefined) args.limit = limit;
+    const raw = await this.callTool('find_symbol', args);
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return { results: parsed as ReadonlyArray<RawSymbol>, suggestions: [] };
+    }
+    const wrapper = parsed as {
+      results?: ReadonlyArray<RawSymbol>;
+      did_you_mean?: ReadonlyArray<FindSymbolSuggestion>;
+    };
+    return {
+      results: wrapper.results ?? [],
+      suggestions: wrapper.did_you_mean ?? [],
+    };
   }
 
   /**
