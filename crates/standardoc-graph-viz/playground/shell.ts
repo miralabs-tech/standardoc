@@ -112,18 +112,26 @@ async function boot(): Promise<void> {
 	const projectsRes = await mcp.listProjects().catch(() => null);
 	const projects = projectsRes?.projects ?? [];
 
-	// Entry points — list_symbols doesn't expose an entry_point filter
-	// yet, so we walk every page via the cursor and filter client-side.
-	// Bounded above by PAGE_SIZE * MAX_PAGES so a runaway daemon can't
-	// hang the boot path; the limit is generous enough for realistic
-	// workspaces.
-	setStatus('entry points…');
-	const entryPoints = await collectEntryPoints(mcp, status => setStatus(status));
+	// Walk the full workspace symbol index in one paginated pass that
+	// feeds BOTH the Entry Points section and the IDE-style tree below.
+	// fetch_graph's 5k node cap is fine for the visual overview canvas
+	// but it truncates the tree on real workspaces — list_symbols' cursor
+	// pagination gives complete coverage at the cost of N round-trips
+	// (bounded above by EP_MAX_PAGES so a runaway daemon can't hang boot).
+	setStatus('workspace symbols…');
+	const { all: rawSymbols, entryPoints } = await collectWorkspaceSymbols(mcp, status => setStatus(status));
 	explorerEl.entryPoints = entryPoints;
 
-	// Load the full workspace graph into the overview canvas. We reuse
-	// the same symbol set to build the Explorer file tree below — one
-	// fetch feeds both the canvas and the navigation panel.
+	// Resolve every symbol to its owning project via longest-prefix
+	// match on the file path. list_symbols doesn't surface project_id
+	// directly, but rel_path on each project gives us the same answer
+	// — and longest-prefix correctly nests sub-projects (lib/pkg/
+	// playground all under standardoc-graph-viz) instead of pulling
+	// their files up to the parent.
+	const treeSymbols: BrowseSymbol[] = rawSymbols.map(s => rawToBrowseSymbol(s, projects));
+
+	// Load the workspace graph into the overview canvas — bounded set
+	// (5k) intentional, the nebula doesn't gain much from going wider.
 	setStatus('fetch graph…');
 	const graph = await mcp.fetchGraph(false).catch(() => null);
 	const symbolByFqdn = new Map<string, BrowseSymbol>();
@@ -133,17 +141,14 @@ async function boot(): Promise<void> {
 		overview.fit();
 	}
 
-	// IDE-style workspace tree built synchronously from the already-
-	// fetched symbol set (no extra round-trip). Top level is the
-	// workspace root; below it, projects are grouped under their first
-	// path segment (crates/, ext/, …) so the structure mirrors a real
-	// file explorer; each project then expands into its own src/tests/
-	// folder hierarchy + per-file symbol list. The fileById index lets
+	// IDE-style workspace tree built from the full paginated symbol
+	// set so every indexed file shows even when the workspace has more
+	// than 5000 symbols (the fetch_graph cap). The fileById index lets
 	// the shell react to file clicks by spawning a synthetic SymbolDetail
 	// profile listing the symbols defined in that file.
 	setStatus('build tree…');
 	const fileById = new Map<string, FileEntry>();
-	const workspaceRoot = buildWorkspaceTree('Workspace', projects, graph?.symbols ?? [], fileById);
+	const workspaceRoot = buildWorkspaceTree('Workspace', projects, treeSymbols, fileById);
 	explorerEl.tree = [workspaceRoot];
 
 	// File click → synthetic SymbolDetail listing the file's symbols.
@@ -243,11 +248,19 @@ async function boot(): Promise<void> {
 const EP_PAGE_SIZE = 500;
 const EP_MAX_PAGES = 50; // 25k symbols ceiling, generous for any realistic workspace
 
-async function collectEntryPoints(
+/**
+ * Single paginated walk of the workspace symbol index. Returns both
+ * the full RawSymbol set (drives the IDE-style file tree) and the
+ * filtered entry-points subset (drives the Explorer's Entry Points
+ * section). Merging the two consumers into one pass avoids paying
+ * the list_symbols round-trip cost twice.
+ */
+async function collectWorkspaceSymbols(
 	mcp: McpBrowse,
 	report: (status: string) => void,
-): Promise<ExplorerEntryPoint[]> {
-	const found: ExplorerEntryPoint[] = [];
+): Promise<{ all: RawSymbol[]; entryPoints: ExplorerEntryPoint[] }> {
+	const all: RawSymbol[] = [];
+	const entryPoints: ExplorerEntryPoint[] = [];
 	let cursor: string | undefined;
 	let page = 0;
 	while (page < EP_MAX_PAGES) {
@@ -255,19 +268,60 @@ async function collectEntryPoints(
 		const res = await mcp.listSymbols({ limit: EP_PAGE_SIZE, cursor }).catch(() => null);
 		if (res === null) break;
 		for (const s of res.items) {
+			all.push(s);
 			if (typeof s.entry_point === 'string' && s.entry_point.length > 0) {
-				found.push({
+				entryPoints.push({
 					fqdn: s.fqdn,
 					label: shortFqdn(s.fqdn),
 					kind: s.entry_point as EntryPointKind,
 				});
 			}
 		}
-		report(`entry points… (page ${page}, ${found.length} found)`);
+		report(`workspace symbols… (page ${page}, ${all.length} total, ${entryPoints.length} entry points)`);
 		if (res.next_cursor === undefined || res.next_cursor === null || res.next_cursor.length === 0) break;
 		cursor = res.next_cursor;
 	}
-	return found;
+	return { all, entryPoints };
+}
+
+/**
+ * Convert a list_symbols RawSymbol into the flatter BrowseSymbol shape
+ * the tree builder consumes. list_symbols doesn't carry project_id, so
+ * we resolve it via longest-prefix match on the file path — sub-project
+ * paths (lib/pkg/playground inside standardoc-graph-viz) bind to the
+ * deepest matching project rather than the parent crate.
+ */
+function rawToBrowseSymbol(s: RawSymbol, projects: ReadonlyArray<ProjectLike>): BrowseSymbol {
+	const file = s.location.file;
+	return {
+		fqdn: s.fqdn,
+		name: s.name,
+		kind: s.kind,
+		visibility: s.visibility,
+		module: s.module,
+		language_kind: s.language_kind,
+		language: '',
+		is_external: false,
+		file,
+		start_line: s.location.start_line,
+		project_id: inferProjectId(file, projects),
+	};
+}
+
+function inferProjectId(filePath: string, projects: ReadonlyArray<ProjectLike>): number | null {
+	if (!filePath) return null;
+	const norm = filePath.replace(/\\/g, '/');
+	let best: { id: number; len: number } | null = null;
+	for (const p of projects) {
+		const prefix = p.rel_path.replace(/\\/g, '/');
+		if (prefix.length === 0) continue;
+		if (norm === prefix || norm.startsWith(`${prefix}/`)) {
+			if (best === null || prefix.length > best.len) {
+				best = { id: p.project_id, len: prefix.length };
+			}
+		}
+	}
+	return best?.id ?? null;
 }
 
 interface DirNode {
