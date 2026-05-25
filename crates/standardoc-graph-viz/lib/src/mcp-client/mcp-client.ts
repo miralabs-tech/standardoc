@@ -124,11 +124,18 @@ export class McpBrowse {
 	 * omitted.
 	 */
 	async listSymbols(options: ListSymbolsOptions = {}): Promise<ListSymbolsResponse> {
+		// Daemon-side argument names: ext / vis / kind / module / limit /
+		// cursor. The 'externals' / 'visibility' aliases here are just
+		// nicer-looking client-side spellings; they get translated on
+		// the way out. Sending the long names directly was silently
+		// dropped by the daemon (no error, just unfiltered results) —
+		// which is how the playground walk used to burn its 25k cap on
+		// '<builtin>::*' before reaching any workspace project.
 		const args: Record<string, unknown> = {};
 		if (options.kind !== undefined) args.kind = options.kind;
 		if (options.module !== undefined) args.module = options.module;
-		if (options.visibility !== undefined) args.visibility = options.visibility;
-		if (options.externals !== undefined) args.externals = options.externals;
+		if (options.visibility !== undefined) args.vis = options.visibility;
+		if (options.externals !== undefined) args.ext = options.externals;
 		if (options.limit !== undefined) args.limit = options.limit;
 		if (options.cursor !== undefined) args.cursor = options.cursor;
 		const raw = await this.callTool('list_symbols', args);

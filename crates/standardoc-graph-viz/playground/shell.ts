@@ -246,7 +246,7 @@ async function boot(): Promise<void> {
 }
 
 const EP_PAGE_SIZE = 500;
-const EP_MAX_PAGES = 200; // 100k symbols ceiling — generous even for monorepos
+const EP_MAX_PAGES = 1000; // 500k symbols ceiling — safety net only, ext:false should cap us far below this
 
 /**
  * Single paginated walk of the workspace symbol index. Returns both
@@ -265,13 +265,16 @@ async function collectWorkspaceSymbols(
 	let page = 0;
 	while (page < EP_MAX_PAGES) {
 		page++;
-		// externals: false drops builtins + dependency crate symbols so
-		// the cursor reaches workspace projects fast — otherwise the
-		// first thousand of pages burn on <builtin>::* alone and the
-		// later workspace projects never get walked.
+		// externals: false drops dependency crate symbols server-side.
+		// Builtins ('<builtin>::*') aren't covered by that flag so we
+		// also filter them client-side below — they otherwise drown the
+		// workspace symbols under hundreds of pages on cold start.
 		const res = await mcp.listSymbols({ limit: EP_PAGE_SIZE, externals: false, cursor }).catch(() => null);
 		if (res === null) break;
 		for (const s of res.items) {
+			if (s.language_kind === 'builtin' || s.location.file.startsWith('<builtin>')) {
+				continue;
+			}
 			all.push(s);
 			if (typeof s.entry_point === 'string' && s.entry_point.length > 0) {
 				entryPoints.push({
@@ -281,7 +284,7 @@ async function collectWorkspaceSymbols(
 				});
 			}
 		}
-		report(`workspace symbols… (page ${page}, ${all.length} total, ${entryPoints.length} entry points)`);
+		report(`workspace symbols… (page ${page}, ${all.length} kept, ${entryPoints.length} entry points)`);
 		if (res.next_cursor === undefined || res.next_cursor === null || res.next_cursor.length === 0) break;
 		cursor = res.next_cursor;
 	}
