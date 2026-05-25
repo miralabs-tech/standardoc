@@ -22,25 +22,21 @@
 //! The legacy `GraphEngine` (single canvas + drill tree) lived here
 //! through Phases 1–3c. Phase 3d removed it along with its tree /
 //! scene / render / layout / viewport / interaction modules — the new
-//! split canvases supersede it. Parked but kept: [`force3d`], [`gpu`]
-//! — both may surface in a future GPU-accelerated nebula path.
+//! split canvases supersede it.
 
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_lossless)]
-// Parked modules (force3d, gpu, large parts of palette/payload) carry
-// helpers that used to feed the legacy GraphEngine and that we expect
-// to re-engage in a Phase-4 GPU-accelerated nebula path. Silencing
-// dead_code at the crate level keeps the slim-down commit focused on
-// deletion rather than another bookkeeping pass — the next time one
-// of these modules grows a real consumer, the lint comes back.
+// `palette` and `payload` still carry helpers that used to feed the
+// legacy GraphEngine; the slim canvases consume only a subset. The
+// crate-wide allow keeps the slim-down focused on deletion rather than
+// another bookkeeping pass — the next time one of these helpers grows
+// a real consumer the lint will fire.
 #![allow(dead_code)]
 
 mod camera;
 mod focus;
-mod force3d;
-mod gpu;
 mod kind;
 mod overview;
 mod palette;

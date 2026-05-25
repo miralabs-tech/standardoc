@@ -217,38 +217,10 @@
 		}
 	}
 
-	&__legend {
-		display: flex;
-		flex-direction: column;
-		gap: var(--sd-space-1, 4px);
-		padding: var(--sd-space-1, 4px) var(--sd-panel-padding, 12px);
-	}
-
-	&__legend-row {
-		display: flex;
-		align-items: center;
-		gap: var(--sd-space-2, 8px);
-		font-size: var(--sd-text-xs, 10px);
-		color: var(--sd-fg-muted, #9d9d9d);
-	}
-
-	&__legend-swatch {
-		width: 10px;
-		height: 10px;
-		border-radius: 2px;
-		flex: 0 0 auto;
-	}
-
-	&__legend-edge {
-		width: 18px;
-		height: 0;
-		border-top: 1.5px dashed currentColor;
-		flex: 0 0 auto;
-	}
 }
 
 // Kind palette mapping for swatches and tree icons. Single source —
-// referenced both from the tree node icons and the legend below.
+// referenced from the tree node icons and the inline filter chips.
 @mixin kind-swatch($var) {
 	background: var(--#{$var}, #9d9d9d);
 }
