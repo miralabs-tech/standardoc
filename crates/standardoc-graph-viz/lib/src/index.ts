@@ -8,7 +8,6 @@ export type { RenderMode, Status, StatusKind } from './types';
 // declares them under `sideEffects`.
 export * from './components/toolbar';
 export * from './components/hud';
-export * from './components/graph';
 export * from './components/panel-layout';
 export * from './components/explorer';
 export * from './components/symbol-details';

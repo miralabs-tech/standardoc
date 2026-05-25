@@ -11,7 +11,6 @@
     ".": "./src/index.ts",
     "./components/toolbar": "./src/components/toolbar/index.ts",
     "./components/hud": "./src/components/hud/index.ts",
-    "./components/graph": "./src/components/graph/index.ts",
     "./components/panel-layout": "./src/components/panel-layout/index.ts",
     "./components/explorer": "./src/components/explorer/index.ts",
     "./components/symbol-details": "./src/components/symbol-details/index.ts",

@@ -374,11 +374,17 @@ const server = Bun.serve({
     if (url.pathname === '/mcp' || url.pathname.startsWith('/mcp/')) {
       return proxyMcp(req, url.pathname + url.search);
     }
-    if (url.pathname === '/main.js') {
-      return bundleEntry('main.ts');
-    }
     if (url.pathname === '/shell.js') {
       return bundleEntry('shell.ts');
+    }
+    if (url.pathname === '/' || url.pathname === '') {
+      // Phase 3d retired the legacy GraphEngine-based main.ts entry —
+      // '/' now redirects to the multi-panel shell so old bookmarks
+      // still land somewhere sensible.
+      return new Response(null, {
+        status: 302,
+        headers: { Location: '/shell.html' },
+      });
     }
     const served = await serveStatic(url.pathname);
     if (served !== null) return served;
