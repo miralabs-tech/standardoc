@@ -55,6 +55,7 @@ import type {
 	SymbolDetailsTabChangeDetail,
 	SymbolRelationBucket,
 	SymbolRelationKind,
+	SymbolSubItem,
 } from './symbol-details.type';
 import s from './symbol-details.module.scss';
 
@@ -103,6 +104,7 @@ const RELATION_TITLE: Record<SymbolRelationKind, string> = {
 	usedBy: 'Used by',
 	usesTypes: 'Uses types',
 	calls: 'Calls',
+	imports: 'Imports',
 	importedBy: 'Imported by',
 	testedBy: 'Tested by',
 	implements: 'Implements',
@@ -131,6 +133,8 @@ export class SymbolDetailsElement extends HTMLElement {
 	#sourceLoading = false;
 	#tab: SymbolDetailsTab = 'overview';
 	#docExpanded = false;
+	#expandedBuckets = new Set<SymbolRelationKind>();
+	#bucketSortBy = new Map<SymbolRelationKind, 'default' | 'name' | 'kind'>();
 	#unsubscribeFocus: (() => void) | null = null;
 	#focus: FocusState = focusStore.get();
 
@@ -149,7 +153,22 @@ export class SymbolDetailsElement extends HTMLElement {
 		// doesn't surface a stale body while a fresh fetch is in flight.
 		this.#sourceBody = null;
 		this.#sourceLoading = false;
+		// Reset per-bucket expand state — keeping it would cross-pollute
+		// between symbols (e.g. user expands Used by on A, switches to
+		// B which also has Used by → B opens expanded by surprise).
+		this.#expandedBuckets.clear();
+		this.#bucketSortBy.clear();
 		this.#refresh();
+		// If the user was already on the Source tab when the symbol
+		// changed, the cache is now null and the body shows the empty
+		// placeholder. Re-emit the tab-change so the host's existing
+		// source-fetch listener fires for the new symbol without the
+		// user having to manually re-click the tab.
+		if (this.#tab === 'source' && next !== null) {
+			this.dispatchEvent(new CustomEvent<SymbolDetailsTabChangeDetail>('sd-symbol-tab-change', {
+				detail: { tab: 'source' }, bubbles: true, composed: true,
+			}));
+		}
 	}
 
 	get symbol(): SymbolDetail | null {
@@ -265,8 +284,8 @@ export class SymbolDetailsElement extends HTMLElement {
 		const n = this.#nodes;
 		if (n === null) return;
 		const sym = this.#symbol;
-		const fieldCount = sym?.fieldCount ?? 0;
-		const methodCount = sym?.methodCount ?? 0;
+		const fieldCount = sym?.fields.length ?? 0;
+		const methodCount = sym?.methods.length ?? 0;
 		const disabled = sym === null;
 
 		const tabs: Array<{ id: SymbolDetailsTab; label: string; disabled: boolean }> = [
@@ -309,15 +328,59 @@ export class SymbolDetailsElement extends HTMLElement {
 				this.#renderOverview(n.body, sym);
 				break;
 			case 'fields':
-				n.body.innerHTML = `<div class="${C.empty}">Fields tab — coming in Phase 4 (Field Details panel).</div>`;
+				this.#renderSubItems(n.body, sym.fields, 'fields');
 				break;
 			case 'methods':
-				n.body.innerHTML = `<div class="${C.empty}">Methods tab — coming in Phase 4.</div>`;
+				this.#renderSubItems(n.body, sym.methods, 'methods');
 				break;
 			case 'source':
 				this.#renderSource(n.body, sym);
 				break;
 		}
+	}
+
+	#renderSubItems(
+		mount: HTMLElement,
+		items: ReadonlyArray<SymbolSubItem>,
+		kind: 'fields' | 'methods',
+	): void {
+		mount.innerHTML = '';
+		if (items.length === 0) {
+			const empty = document.createElement('div');
+			empty.className = C.empty;
+			empty.textContent = kind === 'fields'
+				? 'No fields or variants on this symbol.'
+				: 'No methods on this symbol.';
+			mount.appendChild(empty);
+			return;
+		}
+		const section = document.createElement('section');
+		section.className = C.section;
+		const ul = document.createElement('ul');
+		ul.className = C.relationList;
+		for (const it of items) {
+			const li = document.createElement('li');
+			li.className = C.relationItem;
+			li.title = it.fqdn;
+			const label = document.createElement('span');
+			label.className = C.relationItemLabel;
+			label.textContent = it.name;
+			const k = document.createElement('span');
+			k.className = C.relationItemKind;
+			k.textContent = it.kindLabel;
+			li.appendChild(label);
+			li.appendChild(k);
+			li.addEventListener('click', () => {
+				focusStore.setFocus(it.fqdn);
+				this.dispatchEvent(new CustomEvent<SymbolDetailsRelationClickDetail>('sd-symbol-relation-click', {
+					detail: { fqdn: it.fqdn, relationKind: 'definedHere' },
+					bubbles: true, composed: true,
+				}));
+			});
+			ul.appendChild(li);
+		}
+		section.appendChild(ul);
+		mount.appendChild(section);
 	}
 
 	#renderSource(mount: HTMLElement, sym: SymbolDetail): void {
@@ -354,7 +417,12 @@ export class SymbolDetailsElement extends HTMLElement {
 		pre.style.color = 'var(--sd-fg, #cccccc)';
 		pre.style.overflow = 'auto';
 		pre.style.whiteSpace = 'pre';
-		pre.textContent = this.#sourceBody;
+		// Light-weight syntax-highlighter — single-pass regex tokenizer
+		// keyed on the file extension. Not a full lexer, just enough to
+		// give the Source preview the typography-first feel the manifesto
+		// asks for. Falls back to plain text when the language is
+		// unknown.
+		pre.innerHTML = highlightSource(this.#sourceBody, sym.file);
 		mount.appendChild(pre);
 	}
 
@@ -426,9 +494,11 @@ export class SymbolDetailsElement extends HTMLElement {
 		}
 	}
 
-	#renderRelation(bucket: SymbolRelationBucket, ownFqdn: string): HTMLElement {
+	#renderRelation(bucket: SymbolRelationBucket, _ownFqdn: string): HTMLElement {
 		const wrap = document.createElement('div');
 		wrap.className = C.relation;
+		const expanded = this.#expandedBuckets.has(bucket.kind);
+		const sortBy = this.#bucketSortBy.get(bucket.kind) ?? 'default';
 
 		const header = document.createElement('div');
 		header.className = C.relationHeader;
@@ -443,24 +513,50 @@ export class SymbolDetailsElement extends HTMLElement {
 		header.appendChild(title);
 		header.appendChild(count);
 		header.appendChild(spacer);
+		// Sort toggle — cycles default → name → kind → default. Compact
+		// "↕ <mode>" button so the inspector stays "IDE-like" instead of
+		// a static dump.
+		const sortBtn = document.createElement('button');
+		sortBtn.type = 'button';
+		sortBtn.className = C.seeAll;
+		const sortLabel = sortBy === 'default' ? '↕ order' : sortBy === 'name' ? '↕ name' : '↕ kind';
+		sortBtn.textContent = sortLabel;
+		sortBtn.title = 'Cycle sort: default → name → kind';
+		sortBtn.addEventListener('click', () => {
+			const next: 'default' | 'name' | 'kind' = sortBy === 'default' ? 'name' : sortBy === 'name' ? 'kind' : 'default';
+			if (next === 'default') this.#bucketSortBy.delete(bucket.kind);
+			else this.#bucketSortBy.set(bucket.kind, next);
+			this.#renderBody();
+		});
+		header.appendChild(sortBtn);
 		if (bucket.total > TOP_PER_RELATION) {
-			const seeAll = document.createElement('button');
-			seeAll.type = 'button';
-			seeAll.className = C.seeAll;
-			seeAll.textContent = 'See all ›';
-			seeAll.addEventListener('click', () => {
-				this.dispatchEvent(new CustomEvent<SymbolDetailsActionDetail>('sd-symbol-action', {
-					detail: { action: 'see-all', fqdn: ownFqdn, relationKind: bucket.kind },
-					bubbles: true, composed: true,
-				}));
+			// Inline expand — no spawnable drawer, just toggle which slice
+			// of the bucket we render. Resets on symbol swap to avoid
+			// cross-pollution.
+			const toggle = document.createElement('button');
+			toggle.type = 'button';
+			toggle.className = C.seeAll;
+			toggle.textContent = expanded ? 'Show less' : `See all (${bucket.total}) ›`;
+			toggle.addEventListener('click', () => {
+				if (this.#expandedBuckets.has(bucket.kind)) this.#expandedBuckets.delete(bucket.kind);
+				else this.#expandedBuckets.add(bucket.kind);
+				this.#renderBody();
 			});
-			header.appendChild(seeAll);
+			header.appendChild(toggle);
 		}
 		wrap.appendChild(header);
 
 		const ul = document.createElement('ul');
 		ul.className = C.relationList;
-		for (const item of bucket.items.slice(0, TOP_PER_RELATION)) {
+		// Apply sort BEFORE the visible-slice cap so the slice picks up
+		// the right top-5 after sort. Default keeps server order.
+		const sortedItems = sortBy === 'default'
+			? bucket.items
+			: [...bucket.items].sort((a, b) => sortBy === 'name'
+				? a.label.localeCompare(b.label)
+				: a.kindLabel.localeCompare(b.kindLabel) || a.label.localeCompare(b.label));
+		const visible = expanded ? sortedItems : sortedItems.slice(0, TOP_PER_RELATION);
+		for (const item of visible) {
 			const li = document.createElement('li');
 			li.className = C.relationItem;
 			li.title = item.fqdn;
@@ -493,11 +589,12 @@ export class SymbolDetailsElement extends HTMLElement {
 			n.actions.innerHTML = '';
 			return;
 		}
+		// Two wired actions only. The four manifesto extras (show callers /
+		// deps graphs, isolate subgraph, expand neighborhood) were stubs
+		// with no concrete behavior — removed pending real implementation.
 		const acts: Array<{ id: SymbolDetailsAction; label: string }> = [
 			{ id: 'open-in-editor', label: 'Open in editor' },
-			{ id: 'show-callers', label: 'Show callers graph' },
 			{ id: 'add-to-compare', label: 'Add to compare' },
-			{ id: 'show-callees', label: 'Show callees graph' },
 		];
 		n.actions.innerHTML = acts.map(a =>
 			`<button type="button" class="${C.action}" data-action="${a.id}">${escapeHtml(a.label)}</button>`,
@@ -515,6 +612,82 @@ export class SymbolDetailsElement extends HTMLElement {
 			bubbles: true, composed: true,
 		}));
 	}
+}
+
+type HighlightLang = 'rust' | 'ts' | null;
+
+const RUST_KEYWORDS = new Set([
+	'fn', 'struct', 'enum', 'trait', 'impl', 'let', 'mut', 'const', 'static',
+	'pub', 'use', 'mod', 'return', 'if', 'else', 'for', 'while', 'loop', 'match',
+	'where', 'async', 'await', 'move', 'self', 'Self', 'true', 'false', 'as',
+	'in', 'ref', 'unsafe', 'extern', 'type', 'dyn', 'crate', 'super', 'break',
+	'continue', 'box', 'macro_rules',
+]);
+
+const TS_KEYWORDS = new Set([
+	'function', 'class', 'interface', 'type', 'enum', 'const', 'let', 'var',
+	'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default', 'break',
+	'continue', 'return', 'throw', 'try', 'catch', 'finally', 'new', 'this',
+	'super', 'extends', 'implements', 'export', 'import', 'from', 'as', 'in',
+	'of', 'async', 'await', 'yield', 'true', 'false', 'null', 'undefined',
+	'void', 'never', 'any', 'unknown', 'string', 'number', 'boolean', 'object',
+	'symbol', 'bigint', 'public', 'private', 'protected', 'readonly', 'static',
+	'abstract', 'override', 'declare',
+]);
+
+function detectLang(file: string): HighlightLang {
+	const f = file.toLowerCase();
+	if (f.endsWith('.rs')) return 'rust';
+	if (f.endsWith('.ts') || f.endsWith('.tsx') || f.endsWith('.js') || f.endsWith('.jsx') || f.endsWith('.mts') || f.endsWith('.cts')) return 'ts';
+	return null;
+}
+
+/**
+ * Single-pass syntax highlighter producing an HTML string with `<span>`
+ * wrappers around tokens. Comments / strings / numbers / keywords / types
+ * each get a CSS variable hook from the existing kind palette so the
+ * highlighting blends with the rest of the shell rather than introducing
+ * a new colour scheme.
+ *
+ * Trade-offs (V0):
+ *   - Regex tokeniser, not a real lexer — fine for read-only previews,
+ *     would mis-tokenise pathological cases (nested template literals,
+ *     escaped quotes spanning lines) but those rarely appear in symbol
+ *     bodies.
+ *   - Two languages only: Rust + TS family. Unknown extensions render
+ *     as plain escaped text.
+ */
+function highlightSource(code: string, file: string): string {
+	const lang = detectLang(file);
+	if (lang === null) return escapeHtml(code);
+	const keywords = lang === 'rust' ? RUST_KEYWORDS : TS_KEYWORDS;
+	// Order matters in the alternation: comments + strings must win
+	// over keywords/identifiers since e.g. `// fn foo` should stay all-
+	// comment, not partly-keyword.
+	const re = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`|\b\d+(?:\.\d+)?(?:[eE][-+]?\d+)?\b|\b[A-Z][a-zA-Z0-9_]*\b|\b[a-zA-Z_][a-zA-Z0-9_]*\b)/g;
+	let out = '';
+	let last = 0;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(code)) !== null) {
+		const tok = m[0];
+		const start = m.index;
+		if (start > last) out += escapeHtml(code.slice(last, start));
+		const cls = classifyToken(tok, keywords);
+		if (cls === null) out += escapeHtml(tok);
+		else out += `<span style="color: var(${cls})">${escapeHtml(tok)}</span>`;
+		last = start + tok.length;
+	}
+	if (last < code.length) out += escapeHtml(code.slice(last));
+	return out;
+}
+
+function classifyToken(tok: string, keywords: Set<string>): string | null {
+	if (tok.startsWith('//') || tok.startsWith('/*')) return '--sd-fg-muted';
+	if (tok.startsWith('"') || tok.startsWith("'") || tok.startsWith('`')) return '--sd-status-ok';
+	if (/^\d/.test(tok)) return '--sd-kind-value';
+	if (keywords.has(tok)) return '--sd-kind-callable';
+	if (/^[A-Z]/.test(tok)) return '--sd-kind-type';
+	return null;
 }
 
 function escapeHtml(text: string): string {

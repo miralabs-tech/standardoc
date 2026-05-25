@@ -20,6 +20,7 @@ export type SymbolRelationKind =
 	| 'usedBy'
 	| 'usesTypes'
 	| 'calls'
+	| 'imports'
 	| 'importedBy'
 	| 'testedBy'
 	| 'implements'
@@ -33,6 +34,14 @@ export interface SymbolRelationBucket {
 	readonly total: number;
 }
 
+export interface SymbolSubItem {
+	readonly fqdn: string;
+	readonly name: string;
+	readonly kindLabel: SymbolKindLabel;
+	readonly file: string | null;
+	readonly startLine: number | null;
+}
+
 export interface SymbolDetail {
 	readonly fqdn: string;
 	readonly name: string;
@@ -42,8 +51,8 @@ export interface SymbolDetail {
 	readonly startLine: number;
 	readonly documentation: string | null;
 	readonly entryPointKind: EntryPointKind | null;
-	readonly fieldCount: number;
-	readonly methodCount: number;
+	readonly fields: ReadonlyArray<SymbolSubItem>;
+	readonly methods: ReadonlyArray<SymbolSubItem>;
 	readonly relations: ReadonlyArray<SymbolRelationBucket>;
 }
 
@@ -52,16 +61,11 @@ export type SymbolDetailsTab = 'overview' | 'fields' | 'methods' | 'source';
 export type SymbolDetailsAction =
 	| 'open-in-editor'
 	| 'copy-fqdn'
-	| 'show-callers'
-	| 'show-callees'
-	| 'add-to-compare'
-	| 'see-all';
+	| 'add-to-compare';
 
 export interface SymbolDetailsActionDetail {
 	readonly action: SymbolDetailsAction;
 	readonly fqdn: string;
-	/** Present for `see-all` to disambiguate which relation bucket. */
-	readonly relationKind?: SymbolRelationKind;
 }
 
 export interface SymbolDetailsRelationClickDetail {
