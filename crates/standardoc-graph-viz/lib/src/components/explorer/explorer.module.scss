@@ -104,11 +104,13 @@
 	&__node-row {
 		display: flex;
 		align-items: center;
-		gap: var(--sd-space-1, 4px);
-		padding: 2px var(--sd-panel-padding, 12px);
+		gap: 3px;
+		padding: 1px var(--sd-space-1, 4px);
 		cursor: pointer;
 		color: var(--sd-fg, #cccccc);
 		user-select: none;
+		font-size: var(--sd-text-sm, 11px);
+		line-height: 1.5;
 
 		&:hover {
 			background: var(--sd-hover, #2a2d2e);
@@ -147,7 +149,7 @@
 	&__node-children {
 		list-style: none;
 		margin: 0;
-		padding: 0 0 0 16px;
+		padding: 0;
 	}
 
 	&__entry {

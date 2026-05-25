@@ -137,6 +137,8 @@ export class ExplorerElement extends HTMLElement {
 	#tree: ReadonlyArray<ExplorerTreeNode> = [];
 	#entryPoints: ReadonlyArray<ExplorerEntryPoint> = [];
 	#expanded = new Set<string>();
+	#userExpanded = new Set<string>();
+	#autoExpanded = new Set<string>();
 	#selectedId: string | null = null;
 	#searchDebounceHandle: number | null = null;
 	#unsubscribeFocus: (() => void) | null = null;
@@ -185,13 +187,28 @@ export class ExplorerElement extends HTMLElement {
 			// Auto-expand the path leading to the focused symbol so its
 			// row is actually visible — useful when the focus shift
 			// originates outside the Explorer (search, focus graph click,
-			// cluster drill, recents click on a hidden node).
+			// cluster drill, recents click on a hidden node). Track which
+			// ids we auto-expanded so the next focus shift can close any
+			// ancestor the user didn't manually open — keeps the tree
+			// from sprawling open as navigation accumulates.
 			if (state.current !== null && state.current !== prevFqdn) {
 				const path = findAncestorIds(this.#tree, state.current);
+				const newAuto = new Set<string>();
 				if (path !== null) {
-					// Expand every id on the path except the leaf itself.
-					for (const id of path.slice(0, -1)) this.#expanded.add(id);
+					for (const id of path.slice(0, -1)) {
+						newAuto.add(id);
+						this.#expanded.add(id);
+					}
 				}
+				// Collapse anything we auto-opened last time that's no
+				// longer on the new path AND wasn't user-toggled in
+				// between.
+				for (const stale of this.#autoExpanded) {
+					if (!newAuto.has(stale) && !this.#userExpanded.has(stale)) {
+						this.#expanded.delete(stale);
+					}
+				}
+				this.#autoExpanded = newAuto;
 			}
 			this.#renderRecents();
 			this.#renderTree();
@@ -299,7 +316,7 @@ export class ExplorerElement extends HTMLElement {
 
 		const row = document.createElement('div');
 		row.className = classigo(C.nodeRow, isSelected && C.nodeRowSelected);
-		row.style.paddingLeft = `${12 + depth * 12}px`;
+		row.style.paddingLeft = `${6 + depth * 8}px`;
 
 		const twisty = document.createElement('span');
 		twisty.className = C.nodeTwisty;
@@ -325,8 +342,12 @@ export class ExplorerElement extends HTMLElement {
 			if (canExpand) {
 				if (isExpanded) {
 					this.#expanded.delete(node.id);
+					this.#userExpanded.delete(node.id);
 				} else {
 					this.#expanded.add(node.id);
+					// User-driven expansion → record so the auto-close
+					// sweep on the next focus shift leaves it alone.
+					this.#userExpanded.add(node.id);
 					// Lazy-load: first expansion of a node declared expandable
 					// but with no children yet → ask the host to populate.
 					if (!hasChildren && node.expandable === true) {

@@ -62,7 +62,7 @@ struct LaidCluster {
 
 const MIN_CLUSTER_RADIUS: f64 = 18.0;
 const MAX_CLUSTER_RADIUS: f64 = 72.0;
-const CLUSTER_GAP: f64 = 36.0;
+const CLUSTER_GAP: f64 = 72.0;
 const HIT_PAD: f64 = 6.0;
 const LABEL_OFFSET: f64 = 8.0;
 const ZOOM_MIN: f64 = 0.1;
@@ -304,8 +304,11 @@ impl OverviewCanvas {
 		let cy = self.height * 0.5;
 		// Spiral scale tuned so a workspace of ~10–20 clusters lands
 		// inside a typical panel without overflowing. Larger workspaces
-		// degrade gracefully (just spiral wider).
-		let scale = f64::min(self.width, self.height) * 0.085;
+		// degrade gracefully (just spiral wider). The 0.14 multiplier +
+		// doubled CLUSTER_GAP push siblings far enough apart that their
+		// halos no longer touch — the nebula reads as discrete clusters
+		// instead of a single blob.
+		let scale = f64::min(self.width, self.height) * 0.14;
 
 		// Cluster radius from sqrt(symbol_count). Floor + ceiling keep
 		// the visual hierarchy readable when counts span 3+ orders of
@@ -360,11 +363,13 @@ impl OverviewCanvas {
 			let (Some(from), Some(to)) = (self.positions.get(&e.from), self.positions.get(&e.to))
 			else { continue };
 			// Logarithmic so a single edge still draws and a heavy
-			// bundle doesn't dominate.
+			// bundle doesn't dominate. Floor on alpha + width bumped
+			// so even one-off cross-project edges read against the
+			// dark background — used to read as invisible hairlines.
 			let w_norm = (f64::from(e.weight.max(1))).ln() / (max_weight.ln().max(1.0));
-			let line_w = 0.6 + w_norm * 2.4;
-			let alpha = 0.25 + w_norm * 0.45;
-			self.ctx.set_stroke_style_str(&format!("rgba(74, 158, 255, {alpha:.3})"));
+			let line_w = 1.4 + w_norm * 3.2;
+			let alpha = 0.55 + w_norm * 0.4;
+			self.ctx.set_stroke_style_str(&format!("rgba(120, 180, 255, {alpha:.3})"));
 			self.ctx.set_line_width(line_w);
 			self.ctx.begin_path();
 			self.ctx.move_to(from.x, from.y);
