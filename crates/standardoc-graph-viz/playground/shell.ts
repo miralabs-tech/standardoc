@@ -246,7 +246,7 @@ async function boot(): Promise<void> {
 }
 
 const EP_PAGE_SIZE = 500;
-const EP_MAX_PAGES = 50; // 25k symbols ceiling, generous for any realistic workspace
+const EP_MAX_PAGES = 200; // 100k symbols ceiling — generous even for monorepos
 
 /**
  * Single paginated walk of the workspace symbol index. Returns both
@@ -265,7 +265,11 @@ async function collectWorkspaceSymbols(
 	let page = 0;
 	while (page < EP_MAX_PAGES) {
 		page++;
-		const res = await mcp.listSymbols({ limit: EP_PAGE_SIZE, cursor }).catch(() => null);
+		// externals: false drops builtins + dependency crate symbols so
+		// the cursor reaches workspace projects fast — otherwise the
+		// first thousand of pages burn on <builtin>::* alone and the
+		// later workspace projects never get walked.
+		const res = await mcp.listSymbols({ limit: EP_PAGE_SIZE, externals: false, cursor }).catch(() => null);
 		if (res === null) break;
 		for (const s of res.items) {
 			all.push(s);
