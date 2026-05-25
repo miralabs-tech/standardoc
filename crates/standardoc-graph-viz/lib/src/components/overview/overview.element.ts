@@ -145,6 +145,21 @@ export class OverviewElement extends HTMLElement {
 		void Promise.resolve(this.#factory(n.canvas, w, h, dpr))
 			.then(canvas => {
 				this.#canvas = canvas;
+				// Wire wasm-side hover + click callbacks to DOM events.
+				// Without this the cluster-click in the overview canvas
+				// fired into the void and the shell never saw the drill
+				// signal — which surfaced as 'the overview never moves'
+				// because no focus shift was ever requested from there.
+				canvas.set_on_cluster_hover((id: number | null) => {
+					this.dispatchEvent(new CustomEvent<OverviewClusterHoverDetail>('sd-overview-cluster-hover', {
+						detail: { clusterId: id }, bubbles: true, composed: true,
+					}));
+				});
+				canvas.set_on_cluster_click((id: number) => {
+					this.dispatchEvent(new CustomEvent<OverviewClusterClickDetail>('sd-overview-cluster-click', {
+						detail: { clusterId: id }, bubbles: true, composed: true,
+					}));
+				});
 				this.#observer = new ResizeObserver(() => this.#syncSize());
 				this.#observer.observe(n.canvas);
 				this.dispatchEvent(new CustomEvent<OverviewReadyDetail>('sd-overview-ready', {
