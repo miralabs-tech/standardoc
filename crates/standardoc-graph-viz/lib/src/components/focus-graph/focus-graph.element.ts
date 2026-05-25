@@ -52,12 +52,26 @@ const C = {
 	canvas: s.focus__canvas ?? '',
 	overlay: s.focus__overlay ?? '',
 	label: s.focus__label ?? '',
+	edgeLabel: s['focus__edge-label'] ?? '',
 } as const;
+
+interface BucketLabel {
+	readonly text: string;
+	readonly count: number;
+	readonly x: number;
+	readonly y: number;
+}
 
 interface EdgeLabel {
 	readonly text: string;
+	readonly color: string;
 	readonly x: number;
 	readonly y: number;
+}
+
+interface OverlayPayload {
+	readonly buckets: ReadonlyArray<BucketLabel>;
+	readonly edges: ReadonlyArray<EdgeLabel>;
 }
 
 const HOPS: ReadonlyArray<{ hops: number; label: string }> = [
@@ -272,22 +286,34 @@ export class FocusGraphElement extends HTMLElement {
 		const n = this.#nodes;
 		if (n === null || this.#canvas === null) return;
 		const raw = this.#canvas.label_layout();
-		let labels: EdgeLabel[] = [];
+		let parsed: OverlayPayload = { buckets: [], edges: [] };
 		try {
-			const parsed = JSON.parse(raw) as ReadonlyArray<EdgeLabel>;
-			if (Array.isArray(parsed)) labels = parsed;
+			const obj = JSON.parse(raw) as OverlayPayload;
+			if (obj && Array.isArray(obj.buckets) && Array.isArray(obj.edges)) parsed = obj;
 		} catch {
 			return;
 		}
-		if (labels.length === 0) {
+		if (parsed.buckets.length === 0 && parsed.edges.length === 0) {
 			if (n.overlay.childNodes.length > 0) n.overlay.replaceChildren();
 			return;
 		}
 		const frag = document.createDocumentFragment();
-		for (const l of labels) {
+		// Edge labels first (lower z visually) so bucket pills land on
+		// top if they ever overlap.
+		for (const l of parsed.edges) {
+			const el = document.createElement('span');
+			el.className = C.edgeLabel;
+			el.textContent = l.text;
+			el.style.left = `${l.x}px`;
+			el.style.top = `${l.y}px`;
+			el.style.color = l.color;
+			el.style.borderColor = l.color;
+			frag.appendChild(el);
+		}
+		for (const l of parsed.buckets) {
 			const el = document.createElement('span');
 			el.className = C.label;
-			el.textContent = l.text;
+			el.textContent = `${l.text} (${l.count})`;
 			el.style.left = `${l.x}px`;
 			el.style.top = `${l.y}px`;
 			frag.appendChild(el);

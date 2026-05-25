@@ -1,20 +1,23 @@
-//! Phase 3 (Shell) — **Focus Graph canvas**. Symbol-local view: the
-//! focused symbol at the centre, depth-N BFS neighbourhood expanded
-//! around it, edges labelled inline (CALLS / IMPORTS / USES_TYPE /
-//! IMPLEMENTS / EXTENDS / TESTS) via a DOM overlay supplied by
-//! `label_layout()` — the host pins text elements over the canvas
-//! coordinates we compute.
+//! Phase 4 — **Focus Graph canvas (bucket layout)**. The focal symbol
+//! sits centre-stage as a rounded card; its immediate neighbours are
+//! grouped into typed buckets (Used by, Calls, Uses types, Imports,
+//! Imported by, Tested by, Implements/Extends) and laid out spatially
+//! around the centre instead of on BFS-depth concentric rings. Each
+//! bucket renders as a vertical column of small cards under a DOM-
+//! overlay header supplied by `bucket_layout()`. Edges are straight
+//! lines coloured by edge kind (palette unchanged) and labels live on
+//! the bucket headers, not on the edges themselves.
 //!
-//! Phase 3b (this revision) implements the real radial layout: focal
-//! at centre, neighbours evenly distributed on a ring around. Each
-//! node is a filled circle whose colour echoes its kind (via the
-//! shared `palette::kind_color_hex`); edges are straight lines whose
-//! hue echoes their edge kind, with the edge's `kind` rendered as a
-//! DOM-overlay label at the midpoint. Hit-test fires `on_node_click`
-//! for any neighbour quick-clicked.
+//! Per-bucket categorisation is driven by the edge connecting each
+//! neighbour to the centre (kind + direction). Neighbours that don't
+//! touch the centre directly — depth-2+ in multi-hop modes — are
+//! dropped from the layout entirely (they have no canonical bucket).
+//! Each bucket caps at BUCKET_TOP_N items and surfaces the truncation
+//! as a "+N more" badge under the column.
 //!
-//! Pan/zoom + drag camera and depth-2+ multi-ring layouts land in
-//! Phase 3c. Slim-down of the legacy GraphEngine path is Phase 3d.
+//! Camera (pan/zoom + drag) is unchanged from the prior multi-ring
+//! revision; hover illumination + hit-test were ported to the new
+//! rectangular geometry.
 
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -23,7 +26,7 @@ use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 use crate::kind::Kind;
 use crate::palette::kind_color_hex;
 
-#[allow(dead_code)] // depth read in Phase 3c for multi-ring layouts
+#[allow(dead_code)] // depth retained for hop filtering
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct FocusNode {
 	pub fqdn: String,
@@ -32,9 +35,23 @@ pub(crate) struct FocusNode {
 	pub kind: Option<String>,
 	/// BFS depth from the centre. `0` for the focal symbol itself.
 	pub depth: u32,
+	/// Optional sub-symbol counts displayed in the centre card footer
+	/// ("N fields · N methods"). Only the centre uses these; other
+	/// nodes leave them None.
+	#[serde(default)]
+	pub field_count: Option<u32>,
+	#[serde(default)]
+	pub method_count: Option<u32>,
+	/// Source location metadata surfaced as the neighbour card's 3rd
+	/// line ("file.ts:42") so each card reads as a mini semantic record
+	/// per the manifesto (typography-first, semantic density).
+	#[serde(default)]
+	pub file: Option<String>,
+	#[serde(default)]
+	pub start_line: Option<u32>,
 }
 
-#[allow(dead_code)] // depth read in Phase 3c
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct FocusEdge {
 	pub from: String,
@@ -52,32 +69,119 @@ struct FocusPayload {
 	edges: Vec<FocusEdge>,
 }
 
-/// Computed canvas-space position for a single node. Centre is at
-/// `radius == 0.0`; neighbours sit on a ring whose radius is derived
-/// from canvas size in `layout()`.
+/// Computed canvas-space rectangle for a single node card.
 #[derive(Debug, Clone, Copy)]
 struct LaidNode {
 	x: f64,
 	y: f64,
-	r: f64,
+	w: f64,
+	h: f64,
+	is_center: bool,
+	/// Bucket this card belongs to (None for the centre). Drives the
+	/// card border colour so neighbours read as part of their bucket
+	/// at a glance, not just from their angular position.
+	bucket: Option<Bucket>,
+}
+
+/// Spatial bucket a neighbour gets placed into based on the edge type
+/// + direction connecting it to the centre. The mapping is canonical:
+/// inbound CALLS → UsedBy, outbound CALLS → Calls, etc. Neighbours
+/// reachable only via depth-2+ paths are skipped entirely (no bucket).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Bucket {
+	UsedBy,
+	UsesTypes,
+	Calls,
+	Imports,
+	ImportedBy,
+	TestedBy,
+	ImplementsExtends,
+	/// Neighbours reachable via depth-2+ paths (no direct edge to the
+	/// centre). Placed far south below TestedBy so the multi-hop modes
+	/// surface them without crowding the immediate-neighbour buckets.
+	Indirect,
+}
+
+#[derive(Serialize)]
+struct BucketLabelOut<'a> {
+	text: &'a str,
+	count: usize,
+	x: f64,
+	y: f64,
 }
 
 #[derive(Serialize)]
 struct EdgeLabelOut<'a> {
 	text: &'a str,
+	color: &'a str,
 	x: f64,
 	y: f64,
 }
 
-const CENTER_RADIUS: f64 = 22.0;
-const NEIGHBOR_RADIUS: f64 = 14.0;
-const NODE_LABEL_OFFSET: f64 = 18.0;
-const EDGE_LINE_WIDTH: f64 = 1.5;
+#[derive(Serialize)]
+struct OverlayPayload<'a> {
+	buckets: Vec<BucketLabelOut<'a>>,
+	edges: Vec<EdgeLabelOut<'a>>,
+}
+
+const CENTER_W: f64 = 220.0;
+const CENTER_H: f64 = 78.0;
+const ITEM_W: f64 = 178.0;
+const ITEM_H: f64 = 48.0;
+const ITEM_GAP: f64 = 6.0;
+const ITEM_GAP_H: f64 = 10.0; // horizontal gap when bucket lays items in a row
+const BUCKET_HEADER_GAP: f64 = 22.0;
+const MORE_BADGE_H: f64 = 18.0;
+const CARD_RADIUS: f64 = 10.0;
+const EDGE_LINE_WIDTH: f64 = 2.4;
+const ARROW_LEN: f64 = 11.0;
+const ARROW_HALF_WIDTH: f64 = 5.5;
+
+#[derive(Debug, Clone, Copy)]
+enum BucketDirection {
+	/// Items stacked top-to-bottom (left/right buckets default).
+	Vertical,
+	/// Items laid out left-to-right (bottom bucket like TestedBy in the
+	/// mockup so the row width takes horizontal canvas space instead of
+	/// stacking tall under the centre).
+	Horizontal,
+}
 const HIT_PAD: f64 = 4.0;
 const ZOOM_MIN: f64 = 0.1;
 const ZOOM_MAX: f64 = 8.0;
 const ZOOM_STEP: f64 = 0.0012;
 const CLICK_DRAG_THRESHOLD: f64 = 4.0;
+/// Cap the number of items rendered per bucket. Matches the mockup
+/// (each bucket shows 2-5 items, the rest collapsed into a "+N more"
+/// badge under the column). Real symbols can have dozens of inbound
+/// CALLS — rendering them all turned the V0 into a giga-list wall.
+const BUCKET_TOP_N: usize = 5;
+
+/// Ordered bucket placements at 6 distinct compass positions around
+/// the centre — NW / NE / W / E / SW / SE. Eight placements were
+/// tested and collided (intermediate angles cluttered the bottom
+/// half). The chosen six are airy enough for crowded symbols and map
+/// directly to the mockup spatial intuition.
+const BUCKET_PLACEMENTS: &[(Bucket, &str, f64, f64, BucketDirection)] = &[
+	// (bucket, header label, angle_rad, radial_offset_pixels, direction)
+	// Angles use canvas convention (0 right, 0.5π down, π left, 1.5π up).
+	// SEMANTIC CONVENTION (per the Dark Semantic Observatory manifesto):
+	//   • W (left)  = callers / used by
+	//   • E (right) = dependencies / uses types
+	//   • N (up)    = imports / API
+	//   • S (down)  = tests / implementations
+	// Each cardinal axis gets ±0.10π offset to split inbound vs outbound
+	// without overlapping columns. Reading the graph by direction tells
+	// the user the relationship immediately — no hover needed.
+	(Bucket::UsedBy,            "Used by",     std::f64::consts::PI * 1.00, 380.0, BucketDirection::Vertical),   // W   — callers
+	(Bucket::Imports,           "Imports",     std::f64::consts::PI * 1.40, 380.0, BucketDirection::Vertical),   // N-L — outbound API namespace
+	(Bucket::ImportedBy,        "Imported by", std::f64::consts::PI * 1.60, 380.0, BucketDirection::Vertical),   // N-R — inbound API namespace
+	(Bucket::UsesTypes,         "Uses types",  std::f64::consts::PI * 1.90, 380.0, BucketDirection::Vertical),   // E-↑ — outbound type deps
+	(Bucket::Calls,             "Calls",       std::f64::consts::PI * 0.10, 380.0, BucketDirection::Vertical),   // E-↓ — outbound behaviour deps
+	(Bucket::ImplementsExtends, "Impl/Extend", std::f64::consts::PI * 0.40, 380.0, BucketDirection::Vertical),   // S-R — implementations
+	(Bucket::TestedBy,          "Tested by",   std::f64::consts::PI * 0.60, 380.0, BucketDirection::Horizontal), // S-L — tests
+	(Bucket::Indirect,          "Indirect",    std::f64::consts::PI * 0.50, 580.0, BucketDirection::Horizontal), // S-far — depth-2+
+];
 
 #[derive(Debug, Clone, Copy)]
 struct DragState {
@@ -107,6 +211,10 @@ pub struct FocusGraphCanvas {
 	/// `resize`. Centre lives under the focal FQDN; neighbours each
 	/// have their own entry.
 	positions: std::collections::HashMap<String, LaidNode>,
+	/// Per-bucket "+N more" badge anchor (x, y, hidden_count). Populated
+	/// during layout() for buckets whose item count exceeded BUCKET_TOP_N.
+	/// Rendered as a non-interactive badge under the column.
+	overflow_badges: Vec<(Bucket, f64, f64, usize)>,
 	hovered: Option<String>,
 	drag: Option<DragState>,
 	/// Camera translation in screen pixels — pan offset applied via
@@ -140,6 +248,7 @@ impl FocusGraphCanvas {
 			on_node_hover: None,
 			needs_redraw: true,
 			positions: std::collections::HashMap::new(),
+			overflow_badges: Vec::new(),
 			hovered: None,
 			drag: None,
 			cam_offset_x: 0.0,
@@ -158,6 +267,10 @@ impl FocusGraphCanvas {
 		self.neighbors.sort_by(|a, b| a.name.cmp(&b.name));
 		self.edges = parsed.edges;
 		self.layout();
+		// Auto-fit on payload load so the user always sees the full
+		// bucket layout instead of a clipped slice when switching to a
+		// symbol whose bbox doesn't naturally fit the drawer.
+		self.fit_to_content();
 		self.needs_redraw = true;
 		Ok(())
 	}
@@ -290,43 +403,151 @@ impl FocusGraphCanvas {
 	}
 
 	pub fn fit(&mut self) {
-		// Reset camera + re-layout in case dimensions changed since the
-		// last paint. After fit the focal node lands at canvas centre at
-		// 1× zoom.
-		self.cam_offset_x = 0.0;
-		self.cam_offset_y = 0.0;
-		self.cam_zoom = 1.0;
+		// Re-layout + camera-frame to the full bounding box so the whole
+		// bucket-layout fits regardless of the drawer dimensions.
 		self.layout();
+		self.fit_to_content();
 		self.needs_redraw = true;
 	}
 
-	/// JSON for the DOM overlay layer — one entry per edge label
-	/// (CALLS / IMPORTS / etc.) anchored at the canvas-space midpoint
-	/// of the edge. Coordinates are in CSS pixels with the camera
-	/// transform applied so labels track pan + zoom alongside the
-	/// canvas content.
+	/// Compute the bounding box of every laid-out card and adjust
+	/// cam_zoom + cam_offset so the bbox lands centred inside the
+	/// canvas with a uniform padding. Called on every `set_payload` so
+	/// the user never has to manually fit after switching symbols.
+	fn fit_to_content(&mut self) {
+		if self.positions.is_empty() {
+			self.cam_zoom = 1.0;
+			self.cam_offset_x = 0.0;
+			self.cam_offset_y = 0.0;
+			return;
+		}
+		let mut min_x = f64::INFINITY;
+		let mut min_y = f64::INFINITY;
+		let mut max_x = f64::NEG_INFINITY;
+		let mut max_y = f64::NEG_INFINITY;
+		for p in self.positions.values() {
+			if p.x < min_x { min_x = p.x; }
+			if p.y < min_y { min_y = p.y; }
+			if p.x + p.w > max_x { max_x = p.x + p.w; }
+			if p.y + p.h > max_y { max_y = p.y + p.h; }
+		}
+		// Pad-out the bbox so bucket header pills (above the column top)
+		// and the "+N more" badge (below the column bottom) don't get
+		// clipped at the canvas edges.
+		let header_pad = 32.0;
+		let badge_pad = MORE_BADGE_H + 12.0;
+		min_y -= header_pad;
+		max_y += badge_pad;
+		let bbox_w = (max_x - min_x).max(1.0);
+		let bbox_h = (max_y - min_y).max(1.0);
+		let pad = 24.0;
+		let zoom_x = (self.width - pad * 2.0) / bbox_w;
+		let zoom_y = (self.height - pad * 2.0) / bbox_h;
+		let zoom = zoom_x.min(zoom_y).clamp(ZOOM_MIN, ZOOM_MAX);
+		let bbox_cx = (min_x + max_x) * 0.5;
+		let bbox_cy = (min_y + max_y) * 0.5;
+		self.cam_zoom = zoom;
+		self.cam_offset_x = self.width * 0.5 - bbox_cx * zoom;
+		self.cam_offset_y = self.height * 0.5 - bbox_cy * zoom;
+	}
+
+	/// JSON for the DOM overlay layer — one entry per non-empty bucket
+	/// header ("Used by (3)", "Calls (2)", …) anchored at the bucket's
+	/// column top. Coordinates are in CSS pixels with the camera
+	/// transform applied so headers track pan + zoom.
 	///
-	/// Only first-ring edges get labelled: at BFS-2/3 the edge count
-	/// explodes and a full label set drowns the canvas in text. The
-	/// focal-to-immediate-neighbour kind is the bit a reader needs to
-	/// orient; deeper edges still draw but read by line colour alone.
+	/// Replaces the prior `label_layout()` (per-edge labels at edge
+	/// midpoints). The new payload reads more like a structured
+	/// relation card than a connection diagram, matching the Phase 4
+	/// mockup.
 	pub fn label_layout(&self) -> String {
-		let mut out = Vec::with_capacity(self.edges.len());
-		for e in &self.edges {
-			if e.depth > 1 {
-				continue;
+		let centre_fqdn = match &self.center {
+			Some(c) => c.fqdn.clone(),
+			None => return r#"{"buckets":[],"edges":[]}"#.to_string(),
+		};
+		// Bucket header labels — one pill per non-empty bucket, anchored
+		// above the bucket's first item card.
+		let mut counts: std::collections::HashMap<Bucket, usize> = std::collections::HashMap::new();
+		let mut top_y: std::collections::HashMap<Bucket, f64> = std::collections::HashMap::new();
+		let mut bucket_x: std::collections::HashMap<Bucket, f64> = std::collections::HashMap::new();
+		for n in &self.neighbors {
+			let Some(bucket) = self.bucket_for_neighbor(n, &centre_fqdn) else { continue };
+			*counts.entry(bucket).or_insert(0) += 1;
+			if let Some(pos) = self.positions.get(&n.fqdn) {
+				let top = top_y.entry(bucket).or_insert(f64::INFINITY);
+				if pos.y < *top {
+					*top = pos.y;
+				}
+				let cx = pos.x + pos.w * 0.5;
+				bucket_x.insert(bucket, cx);
 			}
-			let Some(from) = self.positions.get(&e.from) else { continue };
-			let Some(to) = self.positions.get(&e.to) else { continue };
-			let wx = (from.x + to.x) * 0.5;
-			let wy = (from.y + to.y) * 0.5;
-			out.push(EdgeLabelOut {
-				text: &e.kind,
+		}
+		let mut buckets = Vec::with_capacity(counts.len());
+		for (bucket, label, _angle, _radial, _direction) in BUCKET_PLACEMENTS {
+			let count = match counts.get(bucket) {
+				Some(c) if *c > 0 => *c,
+				_ => continue,
+			};
+			let (wx, wy) = match (bucket_x.get(bucket), top_y.get(bucket)) {
+				(Some(x), Some(y)) => (*x, *y - BUCKET_HEADER_GAP),
+				_ => continue,
+			};
+			buckets.push(BucketLabelOut {
+				text: label,
+				count,
 				x: wx * self.cam_zoom + self.cam_offset_x,
 				y: wy * self.cam_zoom + self.cam_offset_y,
 			});
 		}
-		serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
+
+		// Per-edge labels — depth-1 only (depth-2+ floods the canvas),
+		// positioned at the midpoint of each centre↔neighbour edge.
+		// One label per bucket suffices to read the relation type at a
+		// glance, but the mockup labels each edge so we render them all
+		// up to a reasonable cap (FIRST_BUCKET_ITEM only when more than
+		// 3 items share the same kind, otherwise per-edge).
+		let mut edge_labels = Vec::new();
+		let mut per_bucket_labelled: std::collections::HashMap<Bucket, usize> = std::collections::HashMap::new();
+		for e in &self.edges {
+			if e.depth > 1 { continue; }
+			let other_fqdn = if e.from == centre_fqdn {
+				&e.to
+			} else if e.to == centre_fqdn {
+				&e.from
+			} else {
+				continue;
+			};
+			let Some(other_pos) = self.positions.get(other_fqdn) else { continue };
+			// Find the bucket for this neighbour so we can rate-limit
+			// labels per bucket (max 2 labels per bucket — beyond that
+			// the bucket header already conveys the kind).
+			let bucket_opt = self.neighbors.iter()
+				.find(|n| n.fqdn == *other_fqdn)
+				.and_then(|n| self.bucket_for_neighbor(n, &centre_fqdn));
+			if let Some(b) = bucket_opt {
+				let n = per_bucket_labelled.entry(b).or_insert(0);
+				if *n >= 2 { continue; }
+				*n += 1;
+			}
+			let Some(centre_pos) = self.positions.get(&centre_fqdn) else { continue };
+			let (cx, cy) = (centre_pos.x + centre_pos.w * 0.5, centre_pos.y + centre_pos.h * 0.5);
+			let (ox, oy) = (other_pos.x + other_pos.w * 0.5, other_pos.y + other_pos.h * 0.5);
+			// Offset the label 65% of the way from centre toward the
+			// neighbour so it lands away from the centre card (50% put
+			// it on top of the centre card for short radials).
+			let t = 0.65;
+			let wx = cx + (ox - cx) * t;
+			let wy = cy + (oy - cy) * t;
+			edge_labels.push(EdgeLabelOut {
+				text: edge_phrase(&e.kind),
+				color: edge_color_for_kind(&e.kind),
+				x: wx * self.cam_zoom + self.cam_offset_x,
+				y: wy * self.cam_zoom + self.cam_offset_y,
+			});
+		}
+
+		let payload = OverlayPayload { buckets, edges: edge_labels };
+		serde_json::to_string(&payload).unwrap_or_else(|_| r#"{"buckets":[],"edges":[]}"#.to_string())
 	}
 
 	#[wasm_bindgen(getter)]
@@ -346,58 +567,133 @@ impl FocusGraphCanvas {
 
 	fn layout(&mut self) {
 		self.positions.clear();
+		self.overflow_badges.clear();
 		let cx = self.width * 0.5;
 		let cy = self.height * 0.5;
 		let Some(centre) = &self.center else { return };
-		self.positions.insert(centre.fqdn.clone(), LaidNode { x: cx, y: cy, r: CENTER_RADIUS });
+		// Centre card anchored on the canvas centre.
+		self.positions.insert(centre.fqdn.clone(), LaidNode {
+			x: cx - CENTER_W * 0.5,
+			y: cy - CENTER_H * 0.5,
+			w: CENTER_W,
+			h: CENTER_H,
+			is_center: true,
+			bucket: None,
+		});
 		if self.neighbors.is_empty() {
 			return;
 		}
 
-		// Group neighbours by BFS depth so each ring carries only its
-		// own depth. Single-ring layouts at BFS-2/3 turned into spaghetti
-		// the moment the focal had >20 second-degree neighbours; one
-		// concentric ring per depth restores readability.
-		let mut by_depth: std::collections::BTreeMap<u32, Vec<&FocusNode>> = std::collections::BTreeMap::new();
+		// Categorise neighbours into typed buckets based on the edge
+		// connecting them to the centre. Multi-edge neighbours collapse
+		// to the first edge's bucket. Neighbours with no direct edge to
+		// the centre (depth-2+) are skipped entirely in V0 — they have
+		// no canonical bucket and would clutter the layout.
+		let centre_fqdn = centre.fqdn.clone();
+		let mut buckets: std::collections::HashMap<Bucket, Vec<&FocusNode>> =
+			std::collections::HashMap::new();
 		for n in &self.neighbors {
-			by_depth.entry(n.depth.max(1)).or_default().push(n);
+			let Some(bucket) = self.bucket_for_neighbor(n, &centre_fqdn) else { continue };
+			buckets.entry(bucket).or_default().push(n);
 		}
-		let max_depth = by_depth.keys().copied().max().unwrap_or(1);
 
-		// Ring radii: inner ring at 28% of the smaller dimension, deeper
-		// rings step outward so the outermost lands inside the canvas
-		// with room for labels. Step shrinks as max_depth grows so a
-		// BFS-5 layout still fits.
-		let inner = f64::min(self.width, self.height) * 0.26;
-		let outer = f64::min(self.width, self.height) * 0.46;
-		let step = if max_depth > 1 {
-			(outer - inner) / (max_depth as f64 - 1.0)
-		} else {
-			0.0
-		};
-
-		for (depth, nodes) in &by_depth {
-			let ring = inner + (*depth as f64 - 1.0) * step;
-			let count = nodes.len() as f64;
-			// Stagger the starting angle per ring so radial spokes don't
-			// align across depths (which used to make the eye read the
-			// outer ring as one continuous mass).
-			let offset = (*depth as f64 - 1.0) * std::f64::consts::FRAC_PI_6;
-			let start = -std::f64::consts::FRAC_PI_2 + offset;
-			let node_radius = if *depth == 1 {
-				NEIGHBOR_RADIUS
-			} else {
-				// Deeper rings get smaller discs so the eye reads the
-				// hierarchy at a glance.
-				(NEIGHBOR_RADIUS / (*depth as f64).sqrt()).max(6.0)
+		// Lay out each bucket centred on its (angle, radial) placement.
+		// Vertical buckets stack items top-to-bottom; horizontal buckets
+		// (TestedBy at the bottom) lay them side-by-side. Cap each bucket
+		// at BUCKET_TOP_N — the rest collapse into a "+N more" badge.
+		// fit_to_content() on set_payload zooms the camera so the full
+		// bbox fits the drawer, so the radials can stay generous.
+		for (bucket, _label, angle, radial, direction) in BUCKET_PLACEMENTS {
+			let items = match buckets.get(bucket) {
+				Some(v) if !v.is_empty() => v,
+				_ => continue,
 			};
-			for (i, neighbor) in nodes.iter().enumerate() {
-				let angle = start + (i as f64) * std::f64::consts::TAU / count.max(1.0);
-				let nx = cx + ring * angle.cos();
-				let ny = cy + ring * angle.sin();
-				self.positions.insert(neighbor.fqdn.clone(), LaidNode { x: nx, y: ny, r: node_radius });
+			let visible = items.len().min(BUCKET_TOP_N);
+			let hidden = items.len().saturating_sub(visible);
+			let bucket_cx = cx + radial * angle.cos();
+			let bucket_cy = cy + radial * angle.sin();
+
+			match direction {
+				BucketDirection::Vertical => {
+					let total_h = (visible as f64) * (ITEM_H + ITEM_GAP) - ITEM_GAP;
+					let start_y = bucket_cy - total_h * 0.5;
+					for (i, n) in items.iter().take(BUCKET_TOP_N).enumerate() {
+						let item_y = start_y + (i as f64) * (ITEM_H + ITEM_GAP);
+						self.positions.insert(n.fqdn.clone(), LaidNode {
+							x: bucket_cx - ITEM_W * 0.5,
+							y: item_y,
+							w: ITEM_W,
+							h: ITEM_H,
+							is_center: false,
+							bucket: Some(*bucket),
+						});
+					}
+					if hidden > 0 {
+						let badge_y = start_y + total_h + ITEM_GAP;
+						self.overflow_badges.push((*bucket, bucket_cx, badge_y, hidden));
+					}
+				}
+				BucketDirection::Horizontal => {
+					let total_w = (visible as f64) * (ITEM_W + ITEM_GAP_H) - ITEM_GAP_H;
+					let start_x = bucket_cx - total_w * 0.5;
+					for (i, n) in items.iter().take(BUCKET_TOP_N).enumerate() {
+						let item_x = start_x + (i as f64) * (ITEM_W + ITEM_GAP_H);
+						self.positions.insert(n.fqdn.clone(), LaidNode {
+							x: item_x,
+							y: bucket_cy - ITEM_H * 0.5,
+							w: ITEM_W,
+							h: ITEM_H,
+							is_center: false,
+							bucket: Some(*bucket),
+						});
+					}
+					if hidden > 0 {
+						// Badge to the right of the last item rather than
+						// below (the row already takes horizontal space).
+						let badge_x = start_x + total_w + ITEM_GAP_H + 48.0;
+						self.overflow_badges.push((*bucket, badge_x, bucket_cy - MORE_BADGE_H * 0.5, hidden));
+					}
+				}
 			}
 		}
+	}
+
+	/// Classify a neighbour into its display bucket from the edge that
+	/// connects it to the centre. Direction matters: an inbound CALLS
+	/// edge (other → centre) means the centre is *used by* the other;
+	/// an outbound CALLS (centre → other) means the centre *calls*
+	/// other. Neighbours with no direct edge to the centre (depth-2+
+	/// only) land in `Indirect` so 2/3-hop views surface them rather
+	/// than dropping them invisibly.
+	fn bucket_for_neighbor(&self, n: &FocusNode, centre_fqdn: &str) -> Option<Bucket> {
+		for e in &self.edges {
+			if e.from == n.fqdn && e.to == centre_fqdn {
+				// Inbound: other → centre.
+				return Some(match e.kind.as_str() {
+					"CALLS" => Bucket::UsedBy,
+					"REFERENCES" | "USES_TYPE" => Bucket::UsedBy,
+					"IMPORTS" => Bucket::ImportedBy,
+					"TESTS" => Bucket::TestedBy,
+					"IMPLEMENTS" | "EXTENDS" => Bucket::ImplementsExtends,
+					_ => Bucket::UsedBy,
+				});
+			}
+			if e.from == centre_fqdn && e.to == n.fqdn {
+				// Outbound: centre → other.
+				return Some(match e.kind.as_str() {
+					"CALLS" => Bucket::Calls,
+					"USES_TYPE" | "REFERENCES" => Bucket::UsesTypes,
+					"IMPORTS" => Bucket::Imports,
+					"TESTS" => Bucket::TestedBy,
+					"IMPLEMENTS" | "EXTENDS" => Bucket::ImplementsExtends,
+					_ => Bucket::Calls,
+				});
+			}
+		}
+		// No direct edge to the centre — the neighbour is only reachable
+		// via depth-2+ paths, surface it in the Indirect bucket so multi-
+		// hop views are not silently empty.
+		Some(Bucket::Indirect)
 	}
 
 	fn draw(&self) {
@@ -438,7 +734,7 @@ impl FocusGraphCanvas {
 			let (Some(from), Some(to)) = (self.positions.get(&e.from), self.positions.get(&e.to))
 			else { continue };
 			let base_alpha: f64 = match e.depth {
-				0 | 1 => 0.95,
+				0 | 1 => 1.0,
 				2 => 0.55,
 				_ => 0.3,
 			};
@@ -454,10 +750,36 @@ impl FocusGraphCanvas {
 			self.ctx.set_global_alpha(alpha);
 			self.ctx.set_line_width(line_w);
 			self.ctx.set_stroke_style_str(edge_color_for_kind(&e.kind));
-			self.ctx.begin_path();
-			self.ctx.move_to(from.x, from.y);
-			self.ctx.line_to(to.x, to.y);
-			self.ctx.stroke();
+			// Anchor edges at card centres — the card paint below covers
+			// the line ends, so a centre-to-centre segment reads as a
+			// connector docking on each card's edge.
+			let (fx, fy) = (from.x + from.w * 0.5, from.y + from.h * 0.5);
+			let (tx, ty) = (to.x + to.w * 0.5, to.y + to.h * 0.5);
+			// IMPLEMENTS / EXTENDS render as a double-line (two parallel
+			// strokes offset perpendicular to the line direction) so they
+			// read as "inheritance/contract" visually — a single line
+			// would look like any other call/uses edge.
+			let is_double = e.kind == "IMPLEMENTS" || e.kind == "EXTENDS";
+			if is_double {
+				let dx = tx - fx;
+				let dy = ty - fy;
+				let len = dx.hypot(dy).max(1.0);
+				let px = -dy / len * 2.0;
+				let py = dx / len * 2.0;
+				self.ctx.begin_path();
+				self.ctx.move_to(fx + px, fy + py);
+				self.ctx.line_to(tx + px, ty + py);
+				self.ctx.stroke();
+				self.ctx.begin_path();
+				self.ctx.move_to(fx - px, fy - py);
+				self.ctx.line_to(tx - px, ty - py);
+				self.ctx.stroke();
+			} else {
+				self.ctx.begin_path();
+				self.ctx.move_to(fx, fy);
+				self.ctx.line_to(tx, ty);
+				self.ctx.stroke();
+			}
 		}
 		self.ctx.set_global_alpha(1.0);
 		self.ctx.set_line_width(EDGE_LINE_WIDTH);
@@ -488,42 +810,179 @@ impl FocusGraphCanvas {
 		}
 		self.ctx.set_global_alpha(1.0);
 
+		// Arrowheads — drawn AFTER the cards so they land on top of the
+		// destination card border rather than disappearing under the
+		// next paint pass. One arrow per edge at the `to` endpoint,
+		// coloured to match the edge kind.
+		for e in &self.edges {
+			let (Some(from), Some(to)) = (self.positions.get(&e.from), self.positions.get(&e.to))
+			else { continue };
+			let touches_hover = connected
+				.as_ref()
+				.is_some_and(|set| set.contains(e.from.as_str()) && set.contains(e.to.as_str()));
+			let base_alpha: f64 = match e.depth {
+				0 | 1 => 0.95,
+				2 => 0.5,
+				_ => 0.3,
+			};
+			let alpha = match (&connected, touches_hover) {
+				(Some(_), true) => 1.0,
+				(Some(_), false) => base_alpha * 0.2,
+				(None, _) => base_alpha,
+			};
+			self.ctx.set_global_alpha(alpha);
+			self.ctx.set_fill_style_str(edge_color_for_kind(&e.kind));
+			let (fx, fy) = (from.x + from.w * 0.5, from.y + from.h * 0.5);
+			let (tx, ty) = (to.x + to.w * 0.5, to.y + to.h * 0.5);
+			let dx = tx - fx;
+			let dy = ty - fy;
+			let len = dx.hypot(dy).max(1.0);
+			let ux = dx / len;
+			let uy = dy / len;
+			// Find the line-rect intersection on the destination card so
+			// the arrow tip lands flush with the card edge, then pull it
+			// out by 2px so the head sits visibly outside the border.
+			let half_w = to.w * 0.5;
+			let half_h = to.h * 0.5;
+			let t_x = half_w / ux.abs().max(0.001);
+			let t_y = half_h / uy.abs().max(0.001);
+			let edge_t = t_x.min(t_y);
+			let tip_x = tx - ux * (edge_t - 2.0);
+			let tip_y = ty - uy * (edge_t - 2.0);
+			let base_x = tip_x - ux * ARROW_LEN;
+			let base_y = tip_y - uy * ARROW_LEN;
+			let perp_x = -uy * ARROW_HALF_WIDTH;
+			let perp_y = ux * ARROW_HALF_WIDTH;
+			self.ctx.begin_path();
+			self.ctx.move_to(tip_x, tip_y);
+			self.ctx.line_to(base_x + perp_x, base_y + perp_y);
+			self.ctx.line_to(base_x - perp_x, base_y - perp_y);
+			self.ctx.close_path();
+			self.ctx.fill();
+		}
+		self.ctx.set_global_alpha(1.0);
+
+		// Overflow badges sit under each truncated bucket column. They
+		// surface that the bucket has more items than the cap shows
+		// without forcing the layout to render them inline.
+		for (_bucket, x, y, count) in &self.overflow_badges {
+			let badge_w = 96.0;
+			let badge_x = x - badge_w * 0.5;
+			self.ctx.set_fill_style_str("#252526");
+			rounded_rect_path(&self.ctx, badge_x, *y, badge_w, MORE_BADGE_H, MORE_BADGE_H * 0.5);
+			self.ctx.fill();
+			self.ctx.set_stroke_style_str("#3d3d3d");
+			self.ctx.set_line_width(1.0);
+			rounded_rect_path(&self.ctx, badge_x, *y, badge_w, MORE_BADGE_H, MORE_BADGE_H * 0.5);
+			self.ctx.stroke();
+			self.ctx.set_fill_style_str("#9d9d9d");
+			self.ctx.set_font("600 10px ui-monospace, SFMono-Regular, monospace");
+			self.ctx.set_text_align("center");
+			self.ctx.set_text_baseline("middle");
+			let _ = self.ctx.fill_text(&format!("+{count} more"), *x, *y + MORE_BADGE_H * 0.5);
+		}
+
 		self.ctx.restore();
 	}
 
 	fn draw_node(&self, pos: &LaidNode, node: &FocusNode, is_center: bool, highlighted: bool) {
 		let kind = parse_kind(node.kind.as_deref());
-		let fill = kind_color_hex(kind);
-		// Halo behind the centre and any hovered node — soft cue that
-		// reads on both light and dark surrounding lines.
+		let kind_color = kind_color_hex(kind);
+		// Bucket-driven border colour: each bucket type owns a hue so the
+		// card border doubles as a categorical badge. The centre keeps a
+		// blue accent (no bucket).
+		let border_color = match pos.bucket {
+			Some(b) => bucket_border_color(b),
+			None => "#5aa9ff",
+		};
+		// Drop shadow under every card — gives the layout real depth
+		// vs the flat VSCode-panel feel the V0 had. Larger soft shadow
+		// for the centre to anchor it as the focal point.
+		let shadow_off = if is_center { 6.0 } else { 4.0 };
+		let shadow_alpha = if is_center { 0.6 } else { 0.45 };
+		self.ctx.set_fill_style_str(&format!("rgba(0, 0, 0, {shadow_alpha:.3})"));
+		rounded_rect_path(&self.ctx, pos.x + shadow_off * 0.4, pos.y + shadow_off, pos.w, pos.h, CARD_RADIUS);
+		self.ctx.fill();
+		// Soft halo behind the centre / hovered card for visual anchor.
 		if is_center || highlighted {
-			self.ctx.set_fill_style_str("rgba(74, 158, 255, 0.18)");
-			self.ctx.begin_path();
-			let _ = self.ctx.arc(pos.x, pos.y, pos.r + 6.0, 0.0, std::f64::consts::TAU);
+			let halo_color = if is_center { border_color } else { "rgba(74, 158, 255, 1.0)" };
+			self.ctx.set_fill_style_str(&format!("{halo_color}33")); // ~20% alpha via hex appended
+			rounded_rect_path(&self.ctx, pos.x - 8.0, pos.y - 8.0, pos.w + 16.0, pos.h + 16.0, CARD_RADIUS + 6.0);
 			self.ctx.fill();
 		}
-		self.ctx.set_fill_style_str(fill);
-		self.ctx.begin_path();
-		let _ = self.ctx.arc(pos.x, pos.y, pos.r, 0.0, std::f64::consts::TAU);
-		self.ctx.fill();
-		// Outline for the centre to anchor the eye.
+		// Card body — radial gradient on centre for a subtle "lit"
+		// effect (mockup centre card has the same feel), flat dark on
+		// neighbours so they stay readable backdrop.
 		if is_center {
-			self.ctx.set_stroke_style_str("#ffffff");
-			self.ctx.set_line_width(2.0);
-			self.ctx.begin_path();
-			let _ = self.ctx.arc(pos.x, pos.y, pos.r, 0.0, std::f64::consts::TAU);
-			self.ctx.stroke();
-		}
-		// Label below the node. Centre's label is bolder + larger.
-		self.ctx.set_fill_style_str(if is_center { "#ffffff" } else { "#cccccc" });
-		self.ctx.set_font(if is_center {
-			"600 13px ui-monospace, SFMono-Regular, monospace"
+			let g = self.ctx.create_linear_gradient(pos.x, pos.y, pos.x, pos.y + pos.h);
+			let _ = g.add_color_stop(0.0, "#262b3a");
+			let _ = g.add_color_stop(1.0, "#1c1f29");
+			self.ctx.set_fill_style_canvas_gradient(&g);
 		} else {
-			"11px ui-monospace, SFMono-Regular, monospace"
-		});
-		self.ctx.set_text_align("center");
+			self.ctx.set_fill_style_str("#1a1d22");
+		}
+		rounded_rect_path(&self.ctx, pos.x, pos.y, pos.w, pos.h, CARD_RADIUS);
+		self.ctx.fill();
+		self.ctx.set_stroke_style_str(border_color);
+		self.ctx.set_line_width(if is_center { 2.5 } else { 1.8 });
+		rounded_rect_path(&self.ctx, pos.x, pos.y, pos.w, pos.h, CARD_RADIUS);
+		self.ctx.stroke();
+		// Left accent stripe (kind colour) — thin coloured band on the
+		// card's left edge so the symbol kind reads alongside the bucket
+		// border colour without fighting it.
+		self.ctx.set_fill_style_str(kind_color);
+		rounded_rect_path(&self.ctx, pos.x, pos.y, 3.0, pos.h, CARD_RADIUS * 0.4);
+		self.ctx.fill();
+
+		// Text content. Centre gets 3 lines (name / kind / footer);
+		// neighbour cards get 2 (name / kindLabel).
+		self.ctx.set_text_align("left");
 		self.ctx.set_text_baseline("top");
-		let _ = self.ctx.fill_text(&node.name, pos.x, pos.y + pos.r + NODE_LABEL_OFFSET - 14.0);
+		let pad_x = pos.x + 10.0;
+		if is_center {
+			self.ctx.set_fill_style_str("#ffffff");
+			self.ctx.set_font("600 14px ui-monospace, SFMono-Regular, monospace");
+			let _ = self.ctx.fill_text(&node.name, pad_x, pos.y + 10.0);
+			self.ctx.set_fill_style_str("#9d9d9d");
+			self.ctx.set_font("11px ui-monospace, SFMono-Regular, monospace");
+			let kind_label = node.kind.clone().unwrap_or_else(|| "symbol".to_string());
+			let _ = self.ctx.fill_text(&kind_label, pad_x, pos.y + 30.0);
+			let footer = format_center_footer(node.field_count, node.method_count);
+			if !footer.is_empty() {
+				self.ctx.set_fill_style_str("#cccccc");
+				self.ctx.set_font("11px ui-monospace, SFMono-Regular, monospace");
+				let _ = self.ctx.fill_text(&footer, pad_x, pos.y + 50.0);
+			}
+		} else {
+			// Three-line neighbour card: name (bold), kind (muted), file:line
+			// (small muted) — matches the manifesto's "mini semantic record"
+			// per node so the graph reads without hover.
+			self.ctx.set_fill_style_str("#e3e3e3");
+			self.ctx.set_font("12px ui-monospace, SFMono-Regular, monospace");
+			let _ = self.ctx.fill_text(&node.name, pad_x, pos.y + 4.0);
+			self.ctx.set_fill_style_str("#8a8d96");
+			self.ctx.set_font("10px ui-monospace, SFMono-Regular, monospace");
+			let kind_label = node.kind.clone().unwrap_or_default();
+			if !kind_label.is_empty() {
+				let _ = self.ctx.fill_text(&kind_label, pad_x, pos.y + 17.0);
+			}
+			// 3rd line: file basename + line number, only when both are
+			// present and the card has room. Truncate the file basename
+			// so it fits — readers care about the relative location, not
+			// the full path which is already in the inspector panel.
+			if let (Some(f), Some(line)) = (&node.file, node.start_line) {
+				let basename = f.rsplit(|c: char| c == '/' || c == '\\').next().unwrap_or(f);
+				let max_chars = 22;
+				let trimmed = if basename.len() > max_chars {
+					format!("…{}", &basename[basename.len() - (max_chars - 1)..])
+				} else {
+					basename.to_string()
+				};
+				self.ctx.set_fill_style_str("#6e7079");
+				self.ctx.set_font("9px ui-monospace, SFMono-Regular, monospace");
+				let _ = self.ctx.fill_text(&format!("{trimmed}:{line}"), pad_x, pos.y + 28.0);
+			}
+		}
 	}
 
 	fn draw_empty_state(&self) {
@@ -544,20 +1003,51 @@ impl FocusGraphCanvas {
 		// transform so the hit-test threshold compares like-with-like.
 		let world_x = (screen_x - self.cam_offset_x) / self.cam_zoom;
 		let world_y = (screen_y - self.cam_offset_y) / self.cam_zoom;
-		// The HIT_PAD slop is also in screen space, so divide it by
-		// zoom so the click target stays the same screen size as the
-		// user zooms in.
 		let pad = HIT_PAD / self.cam_zoom;
-		let mut best: Option<(f64, String)> = None;
 		for (fqdn, p) in &self.positions {
-			let d = (world_x - p.x).hypot(world_y - p.y);
-			if d <= p.r + pad {
-				if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
-					best = Some((d, fqdn.clone()));
-				}
+			let inside = world_x >= p.x - pad
+				&& world_x <= p.x + p.w + pad
+				&& world_y >= p.y - pad
+				&& world_y <= p.y + p.h + pad;
+			if inside {
+				return Some(fqdn.clone());
 			}
 		}
-		best.map(|(_, f)| f)
+		None
+	}
+}
+
+/// Trace a rounded-rect path on the canvas context. Used by all card
+/// surfaces (centre, neighbours, halos, accent stripes). Independent
+/// of the browser's CanvasPath2D `roundRect` so we don't depend on the
+/// 2023+ Web API surface.
+fn rounded_rect_path(ctx: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f64, r: f64) {
+	let r = r.min(w * 0.5).min(h * 0.5);
+	ctx.begin_path();
+	ctx.move_to(x + r, y);
+	ctx.line_to(x + w - r, y);
+	let _ = ctx.arc_to(x + w, y, x + w, y + r, r);
+	ctx.line_to(x + w, y + h - r);
+	let _ = ctx.arc_to(x + w, y + h, x + w - r, y + h, r);
+	ctx.line_to(x + r, y + h);
+	let _ = ctx.arc_to(x, y + h, x, y + h - r, r);
+	ctx.line_to(x, y + r);
+	let _ = ctx.arc_to(x, y, x + r, y, r);
+	ctx.close_path();
+}
+
+fn format_center_footer(field_count: Option<u32>, method_count: Option<u32>) -> String {
+	let f = field_count.unwrap_or(0);
+	let m = method_count.unwrap_or(0);
+	match (f, m) {
+		(0, 0) => String::new(),
+		(_, 0) => format!("{f} field{}", if f == 1 { "" } else { "s" }),
+		(0, _) => format!("{m} method{}", if m == 1 { "" } else { "s" }),
+		(_, _) => format!(
+			"{f} field{} · {m} method{}",
+			if f == 1 { "" } else { "s" },
+			if m == 1 { "" } else { "s" },
+		),
 	}
 }
 
@@ -582,5 +1072,46 @@ fn edge_color_for_kind(kind: &str) -> &'static str {
 		"TESTS" => "#89d185",      // green — verification
 		"REFERENCES" => "#9d9d9d", // grey — generic reference
 		_ => "#666666",
+	}
+}
+
+/// Human-readable edge label, lower-case so the graph reads as a
+/// sentence ("reader::read_chunk uses type Const") instead of shouted
+/// constants ("USES_TYPE"). Mirrors the manifesto's "lue comme une
+/// phrase" principle.
+fn edge_phrase(kind: &str) -> &'static str {
+	match kind {
+		"CALLS" => "calls",
+		"IMPORTS" => "imports",
+		"USES_TYPE" => "uses type",
+		"IMPLEMENTS" => "implements",
+		"EXTENDS" => "extends",
+		"TESTS" => "tests",
+		"REFERENCES" => "references",
+		_ => "links",
+	}
+}
+
+/// Bucket border colour mirrors the dominant edge colour for that
+/// bucket so cards in the same group read as a visual cluster:
+///   USED BY     — used-by edges are inbound CALLS, so blue
+///   USES TYPES  — outbound USES_TYPE, yellow
+///   CALLS       — outbound CALLS, blue (same hue as UsedBy reflects
+///                 that both buckets are CALLS-derived; bucket position
+///                 disambiguates direction)
+///   IMPORTS     — outbound IMPORTS, purple
+///   IMPORTED BY — inbound IMPORTS, purple
+///   TESTED BY   — TESTS edges, green
+///   IMPL/EXT    — IMPLEMENTS/EXTENDS, orange
+fn bucket_border_color(bucket: Bucket) -> &'static str {
+	match bucket {
+		Bucket::UsedBy => "#3794ff",
+		Bucket::Calls => "#3794ff",
+		Bucket::UsesTypes => "#cca700",
+		Bucket::Imports => "#b180d7",
+		Bucket::ImportedBy => "#b180d7",
+		Bucket::TestedBy => "#89d185",
+		Bucket::ImplementsExtends => "#f48771",
+		Bucket::Indirect => "#6d6d6d",
 	}
 }
