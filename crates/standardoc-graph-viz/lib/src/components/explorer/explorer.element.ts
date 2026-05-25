@@ -63,10 +63,8 @@ const C = {
 	entryBadgeFfiExport: s['explorer__entry-badge--ffi-export'] ?? '',
 	recent: s.explorer__recent ?? '',
 	recentCurrent: s['explorer__recent--current'] ?? '',
-	legend: s.explorer__legend ?? '',
-	legendRow: s['explorer__legend-row'] ?? '',
-	legendSwatch: s['explorer__legend-swatch'] ?? '',
-	legendEdge: s['explorer__legend-edge'] ?? '',
+	// Legend SCSS classes retained in the stylesheet but unused — removed
+	// the legend section in favour of inline-coloured filter chips.
 	kindModule: s['kind-module'] ?? '',
 	kindType: s['kind-type'] ?? '',
 	kindCallable: s['kind-callable'] ?? '',
@@ -143,6 +141,7 @@ export class ExplorerElement extends HTMLElement {
 	#searchDebounceHandle: number | null = null;
 	#unsubscribeFocus: (() => void) | null = null;
 	#focus: FocusState = focusStore.get();
+	#kindFilter = new Set<ExplorerNodeKind>();
 
 	#nodes: {
 		root: HTMLElement;
@@ -241,6 +240,7 @@ export class ExplorerElement extends HTMLElement {
 					aria-label="Search symbols in workspace"
 				/>
 			</div>
+			<div data-role="filter-mount" style="display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px; border-bottom: 1px solid var(--sd-border-subtle, #2d2d2d);"></div>
 			<div class="${C.body}">
 				<section class="${C.section}">
 					<div class="${C.sectionTitle}">Tree</div>
@@ -253,10 +253,6 @@ export class ExplorerElement extends HTMLElement {
 				<section class="${C.section}">
 					<div class="${C.sectionTitle}">Recently viewed</div>
 					<div data-role="recents-mount"></div>
-				</section>
-				<section class="${C.section}">
-					<div class="${C.sectionTitle}">Legend</div>
-					<div class="${C.legend}" data-role="legend-mount"></div>
 				</section>
 			</div>
 		`;
@@ -271,10 +267,107 @@ export class ExplorerElement extends HTMLElement {
 		};
 
 		this.#wireSearch();
+		this.#renderFilterChips(root.querySelector<HTMLElement>('[data-role="filter-mount"]')!);
 		this.#renderTree();
 		this.#renderEntryPoints();
 		this.#renderRecents();
-		this.#renderLegend(root.querySelector<HTMLElement>('[data-role="legend-mount"]')!);
+	}
+
+	/// Render a chip row above the tree letting the user toggle which
+	/// symbol kinds appear in the tree. Containers (workspace / project /
+	/// folder / file / module) are NOT filterable — they're navigational
+	/// scaffolding. Filtering replaces the legend section which was an
+	/// after-thought; the chips' colour-coded swatches double as legend.
+	#renderFilterChips(mount: HTMLElement): void {
+		const filterableKinds: Array<{ kind: ExplorerNodeKind; label: string; cls: string }> = [
+			{ kind: 'struct',   label: 'struct',   cls: C.kindType },
+			{ kind: 'enum',     label: 'enum',     cls: C.kindType },
+			{ kind: 'trait',    label: 'trait',    cls: C.kindType },
+			{ kind: 'function', label: 'fn',       cls: C.kindCallable },
+			{ kind: 'value',    label: 'const',    cls: C.kindValue },
+			{ kind: 'macro',    label: 'macro',    cls: C.kindMacro },
+		];
+		mount.replaceChildren();
+		for (const { kind, label, cls } of filterableKinds) {
+			const chip = document.createElement('button');
+			chip.type = 'button';
+			const active = this.#kindFilter.has(kind);
+			chip.textContent = label;
+			chip.style.cssText = [
+				`background: ${active ? 'var(--sd-selection, #094771)' : 'transparent'}`,
+				`border: 1px solid var(--sd-border-subtle, #2d2d2d)`,
+				`color: var(--sd-fg, #cccccc)`,
+				`font-size: 10px`,
+				`padding: 2px 8px`,
+				`border-radius: 999px`,
+				`cursor: pointer`,
+				`display: inline-flex`,
+				`align-items: center`,
+				`gap: 4px`,
+				`font-family: var(--sd-font-mono, ui-monospace, monospace)`,
+				active ? 'opacity: 1' : 'opacity: 0.7',
+			].join(';');
+			// Swatch inline so the chip doubles as the kind legend.
+			const swatch = document.createElement('span');
+			swatch.className = cls;
+			swatch.style.cssText = 'width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: currentColor;';
+			chip.prepend(swatch);
+			chip.addEventListener('click', () => {
+				if (this.#kindFilter.has(kind)) this.#kindFilter.delete(kind);
+				else this.#kindFilter.add(kind);
+				this.#renderFilterChips(mount);
+				this.#renderTree();
+			});
+			mount.appendChild(chip);
+		}
+		if (this.#kindFilter.size > 0) {
+			const clear = document.createElement('button');
+			clear.type = 'button';
+			clear.textContent = 'clear';
+			clear.style.cssText = [
+				`background: transparent`,
+				`border: 1px dashed var(--sd-border, #454545)`,
+				`color: var(--sd-fg-muted, #9d9d9d)`,
+				`font-size: 10px`,
+				`padding: 2px 8px`,
+				`border-radius: 999px`,
+				`cursor: pointer`,
+				`font-family: var(--sd-font-mono, ui-monospace, monospace)`,
+			].join(';');
+			clear.addEventListener('click', () => {
+				this.#kindFilter.clear();
+				this.#renderFilterChips(mount);
+				this.#renderTree();
+			});
+			mount.appendChild(clear);
+		}
+	}
+
+	/// Apply the active kind filter to the tree. Symbol leaves with a
+	/// filterable kind are dropped when their kind isn't selected;
+	/// containers with no surviving descendants disappear so the tree
+	/// doesn't expand into empty folders. Returns null when the whole
+	/// node + subtree is filtered out.
+	#filterTreeNode(node: ExplorerTreeNode): ExplorerTreeNode | null {
+		if (this.#kindFilter.size === 0) return node;
+		const filterableSymbolKinds: ExplorerNodeKind[] = ['struct', 'enum', 'function', 'trait', 'value', 'macro'];
+		const isFilterable = filterableSymbolKinds.includes(node.kind);
+		if (isFilterable) {
+			return this.#kindFilter.has(node.kind) ? node : null;
+		}
+		// Container: filter children, drop if empty.
+		if (node.children === undefined || node.children.length === 0) {
+			// 'unknown' leaves stay (we don't filter on those), but
+			// unknown containers without children just pass through.
+			return node;
+		}
+		const filteredChildren: ExplorerTreeNode[] = [];
+		for (const c of node.children) {
+			const kept = this.#filterTreeNode(c);
+			if (kept !== null) filteredChildren.push(kept);
+		}
+		if (filteredChildren.length === 0) return null;
+		return { ...node, children: filteredChildren };
 	}
 
 	#wireSearch(): void {
@@ -301,7 +394,16 @@ export class ExplorerElement extends HTMLElement {
 		}
 		const ul = document.createElement('ul');
 		ul.className = C.tree;
-		for (const node of this.#tree) ul.appendChild(this.#renderNode(node, 0));
+		const filtered: ExplorerTreeNode[] = [];
+		for (const root of this.#tree) {
+			const kept = this.#filterTreeNode(root);
+			if (kept !== null) filtered.push(kept);
+		}
+		if (filtered.length === 0) {
+			n.treeMount.innerHTML = `<div class="${C.empty}">No symbols match the active filter.</div>`;
+			return;
+		}
+		for (const node of filtered) ul.appendChild(this.#renderNode(node, 0));
 		n.treeMount.replaceChildren(ul);
 	}
 
@@ -432,6 +534,12 @@ export class ExplorerElement extends HTMLElement {
 			n.recentsMount.innerHTML = `<div class="${C.empty}">Click a symbol to remember it.</div>`;
 			return;
 		}
+		// Cap visible recents at 5 items + make the list scrollable past
+		// that — long histories used to push the rest of the explorer
+		// off-screen. The full focusStore.recent set still drives the
+		// state; we just window the render.
+		n.recentsMount.style.maxHeight = `${5 * 22 + 4}px`;
+		n.recentsMount.style.overflowY = 'auto';
 		const frag = document.createDocumentFragment();
 		for (const fqdn of recent) {
 			const row = document.createElement('div');
@@ -454,30 +562,10 @@ export class ExplorerElement extends HTMLElement {
 		n.recentsMount.replaceChildren(frag);
 	}
 
-	#renderLegend(mount: HTMLElement): void {
-		const rows: Array<{ kind: 'swatch' | 'edge'; cls?: string; label: string }> = [
-			{ kind: 'swatch', cls: C.kindModule, label: 'Module / Project' },
-			{ kind: 'swatch', cls: C.kindType, label: 'Struct / Enum / Trait' },
-			{ kind: 'swatch', cls: C.kindCallable, label: 'Function / Method' },
-			{ kind: 'swatch', cls: C.kindValue, label: 'Const / Value' },
-			{ kind: 'swatch', cls: C.kindMacro, label: 'Macro' },
-			{ kind: 'edge', label: 'Edge (calls, uses, imports, tests)' },
-		];
-		const frag = document.createDocumentFragment();
-		for (const r of rows) {
-			const row = document.createElement('div');
-			row.className = C.legendRow;
-			const mark = document.createElement('span');
-			if (r.kind === 'swatch') mark.className = classigo(C.legendSwatch, r.cls ?? '');
-			else mark.className = C.legendEdge;
-			const label = document.createElement('span');
-			label.textContent = r.label;
-			row.appendChild(mark);
-			row.appendChild(label);
-			frag.appendChild(row);
-		}
-		mount.replaceChildren(frag);
-	}
+	// Legend removed — the kind filter chips at the top of the Explorer
+	// now double as a live legend (each chip carries a coloured swatch
+	// of the same hue used by the tree icons). The standalone Legend
+	// section was muted at the bottom and never read in practice.
 
 	#scrollSelectedIntoView(): void {
 		const n = this.#nodes;
