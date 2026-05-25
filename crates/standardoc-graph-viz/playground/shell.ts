@@ -245,8 +245,11 @@ async function boot(): Promise<void> {
 	setStatus(`ready (${entryPoints.length} entry points)`);
 }
 
-const EP_PAGE_SIZE = 500;
-const EP_MAX_PAGES = 1000; // 500k symbols ceiling — safety net only, ext:false should cap us far below this
+// Daemon caps `limit` at u8 (255) — we used to send 500 and the
+// request died silently inside the McpBrowse catch, returning ZERO
+// symbols and leaving the tree empty + 'ready (0 entry points)'.
+const EP_PAGE_SIZE = 200;
+const EP_MAX_PAGES = 2500; // 500k symbols ceiling — safety net only, ext:false should cap us far below this
 
 /**
  * Single paginated walk of the workspace symbol index. Returns both
@@ -269,7 +272,14 @@ async function collectWorkspaceSymbols(
 		// Builtins ('<builtin>::*') aren't covered by that flag so we
 		// also filter them client-side below — they otherwise drown the
 		// workspace symbols under hundreds of pages on cold start.
-		const res = await mcp.listSymbols({ limit: EP_PAGE_SIZE, externals: false, cursor }).catch(() => null);
+		const res = await mcp.listSymbols({ limit: EP_PAGE_SIZE, externals: false, cursor }).catch(e => {
+			// Log instead of silently breaking so a daemon-side regression
+			// (param shape changed, limit cap tightened, etc.) surfaces in
+			// the console rather than showing up as a magically empty tree.
+			// eslint-disable-next-line no-console
+			console.warn('[shell] listSymbols failed:', e);
+			return null;
+		});
 		if (res === null) break;
 		for (const s of res.items) {
 			if (s.language_kind === 'builtin' || s.location.file.startsWith('<builtin>')) {
