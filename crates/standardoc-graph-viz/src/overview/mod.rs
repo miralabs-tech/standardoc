@@ -2,23 +2,26 @@
 //! project rendered as a luminous cluster (nebula-ish), inter-project
 //! dependencies as glow strands whose intensity tracks edge weight.
 //!
-//! Phase 3b (this revision) implements a deterministic sunflower
-//! packing — biggest project at centre, others spiralling out via the
-//! Fibonacci angle so the layout reads organically without running a
-//! force simulation each frame. Each cluster paints as a radial-
-//! gradient disc whose radius derives from `sqrt(symbol_count)`, with
-//! the label below. Inter-project edges are straight lines whose
-//! stroke width is weight-driven (logarithmic so a single dependency
-//! still draws and a 200-edge bundle isn't a black slab).
+//! Phase 3c upgrade: projects live in 3D world space (deterministic
+//! sunflower in the XZ plane, biggest near origin, others spiralling
+//! out via the Fibonacci angle). A `Camera3D` orbits the workspace
+//! centroid — drag rotates yaw + pitch, wheel dollies in/out, presets
+//! re-aim the camera (orbit / top / front / side). Each frame projects
+//! cluster centres through view × proj into screen space; clusters
+//! depth-sort back-to-front so closer nebulae paint over farther ones.
 //!
-//! Hit-test fires `on_cluster_hover` / `on_cluster_click` for the
-//! disc under the pointer. Pan / zoom + a real 3D force layout +
-//! glow particle layer land in Phase 3c. Slim-down of the legacy
-//! GraphEngine path is Phase 3d.
+//! Hit-test re-projects the cluster positions every move so the click
+//! target tracks the current camera. Inter-project edges draw as 2D
+//! lines between the projected endpoints with weight-driven width.
+//!
+//! Phase 3d will slim the legacy GraphEngine path — this module stays.
 
+use glam::{Vec3, Vec4};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
+
+use crate::camera::Camera3D;
 
 /// One project cluster — a nebula in the workspace overview. Phase 3b
 /// uses `id` / `label` / `symbol_count` for layout + rendering. The
@@ -51,37 +54,46 @@ struct OverviewPayload {
 	edges: Vec<OverviewEdge>,
 }
 
-/// Canvas-space position + radius for a single cluster, computed once
-/// in `layout()` and consumed by `draw()` / `hit_test()`.
+/// World-space cluster placement. `pos` is in world coordinates;
+/// `world_radius` is the cluster's sphere radius in the same space.
 #[derive(Debug, Clone, Copy)]
 struct LaidCluster {
-	x: f64,
-	y: f64,
-	r: f64,
+	pos: Vec3,
+	world_radius: f32,
 }
 
-const MIN_CLUSTER_RADIUS: f64 = 18.0;
-const MAX_CLUSTER_RADIUS: f64 = 72.0;
-const CLUSTER_GAP: f64 = 72.0;
-const HIT_PAD: f64 = 6.0;
-const LABEL_OFFSET: f64 = 8.0;
-const ZOOM_MIN: f64 = 0.1;
-const ZOOM_MAX: f64 = 8.0;
+/// Screen-space projection of a cluster for the current frame, cached
+/// per-tick so hit_test + draw read the same numbers.
+#[allow(dead_code)] // id retained for debug-print symmetry with positions
+#[derive(Debug, Clone, Copy)]
+struct ProjectedCluster {
+	id: u32,
+	screen_x: f64,
+	screen_y: f64,
+	screen_radius: f64,
+	/// Distance from the camera eye in world units — used for depth
+	/// sort + alpha-fade on far clusters.
+	depth: f64,
+	/// True when the cluster is in front of the near plane (visible).
+	visible: bool,
+}
+
+const MIN_CLUSTER_RADIUS_WORLD: f32 = 60.0;
+const MAX_CLUSTER_RADIUS_WORLD: f32 = 220.0;
+const CLUSTER_GAP_WORLD: f32 = 220.0;
+const SUNFLOWER_SCALE: f32 = 280.0;
 const ZOOM_STEP: f64 = 0.0012;
 const CLICK_DRAG_THRESHOLD: f64 = 4.0;
+const LABEL_OFFSET: f64 = 10.0;
+const HIT_PAD: f64 = 6.0;
+const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653_3;
 
 #[derive(Debug, Clone, Copy)]
 struct DragState {
-	start_pointer_x: f64,
-	start_pointer_y: f64,
-	start_offset_x: f64,
-	start_offset_y: f64,
+	last_x: f64,
+	last_y: f64,
 	moved: bool,
 }
-/// Golden angle in radians — 137.5° = `π * (3 - sqrt(5))`. Distributes
-/// points evenly around the origin when paired with `sqrt(i)` radial
-/// growth.
-const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653_3;
 
 #[wasm_bindgen]
 pub struct OverviewCanvas {
@@ -95,17 +107,11 @@ pub struct OverviewCanvas {
 	on_cluster_click: Option<js_sys::Function>,
 	on_cluster_hover: Option<js_sys::Function>,
 	needs_redraw: bool,
-	/// Cluster id → laid-out position. Re-computed on `set_payload` /
-	/// `resize`. Hover + click hit-test scan this map.
 	positions: std::collections::HashMap<u32, LaidCluster>,
-	/// Pre-sorted (by symbol_count desc) cluster index → cluster id so
-	/// the centre is always the heaviest project.
 	render_order: Vec<u32>,
 	hovered: Option<u32>,
 	drag: Option<DragState>,
-	cam_offset_x: f64,
-	cam_offset_y: f64,
-	cam_zoom: f64,
+	cam: Camera3D,
 }
 
 #[wasm_bindgen]
@@ -132,9 +138,7 @@ impl OverviewCanvas {
 			render_order: Vec::new(),
 			hovered: None,
 			drag: None,
-			cam_offset_x: 0.0,
-			cam_offset_y: 0.0,
-			cam_zoom: 1.0,
+			cam: Camera3D::identity(),
 		})
 	}
 
@@ -144,11 +148,16 @@ impl OverviewCanvas {
 		self.clusters = parsed.clusters;
 		self.edges = parsed.edges;
 		self.layout();
+		self.fit_camera();
 		self.needs_redraw = true;
 		Ok(())
 	}
 
 	pub fn tick(&mut self) {
+		if self.cam.animating() {
+			self.cam.step_animation();
+			self.needs_redraw = true;
+		}
 		if !self.needs_redraw {
 			return;
 		}
@@ -164,7 +173,6 @@ impl OverviewCanvas {
 		self.width = f64::from(width);
 		self.height = f64::from(height);
 		crate::apply_canvas_size(&self.canvas, width, height, self.device_pixel_ratio);
-		self.layout();
 		self.needs_redraw = true;
 	}
 
@@ -187,13 +195,14 @@ impl OverviewCanvas {
 
 	pub fn on_pointer_move(&mut self, x: f64, y: f64) {
 		if let Some(drag) = &mut self.drag {
-			let dx = x - drag.start_pointer_x;
-			let dy = y - drag.start_pointer_y;
+			let dx = x - drag.last_x;
+			let dy = y - drag.last_y;
+			drag.last_x = x;
+			drag.last_y = y;
 			if dx.hypot(dy) >= CLICK_DRAG_THRESHOLD {
 				drag.moved = true;
 			}
-			self.cam_offset_x = drag.start_offset_x + dx;
-			self.cam_offset_y = drag.start_offset_y + dy;
+			self.cam.orbit(dx, dy);
 			self.needs_redraw = true;
 			return;
 		}
@@ -210,13 +219,7 @@ impl OverviewCanvas {
 	}
 
 	pub fn on_pointer_down(&mut self, x: f64, y: f64, _button: i16) {
-		self.drag = Some(DragState {
-			start_pointer_x: x,
-			start_pointer_y: y,
-			start_offset_x: self.cam_offset_x,
-			start_offset_y: self.cam_offset_y,
-			moved: false,
-		});
+		self.drag = Some(DragState { last_x: x, last_y: y, moved: false });
 	}
 
 	pub fn on_pointer_up(&mut self, x: f64, y: f64, _button: i16) {
@@ -244,33 +247,21 @@ impl OverviewCanvas {
 		}
 	}
 
-	pub fn on_wheel(&mut self, x: f64, y: f64, delta_y: f64) {
-		// Exponential zoom anchored at the pointer — same semantics as
-		// FocusGraphCanvas so muscle-memory transfers between panels.
-		let factor = (-delta_y * ZOOM_STEP).exp();
-		let next_zoom = (self.cam_zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
-		if (next_zoom - self.cam_zoom).abs() < f64::EPSILON {
-			return;
-		}
-		let ratio = next_zoom / self.cam_zoom;
-		self.cam_offset_x = x - (x - self.cam_offset_x) * ratio;
-		self.cam_offset_y = y - (y - self.cam_offset_y) * ratio;
-		self.cam_zoom = next_zoom;
+	pub fn on_wheel(&mut self, _x: f64, _y: f64, delta_y: f64) {
+		// Exponential dolly. Negative delta_y (scroll up) pulls the eye
+		// closer; positive (scroll down) pushes it back.
+		let factor = (-delta_y * ZOOM_STEP).exp() as f32;
+		self.cam.dolly(factor);
 		self.needs_redraw = true;
 	}
 
 	pub fn fit(&mut self) {
-		// Reset camera + re-lay in case dimensions shifted since the
-		// last paint. After fit the sunflower lands centred at 1× zoom.
-		self.cam_offset_x = 0.0;
-		self.cam_offset_y = 0.0;
-		self.cam_zoom = 1.0;
-		self.layout();
+		self.fit_camera();
 		self.needs_redraw = true;
 	}
 
-	pub fn set_camera_preset(&mut self, _preset: &str) {
-		// Phase 3c (3D camera).
+	pub fn set_camera_preset(&mut self, preset: &str) {
+		self.cam.apply_preset(preset);
 		self.needs_redraw = true;
 	}
 
@@ -290,9 +281,9 @@ impl OverviewCanvas {
 		if self.clusters.is_empty() {
 			return;
 		}
-		// Sort by symbol_count desc (with stable id tiebreaker) so the
-		// heaviest project anchors the centre. Render the ring outward
-		// from there.
+		// Sort by symbol_count desc (id tiebreaker) so the heaviest
+		// project anchors the centre. Sunflower lays the rest outward
+		// in the XZ plane — Y stays zero for a flat nebula sheet.
 		let mut order: Vec<usize> = (0..self.clusters.len()).collect();
 		order.sort_by(|&a, &b| {
 			let ca = &self.clusters[a];
@@ -300,43 +291,56 @@ impl OverviewCanvas {
 			cb.symbol_count.cmp(&ca.symbol_count).then(ca.id.cmp(&cb.id))
 		});
 
-		let cx = self.width * 0.5;
-		let cy = self.height * 0.5;
-		// Spiral scale tuned so a workspace of ~10–20 clusters lands
-		// inside a typical panel without overflowing. Larger workspaces
-		// degrade gracefully (just spiral wider). The 0.14 multiplier +
-		// doubled CLUSTER_GAP push siblings far enough apart that their
-		// halos no longer touch — the nebula reads as discrete clusters
-		// instead of a single blob.
-		let scale = f64::min(self.width, self.height) * 0.14;
-
-		// Cluster radius from sqrt(symbol_count). Floor + ceiling keep
-		// the visual hierarchy readable when counts span 3+ orders of
-		// magnitude (a 10-symbol crate next to a 2000-symbol crate).
 		let max_count = self
 			.clusters
 			.iter()
 			.map(|c| c.symbol_count.max(1))
 			.max()
-			.unwrap_or(1) as f64;
+			.unwrap_or(1) as f32;
 
 		for (i, &cluster_idx) in order.iter().enumerate() {
 			let c = &self.clusters[cluster_idx];
-			let raw = (c.symbol_count.max(1) as f64).sqrt();
+			let raw = (c.symbol_count.max(1) as f32).sqrt();
 			let normalised = raw / max_count.sqrt();
-			let r = MIN_CLUSTER_RADIUS + normalised * (MAX_CLUSTER_RADIUS - MIN_CLUSTER_RADIUS);
+			let world_r = MIN_CLUSTER_RADIUS_WORLD
+				+ normalised * (MAX_CLUSTER_RADIUS_WORLD - MIN_CLUSTER_RADIUS_WORLD);
 
-			let (x, y) = if i == 0 {
-				(cx, cy)
+			let pos = if i == 0 {
+				Vec3::ZERO
 			} else {
 				let angle = (i as f64) * GOLDEN_ANGLE;
-				let radial = scale * (i as f64).sqrt() + CLUSTER_GAP;
-				(cx + radial * angle.cos(), cy + radial * angle.sin())
+				let radial = SUNFLOWER_SCALE * (i as f32).sqrt() + CLUSTER_GAP_WORLD;
+				Vec3::new(
+					radial * angle.cos() as f32,
+					0.0,
+					radial * angle.sin() as f32,
+				)
 			};
 
-			self.positions.insert(c.id, LaidCluster { x, y, r });
+			self.positions.insert(c.id, LaidCluster { pos, world_radius: world_r });
 			self.render_order.push(c.id);
 		}
+	}
+
+	fn fit_camera(&mut self) {
+		if self.positions.is_empty() {
+			return;
+		}
+		let mut centroid = Vec3::ZERO;
+		let mut count = 0.0_f32;
+		for p in self.positions.values() {
+			centroid += p.pos;
+			count += 1.0;
+		}
+		centroid /= count.max(1.0);
+		let mut max_dist = 0.0_f32;
+		for p in self.positions.values() {
+			let d = (p.pos - centroid).length() + p.world_radius;
+			if d > max_dist {
+				max_dist = d;
+			}
+		}
+		self.cam.frame(centroid, max_dist);
 	}
 
 	fn draw(&self) {
@@ -348,11 +352,14 @@ impl OverviewCanvas {
 			return;
 		}
 
-		self.ctx.save();
-		self.ctx.translate(self.cam_offset_x, self.cam_offset_y).ok();
-		self.ctx.scale(self.cam_zoom, self.cam_zoom).ok();
+		// Project every cluster once for this frame. Hit-test in the
+		// next on_pointer_move will re-project — cheap enough at <100
+		// clusters, simpler than a stale screen-space cache.
+		let projected = self.project_clusters();
 
-		// Edges first so cluster discs paint on top.
+		// Edges in projected screen space. We do NOT depth-sort edges
+		// per se; a single line per pair works for the workspace scale
+		// we operate on (a few hundred edges at most).
 		let max_weight = self
 			.edges
 			.iter()
@@ -360,72 +367,116 @@ impl OverviewCanvas {
 			.max()
 			.unwrap_or(1) as f64;
 		for e in &self.edges {
-			let (Some(from), Some(to)) = (self.positions.get(&e.from), self.positions.get(&e.to))
-			else { continue };
-			// Logarithmic so a single edge still draws and a heavy
-			// bundle doesn't dominate. Floor on alpha + width bumped
-			// so even one-off cross-project edges read against the
-			// dark background — used to read as invisible hairlines.
+			let (Some(from), Some(to)) = (projected.get(&e.from), projected.get(&e.to)) else { continue };
+			if !from.visible || !to.visible {
+				continue;
+			}
 			let w_norm = (f64::from(e.weight.max(1))).ln() / (max_weight.ln().max(1.0));
 			let line_w = 1.4 + w_norm * 3.2;
 			let alpha = 0.55 + w_norm * 0.4;
 			self.ctx.set_stroke_style_str(&format!("rgba(120, 180, 255, {alpha:.3})"));
 			self.ctx.set_line_width(line_w);
 			self.ctx.begin_path();
-			self.ctx.move_to(from.x, from.y);
-			self.ctx.line_to(to.x, to.y);
+			self.ctx.move_to(from.screen_x, from.screen_y);
+			self.ctx.line_to(to.screen_x, to.screen_y);
 			self.ctx.stroke();
 		}
 
-		// Cluster discs — biggest first so smaller ones layer in front
-		// when the spiral edges overlap.
-		for id in &self.render_order {
-			let Some(pos) = self.positions.get(id) else { continue };
+		// Depth-sort clusters back-to-front so closer nebulae layer over
+		// farther ones (no z-buffer in Canvas2D).
+		let mut order: Vec<u32> = self.render_order.clone();
+		order.sort_by(|a, b| {
+			let da = projected.get(a).map_or(f64::INFINITY, |p| -p.depth);
+			let db = projected.get(b).map_or(f64::INFINITY, |p| -p.depth);
+			da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+		});
+		for id in &order {
+			let Some(proj) = projected.get(id) else { continue };
+			if !proj.visible {
+				continue;
+			}
 			let Some(c) = self.clusters.iter().find(|c| c.id == *id) else { continue };
 			let highlighted = self.hovered == Some(*id);
-			self.draw_cluster(pos, c, highlighted);
+			self.draw_cluster(proj, c, highlighted);
 		}
-
-		self.ctx.restore();
 	}
 
-	fn draw_cluster(&self, pos: &LaidCluster, cluster: &OverviewCluster, highlighted: bool) {
-		// Soft outer glow — bigger than the disc, low alpha. Conveys
-		// the nebula feel without paying the cost of a real particle
-		// system. The hovered cluster gets a brighter halo.
-		let halo_alpha = if highlighted { 0.45 } else { 0.18 };
+	fn project_clusters(&self) -> std::collections::HashMap<u32, ProjectedCluster> {
+		let mut out: std::collections::HashMap<u32, ProjectedCluster> = std::collections::HashMap::new();
+		let view = self.cam.view();
+		let aspect = (self.width / self.height.max(1.0)) as f32;
+		let proj = self.cam.proj(aspect);
+		let vp = proj * view;
+		let eye = self.cam.eye();
+		// focal_pixels = height/2 / tan(fov_y/2) — converts a world
+		// radius at a given camera-space depth into a screen-space disc
+		// radius. cf. pinhole perspective.
+		let focal_pixels = (self.height * 0.5) / (self.cam.fov_y as f64 * 0.5).tan();
+		for (id, c) in &self.positions {
+			let clip = vp * Vec4::new(c.pos.x, c.pos.y, c.pos.z, 1.0);
+			if clip.w <= 0.0 {
+				out.insert(*id, ProjectedCluster {
+					id: *id,
+					screen_x: 0.0,
+					screen_y: 0.0,
+					screen_radius: 0.0,
+					depth: f64::MAX,
+					visible: false,
+				});
+				continue;
+			}
+			let ndc_x = clip.x / clip.w;
+			let ndc_y = clip.y / clip.w;
+			// Camera::view() uses up=NEG_Y → ndc Y is already screen-down,
+			// no need to flip.
+			let sx = (ndc_x as f64 * 0.5 + 0.5) * self.width;
+			let sy = (ndc_y as f64 * 0.5 + 0.5) * self.height;
+			let depth = (c.pos - eye).length() as f64;
+			let screen_radius = (c.world_radius as f64) * focal_pixels / depth.max(1.0);
+			out.insert(*id, ProjectedCluster {
+				id: *id,
+				screen_x: sx,
+				screen_y: sy,
+				screen_radius,
+				depth,
+				visible: true,
+			});
+		}
+		out
+	}
+
+	fn draw_cluster(&self, proj: &ProjectedCluster, cluster: &OverviewCluster, highlighted: bool) {
+		let r = proj.screen_radius.max(2.0);
+		let halo_alpha = if highlighted { 0.55 } else { 0.22 };
 		self.ctx.set_fill_style_str(&format!("rgba(177, 128, 215, {halo_alpha:.3})"));
 		self.ctx.begin_path();
-		let _ = self.ctx.arc(pos.x, pos.y, pos.r + 16.0, 0.0, std::f64::consts::TAU);
+		let _ = self.ctx.arc(proj.screen_x, proj.screen_y, r + 16.0, 0.0, std::f64::consts::TAU);
 		self.ctx.fill();
 
-		// Radial gradient — bright violet centre fading to dark. The
-		// browser handles the math, no shader required.
-		let gradient = match self.ctx.create_radial_gradient(pos.x, pos.y, 0.0, pos.x, pos.y, pos.r) {
+		let gradient = match self.ctx.create_radial_gradient(proj.screen_x, proj.screen_y, 0.0, proj.screen_x, proj.screen_y, r) {
 			Ok(g) => g,
 			Err(_) => return,
 		};
-		let _ = gradient.add_color_stop(0.0, "rgba(220, 200, 255, 0.95)");
-		let _ = gradient.add_color_stop(0.55, "rgba(170, 130, 215, 0.75)");
+		let _ = gradient.add_color_stop(0.0, "rgba(230, 210, 255, 0.95)");
+		let _ = gradient.add_color_stop(0.55, "rgba(170, 130, 215, 0.78)");
 		let _ = gradient.add_color_stop(1.0, "rgba(60, 40, 95, 0.4)");
 		self.ctx.set_fill_style_canvas_gradient(&gradient);
 		self.ctx.begin_path();
-		let _ = self.ctx.arc(pos.x, pos.y, pos.r, 0.0, std::f64::consts::TAU);
+		let _ = self.ctx.arc(proj.screen_x, proj.screen_y, r, 0.0, std::f64::consts::TAU);
 		self.ctx.fill();
 
-		// Label below the cluster. Counts paint smaller + dimmer.
 		self.ctx.set_fill_style_str(if highlighted { "#ffffff" } else { "#cccccc" });
 		self.ctx.set_font("600 13px ui-monospace, SFMono-Regular, monospace");
 		self.ctx.set_text_align("center");
 		self.ctx.set_text_baseline("top");
-		let _ = self.ctx.fill_text(&cluster.label, pos.x, pos.y + pos.r + LABEL_OFFSET);
+		let _ = self.ctx.fill_text(&cluster.label, proj.screen_x, proj.screen_y + r + LABEL_OFFSET);
 
 		self.ctx.set_fill_style_str("#9d9d9d");
 		self.ctx.set_font("10px ui-monospace, SFMono-Regular, monospace");
 		let _ = self.ctx.fill_text(
 			&format!("{} symbols", cluster.symbol_count),
-			pos.x,
-			pos.y + pos.r + LABEL_OFFSET + 16.0,
+			proj.screen_x,
+			proj.screen_y + r + LABEL_OFFSET + 16.0,
 		);
 	}
 
@@ -442,15 +493,14 @@ impl OverviewCanvas {
 	}
 
 	fn hit_test(&self, screen_x: f64, screen_y: f64) -> Option<u32> {
-		// Invert the camera so the threshold compares like-with-like
-		// against the world-space positions stored in `positions`.
-		let world_x = (screen_x - self.cam_offset_x) / self.cam_zoom;
-		let world_y = (screen_y - self.cam_offset_y) / self.cam_zoom;
-		let pad = HIT_PAD / self.cam_zoom;
+		let projected = self.project_clusters();
 		let mut best: Option<(f64, u32)> = None;
-		for (id, p) in &self.positions {
-			let d = (world_x - p.x).hypot(world_y - p.y);
-			if d <= p.r + pad {
+		for (id, p) in &projected {
+			if !p.visible {
+				continue;
+			}
+			let d = (screen_x - p.screen_x).hypot(screen_y - p.screen_y);
+			if d <= p.screen_radius + HIT_PAD {
 				if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
 					best = Some((d, *id));
 				}
