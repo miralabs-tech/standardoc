@@ -1,0 +1,96 @@
+@use '../../styles/mixins' as *;
+
+// Bottom-anchored drawer hosting spawnable panels. Pinned to the
+// viewport bottom edge so it overlays whatever sits below the shell
+// grid without forcing a grid-template reshuffle. Hidden entirely
+// when there are no panels open — toggling the `--hidden` modifier
+// is cheaper than mounting/unmounting the element.
+
+.host {
+	position: fixed;
+	left: var(--sd-shell-gap, 8px);
+	right: var(--sd-shell-gap, 8px);
+	bottom: var(--sd-shell-gap, 8px);
+	height: var(--sd-panel-host-h, 280px);
+	background: var(--sd-panel-bg, #1e1e1e);
+	border: var(--sd-panel-border, 1px solid #2d2d2d);
+	border-top: 2px solid var(--sd-accent, #3794ff);
+	border-radius: var(--sd-radius-md, 6px);
+	display: flex;
+	flex-direction: column;
+	z-index: 50;
+	box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.4);
+	overflow: hidden;
+
+	&--hidden {
+		display: none;
+	}
+
+	&__tabs {
+		flex: 0 0 auto;
+		display: flex;
+		align-items: stretch;
+		background: var(--sd-panel-header-bg, #252526);
+		border-bottom: 1px solid var(--sd-border-subtle, #2d2d2d);
+		overflow-x: auto;
+		overflow-y: hidden;
+		height: var(--sd-panel-header-h, 32px);
+		min-height: var(--sd-panel-header-h, 32px);
+	}
+
+	&__tab {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--sd-space-1, 4px);
+		padding: 0 var(--sd-space-2, 8px);
+		border-right: 1px solid var(--sd-border-subtle, #2d2d2d);
+		color: var(--sd-fg-muted, #9d9d9d);
+		font-size: var(--sd-text-sm, 11px);
+		white-space: nowrap;
+		cursor: pointer;
+		user-select: none;
+
+		&:hover {
+			background: var(--sd-hover, #2a2d2e);
+			color: var(--sd-fg, #cccccc);
+		}
+
+		&--active {
+			background: var(--sd-panel-bg, #1e1e1e);
+			color: var(--sd-fg, #cccccc);
+			border-bottom: 2px solid var(--sd-accent, #3794ff);
+			margin-bottom: -1px;
+		}
+	}
+
+	&__tab-label {
+		background: transparent;
+		border: 0;
+		color: inherit;
+		padding: 0;
+		font: inherit;
+		cursor: pointer;
+	}
+
+	&__close {
+		background: transparent;
+		border: 0;
+		color: var(--sd-fg-muted, #9d9d9d);
+		padding: 0;
+		margin-left: var(--sd-space-1, 4px);
+		line-height: 1;
+		font-size: 14px;
+		cursor: pointer;
+
+		&:hover {
+			color: var(--sd-status-err, #f48771);
+		}
+	}
+
+	&__body {
+		flex: 1 1 auto;
+		overflow: auto;
+		padding: var(--sd-panel-padding, 12px);
+		background: var(--sd-panel-bg, #1e1e1e);
+	}
+}
