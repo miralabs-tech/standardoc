@@ -92,12 +92,16 @@ async function boot(): Promise<void> {
 	const overview = overviewEl.canvas!;
 	const focusCanvas = focusEl.canvas!;
 
-	// Click on an overview cluster → drill into focus on a representative
-	// symbol (Phase 3c lands the cluster→symbol lookup; for now we don't
-	// drill until that resolution is wired).
+	// Cluster click drill — resolved against a representative-symbol
+	// map built right after the workspace walk (we have the full symbol
+	// set there, this is just a one-pass index).
+	const representativeByProjectId = new Map<number, string>();
+	// (filled below, after treeSymbols is built)
+
 	overviewEl.addEventListener('sd-overview-cluster-click', e => {
-		const _detail = (e as CustomEvent<OverviewClusterClickDetail>).detail;
-		// Phase 3c: focusStore.setFocus(representativeFqdnFor(_detail.clusterId));
+		const { clusterId } = (e as CustomEvent<OverviewClusterClickDetail>).detail;
+		const fqdn = representativeByProjectId.get(clusterId);
+		if (fqdn !== undefined) focusStore.setFocus(fqdn);
 	});
 
 	// Click on a focus-graph node → shift global focus.
@@ -130,6 +134,28 @@ async function boot(): Promise<void> {
 	// playground all under standardoc-graph-viz) instead of pulling
 	// their files up to the parent.
 	const treeSymbols: BrowseSymbol[] = rawSymbols.map(s => rawToBrowseSymbol(s, projects));
+
+	// One-pass index: pick a representative symbol per project so a
+	// cluster click in the overview has a focal target to drill into.
+	// Preference rules: symbol whose module exactly equals the project
+	// label (the canonical root) → then shortest FQDN → then alphabetical.
+	for (const p of projects) {
+		let best: { fqdn: string; rank: [number, number, string] } | null = null;
+		for (const s of treeSymbols) {
+			if (s.project_id !== p.project_id) continue;
+			const moduleMatch = s.module === p.label ? 0 : 1;
+			const segCount = s.fqdn.split('::').length;
+			const rank: [number, number, string] = [moduleMatch, segCount, s.fqdn];
+			if (best === null
+				|| rank[0] < best.rank[0]
+				|| (rank[0] === best.rank[0] && rank[1] < best.rank[1])
+				|| (rank[0] === best.rank[0] && rank[1] === best.rank[1] && rank[2] < best.rank[2])
+			) {
+				best = { fqdn: s.fqdn, rank };
+			}
+		}
+		if (best !== null) representativeByProjectId.set(p.project_id, best.fqdn);
+	}
 
 	// Load the workspace graph into the overview canvas — bounded set
 	// (5k) intentional, the nebula doesn't gain much from going wider.
