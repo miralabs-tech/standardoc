@@ -17,9 +17,12 @@
     "./components/search": "./src/components/search/index.ts",
     "./components/overview": "./src/components/overview/index.ts",
     "./components/focus-graph": "./src/components/focus-graph/index.ts",
+    "./components/compare-panel": "./src/components/compare-panel/index.ts",
+    "./components/panel-host": "./src/components/panel-host/index.ts",
     "./profiler": "./src/profiler/index.ts",
     "./mcp-client": "./src/mcp-client/index.ts",
     "./focus-store": "./src/focus-store/index.ts",
+    "./panel-manager": "./src/panel-manager/index.ts",
     "./styles/tokens": "./src/styles/_tokens.scss",
     "./styles/mixins": "./src/styles/_mixins.scss"
   },

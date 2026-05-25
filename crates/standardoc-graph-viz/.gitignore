@@ -1,3 +1,6 @@
 pkg/
 target/
 .standardoc/
+
+# Local mockups / scratch screenshots (manifesto reference inputs)
+exam*.png

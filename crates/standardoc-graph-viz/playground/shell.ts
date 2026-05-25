@@ -16,8 +16,11 @@ import '@standarx/standardoc-viz/components/symbol-details';
 import '@standarx/standardoc-viz/components/search';
 import '@standarx/standardoc-viz/components/overview';
 import '@standarx/standardoc-viz/components/focus-graph';
+import '@standarx/standardoc-viz/components/compare-panel';
+import '@standarx/standardoc-viz/components/panel-host';
 
 import { focusStore } from '@standarx/standardoc-viz/focus-store';
+import { panelManager } from '@standarx/standardoc-viz/panel-manager';
 import { McpBrowse } from '@standarx/standardoc-viz/mcp-client';
 import type {
   BrowseSymbol,
@@ -25,6 +28,7 @@ import type {
   RawSymbol,
 } from '@standarx/standardoc-viz/mcp-client';
 import type {
+  ComparePanelElement,
   ExplorerElement,
   ExplorerEntryPoint,
   ExplorerNodeKind,
@@ -38,13 +42,16 @@ import type {
   OverviewClusterClickDetail,
   OverviewElement,
   OverviewErrorDetail,
+  PanelHostElement,
   SearchElement,
   SymbolDetail,
+  SymbolDetailsActionDetail,
   SymbolDetailsElement,
   SymbolDetailsTabChangeDetail,
   SymbolRelationBucket,
   SymbolRelationKind,
   SymbolSearchResult,
+  SymbolSubItem,
 } from '@standarx/standardoc-viz';
 
 const explorerEl = document.getElementById('explorer') as ExplorerElement;
@@ -52,6 +59,7 @@ const detailsEl = document.getElementById('details') as SymbolDetailsElement;
 const searchEl = document.getElementById('search') as SearchElement;
 const overviewEl = document.getElementById('overview') as OverviewElement;
 const focusEl = document.getElementById('focus') as FocusGraphElement;
+const panelsEl = document.getElementById('panels') as PanelHostElement;
 const statusEl = document.getElementById('status') as HTMLSpanElement;
 
 function setStatus(text: string): void {
@@ -245,6 +253,92 @@ async function boot(): Promise<void> {
     }
   });
 
+  // Spawnable Compare panel — Phase 4. Pin-pattern UX: first click on
+  // "Add to compare" pins the current symbol; second click on a DIFFERENT
+  // symbol opens the panel with both. Clicking the same pinned symbol
+  // again toggles the pin off without spawning. The status bar surfaces
+  // the pending pin so the user knows the next click will spawn.
+  let comparePinned: string | null = null;
+  let compareToken = 0;
+
+  detailsEl.addEventListener('sd-symbol-action', ev => {
+    const detail = (ev as CustomEvent<SymbolDetailsActionDetail>).detail;
+    switch (detail.action) {
+      case 'add-to-compare':
+        void handleAddToCompare(detail.fqdn);
+        break;
+      case 'copy-fqdn':
+        void handleCopyFqdn(detail.fqdn);
+        break;
+      case 'open-in-editor':
+        // Playground has no editor host to hand the symbol off to —
+        // surface the intent so the user sees the click did register,
+        // and let the future VSCode webview branch take over here.
+        setStatus(`open in editor: ${shortFqdn(detail.fqdn)} — not available in playground`);
+        break;
+    }
+  });
+
+  async function handleCopyFqdn(fqdn: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(fqdn);
+      setStatus(`copied: ${shortFqdn(fqdn)}`);
+    } catch (e) {
+      setStatus(`copy failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async function handleAddToCompare(fqdn: string): Promise<void> {
+    if (comparePinned === fqdn) {
+      comparePinned = null;
+      setStatus(`compare: unpinned ${shortFqdn(fqdn)}`);
+      return;
+    }
+    if (comparePinned === null) {
+      comparePinned = fqdn;
+      setStatus(`compare: pinned ${shortFqdn(fqdn)} — Add to compare another symbol to open`);
+      return;
+    }
+    const left = comparePinned;
+    const right = fqdn;
+    comparePinned = null;
+    await spawnComparePanel(left, right);
+  }
+
+  async function spawnComparePanel(leftFqdn: string, rightFqdn: string): Promise<void> {
+    const myToken = ++compareToken;
+    panelManager.open('compare', { leftFqdn, rightFqdn });
+    // Sync render: panel-host subscribers fire synchronously, so the
+    // compare-panel element is mounted by the time `open()` returns.
+    const target = panelsEl.activePanelElement as ComparePanelElement | null;
+    if (target === null) return;
+    target.data = {
+      left: { fqdn: leftFqdn, detail: null, loading: true },
+      right: { fqdn: rightFqdn, detail: null, loading: true },
+    };
+    setStatus(`compare: ${shortFqdn(leftFqdn)} ↔ ${shortFqdn(rightFqdn)}…`);
+    const [leftCtx, rightCtx, leftSubs, rightSubs] = await Promise.all([
+      mcp.getContext(leftFqdn).catch(() => null),
+      mcp.getContext(rightFqdn).catch(() => null),
+      fetchSubItems(mcp, leftFqdn),
+      fetchSubItems(mcp, rightFqdn),
+    ]);
+    if (myToken !== compareToken) return;
+    target.data = {
+      left: {
+        fqdn: leftFqdn,
+        detail: leftCtx !== null ? buildSymbolDetail(leftCtx, [], leftSubs, leftFqdn) : null,
+        loading: false,
+      },
+      right: {
+        fqdn: rightFqdn,
+        detail: rightCtx !== null ? buildSymbolDetail(rightCtx, [], rightSubs, rightFqdn) : null,
+        loading: false,
+      },
+    };
+    setStatus(`compare ready (${shortFqdn(leftFqdn)} ↔ ${shortFqdn(rightFqdn)})`);
+  }
+
   // Hop selector drives the BFS depth on every focus fetch. Phase 3a
   // hardcoded depth=1 on the wire; now the user's choice in the focus
   // panel chips picks the real depth. 'All' (hops=0) caps at 5 — the
@@ -265,19 +359,36 @@ async function boot(): Promise<void> {
     const depth = currentHops === 0 ? 5 : currentHops;
     detailsEl.symbol = null;
     setStatus(`fetch ${shortFqdn(fqdn)} (depth ${depth})…`);
-    const [ctx, neighborhood] = await Promise.all([
+    const [ctx, neighborhood, subItems] = await Promise.all([
       mcp.getContext(fqdn).catch(() => null),
       mcp.fetchNeighborhood(fqdn, false, depth).catch(() => null),
+      fetchSubItems(mcp, fqdn),
     ]);
     if (myToken !== focusToken) return; // a newer focus arrived
-    focusCanvas.set_payload(buildFocusPayload(fqdn, ctx, neighborhood?.edges ?? [], neighborhood?.symbols ?? []));
+    // Build SymbolDetail first so its fields/methods arrays feed the
+    // focus payload's centre-card footer ("N fields · N methods").
+    // The build is purely TS-side, no extra MCP round-trip.
+    let fieldCount = 0;
+    let methodCount = 0;
+    if (ctx !== null) {
+      const sym = buildSymbolDetail(ctx, neighborhood?.edges ?? [], subItems, fqdn);
+      fieldCount = sym.fields.length;
+      methodCount = sym.methods.length;
+      detailsEl.symbol = sym;
+    }
+    focusCanvas.set_payload(buildFocusPayload(
+      fqdn,
+      ctx,
+      neighborhood?.edges ?? [],
+      neighborhood?.symbols ?? [],
+      fieldCount,
+      methodCount,
+    ));
     focusCanvas.fit();
     if (ctx === null) {
       setStatus(`get_context failed for ${shortFqdn(fqdn)}`);
       return;
     }
-    const sym = buildSymbolDetail(ctx, neighborhood?.edges ?? [], fqdn);
-    detailsEl.symbol = sym;
     setStatus(`ready (${entryPoints.length} entry points)`);
   }
   focusStore.subscribe(async state => {
@@ -403,6 +514,7 @@ interface FileEntry {
   readonly projectLabel: string;
   readonly symbols: ReadonlyArray<BrowseSymbol>;
 }
+
 
 interface ProjectLike {
   readonly project_id: number;
@@ -605,8 +717,8 @@ function buildFileSyntheticDetail(file: FileEntry): SymbolDetail {
     startLine: 1,
     documentation: `${file.symbols.length} symbol${file.symbols.length === 1 ? '' : 's'} defined in this file · project: ${file.projectLabel}`,
     entryPointKind: null,
-    fieldCount: 0,
-    methodCount: 0,
+    fields: [],
+    methods: [],
     relations: [{
       kind: 'definedHere',
       items: file.symbols.map(s => ({
@@ -690,6 +802,8 @@ function buildFocusPayload(
   ctx: GetContextResponse | null,
   neighborhoodEdges: ReadonlyArray<{ from: string; to: string; kind: string; outbound: boolean }>,
   neighborhoodSymbols: ReadonlyArray<BrowseSymbol>,
+  centerFieldCount: number,
+  centerMethodCount: number,
 ): string {
   const centerSym = ctx?.context.symbol;
   const center = centerSym !== undefined ? {
@@ -697,6 +811,8 @@ function buildFocusPayload(
     name: centerSym.name,
     kind: centerSym.decl_kind ?? centerSym.language_kind ?? centerSym.kind,
     depth: 0,
+    field_count: centerFieldCount,
+    method_count: centerMethodCount,
   } : null;
   // BFS depth per neighbour: shortest hop count from the focal symbol.
   // fetch_graph doesn't surface per-node depth in the wire payload,
@@ -710,6 +826,8 @@ function buildFocusPayload(
       name: s.name,
       kind: s.language_kind ?? s.kind,
       depth: depthByFqdn.get(s.fqdn) ?? 1,
+      file: s.file && s.file.length > 0 ? s.file : null,
+      start_line: typeof s.start_line === 'number' ? s.start_line : null,
     }));
   const focalEdges = neighborhoodEdges.map(e => ({
     from: e.from,
@@ -754,6 +872,7 @@ function shortFqdn(fqdn: string): string {
   return idx >= 0 ? fqdn.slice(idx + 2) : fqdn;
 }
 
+
 function toSymbolSearchResult(s: RawSymbol): SymbolSearchResult {
   return {
     fqdn: s.fqdn,
@@ -767,6 +886,7 @@ function toSymbolSearchResult(s: RawSymbol): SymbolSearchResult {
 function buildSymbolDetail(
   ctx: GetContextResponse,
   neighborhoodEdges: ReadonlyArray<{ from: string; to: string; kind: string; outbound: boolean }>,
+  subItems: ReadonlyArray<RawSymbol>,
   fqdn: string,
 ): SymbolDetail {
   const sym = ctx.context.symbol;
@@ -791,8 +911,12 @@ function buildSymbolDetail(
   for (const e of ctx.callees) {
     if (e.target.fqdn) pushBucket('calls', e.target.fqdn, 'fn');
   }
+  // `ctx.imports` = OUTBOUND imports from this symbol (what it pulls in).
+  // `ctx.imported_by` = INBOUND imports (who imports this symbol).
+  // Used to be collapsed into the same `importedBy` bucket which mis-
+  // labelled outbound imports as "Imported by" in the panel.
   for (const e of ctx.imports) {
-    if (e.target.fqdn) pushBucket('importedBy', e.target.fqdn, 'mod');
+    if (e.target.fqdn) pushBucket('imports', e.target.fqdn, 'mod');
   }
   for (const e of ctx.imported_by) {
     if (e.target.fqdn) pushBucket('importedBy', e.target.fqdn, 'mod');
@@ -829,7 +953,7 @@ function buildSymbolDetail(
   }
 
   const orderedKinds: SymbolRelationKind[] = [
-    'usedBy', 'usesTypes', 'calls', 'importedBy', 'testedBy', 'implements', 'extends',
+    'usedBy', 'usesTypes', 'calls', 'imports', 'importedBy', 'testedBy', 'implements', 'extends',
   ];
   const relations: SymbolRelationBucket[] = [];
   for (const k of orderedKinds) {
@@ -838,6 +962,24 @@ function buildSymbolDetail(
     const items = [...m.values()];
     relations.push({ kind: k, items, total: items.length });
   }
+
+  const fields: SymbolSubItem[] = [];
+  const methods: SymbolSubItem[] = [];
+  for (const s of subItems) {
+    const cls = classifySubItem(s);
+    if (cls === null) continue;
+    const item: SymbolSubItem = {
+      fqdn: s.fqdn,
+      name: s.name,
+      kindLabel: s.decl_kind ?? s.language_kind ?? s.kind,
+      file: s.location.file,
+      startLine: s.location.start_line,
+    };
+    if (cls === 'field') fields.push(item);
+    else methods.push(item);
+  }
+  fields.sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0));
+  methods.sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0));
 
   return {
     fqdn: sym.fqdn,
@@ -848,10 +990,47 @@ function buildSymbolDetail(
     startLine: sym.location.start_line,
     documentation: doc,
     entryPointKind: epKind,
-    fieldCount: 0,
-    methodCount: 0,
+    fields,
+    methods,
     relations,
   };
+}
+
+/**
+ * Best-effort sub-symbols fetch for a parent FQDN. `list_symbols`
+ * scoped by `module = parentFqdn` returns the direct children that the
+ * extractors registered as nested symbols (Rust struct fields / enum
+ * variants / impl methods, TS interface properties / class methods).
+ * Bounded by SUB_PAGE_SIZE — structs with > 200 members are vanishingly
+ * rare and we don't paginate here; the daemon caps `limit` at u8 (255)
+ * so SUB_PAGE_SIZE stays safely below.
+ */
+const SUB_PAGE_SIZE = 200;
+async function fetchSubItems(mcp: McpBrowse, fqdn: string): Promise<ReadonlyArray<RawSymbol>> {
+  try {
+    const res = await mcp.listSymbols({ module: fqdn, limit: SUB_PAGE_SIZE });
+    return res.items;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Classify a sub-symbol returned by `list_symbols({ module: parentFqdn })`
+ * into the Fields or Methods tab bucket. Falls back through decl_kind →
+ * language_kind so the heuristic catches both Rust (`field` / `method`)
+ * and TS (`interface_property` / `class_method`) shapes. Unrecognised
+ * sub-symbols (associated consts, nested types, etc.) are dropped from
+ * V0 — they need their own tab to render cleanly.
+ */
+function classifySubItem(s: RawSymbol): 'field' | 'method' | null {
+  const dk = s.decl_kind;
+  const lk = s.language_kind;
+  if (dk === 'field' || dk === 'variant') return 'field';
+  if (lk === 'field' || lk === 'interface_property' || lk === 'enum_variant' || lk === 'class_property' || lk === 'struct_field') return 'field';
+  if (dk === 'method' || dk === 'function') return 'method';
+  if (lk === 'method' || lk === 'class_method' || lk === 'function') return 'method';
+  return null;
 }
 
 boot().catch((e: unknown) => {

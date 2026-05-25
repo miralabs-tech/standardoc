@@ -62,6 +62,7 @@
         --sd-panel-header-bg: var(--sd-bg-elevated);
         --sd-panel-padding: var(--sd-space-3);
         --sd-panel-border: 1px solid var(--sd-border-subtle);
+        --sd-panel-host-h: 240px;
       }
       html, body {
         margin: 0;
@@ -135,6 +136,7 @@
       <standardoc-focus-graph id="focus" data-slot="focus"></standardoc-focus-graph>
       <standardoc-symbol-details id="details" data-slot="details"></standardoc-symbol-details>
     </standardoc-panel-layout>
+    <standardoc-panel-host id="panels"></standardoc-panel-host>
     <script type="module" src="/shell.js"></script>
   </body>
 </html>
