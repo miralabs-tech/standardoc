@@ -74,6 +74,19 @@ const NEIGHBOR_RADIUS: f64 = 14.0;
 const NODE_LABEL_OFFSET: f64 = 18.0;
 const EDGE_LINE_WIDTH: f64 = 1.5;
 const HIT_PAD: f64 = 4.0;
+const ZOOM_MIN: f64 = 0.1;
+const ZOOM_MAX: f64 = 8.0;
+const ZOOM_STEP: f64 = 0.0012;
+const CLICK_DRAG_THRESHOLD: f64 = 4.0;
+
+#[derive(Debug, Clone, Copy)]
+struct DragState {
+	start_pointer_x: f64,
+	start_pointer_y: f64,
+	start_offset_x: f64,
+	start_offset_y: f64,
+	moved: bool,
+}
 
 #[wasm_bindgen]
 pub struct FocusGraphCanvas {
@@ -95,7 +108,13 @@ pub struct FocusGraphCanvas {
 	/// have their own entry.
 	positions: std::collections::HashMap<String, LaidNode>,
 	hovered: Option<String>,
-	drag_origin: Option<(f64, f64)>,
+	drag: Option<DragState>,
+	/// Camera translation in screen pixels — pan offset applied via
+	/// `ctx.translate` before nodes/edges render. Zero on fit().
+	cam_offset_x: f64,
+	cam_offset_y: f64,
+	/// Camera zoom multiplier applied via `ctx.scale`. 1.0 on fit().
+	cam_zoom: f64,
 }
 
 #[wasm_bindgen]
@@ -122,7 +141,10 @@ impl FocusGraphCanvas {
 			needs_redraw: true,
 			positions: std::collections::HashMap::new(),
 			hovered: None,
-			drag_origin: None,
+			drag: None,
+			cam_offset_x: 0.0,
+			cam_offset_y: 0.0,
+			cam_zoom: 1.0,
 		})
 	}
 
@@ -189,6 +211,20 @@ impl FocusGraphCanvas {
 	}
 
 	pub fn on_pointer_move(&mut self, x: f64, y: f64) {
+		// If a drag is active, the pointer move pans the camera. The
+		// world point under the cursor stays put because we shift the
+		// camera offset by the screen-space delta.
+		if let Some(drag) = &mut self.drag {
+			let dx = x - drag.start_pointer_x;
+			let dy = y - drag.start_pointer_y;
+			if dx.hypot(dy) >= CLICK_DRAG_THRESHOLD {
+				drag.moved = true;
+			}
+			self.cam_offset_x = drag.start_offset_x + dx;
+			self.cam_offset_y = drag.start_offset_y + dy;
+			self.needs_redraw = true;
+			return;
+		}
 		let hit = self.hit_test(x, y);
 		if hit == self.hovered {
 			return;
@@ -202,18 +238,18 @@ impl FocusGraphCanvas {
 	}
 
 	pub fn on_pointer_down(&mut self, x: f64, y: f64, _button: i16) {
-		self.drag_origin = Some((x, y));
+		self.drag = Some(DragState {
+			start_pointer_x: x,
+			start_pointer_y: y,
+			start_offset_x: self.cam_offset_x,
+			start_offset_y: self.cam_offset_y,
+			moved: false,
+		});
 	}
 
 	pub fn on_pointer_up(&mut self, x: f64, y: f64, _button: i16) {
-		// Quick-click discriminator: if the pointer barely moved between
-		// down and up, treat it as a click; otherwise it was a drag (no-op
-		// in Phase 3b, pan camera in 3c).
-		let was_click = match self.drag_origin {
-			Some((sx, sy)) => (x - sx).hypot(y - sy) < 4.0,
-			None => true,
-		};
-		self.drag_origin = None;
+		let was_click = self.drag.as_ref().is_some_and(|d| !d.moved);
+		self.drag = None;
 		if !was_click {
 			return;
 		}
@@ -225,7 +261,7 @@ impl FocusGraphCanvas {
 	}
 
 	pub fn on_pointer_leave(&mut self) {
-		self.drag_origin = None;
+		self.drag = None;
 		if self.hovered.is_none() {
 			return;
 		}
@@ -236,30 +272,50 @@ impl FocusGraphCanvas {
 		}
 	}
 
-	pub fn on_wheel(&mut self, _x: f64, _y: f64, _delta_y: f64) {
-		// Phase 3c: zoom around pointer.
+	pub fn on_wheel(&mut self, x: f64, y: f64, delta_y: f64) {
+		// Exponential zoom keeps the per-notch sensation consistent
+		// whether the camera is at 0.5× or 4×. Anchored at the pointer
+		// so zooming feels like a magnifier on the spot the user is
+		// looking at, not a re-centre on the canvas origin.
+		let factor = (-delta_y * ZOOM_STEP).exp();
+		let next_zoom = (self.cam_zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+		if (next_zoom - self.cam_zoom).abs() < f64::EPSILON {
+			return;
+		}
+		let ratio = next_zoom / self.cam_zoom;
+		self.cam_offset_x = x - (x - self.cam_offset_x) * ratio;
+		self.cam_offset_y = y - (y - self.cam_offset_y) * ratio;
+		self.cam_zoom = next_zoom;
+		self.needs_redraw = true;
 	}
 
 	pub fn fit(&mut self) {
-		// Radial layout is already canvas-fitted; just re-layout in case
-		// dimensions changed since the last paint.
+		// Reset camera + re-layout in case dimensions changed since the
+		// last paint. After fit the focal node lands at canvas centre at
+		// 1× zoom.
+		self.cam_offset_x = 0.0;
+		self.cam_offset_y = 0.0;
+		self.cam_zoom = 1.0;
 		self.layout();
 		self.needs_redraw = true;
 	}
 
 	/// JSON for the DOM overlay layer — one entry per edge label
 	/// (CALLS / IMPORTS / etc.) anchored at the canvas-space midpoint
-	/// of the edge. Coordinates are in CSS pixels, ready to drop into
-	/// the wrapper component's absolute overlay.
+	/// of the edge. Coordinates are in CSS pixels with the camera
+	/// transform applied so labels track pan + zoom alongside the
+	/// canvas content.
 	pub fn label_layout(&self) -> String {
 		let mut out = Vec::with_capacity(self.edges.len());
 		for e in &self.edges {
 			let Some(from) = self.positions.get(&e.from) else { continue };
 			let Some(to) = self.positions.get(&e.to) else { continue };
+			let wx = (from.x + to.x) * 0.5;
+			let wy = (from.y + to.y) * 0.5;
 			out.push(EdgeLabelOut {
 				text: &e.kind,
-				x: (from.x + to.x) * 0.5,
-				y: (from.y + to.y) * 0.5,
+				x: wx * self.cam_zoom + self.cam_offset_x,
+				y: wy * self.cam_zoom + self.cam_offset_y,
 			});
 		}
 		serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
@@ -315,6 +371,14 @@ impl FocusGraphCanvas {
 			return;
 		}
 
+		// Apply camera transform — every draw call below operates in
+		// world space (the coords `layout()` stored in `positions`).
+		// Restoring at the end keeps the empty-state path + the next
+		// frame's fill_rect in canvas-pixel space.
+		self.ctx.save();
+		self.ctx.translate(self.cam_offset_x, self.cam_offset_y).ok();
+		self.ctx.scale(self.cam_zoom, self.cam_zoom).ok();
+
 		// Edges first so nodes paint on top.
 		self.ctx.set_line_width(EDGE_LINE_WIDTH);
 		for e in &self.edges {
@@ -340,6 +404,8 @@ impl FocusGraphCanvas {
 				self.draw_node(pos, n, false, highlighted);
 			}
 		}
+
+		self.ctx.restore();
 	}
 
 	fn draw_node(&self, pos: &LaidNode, node: &FocusNode, is_center: bool, highlighted: bool) {
@@ -389,11 +455,20 @@ impl FocusGraphCanvas {
 		);
 	}
 
-	fn hit_test(&self, x: f64, y: f64) -> Option<String> {
+	fn hit_test(&self, screen_x: f64, screen_y: f64) -> Option<String> {
+		// Pointer events arrive in screen (CSS pixel) space; the layout
+		// positions are world-space. Convert by inverting the camera
+		// transform so the hit-test threshold compares like-with-like.
+		let world_x = (screen_x - self.cam_offset_x) / self.cam_zoom;
+		let world_y = (screen_y - self.cam_offset_y) / self.cam_zoom;
+		// The HIT_PAD slop is also in screen space, so divide it by
+		// zoom so the click target stays the same screen size as the
+		// user zooms in.
+		let pad = HIT_PAD / self.cam_zoom;
 		let mut best: Option<(f64, String)> = None;
 		for (fqdn, p) in &self.positions {
-			let d = (x - p.x).hypot(y - p.y);
-			if d <= p.r + HIT_PAD {
+			let d = (world_x - p.x).hypot(world_y - p.y);
+			if d <= p.r + pad {
 				if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
 					best = Some((d, fqdn.clone()));
 				}

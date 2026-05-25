@@ -65,6 +65,19 @@ const MAX_CLUSTER_RADIUS: f64 = 72.0;
 const CLUSTER_GAP: f64 = 36.0;
 const HIT_PAD: f64 = 6.0;
 const LABEL_OFFSET: f64 = 8.0;
+const ZOOM_MIN: f64 = 0.1;
+const ZOOM_MAX: f64 = 8.0;
+const ZOOM_STEP: f64 = 0.0012;
+const CLICK_DRAG_THRESHOLD: f64 = 4.0;
+
+#[derive(Debug, Clone, Copy)]
+struct DragState {
+	start_pointer_x: f64,
+	start_pointer_y: f64,
+	start_offset_x: f64,
+	start_offset_y: f64,
+	moved: bool,
+}
 /// Golden angle in radians — 137.5° = `π * (3 - sqrt(5))`. Distributes
 /// points evenly around the origin when paired with `sqrt(i)` radial
 /// growth.
@@ -89,7 +102,10 @@ pub struct OverviewCanvas {
 	/// the centre is always the heaviest project.
 	render_order: Vec<u32>,
 	hovered: Option<u32>,
-	drag_origin: Option<(f64, f64)>,
+	drag: Option<DragState>,
+	cam_offset_x: f64,
+	cam_offset_y: f64,
+	cam_zoom: f64,
 }
 
 #[wasm_bindgen]
@@ -115,7 +131,10 @@ impl OverviewCanvas {
 			positions: std::collections::HashMap::new(),
 			render_order: Vec::new(),
 			hovered: None,
-			drag_origin: None,
+			drag: None,
+			cam_offset_x: 0.0,
+			cam_offset_y: 0.0,
+			cam_zoom: 1.0,
 		})
 	}
 
@@ -167,6 +186,17 @@ impl OverviewCanvas {
 	}
 
 	pub fn on_pointer_move(&mut self, x: f64, y: f64) {
+		if let Some(drag) = &mut self.drag {
+			let dx = x - drag.start_pointer_x;
+			let dy = y - drag.start_pointer_y;
+			if dx.hypot(dy) >= CLICK_DRAG_THRESHOLD {
+				drag.moved = true;
+			}
+			self.cam_offset_x = drag.start_offset_x + dx;
+			self.cam_offset_y = drag.start_offset_y + dy;
+			self.needs_redraw = true;
+			return;
+		}
 		let hit = self.hit_test(x, y);
 		if hit == self.hovered {
 			return;
@@ -180,15 +210,18 @@ impl OverviewCanvas {
 	}
 
 	pub fn on_pointer_down(&mut self, x: f64, y: f64, _button: i16) {
-		self.drag_origin = Some((x, y));
+		self.drag = Some(DragState {
+			start_pointer_x: x,
+			start_pointer_y: y,
+			start_offset_x: self.cam_offset_x,
+			start_offset_y: self.cam_offset_y,
+			moved: false,
+		});
 	}
 
 	pub fn on_pointer_up(&mut self, x: f64, y: f64, _button: i16) {
-		let was_click = match self.drag_origin {
-			Some((sx, sy)) => (x - sx).hypot(y - sy) < 4.0,
-			None => true,
-		};
-		self.drag_origin = None;
+		let was_click = self.drag.as_ref().is_some_and(|d| !d.moved);
+		self.drag = None;
 		if !was_click {
 			return;
 		}
@@ -200,7 +233,7 @@ impl OverviewCanvas {
 	}
 
 	pub fn on_pointer_leave(&mut self) {
-		self.drag_origin = None;
+		self.drag = None;
 		if self.hovered.is_none() {
 			return;
 		}
@@ -211,13 +244,27 @@ impl OverviewCanvas {
 		}
 	}
 
-	pub fn on_wheel(&mut self, _x: f64, _y: f64, _delta_y: f64) {
-		// Phase 3c: zoom around pointer.
+	pub fn on_wheel(&mut self, x: f64, y: f64, delta_y: f64) {
+		// Exponential zoom anchored at the pointer — same semantics as
+		// FocusGraphCanvas so muscle-memory transfers between panels.
+		let factor = (-delta_y * ZOOM_STEP).exp();
+		let next_zoom = (self.cam_zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+		if (next_zoom - self.cam_zoom).abs() < f64::EPSILON {
+			return;
+		}
+		let ratio = next_zoom / self.cam_zoom;
+		self.cam_offset_x = x - (x - self.cam_offset_x) * ratio;
+		self.cam_offset_y = y - (y - self.cam_offset_y) * ratio;
+		self.cam_zoom = next_zoom;
+		self.needs_redraw = true;
 	}
 
 	pub fn fit(&mut self) {
-		// Sunflower layout already fits to canvas; just re-lay in case
-		// dimensions shifted since the last paint.
+		// Reset camera + re-lay in case dimensions shifted since the
+		// last paint. After fit the sunflower lands centred at 1× zoom.
+		self.cam_offset_x = 0.0;
+		self.cam_offset_y = 0.0;
+		self.cam_zoom = 1.0;
 		self.layout();
 		self.needs_redraw = true;
 	}
@@ -298,6 +345,10 @@ impl OverviewCanvas {
 			return;
 		}
 
+		self.ctx.save();
+		self.ctx.translate(self.cam_offset_x, self.cam_offset_y).ok();
+		self.ctx.scale(self.cam_zoom, self.cam_zoom).ok();
+
 		// Edges first so cluster discs paint on top.
 		let max_weight = self
 			.edges
@@ -329,6 +380,8 @@ impl OverviewCanvas {
 			let highlighted = self.hovered == Some(*id);
 			self.draw_cluster(pos, c, highlighted);
 		}
+
+		self.ctx.restore();
 	}
 
 	fn draw_cluster(&self, pos: &LaidCluster, cluster: &OverviewCluster, highlighted: bool) {
@@ -383,11 +436,16 @@ impl OverviewCanvas {
 		);
 	}
 
-	fn hit_test(&self, x: f64, y: f64) -> Option<u32> {
+	fn hit_test(&self, screen_x: f64, screen_y: f64) -> Option<u32> {
+		// Invert the camera so the threshold compares like-with-like
+		// against the world-space positions stored in `positions`.
+		let world_x = (screen_x - self.cam_offset_x) / self.cam_zoom;
+		let world_y = (screen_y - self.cam_offset_y) / self.cam_zoom;
+		let pad = HIT_PAD / self.cam_zoom;
 		let mut best: Option<(f64, u32)> = None;
 		for (id, p) in &self.positions {
-			let d = (x - p.x).hypot(y - p.y);
-			if d <= p.r + HIT_PAD {
+			let d = (world_x - p.x).hypot(world_y - p.y);
+			if d <= p.r + pad {
 				if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
 					best = Some((d, *id));
 				}
