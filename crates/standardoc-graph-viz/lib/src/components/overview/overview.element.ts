@@ -8,16 +8,20 @@
  *   - the canvas element
  *   - pointer/wheel/resize events with CSS-pixel coords
  *   - rAF loop while the engine is mounted
+ *   - scope breadcrumb DOM overlay (top-left pill, host-driven label)
  *
  * Does NOT own:
  *   - WASM init (host provides `canvasFactory`)
  *   - cluster/edge data (host calls `el.canvas.set_payload(json)`
  *     via the `.canvas` getter once `sd-overview-ready` fires)
+ *   - scope policy (host owns workspace/project/folder state, just
+ *     pushes the label here via `scopeLabel`)
  *
  * Events emitted:
  *   - `sd-overview-ready`         detail: { canvas }
  *   - `sd-overview-cluster-hover` detail: { clusterId | null }
  *   - `sd-overview-cluster-click` detail: { clusterId }
+ *   - `sd-overview-back`          detail: {}  — breadcrumb back click
  *   - `sd-overview-error`         detail: { source, message }
  */
 
@@ -30,6 +34,7 @@ import type {
   OverviewClusterHoverDetail,
   OverviewErrorDetail,
   OverviewReadyDetail,
+  OverviewScopeLabel,
 } from './overview.type';
 import s from './overview.module.scss';
 
@@ -39,6 +44,10 @@ const C = {
   overview: s.overview ?? '',
   grabbing: s['overview--grabbing'] ?? '',
   canvas: s.overview__canvas ?? '',
+  breadcrumb: s.overview__breadcrumb ?? '',
+  breadcrumbBack: s['overview__breadcrumb-back'] ?? '',
+  breadcrumbSep: s['overview__breadcrumb-sep'] ?? '',
+  breadcrumbCurrent: s['overview__breadcrumb-current'] ?? '',
 } as const;
 
 export class OverviewElement extends HTMLElement {
@@ -48,9 +57,11 @@ export class OverviewElement extends HTMLElement {
   #factory: OverviewCanvasFactory | null = null;
   #observer: ResizeObserver | null = null;
   #rafHandle: number | null = null;
+  #scopeLabel: OverviewScopeLabel = null;
   #nodes: {
     root: HTMLElement;
     canvas: HTMLCanvasElement;
+    breadcrumb: HTMLElement;
   } | null = null;
   #dragging = false;
 
@@ -61,6 +72,21 @@ export class OverviewElement extends HTMLElement {
 
   get canvas(): OverviewCanvasFacade | null {
     return this.#canvas;
+  }
+
+  /**
+   * Host-pushed scope label. `null` hides the breadcrumb overlay
+   * (workspace mode). Any other value renders `← Workspace › <label>`
+   * top-left; clicking the back arrow emits `sd-overview-back`.
+   */
+  set scopeLabel(label: OverviewScopeLabel) {
+    if (label === this.#scopeLabel) return;
+    this.#scopeLabel = label;
+    this.#renderBreadcrumb();
+  }
+
+  get scopeLabel(): OverviewScopeLabel {
+    return this.#scopeLabel;
   }
 
   connectedCallback(): void {
@@ -85,9 +111,42 @@ export class OverviewElement extends HTMLElement {
     const canvas = document.createElement('canvas');
     canvas.className = C.canvas;
     root.appendChild(canvas);
+    const breadcrumb = document.createElement('div');
+    breadcrumb.className = C.breadcrumb;
+    breadcrumb.style.display = 'none';
+    root.appendChild(breadcrumb);
     this.replaceChildren(root);
-    this.#nodes = { root, canvas };
+    this.#nodes = { root, canvas, breadcrumb };
     this.#wirePointer();
+    this.#renderBreadcrumb();
+  }
+
+  #renderBreadcrumb(): void {
+    const n = this.#nodes;
+    if (n === null) return;
+    if (this.#scopeLabel === null) {
+      n.breadcrumb.style.display = 'none';
+      n.breadcrumb.replaceChildren();
+      return;
+    }
+    n.breadcrumb.style.display = 'flex';
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = C.breadcrumbBack;
+    back.textContent = '← Workspace';
+    back.title = 'Back to workspace';
+    back.addEventListener('click', () => {
+      this.dispatchEvent(new CustomEvent('sd-overview-back', {
+        detail: {}, bubbles: true, composed: true,
+      }));
+    });
+    const sep = document.createElement('span');
+    sep.className = C.breadcrumbSep;
+    sep.textContent = '›';
+    const current = document.createElement('span');
+    current.className = C.breadcrumbCurrent;
+    current.textContent = this.#scopeLabel;
+    n.breadcrumb.replaceChildren(back, sep, current);
   }
 
   #wirePointer(): void {

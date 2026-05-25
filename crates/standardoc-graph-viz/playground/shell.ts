@@ -101,16 +101,42 @@ async function boot(): Promise<void> {
   const overview = overviewEl.canvas!;
   const focusCanvas = focusEl.canvas!;
 
-  // Cluster click drill — resolved against a representative-symbol
-  // map built right after the workspace walk (we have the full symbol
-  // set there, this is just a one-pass index).
-  const representativeByProjectId = new Map<number, string>();
-  // (filled below, after treeSymbols is built)
+  // Overview scope is driven from Explorer clicks (folder / project)
+  // and from cluster clicks in the canvas itself (workspace mode
+  // drills into a project, project/folder mode focuses a module
+  // representative). `clusterTargets` is rebuilt on every scope
+  // change; the cluster click handler defined below consults it to
+  // dispatch. `applyOverviewScope` is bound to a real implementation
+  // once the workspace data is fetched (it captures `projects`,
+  // `treeSymbols`, `symbolByFqdn`, `graphEdges`); the listeners below
+  // reference it through this closure box.
+  let clusterTargets = new Map<number, ClusterTarget>();
+  let applyOverviewScope: (next: OverviewScope) => void = () => {};
 
   overviewEl.addEventListener('sd-overview-cluster-click', e => {
     const { clusterId } = (e as CustomEvent<OverviewClusterClickDetail>).detail;
-    const fqdn = representativeByProjectId.get(clusterId);
-    if (fqdn !== undefined) focusStore.setFocus(fqdn);
+    const target = clusterTargets.get(clusterId);
+    if (target === undefined) return;
+    switch (target.kind) {
+      case 'drill-project':
+        applyOverviewScope({ kind: 'project', projectId: target.projectId, label: target.label });
+        break;
+      case 'drill-folder':
+        applyOverviewScope({
+          kind: 'folder',
+          projectId: target.projectId,
+          label: target.label,
+          relPath: target.relPath,
+        });
+        break;
+      case 'focus-symbol':
+        focusStore.setFocus(target.fqdn);
+        break;
+    }
+  });
+
+  overviewEl.addEventListener('sd-overview-back', () => {
+    applyOverviewScope({ kind: 'workspace' });
   });
 
   // Click on a focus-graph node → shift global focus.
@@ -144,33 +170,10 @@ async function boot(): Promise<void> {
   // their files up to the parent.
   const treeSymbols: BrowseSymbol[] = rawSymbols.map(s => rawToBrowseSymbol(s, projects));
 
-  // One-pass index: pick a representative symbol per project so a
-  // cluster click in the overview has a focal target to drill into.
-  // Preference rules: symbol whose module exactly equals the project
-  // label (the canonical root) → then shortest FQDN → then alphabetical.
-  for (const p of projects) {
-    let best: { fqdn: string; rank: [number, number, string] } | null = null;
-    for (const s of treeSymbols) {
-      if (s.project_id !== p.project_id) continue;
-      const moduleMatch = s.module === p.label ? 0 : 1;
-      const segCount = s.fqdn.split('::').length;
-      const rank: [number, number, string] = [moduleMatch, segCount, s.fqdn];
-      if (best === null
-        || rank[0] < best.rank[0]
-        || (rank[0] === best.rank[0] && rank[1] < best.rank[1])
-        || (rank[0] === best.rank[0] && rank[1] === best.rank[1] && rank[2] < best.rank[2])
-      ) {
-        best = { fqdn: s.fqdn, rank };
-      }
-    }
-    if (best !== null) representativeByProjectId.set(p.project_id, best.fqdn);
-  }
-
-  // Load the workspace graph into the overview canvas. Edges still
-  // come from fetchGraph (bounded ~5k — adequate for cross-project
-  // aggregation), but the per-cluster symbol_count is sourced from
-  // the full paginated treeSymbols set so clusters past the fetchGraph
-  // cap don't render as '0 symbols'.
+  // Load the workspace graph for inter-cluster edge aggregation. Edges
+  // come from fetchGraph (bounded ~5k) but the per-cluster symbol_count
+  // is sourced from the full paginated treeSymbols set so clusters past
+  // the fetchGraph cap don't render as '0 symbols'.
   setStatus('fetch graph…');
   const graph = await mcp.fetchGraph(false).catch(() => null);
   const symbolByFqdn = new Map<string, BrowseSymbol>();
@@ -181,8 +184,22 @@ async function boot(): Promise<void> {
   for (const s of graph?.symbols ?? []) {
     if (!symbolByFqdn.has(s.fqdn)) symbolByFqdn.set(s.fqdn, s);
   }
-  overview.set_payload(buildOverviewPayload(projects, treeSymbols, graph?.edges ?? [], symbolByFqdn));
-  overview.fit();
+  const graphEdges = graph?.edges ?? [];
+
+  // Bind the scope handler now that the workspace data is in scope.
+  // Initial render = workspace mode (paints projects + project edges).
+  applyOverviewScope = (next: OverviewScope) => {
+    const built = buildOverviewPayloadForScope(next, projects, treeSymbols, graphEdges, symbolByFqdn);
+    clusterTargets = built.targets;
+    overview.set_payload(built.json);
+    overview.fit();
+    overviewEl.scopeLabel = next.kind === 'workspace'
+      ? null
+      : next.kind === 'project'
+        ? next.label
+        : `${next.label}/${next.relPath}`;
+  };
+  applyOverviewScope({ kind: 'workspace' });
 
   // IDE-style workspace tree built from the full paginated symbol
   // set so every indexed file shows even when the workspace has more
@@ -190,13 +207,20 @@ async function boot(): Promise<void> {
   // the shell react to file clicks by spawning a synthetic SymbolDetail
   // profile listing the symbols defined in that file.
   setStatus('build tree…');
-  const fileById = new Map<string, FileEntry>();
-  const workspaceRoot = buildWorkspaceTree('Workspace', projects, treeSymbols, fileById);
+  const treeOut: TreeOut = {
+    fileById: new Map(),
+    folderById: new Map(),
+    projectByExplorerId: new Map(),
+  };
+  const workspaceRoot = buildWorkspaceTree('Workspace', projects, treeSymbols, treeOut);
   explorerEl.tree = [workspaceRoot];
+  const { fileById, folderById, projectByExplorerId } = treeOut;
 
   // File click → synthetic SymbolDetail listing the file's symbols.
-  // Folder / workspace / project clicks just toggle expand + update
-  // the Explorer's own selection highlight; no panel cascade.
+  // Project / folder click → switch the Overview scope so the canvas
+  // paints modules inside that scope rather than the workspace
+  // projects. Workspace-level folders (no project bound) are still
+  // navigational scaffolding — no scope cascade for them.
   explorerEl.addEventListener('sd-explorer-select', ev => {
     const detail = (ev as CustomEvent<ExplorerSelectDetail>).detail;
     if (detail.fqdn !== null) return; // symbol click — handled by focus subscription
@@ -205,6 +229,23 @@ async function boot(): Promise<void> {
       if (entry === undefined) return;
       detailsEl.symbol = buildFileSyntheticDetail(entry);
       focusCanvas.set_payload(buildEmptyFocusPayload());
+      return;
+    }
+    if (detail.kind === 'project') {
+      const proj = projectByExplorerId.get(detail.id);
+      if (proj === undefined) return;
+      applyOverviewScope({ kind: 'project', projectId: proj.project_id, label: proj.label });
+      return;
+    }
+    if (detail.kind === 'folder') {
+      const folder = folderById.get(detail.id);
+      if (folder === undefined) return;
+      applyOverviewScope({
+        kind: 'folder',
+        projectId: folder.projectId,
+        label: folder.projectLabel,
+        relPath: folder.relPath,
+      });
     }
   });
 
@@ -527,6 +568,30 @@ function emptyDir(): DirNode {
   return { children: new Map(), files: new Map() };
 }
 
+/**
+ * Overview navigation state. The default `workspace` mode paints
+ * every project as a cluster (project_id = cluster_id). Clicking a
+ * project cluster — or a folder/project in the Explorer — switches
+ * the scope to `project` or `folder`; the Overview then paints the
+ * modules inside that scope and their inter-module edges. Going back
+ * is one click on the breadcrumb pill the OverviewElement renders.
+ */
+type OverviewScope =
+  | { kind: 'workspace' }
+  | { kind: 'project'; projectId: number; label: string }
+  | { kind: 'folder'; projectId: number; label: string; relPath: string };
+
+/**
+ * What a cluster click should dispatch to. The Overview canvas only
+ * knows opaque u32 ids; the shell owns the resolution table so each
+ * scope can rewrite click semantics independently — workspace mode
+ * drills into projects, module modes focus the module representative.
+ */
+type ClusterTarget =
+  | { kind: 'drill-project'; projectId: number; label: string }
+  | { kind: 'drill-folder'; projectId: number; label: string; relPath: string }
+  | { kind: 'focus-symbol'; fqdn: string };
+
 interface FileEntry {
   readonly id: string;
   readonly path: string;
@@ -534,11 +599,34 @@ interface FileEntry {
   readonly symbols: ReadonlyArray<BrowseSymbol>;
 }
 
+interface FolderEntry {
+  readonly projectId: number;
+  readonly projectLabel: string;
+  /**
+   * Project-relative folder path (no leading separator). Empty string
+   * means the project root itself (only used when the tree-builder
+   * exposes it as a folder, normally the project node is preferred).
+   */
+  readonly relPath: string;
+}
 
 interface ProjectLike {
   readonly project_id: number;
   readonly label: string;
   readonly rel_path: string;
+}
+
+/**
+ * Side-channel maps collected during the workspace tree walk. The
+ * Explorer dispatches clicks via opaque node ids; these maps let the
+ * host resolve a click back to the rich metadata (file entry,
+ * folder coords inside a project, project) needed to drive the
+ * Inspector and the Overview scope.
+ */
+interface TreeOut {
+  readonly fileById: Map<string, FileEntry>;
+  readonly folderById: Map<string, FolderEntry>;
+  readonly projectByExplorerId: Map<string, ProjectLike>;
 }
 
 interface PathTrieNode {
@@ -570,7 +658,7 @@ function buildWorkspaceTree(
   workspaceLabel: string,
   projects: ReadonlyArray<ProjectLike>,
   allSymbols: ReadonlyArray<BrowseSymbol>,
-  fileById: Map<string, FileEntry>,
+  out: TreeOut,
 ): ExplorerTreeNode {
   const trie = emptyTrie();
   for (const p of projects) {
@@ -591,7 +679,7 @@ function buildWorkspaceTree(
     id: 'workspace',
     label: workspaceLabel,
     kind: 'workspace',
-    children: trieToExplorerNodes(trie, 'ws', allSymbols, fileById),
+    children: trieToExplorerNodes(trie, 'ws', allSymbols, out),
   };
 }
 
@@ -599,26 +687,27 @@ function trieToExplorerNodes(
   trie: PathTrieNode,
   idPrefix: string,
   allSymbols: ReadonlyArray<BrowseSymbol>,
-  fileById: Map<string, FileEntry>,
+  out: TreeOut,
 ): ExplorerTreeNode[] {
-  const out: ExplorerTreeNode[] = [];
+  const nodes: ExplorerTreeNode[] = [];
   for (const name of [...trie.children.keys()].sort((a, b) => a.localeCompare(b))) {
     const child = trie.children.get(name);
     if (child === undefined) continue;
     const childId = `${idPrefix}/${name}`;
-    const subProjectNodes = trieToExplorerNodes(child, childId, allSymbols, fileById);
+    const subProjectNodes = trieToExplorerNodes(child, childId, allSymbols, out);
     if (child.project !== undefined) {
       // This trie level is a real project. Render with project kind,
       // path-segment as the visible label, daemon label as tooltip-
       // shaped metadata. Merge sub-project entries with the project's
       // own file tree under one combined children array.
       const project = child.project;
-      const projectNode = buildProjectNode(project, allSymbols, fileById);
+      out.projectByExplorerId.set(childId, project);
+      const projectNode = buildProjectNode(project, allSymbols, out);
       const merged: ExplorerTreeNode[] = [
         ...subProjectNodes,
         ...(projectNode.children ?? []),
       ];
-      out.push({
+      nodes.push({
         id: childId,
         label: name,
         kind: 'project',
@@ -628,7 +717,7 @@ function trieToExplorerNodes(
       });
     } else {
       // Pure folder — only purpose is to nest sub-projects.
-      out.push({
+      nodes.push({
         id: childId,
         label: name,
         kind: 'folder',
@@ -636,13 +725,13 @@ function trieToExplorerNodes(
       });
     }
   }
-  return out;
+  return nodes;
 }
 
 function buildProjectNode(
   project: { project_id: number; label: string; rel_path: string },
   allSymbols: ReadonlyArray<BrowseSymbol>,
-  fileById: Map<string, FileEntry>,
+  out: TreeOut,
 ): ExplorerTreeNode {
   const root = emptyDir();
   let touchedFiles = 0;
@@ -674,8 +763,9 @@ function buildProjectNode(
     }
   }
   const id = `project:${project.project_id}`;
+  out.projectByExplorerId.set(id, project);
   const children = touchedFiles > 0
-    ? dirToNodes(root, id, project.label, project.rel_path, fileById)
+    ? dirToNodes(root, id, project, '', out)
     : undefined;
   return {
     id,
@@ -688,29 +778,34 @@ function buildProjectNode(
 function dirToNodes(
   dir: DirNode,
   idPrefix: string,
-  projectLabel: string,
+  project: ProjectLike,
   currentPath: string,
-  fileById: Map<string, FileEntry>,
+  out: TreeOut,
 ): ExplorerTreeNode[] {
-  const out: ExplorerTreeNode[] = [];
+  const nodes: ExplorerTreeNode[] = [];
   for (const name of [...dir.children.keys()].sort()) {
     const child = dir.children.get(name);
     if (child === undefined) continue;
     const id = `${idPrefix}/${name}`;
     const subPath = currentPath.length > 0 ? `${currentPath}/${name}` : name;
-    out.push({
+    out.folderById.set(id, {
+      projectId: project.project_id,
+      projectLabel: project.label,
+      relPath: subPath,
+    });
+    nodes.push({
       id,
       label: name,
       kind: 'folder',
-      children: dirToNodes(child, id, projectLabel, subPath, fileById),
+      children: dirToNodes(child, id, project, subPath, out),
     });
   }
   for (const name of [...dir.files.keys()].sort()) {
     const symbols = (dir.files.get(name) ?? []).slice().sort((a, b) => a.start_line - b.start_line);
     const id = `${idPrefix}/${name}`;
     const filePath = currentPath.length > 0 ? `${currentPath}/${name}` : name;
-    fileById.set(id, { id, path: filePath, projectLabel, symbols });
-    out.push({
+    out.fileById.set(id, { id, path: filePath, projectLabel: project.label, symbols });
+    nodes.push({
       id,
       label: name,
       kind: 'file',
@@ -724,7 +819,7 @@ function dirToNodes(
       })),
     });
   }
-  return out;
+  return nodes;
 }
 
 function buildFileSyntheticDetail(file: FileEntry): SymbolDetail {
@@ -783,12 +878,32 @@ function mapBrowseSymbolKind(s: BrowseSymbol): ExplorerNodeKind {
   }
 }
 
-function buildOverviewPayload(
+interface BuiltOverviewPayload {
+  readonly json: string;
+  readonly targets: Map<number, ClusterTarget>;
+}
+
+type GraphEdge = { from: string; to: string; kind: string; outbound: boolean };
+
+function buildOverviewPayloadForScope(
+  scope: OverviewScope,
+  projects: ReadonlyArray<{ project_id: number; label: string; rel_path: string; kind: { kind: string } }>,
+  symbols: ReadonlyArray<BrowseSymbol>,
+  edges: ReadonlyArray<GraphEdge>,
+  symbolByFqdn: Map<string, BrowseSymbol>,
+): BuiltOverviewPayload {
+  if (scope.kind === 'workspace') {
+    return buildWorkspaceOverviewPayload(projects, symbols, edges, symbolByFqdn);
+  }
+  return buildModuleOverviewPayload(scope, projects, symbols, edges, symbolByFqdn);
+}
+
+function buildWorkspaceOverviewPayload(
   projects: ReadonlyArray<{ project_id: number; label: string; kind: { kind: string } }>,
   symbols: ReadonlyArray<BrowseSymbol>,
-  edges: ReadonlyArray<{ from: string; to: string; kind: string; outbound: boolean }>,
+  edges: ReadonlyArray<GraphEdge>,
   symbolByFqdn: Map<string, BrowseSymbol>,
-): string {
+): BuiltOverviewPayload {
   const counts = new Map<number, number>();
   for (const s of symbols) {
     if (s.project_id === undefined || s.project_id === null) continue;
@@ -800,6 +915,10 @@ function buildOverviewPayload(
     kind: p.kind.kind,
     symbol_count: counts.get(p.project_id) ?? 0,
   }));
+  const targets = new Map<number, ClusterTarget>();
+  for (const p of projects) {
+    targets.set(p.project_id, { kind: 'drill-project', projectId: p.project_id, label: p.label });
+  }
   const aggregated = new Map<string, { from: number; to: number; weight: number }>();
   for (const e of edges) {
     const from = symbolByFqdn.get(e.from)?.project_id;
@@ -812,10 +931,126 @@ function buildOverviewPayload(
     if (bucket === undefined) aggregated.set(key, { from, to, weight: 1 });
     else bucket.weight += 1;
   }
-  return JSON.stringify({
-    clusters,
-    edges: [...aggregated.values()],
+  return {
+    json: JSON.stringify({ clusters, edges: [...aggregated.values()] }),
+    targets,
+  };
+}
+
+function buildModuleOverviewPayload(
+  scope: Exclude<OverviewScope, { kind: 'workspace' }>,
+  projects: ReadonlyArray<{ project_id: number; label: string; rel_path: string }>,
+  symbols: ReadonlyArray<BrowseSymbol>,
+  edges: ReadonlyArray<GraphEdge>,
+  symbolByFqdn: Map<string, BrowseSymbol>,
+): BuiltOverviewPayload {
+  const project = projects.find(p => p.project_id === scope.projectId);
+  const projRelPath = project?.rel_path.replace(/\\/g, '/') ?? '';
+  const pathPrefix = scope.kind === 'folder' && scope.relPath.length > 0
+    ? `${projRelPath}/${scope.relPath}`
+    : projRelPath;
+  const inScope = (s: BrowseSymbol): boolean => {
+    if (s.project_id !== scope.projectId) return false;
+    if (scope.kind === 'project') return true;
+    if (pathPrefix.length === 0) return true;
+    const norm = (s.file ?? '').replace(/\\/g, '/');
+    return norm === pathPrefix || norm.startsWith(`${pathPrefix}/`);
+  };
+
+  // Group in-scope symbols by module fqdn. Symbols without a module
+  // (rare for workspace symbols) collapse under '<root>' so they don't
+  // disappear from the view.
+  const byModule = new Map<string, BrowseSymbol[]>();
+  for (const s of symbols) {
+    if (!inScope(s)) continue;
+    const m = s.module && s.module.length > 0 ? s.module : '<root>';
+    const bucket = byModule.get(m);
+    if (bucket === undefined) byModule.set(m, [s]);
+    else bucket.push(s);
+  }
+
+  const moduleIds = new Map<string, number>();
+  const clusters: { id: number; label: string; kind: string; symbol_count: number }[] = [];
+  const targets = new Map<number, ClusterTarget>();
+  let nextId = 0;
+  // Stable order: sort by symbol count desc, then alphabetical, so the
+  // heaviest module anchors the sunflower centre.
+  const sorted = [...byModule.entries()].sort(([am, asyms], [bm, bsyms]) => {
+    const dc = bsyms.length - asyms.length;
+    return dc !== 0 ? dc : am.localeCompare(bm);
   });
+  for (const [module, syms] of sorted) {
+    const id = nextId++;
+    moduleIds.set(module, id);
+    clusters.push({
+      id,
+      label: shortenModuleLabel(module, project?.label),
+      kind: 'module',
+      symbol_count: syms.length,
+    });
+    targets.set(id, { kind: 'focus-symbol', fqdn: pickModuleRepresentative(syms) });
+  }
+
+  const aggregated = new Map<string, { from: number; to: number; weight: number }>();
+  for (const e of edges) {
+    const fromSym = symbolByFqdn.get(e.from);
+    const toSym = symbolByFqdn.get(e.to);
+    if (fromSym === undefined || toSym === undefined) continue;
+    if (!inScope(fromSym) || !inScope(toSym)) continue;
+    const fromMod = fromSym.module && fromSym.module.length > 0 ? fromSym.module : '<root>';
+    const toMod = toSym.module && toSym.module.length > 0 ? toSym.module : '<root>';
+    if (fromMod === toMod) continue;
+    const fromId = moduleIds.get(fromMod);
+    const toId = moduleIds.get(toMod);
+    if (fromId === undefined || toId === undefined) continue;
+    const key = `${fromId}->${toId}`;
+    const bucket = aggregated.get(key);
+    if (bucket === undefined) aggregated.set(key, { from: fromId, to: toId, weight: 1 });
+    else bucket.weight += 1;
+  }
+
+  return {
+    json: JSON.stringify({ clusters, edges: [...aggregated.values()] }),
+    targets,
+  };
+}
+
+/**
+ * Strip the project label prefix from a module fqdn so the Overview
+ * shows `query::cache` instead of `standardoc-core::query::cache`.
+ * Falls back to the full module string when no clean prefix matches.
+ */
+function shortenModuleLabel(module: string, projectLabel: string | undefined): string {
+  if (projectLabel && module.startsWith(`${projectLabel}::`)) {
+    return module.slice(projectLabel.length + 2);
+  }
+  if (projectLabel && module === projectLabel) return '<root>';
+  return module;
+}
+
+/**
+ * Pick a single symbol to focus when a module cluster is clicked.
+ * Prefer entry points → public symbols → shortest fqdn → alphabetical
+ * so the click lands on a meaningful surface rather than a random
+ * private helper buried in the middle of the file.
+ */
+function pickModuleRepresentative(symbols: ReadonlyArray<BrowseSymbol>): string {
+  let best: { fqdn: string; rank: [number, number, number, string] } | null = null;
+  for (const s of symbols) {
+    const ep = s.entry_point ? 0 : 1;
+    const vis = s.visibility === 'public' ? 0 : 1;
+    const segCount = s.fqdn.split('::').length;
+    const rank: [number, number, number, string] = [ep, vis, segCount, s.fqdn];
+    if (best === null
+      || rank[0] < best.rank[0]
+      || (rank[0] === best.rank[0] && rank[1] < best.rank[1])
+      || (rank[0] === best.rank[0] && rank[1] === best.rank[1] && rank[2] < best.rank[2])
+      || (rank[0] === best.rank[0] && rank[1] === best.rank[1] && rank[2] === best.rank[2] && rank[3] < best.rank[3])
+    ) {
+      best = { fqdn: s.fqdn, rank };
+    }
+  }
+  return best?.fqdn ?? symbols[0]?.fqdn ?? '';
 }
 
 function buildFocusPayload(

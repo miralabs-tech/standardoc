@@ -44,3 +44,10 @@ export interface OverviewErrorDetail {
   readonly source: 'canvas-init' | 'set-payload';
   readonly message: string;
 }
+
+/**
+ * Describes the current Overview scope label shown in the breadcrumb
+ * overlay. `null` (workspace mode) hides the overlay entirely; any
+ * other value renders the breadcrumb `← Workspace › <label>`.
+ */
+export type OverviewScopeLabel = string | null;
