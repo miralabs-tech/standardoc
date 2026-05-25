@@ -36,6 +36,13 @@ export interface ExplorerTreeNode {
 	readonly expandable?: boolean;
 	/** Optional loading marker — renders as a `…` child placeholder. */
 	readonly loading?: boolean;
+	/**
+	 * Optional tooltip / secondary text. Shown via the row's `title`
+	 * attribute on hover. Use to surface the canonical project label
+	 * when the visible `label` is a path segment, or the file's full
+	 * path when only the basename is shown, etc.
+	 */
+	readonly description?: string;
 }
 
 export interface ExplorerExpandDetail {

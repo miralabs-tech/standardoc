@@ -286,42 +286,108 @@ interface FileEntry {
 	readonly symbols: ReadonlyArray<BrowseSymbol>;
 }
 
+interface ProjectLike {
+	readonly project_id: number;
+	readonly label: string;
+	readonly rel_path: string;
+}
+
+interface PathTrieNode {
+	/** Project bound at this exact path (rel_path === idPath), if any. */
+	project?: ProjectLike;
+	/** Sub-segments under this node. */
+	children: Map<string, PathTrieNode>;
+}
+
+function emptyTrie(): PathTrieNode {
+	return { children: new Map() };
+}
+
+/**
+ * IDE-style workspace tree. We project every project's rel_path onto
+ * a path trie so siblings under shared directories nest properly:
+ * `crates/standardoc-graph-viz/{lib,pkg,playground}` end up as
+ * children of `standardoc-graph-viz` rather than four flat entries
+ * under `crates`. Labels are taken from the path segment (matching
+ * what you'd see in any file explorer); the daemon-provided project
+ * label sits in `title` so hover surfaces the canonical name without
+ * polluting the visible label with crate-system suffixes.
+ *
+ * If a project's directory is ALSO an ancestor of other projects, it
+ * renders as both project + folder: its own file tree merges with the
+ * sub-projects' nodes under one combined entry.
+ */
 function buildWorkspaceTree(
 	workspaceLabel: string,
-	projects: ReadonlyArray<{ project_id: number; label: string; rel_path: string }>,
+	projects: ReadonlyArray<ProjectLike>,
 	allSymbols: ReadonlyArray<BrowseSymbol>,
 	fileById: Map<string, FileEntry>,
 ): ExplorerTreeNode {
-	// Group projects by first path segment so the workspace reads like
-	// a real file explorer (crates/, ext/, examples/, …). Within each
-	// group, projects sort alphabetically by label.
-	const groups = new Map<string, Array<{ project_id: number; label: string; rel_path: string }>>();
+	const trie = emptyTrie();
 	for (const p of projects) {
 		const segs = p.rel_path.replace(/\\/g, '/').split('/').filter(Boolean);
-		const first = segs[0] ?? '<root>';
-		const arr = groups.get(first) ?? [];
-		arr.push(p);
-		groups.set(first, arr);
+		let cur = trie;
+		for (const seg of segs) {
+			let next = cur.children.get(seg);
+			if (next === undefined) {
+				next = emptyTrie();
+				cur.children.set(seg, next);
+			}
+			cur = next;
+		}
+		cur.project = p;
 	}
-
-	const folderNodes: ExplorerTreeNode[] = [...groups.entries()]
-		.sort((a, b) => a[0].localeCompare(b[0]))
-		.map(([name, projs]) => ({
-			id: `wsfolder:${name}`,
-			label: name,
-			kind: 'folder',
-			children: projs
-				.slice()
-				.sort((a, b) => a.label.localeCompare(b.label))
-				.map(p => buildProjectNode(p, allSymbols, fileById)),
-		}));
 
 	return {
 		id: 'workspace',
 		label: workspaceLabel,
 		kind: 'workspace',
-		children: folderNodes,
+		children: trieToExplorerNodes(trie, 'ws', allSymbols, fileById),
 	};
+}
+
+function trieToExplorerNodes(
+	trie: PathTrieNode,
+	idPrefix: string,
+	allSymbols: ReadonlyArray<BrowseSymbol>,
+	fileById: Map<string, FileEntry>,
+): ExplorerTreeNode[] {
+	const out: ExplorerTreeNode[] = [];
+	for (const name of [...trie.children.keys()].sort((a, b) => a.localeCompare(b))) {
+		const child = trie.children.get(name);
+		if (child === undefined) continue;
+		const childId = `${idPrefix}/${name}`;
+		const subProjectNodes = trieToExplorerNodes(child, childId, allSymbols, fileById);
+		if (child.project !== undefined) {
+			// This trie level is a real project. Render with project kind,
+			// path-segment as the visible label, daemon label as tooltip-
+			// shaped metadata. Merge sub-project entries with the project's
+			// own file tree under one combined children array.
+			const project = child.project;
+			const projectNode = buildProjectNode(project, allSymbols, fileById);
+			const merged: ExplorerTreeNode[] = [
+				...subProjectNodes,
+				...(projectNode.children ?? []),
+			];
+			out.push({
+				id: childId,
+				label: name,
+				kind: 'project',
+				children: merged.length > 0 ? merged : undefined,
+				fqdn: null,
+				description: `${project.label} (${project.rel_path})`,
+			});
+		} else {
+			// Pure folder — only purpose is to nest sub-projects.
+			out.push({
+				id: childId,
+				label: name,
+				kind: 'folder',
+				children: subProjectNodes,
+			});
+		}
+	}
+	return out;
 }
 
 function buildProjectNode(

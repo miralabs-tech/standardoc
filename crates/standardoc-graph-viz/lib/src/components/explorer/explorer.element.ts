@@ -274,6 +274,12 @@ export class ExplorerElement extends HTMLElement {
 		label.className = C.nodeLabel;
 		label.textContent = node.label;
 
+		if (node.description !== undefined && node.description.length > 0) {
+			row.title = node.description;
+		} else if (node.fqdn !== null && node.fqdn !== undefined) {
+			row.title = node.fqdn;
+		}
+
 		row.appendChild(twisty);
 		row.appendChild(icon);
 		row.appendChild(label);
