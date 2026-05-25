@@ -54,12 +54,17 @@ struct OverviewPayload {
 	edges: Vec<OverviewEdge>,
 }
 
-/// World-space cluster placement. `pos` is in world coordinates;
-/// `world_radius` is the cluster's sphere radius in the same space.
+/// World-space cluster placement. `pos` is the cluster centre in world
+/// coords; `world_radius` is the cluster's outer sphere radius; `hue`
+/// is the deterministic HSL hue used to colour the cluster. The per-
+/// symbol "sub_points constellation" of the V0 was removed per the Dark
+/// Semantic Observatory manifesto — the Overview shows crates / hubs,
+/// not individual symbols, so satellite dots were decorative noise.
 #[derive(Debug, Clone, Copy)]
 struct LaidCluster {
 	pos: Vec3,
 	world_radius: f32,
+	hue: f32,
 }
 
 /// Screen-space projection of a cluster for the current frame, cached
@@ -78,15 +83,19 @@ struct ProjectedCluster {
 	visible: bool,
 }
 
-const MIN_CLUSTER_RADIUS_WORLD: f32 = 60.0;
+const MIN_CLUSTER_RADIUS_WORLD: f32 = 70.0;
 const MAX_CLUSTER_RADIUS_WORLD: f32 = 220.0;
-const CLUSTER_GAP_WORLD: f32 = 220.0;
-const SUNFLOWER_SCALE: f32 = 280.0;
+const CLUSTER_GAP_WORLD: f32 = 380.0;
+const SUNFLOWER_SCALE: f32 = 440.0;
 const ZOOM_STEP: f64 = 0.0012;
 const CLICK_DRAG_THRESHOLD: f64 = 4.0;
-const LABEL_OFFSET: f64 = 10.0;
+const LABEL_OFFSET: f64 = 14.0;
 const HIT_PAD: f64 = 6.0;
 const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653_3;
+// Sub-points constellation removed (manifesto anti-pattern: "galaxie
+// décorative"). If we ever want per-cluster texture, regenerate from
+// the IR signal (hotspot indicators, complexity score, etc.) — not
+// abstract dot scatter.
 
 #[derive(Debug, Clone, Copy)]
 struct DragState {
@@ -317,7 +326,13 @@ impl OverviewCanvas {
 				)
 			};
 
-			self.positions.insert(c.id, LaidCluster { pos, world_radius: world_r });
+			let hue = label_hue(&c.label);
+
+			self.positions.insert(c.id, LaidCluster {
+				pos,
+				world_radius: world_r,
+				hue,
+			});
 			self.render_order.push(c.id);
 		}
 	}
@@ -344,8 +359,25 @@ impl OverviewCanvas {
 	}
 
 	fn draw(&self) {
-		self.ctx.set_fill_style_str("#161616");
-		self.ctx.fill_rect(0.0, 0.0, self.width, self.height);
+		// Spatial vignette: radial gradient from a deep blue centre out
+		// to near-black at the corners — gives the canvas a sense of
+		// 3D space depth instead of the flat #161616 the V0 used.
+		if let Ok(bg) = self.ctx.create_radial_gradient(
+			self.width * 0.5, self.height * 0.5, 0.0,
+			self.width * 0.5, self.height * 0.5, (self.width.max(self.height)) * 0.8,
+		) {
+			let _ = bg.add_color_stop(0.0, "#1a1e2a");
+			let _ = bg.add_color_stop(0.6, "#10121a");
+			let _ = bg.add_color_stop(1.0, "#08090e");
+			self.ctx.set_fill_style_canvas_gradient(&bg);
+			self.ctx.fill_rect(0.0, 0.0, self.width, self.height);
+		} else {
+			self.ctx.set_fill_style_str("#10121a");
+			self.ctx.fill_rect(0.0, 0.0, self.width, self.height);
+		}
+		// Subtle starfield — 120 tiny dots at deterministic positions
+		// scaled to canvas. The dim alpha keeps them background-only.
+		self.draw_starfield();
 
 		if self.clusters.is_empty() {
 			self.draw_empty_state();
@@ -357,24 +389,26 @@ impl OverviewCanvas {
 		// clusters, simpler than a stale screen-space cache.
 		let projected = self.project_clusters();
 
-		// Edges in projected screen space. We do NOT depth-sort edges
-		// per se; a single line per pair works for the workspace scale
-		// we operate on (a few hundred edges at most).
+		// Inter-cluster edges rendered in TWO PASSES around the cluster
+		// stack: a wide blurred backdrop layer first, then narrow bright
+		// strands ON TOP of the clusters so edges remain visible across
+		// the cluster halos instead of disappearing under them like in
+		// the V0. This is the "glow strand" effect from the mockup.
 		let max_weight = self
 			.edges
 			.iter()
 			.map(|e| e.weight.max(1))
 			.max()
 			.unwrap_or(1) as f64;
+
+		// Pass 1: wide soft blur behind clusters.
 		for e in &self.edges {
 			let (Some(from), Some(to)) = (projected.get(&e.from), projected.get(&e.to)) else { continue };
-			if !from.visible || !to.visible {
-				continue;
-			}
+			if !from.visible || !to.visible { continue; }
 			let w_norm = (f64::from(e.weight.max(1))).ln() / (max_weight.ln().max(1.0));
-			let line_w = 1.4 + w_norm * 3.2;
-			let alpha = 0.55 + w_norm * 0.4;
-			self.ctx.set_stroke_style_str(&format!("rgba(120, 180, 255, {alpha:.3})"));
+			let line_w = 4.0 + w_norm * 6.0;
+			let alpha = 0.18 + w_norm * 0.12;
+			self.ctx.set_stroke_style_str(&format!("rgba(80, 180, 255, {alpha:.3})"));
 			self.ctx.set_line_width(line_w);
 			self.ctx.begin_path();
 			self.ctx.move_to(from.screen_x, from.screen_y);
@@ -398,6 +432,44 @@ impl OverviewCanvas {
 			let Some(c) = self.clusters.iter().find(|c| c.id == *id) else { continue };
 			let highlighted = self.hovered == Some(*id);
 			self.draw_cluster(proj, c, highlighted);
+		}
+
+		// Pass 2: bright narrow strand on top of clusters — completes
+		// the glow effect (wide-soft + narrow-bright = volumetric beam).
+		for e in &self.edges {
+			let (Some(from), Some(to)) = (projected.get(&e.from), projected.get(&e.to)) else { continue };
+			if !from.visible || !to.visible { continue; }
+			let w_norm = (f64::from(e.weight.max(1))).ln() / (max_weight.ln().max(1.0));
+			let line_w = 1.2 + w_norm * 1.4;
+			let alpha = 0.85 + w_norm * 0.15;
+			self.ctx.set_stroke_style_str(&format!("rgba(170, 230, 255, {alpha:.3})"));
+			self.ctx.set_line_width(line_w);
+			self.ctx.begin_path();
+			self.ctx.move_to(from.screen_x, from.screen_y);
+			self.ctx.line_to(to.screen_x, to.screen_y);
+			self.ctx.stroke();
+		}
+	}
+
+	/// Deterministic starfield backdrop — 120 tiny dim dots distributed
+	/// across the canvas via a simple LCG seeded on a fixed constant so
+	/// the pattern is stable across frames + reloads. Gives the empty
+	/// space between clusters texture instead of plain black.
+	fn draw_starfield(&self) {
+		let mut s: u32 = 0x9e37_79b9;
+		for _ in 0..120 {
+			s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+			let rx = (s >> 8) as f64 / (u32::MAX >> 8) as f64;
+			s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+			let ry = (s >> 8) as f64 / (u32::MAX >> 8) as f64;
+			s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+			let bright_pick = (s % 10) as f64 / 10.0;
+			let alpha = if bright_pick > 0.85 { 0.55 } else { 0.18 + bright_pick * 0.12 };
+			let size = if bright_pick > 0.92 { 1.6 } else { 0.7 };
+			self.ctx.set_fill_style_str(&format!("rgba(220, 230, 255, {alpha:.3})"));
+			self.ctx.begin_path();
+			let _ = self.ctx.arc(rx * self.width, ry * self.height, size, 0.0, std::f64::consts::TAU);
+			self.ctx.fill();
 		}
 	}
 
@@ -447,36 +519,65 @@ impl OverviewCanvas {
 
 	fn draw_cluster(&self, proj: &ProjectedCluster, cluster: &OverviewCluster, highlighted: bool) {
 		let r = proj.screen_radius.max(2.0);
-		let halo_alpha = if highlighted { 0.55 } else { 0.22 };
-		self.ctx.set_fill_style_str(&format!("rgba(177, 128, 215, {halo_alpha:.3})"));
+		let Some(laid) = self.positions.get(&cluster.id) else { return };
+		let hue = laid.hue;
+
+		// Cluster halo — soft volumetric glow that reads as a "system
+		// node" / region marker on the architecture map. Replaces the
+		// V0 satellite-dot constellation (galaxie décorative anti-
+		// pattern per the manifesto). Multi-stop radial gradient for
+		// real dimension instead of a flat disc.
+		if let Ok(halo) = self.ctx.create_radial_gradient(
+			proj.screen_x, proj.screen_y, r * 0.10,
+			proj.screen_x, proj.screen_y, r + 60.0,
+		) {
+			let inner_alpha = if highlighted { 0.65 } else { 0.48 };
+			let mid_alpha = if highlighted { 0.42 } else { 0.26 };
+			let _ = halo.add_color_stop(0.0, &format!("hsla({hue:.0}, 90%, 75%, {inner_alpha:.3})"));
+			let _ = halo.add_color_stop(0.45, &format!("hsla({hue:.0}, 80%, 55%, {mid_alpha:.3})"));
+			let _ = halo.add_color_stop(1.0, &format!("hsla({hue:.0}, 70%, 40%, 0.0)"));
+			self.ctx.set_fill_style_canvas_gradient(&halo);
+			self.ctx.begin_path();
+			let _ = self.ctx.arc(proj.screen_x, proj.screen_y, r + 60.0, 0.0, std::f64::consts::TAU);
+			self.ctx.fill();
+		}
+
+		// Bright anchor dot at the cluster centre + its own micro-halo —
+		// reads as the "node" of the topology. The outer halo above is
+		// the cluster's territory; this dot is the cluster's identity.
+		if let Ok(core_glow) = self.ctx.create_radial_gradient(
+			proj.screen_x, proj.screen_y, 0.0,
+			proj.screen_x, proj.screen_y, (r * 0.40).max(12.0),
+		) {
+			let _ = core_glow.add_color_stop(0.0, &format!("hsla({hue:.0}, 95%, 90%, 1.0)"));
+			let _ = core_glow.add_color_stop(0.5, &format!("hsla({hue:.0}, 85%, 70%, 0.65)"));
+			let _ = core_glow.add_color_stop(1.0, &format!("hsla({hue:.0}, 80%, 60%, 0.0)"));
+			self.ctx.set_fill_style_canvas_gradient(&core_glow);
+			self.ctx.begin_path();
+			let _ = self.ctx.arc(proj.screen_x, proj.screen_y, (r * 0.40).max(12.0), 0.0, std::f64::consts::TAU);
+			self.ctx.fill();
+		}
+
+		// Hard centre point — small bright HSL dot anchors the eye on
+		// the cluster's exact world position even when halo+glow blur.
+		self.ctx.set_fill_style_str(&format!("hsla({hue:.0}, 100%, 92%, 1.0)"));
 		self.ctx.begin_path();
-		let _ = self.ctx.arc(proj.screen_x, proj.screen_y, r + 16.0, 0.0, std::f64::consts::TAU);
+		let _ = self.ctx.arc(proj.screen_x, proj.screen_y, 3.5, 0.0, std::f64::consts::TAU);
 		self.ctx.fill();
 
-		let gradient = match self.ctx.create_radial_gradient(proj.screen_x, proj.screen_y, 0.0, proj.screen_x, proj.screen_y, r) {
-			Ok(g) => g,
-			Err(_) => return,
-		};
-		let _ = gradient.add_color_stop(0.0, "rgba(230, 210, 255, 0.95)");
-		let _ = gradient.add_color_stop(0.55, "rgba(170, 130, 215, 0.78)");
-		let _ = gradient.add_color_stop(1.0, "rgba(60, 40, 95, 0.4)");
-		self.ctx.set_fill_style_canvas_gradient(&gradient);
-		self.ctx.begin_path();
-		let _ = self.ctx.arc(proj.screen_x, proj.screen_y, r, 0.0, std::f64::consts::TAU);
-		self.ctx.fill();
-
-		self.ctx.set_fill_style_str(if highlighted { "#ffffff" } else { "#cccccc" });
-		self.ctx.set_font("600 13px ui-monospace, SFMono-Regular, monospace");
+		// Label + count below the constellation.
+		self.ctx.set_fill_style_str(if highlighted { "#ffffff" } else { "#e3e3e3" });
+		self.ctx.set_font("600 14px ui-monospace, SFMono-Regular, monospace");
 		self.ctx.set_text_align("center");
 		self.ctx.set_text_baseline("top");
 		let _ = self.ctx.fill_text(&cluster.label, proj.screen_x, proj.screen_y + r + LABEL_OFFSET);
 
-		self.ctx.set_fill_style_str("#9d9d9d");
-		self.ctx.set_font("10px ui-monospace, SFMono-Regular, monospace");
+		self.ctx.set_fill_style_str(&format!("hsla({hue:.0}, 50%, 70%, 0.9)"));
+		self.ctx.set_font("11px ui-monospace, SFMono-Regular, monospace");
 		let _ = self.ctx.fill_text(
-			&format!("{} symbols", cluster.symbol_count),
+			&format!("{} symbols", format_count(cluster.symbol_count)),
 			proj.screen_x,
-			proj.screen_y + r + LABEL_OFFSET + 16.0,
+			proj.screen_y + r + LABEL_OFFSET + 18.0,
 		);
 	}
 
@@ -507,5 +608,38 @@ impl OverviewCanvas {
 			}
 		}
 		best.map(|(_, id)| id)
+	}
+}
+
+/// Deterministic HSL hue (0-360°) from a cluster label. DJB-2 hash
+/// modulo 360 — cheap, stable across reloads, distributes adjacent
+/// crate names to visually distinct hues.
+fn label_hue(label: &str) -> f32 {
+	let mut h: u32 = 5381;
+	for b in label.bytes() {
+		h = h.wrapping_mul(33).wrapping_add(u32::from(b));
+	}
+	(h % 360) as f32
+}
+
+/// Compact symbol-count formatter for cluster labels. `2400` → `2.4k`,
+/// `1_200_000` → `1.2M`, anything below 1000 prints as-is. Matches the
+/// mockup's `compiler  2.4k symbols` reading.
+fn format_count(n: u32) -> String {
+	if n < 1000 {
+		return n.to_string();
+	}
+	if n < 1_000_000 {
+		let v = f64::from(n) / 1000.0;
+		if v < 10.0 {
+			return format!("{v:.1}k");
+		}
+		return format!("{v:.0}k");
+	}
+	let v = f64::from(n) / 1_000_000.0;
+	if v < 10.0 {
+		format!("{v:.1}M")
+	} else {
+		format!("{v:.0}M")
 	}
 }
