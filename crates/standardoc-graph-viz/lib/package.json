@@ -20,6 +20,7 @@
     "./components/compare-panel": "./src/components/compare-panel/index.ts",
     "./components/panel-host": "./src/components/panel-host/index.ts",
     "./components/legend": "./src/components/legend/index.ts",
+    "./components/select": "./src/components/select/index.ts",
     "./profiler": "./src/profiler/index.ts",
     "./mcp-client": "./src/mcp-client/index.ts",
     "./focus-store": "./src/focus-store/index.ts",
