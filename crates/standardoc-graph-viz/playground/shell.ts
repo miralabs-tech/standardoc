@@ -294,9 +294,22 @@ async function boot(): Promise<void> {
 
   // Bind the scope handler now that the workspace data is in scope.
   // Initial render = workspace mode (paints projects + project edges).
+  // Applies the shell-wide `excludeTests` toggle: when on, both the
+  // symbol set and the edge endpoints get filtered to drop test-
+  // shaped nodes before the payload is built.
   applyOverviewScope = (next: OverviewScope) => {
     currentOverviewScope = next;
-    const built = buildOverviewPayloadForScope(next, projects, treeSymbols, graphEdges, symbolByFqdn);
+    const excludeTests = viewPrefsStore.get().excludeTests;
+    const scopedSymbols = excludeTests
+      ? treeSymbols.filter(s => !looksLikeTest(s.fqdn, s.file))
+      : treeSymbols;
+    const allowedFqdns = excludeTests
+      ? new Set(scopedSymbols.map(s => s.fqdn))
+      : null;
+    const scopedEdges = excludeTests && allowedFqdns !== null
+      ? graphEdges.filter(e => allowedFqdns.has(e.from) && allowedFqdns.has(e.to))
+      : graphEdges;
+    const built = buildOverviewPayloadForScope(next, projects, scopedSymbols, scopedEdges, symbolByFqdn);
     clusterTargets = built.targets;
     overview.set_payload(built.json);
     // Workspace = label only depth-0 root packages so the high-level
@@ -308,6 +321,16 @@ async function boot(): Promise<void> {
     overviewEl.scopeLabel = scopeBreadcrumbLabel(next);
   };
   applyOverviewScope({ kind: 'workspace' });
+
+  // Re-trigger both Overview and Focus on hide-tests toggle so the
+  // wasm canvases pick up the new filter without the user manually
+  // re-navigating. Symbol Details panel subscribes on its own; this
+  // wires the canvas-backed views.
+  viewPrefsStore.subscribe(() => {
+    applyOverviewScope(currentOverviewScope);
+    const fqdn = focusStore.get().current;
+    if (fqdn !== null) void refreshFocus(fqdn);
+  });
 
   // Seed the header search empty state. Entry points (top 5,
   // binary_main + public_api priority) surface the workspace API
@@ -640,13 +663,27 @@ async function boot(): Promise<void> {
       fetchSubItems(mcp, fqdn),
     ]);
     if (myToken !== focusToken) return; // a newer focus arrived
+    // Apply the shell-wide `excludeTests` toggle to the neighborhood
+    // BEFORE building either the SymbolDetail or the focus payload.
+    // Filters both endpoints (skip an edge if either endpoint is a
+    // test) so the wasm canvas matches the panel's "hide tests" view.
+    const excludeTests = viewPrefsStore.get().excludeTests;
+    const neighborhoodSymbols = excludeTests
+      ? (neighborhood?.symbols ?? []).filter(s => !looksLikeTest(s.fqdn, s.file))
+      : (neighborhood?.symbols ?? []);
+    const allowedFqdns = excludeTests
+      ? new Set(neighborhoodSymbols.map(s => s.fqdn).concat([fqdn]))
+      : null;
+    const neighborhoodEdges = excludeTests && allowedFqdns !== null
+      ? (neighborhood?.edges ?? []).filter(e => allowedFqdns.has(e.from) && allowedFqdns.has(e.to))
+      : (neighborhood?.edges ?? []);
     // Build SymbolDetail first so its fields/methods arrays feed the
     // focus payload's centre-card footer ("N fields · N methods").
     // The build is purely TS-side, no extra MCP round-trip.
     let fieldCount = 0;
     let methodCount = 0;
     if (ctx !== null) {
-      const sym = buildSymbolDetail(ctx, neighborhood?.edges ?? [], subItems, fqdn);
+      const sym = buildSymbolDetail(ctx, neighborhoodEdges, subItems, fqdn);
       fieldCount = sym.fields.length;
       methodCount = sym.methods.length;
       detailsEl.symbol = sym;
@@ -654,8 +691,8 @@ async function boot(): Promise<void> {
     focusCanvas.set_payload(buildFocusPayload(
       fqdn,
       ctx,
-      neighborhood?.edges ?? [],
-      neighborhood?.symbols ?? [],
+      neighborhoodEdges,
+      neighborhoodSymbols,
       fieldCount,
       methodCount,
     ));
@@ -1730,6 +1767,26 @@ function shortFqdn(fqdn: string): string {
   return idx >= 0 ? fqdn.slice(idx + 2) : fqdn;
 }
 
+
+/**
+ * Coarse test-symbol heuristic, mirror of the Rust
+ * `query::symbol_looks_like_test` + the Symbol Details panel's
+ * local `looksLikeTest`. Used by the shell to filter focus / overview
+ * payloads when the global `viewPrefsStore.excludeTests` is on so
+ * the wasm canvases match the panel's "hide tests" state without
+ * a round-trip.
+ */
+function looksLikeTest(fqdn: string, file?: string | null): boolean {
+  if (fqdn.includes('::tests::') || fqdn.includes('::test::')) return true;
+  if (fqdn.endsWith('::tests') || fqdn.endsWith('::test')) return true;
+  if (fqdn.endsWith('_test') || fqdn.endsWith('_tests')) return true;
+  if (fqdn.endsWith('.test') || fqdn.endsWith('.spec')) return true;
+  if (!file) return false;
+  const norm = file.replace(/\\/g, '/');
+  if (norm.includes('/tests/') || norm.includes('/test/') || norm.includes('/__tests__/')) return true;
+  if (/(?:_tests?\.rs|\.(?:test|spec)\.(?:tsx?|jsx?))$/.test(norm)) return true;
+  return false;
+}
 
 function formatSignature(sig: RawSymbol['signature']): string | null {
   if (!sig) return null;
