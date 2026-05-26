@@ -23,7 +23,7 @@ use std::sync::Mutex;
 use standardoc_ir::{CrossWorkspaceLookup, CrossWorkspaceResolver};
 
 use crate::storage::cross_workspace::{
-    peer_workspace_for_module, resolve_cross_workspace_import,
+    peer_workspace_for_module, resolve_cross_workspace_import, resolve_intra_workspace_import,
 };
 use crate::storage::handle::IndexHandle;
 
@@ -74,18 +74,42 @@ impl<'a> DbCrossWorkspaceResolver<'a> {
         let Ok(conn) = pool.get() else {
             return CrossWorkspaceLookup::Unknown;
         };
+        // Pass 1 — linked peer workspaces. Cheapest hit path for the
+        // historical multi-workspace use case (Stage 3 R3).
         match resolve_cross_workspace_import(&conn, origin_module, origin_symbol) {
-            Ok(Some(resolution)) => CrossWorkspaceLookup::Hit {
+            Ok(Some(resolution)) => {
+                return CrossWorkspaceLookup::Hit {
+                    workspace_id: resolution.workspace_id,
+                    fqdn: resolution.resolved_fqdn,
+                };
+            }
+            Ok(None) => {}
+            Err(_) => return CrossWorkspaceLookup::Unknown,
+        }
+        // Pass 2 — primary (this) workspace's sibling crates. Critical
+        // for the mono-repo case (no peers linked): without this,
+        // edges crossing crate boundaries within a single workspace
+        // (e.g. `standardoc-lang-provider` → `standardoc-ir::FfiAbi`)
+        // stayed Unresolved. The cross_workspace_post pass has
+        // already filtered out edges targeting the file's own crate
+        // via its `is_local` check, so a hit here is always a real
+        // cross-crate resolution.
+        if let Ok(Some(resolution)) =
+            resolve_intra_workspace_import(&conn, origin_module, origin_symbol)
+        {
+            return CrossWorkspaceLookup::Hit {
                 workspace_id: resolution.workspace_id,
                 fqdn: resolution.resolved_fqdn,
-            },
-            Ok(None) => match peer_workspace_for_module(&conn, origin_module) {
-                Ok(Some(workspace_id)) => {
-                    CrossWorkspaceLookup::KnownPeerMissingSymbol { workspace_id }
-                }
-                _ => CrossWorkspaceLookup::Unknown,
-            },
-            Err(_) => CrossWorkspaceLookup::Unknown,
+            };
+        }
+        // Pass 3 — peer-presence probe so the cross_workspace_post
+        // pass can stamp the typed `UnresolvedBridge` when a known
+        // peer owns the module but doesn't export the symbol.
+        match peer_workspace_for_module(&conn, origin_module) {
+            Ok(Some(workspace_id)) => {
+                CrossWorkspaceLookup::KnownPeerMissingSymbol { workspace_id }
+            }
+            _ => CrossWorkspaceLookup::Unknown,
         }
     }
 }
@@ -270,6 +294,55 @@ mod tests {
             CrossWorkspaceLookup::Hit {
                 workspace_id: "peer-uuid".into(),
                 fqdn: "standardoc-core::pipeline::provider::Foo".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn hit_when_only_primary_workspace_owns_module() {
+        // Mono-repo case: no peer workspaces linked, the target module
+        // lives in a sibling crate within the same (primary) workspace.
+        // Pre-fix this returned Unknown because the resolver only
+        // queried `workspace_id != primary`.
+        let (_dir, handle) = primary_handle();
+        let pool = handle.pool().unwrap();
+        let conn = pool.get().unwrap();
+        let lookup = lookup_with_top_level_symbol("standardoc-ir", "FfiAbi");
+        // Note: put_module_lookup with no explicit workspace defaults to PRIMARY.
+        crate::storage::module_lookup::put_module_lookup(&conn, "primary", &lookup).unwrap();
+        drop(conn);
+
+        let resolver = DbCrossWorkspaceResolver::new(&handle);
+        let result = resolver.resolve("standardoc-ir", "FfiAbi");
+        assert_eq!(
+            result,
+            CrossWorkspaceLookup::Hit {
+                workspace_id: "primary".into(),
+                fqdn: "standardoc-ir::FfiAbi".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn hit_when_underscore_form_resolves_via_primary_after_normalization() {
+        // Combined Bug A + intra-workspace: source uses underscored
+        // `standardoc_ir`, primary has hyphenated `standardoc-ir`,
+        // no peers. Fix chain: normalize in compute() → intra-workspace
+        // primary query hits.
+        let (_dir, handle) = primary_handle();
+        let pool = handle.pool().unwrap();
+        let conn = pool.get().unwrap();
+        let lookup = lookup_with_top_level_symbol("standardoc-ir", "FfiAbi");
+        crate::storage::module_lookup::put_module_lookup(&conn, "primary", &lookup).unwrap();
+        drop(conn);
+
+        let resolver = DbCrossWorkspaceResolver::new(&handle);
+        let result = resolver.resolve("standardoc_ir", "FfiAbi");
+        assert_eq!(
+            result,
+            CrossWorkspaceLookup::Hit {
+                workspace_id: "primary".into(),
+                fqdn: "standardoc-ir::FfiAbi".into(),
             }
         );
     }

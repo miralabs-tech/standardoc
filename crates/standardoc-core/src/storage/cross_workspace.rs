@@ -118,6 +118,56 @@ pub(crate) fn peer_workspace_for_module(
     Ok(row)
 }
 
+/// Intra-workspace counterpart to [`resolve_cross_workspace_import`]
+/// — queries the PRIMARY workspace's `module_lookups` (not peers) so
+/// edges pointing at sibling crates in the same monorepo can resolve
+/// once cargo's underscore→hyphen normalisation has been applied by
+/// the caller. Critical when no peer workspaces are linked: without
+/// it, ~all workspace-internal cross-crate edges (`standardoc_ir::FfiAbi`
+/// from a file in `standardoc-lang-provider`) stayed Unresolved.
+///
+/// The caller is responsible for filtering out edges that target the
+/// FILE'S OWN crate (the cross_workspace_post pass does this via the
+/// `is_local` check on the normalised candidate); this function will
+/// happily return a "Hit" pointing back at the local crate if asked.
+pub(crate) fn resolve_intra_workspace_import(
+    conn: &Connection,
+    origin_module: &str,
+    origin_symbol: &str,
+) -> Result<Option<CrossWorkspaceResolution>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT payload FROM module_lookups \
+         WHERE module_fqdn = ?1 AND workspace_id = ?2",
+    )?;
+    let row = stmt
+        .query_row(params![origin_module, PRIMARY_WORKSPACE_ID], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .optional()?;
+    let Some(payload) = row else {
+        return Ok(None);
+    };
+    let lookup = decode_module_lookup(&payload)?;
+    let Some(entries) = lookup.bindings.get(origin_symbol) else {
+        return Ok(None);
+    };
+    let Some(root_binding) = entries
+        .iter()
+        .find(|b| b.scope_idx == ModuleLookup::ROOT_SCOPE)
+    else {
+        return Ok(None);
+    };
+    let resolved_fqdn = root_binding
+        .resolved_fqdn
+        .clone()
+        .unwrap_or_else(|| format!("{origin_module}::{origin_symbol}"));
+    Ok(Some(CrossWorkspaceResolution {
+        workspace_id: PRIMARY_WORKSPACE_ID.to_string(),
+        resolved_fqdn,
+        binding_source: root_binding.source.clone(),
+    }))
+}
+
 /// Enumerate every linked workspace that provides a matching top-level
 /// binding for `(origin_module, origin_symbol)`. Useful when a symbol
 /// is re-exported by multiple peers and the consumer (Stage 3b-5 MCP)
