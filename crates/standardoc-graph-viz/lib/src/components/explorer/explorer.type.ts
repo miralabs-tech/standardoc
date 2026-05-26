@@ -79,3 +79,20 @@ export interface ExplorerSelectDetail {
   readonly source: 'tree' | 'entry-points' | 'recents';
 }
 
+/**
+ * Navigation modes for the Explorer tree:
+ *   - `files`    — filesystem layout (folders/sub-folders/files); the
+ *                  default and what most IDE-style explorers show.
+ *   - `modules`  — IR-aligned: only modules + their leaf symbols,
+ *                  ignoring intermediate FS layout. Reads like the
+ *                  daemon's module hierarchy.
+ *   - `projects` — flat: just projects (crates / packages), no nesting.
+ *                  Useful for big workspaces to see the top-level shape
+ *                  at a glance.
+ */
+export type ExplorerTreeView = 'files' | 'modules' | 'projects';
+
+export interface ExplorerViewChangeDetail {
+  readonly view: ExplorerTreeView;
+}
+

@@ -19,6 +19,7 @@
     "./components/focus-graph": "./src/components/focus-graph/index.ts",
     "./components/compare-panel": "./src/components/compare-panel/index.ts",
     "./components/panel-host": "./src/components/panel-host/index.ts",
+    "./components/legend": "./src/components/legend/index.ts",
     "./profiler": "./src/profiler/index.ts",
     "./mcp-client": "./src/mcp-client/index.ts",
     "./focus-store": "./src/focus-store/index.ts",

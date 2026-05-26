@@ -48,7 +48,31 @@ const C = {
   breadcrumbBack: s['overview__breadcrumb-back'] ?? '',
   breadcrumbSep: s['overview__breadcrumb-sep'] ?? '',
   breadcrumbCurrent: s['overview__breadcrumb-current'] ?? '',
+  gizmo: s.overview__gizmo ?? '',
+  gizmoGroup: s['overview__gizmo-group'] ?? '',
+  gizmoSep: s['overview__gizmo-sep'] ?? '',
+  gizmoBtn: s['overview__gizmo-btn'] ?? '',
+  gizmoBtnActive: s['overview__gizmo-btn--active'] ?? '',
+  gizmoLabel: s['overview__gizmo-label'] ?? '',
+  gizmoSelect: s['overview__gizmo-select'] ?? '',
 } as const;
+
+const PRESET_BUTTONS: ReadonlyArray<{ preset: string; label: string; title: string }> = [
+  { preset: 'orbit', label: 'orb', title: 'Orbit (3/4 view)' },
+  { preset: 'top', label: 'top', title: 'Top-down view' },
+  { preset: 'front', label: 'fr', title: 'Front view' },
+  { preset: 'side', label: 'side', title: 'Side view' },
+];
+
+const LABEL_LIMIT_OPTIONS: ReadonlyArray<{ value: number; label: string }> = [
+  { value: 0, label: 'all' },
+  { value: 5, label: '5' },
+  { value: 10, label: '10' },
+  { value: 20, label: '20' },
+];
+
+const DEFAULT_PRESET = 'orbit';
+const DEFAULT_LABEL_LIMIT = 0;
 
 export class OverviewElement extends HTMLElement {
   #mounted = false;
@@ -62,8 +86,13 @@ export class OverviewElement extends HTMLElement {
     root: HTMLElement;
     canvas: HTMLCanvasElement;
     breadcrumb: HTMLElement;
+    gizmo: HTMLElement;
+    presetBtns: ReadonlyArray<HTMLButtonElement>;
+    labelSelect: HTMLSelectElement;
   } | null = null;
   #dragging = false;
+  #activePreset = DEFAULT_PRESET;
+  #labelLimit = DEFAULT_LABEL_LIMIT;
 
   set canvasFactory(factory: OverviewCanvasFactory) {
     this.#factory = factory;
@@ -115,10 +144,73 @@ export class OverviewElement extends HTMLElement {
     breadcrumb.className = C.breadcrumb;
     breadcrumb.style.display = 'none';
     root.appendChild(breadcrumb);
+    const gizmo = document.createElement('div');
+    gizmo.className = C.gizmo;
+    // Home button — re-fit the camera on the current scope's bounds.
+    const home = document.createElement('button');
+    home.type = 'button';
+    home.className = C.gizmoBtn;
+    home.title = 'Re-fit camera to scope';
+    home.textContent = '⌂';
+    home.addEventListener('click', () => { this.#canvas?.fit(); });
+    // Preset group — orbit / top / front / side.
+    const presetGroup = document.createElement('div');
+    presetGroup.className = C.gizmoGroup;
+    const presetBtns: HTMLButtonElement[] = [];
+    for (const p of PRESET_BUTTONS) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = C.gizmoBtn;
+      btn.dataset['preset'] = p.preset;
+      btn.title = p.title;
+      btn.textContent = p.label;
+      btn.addEventListener('click', () => {
+        this.#activePreset = p.preset;
+        this.#canvas?.set_camera_preset(p.preset);
+        this.#syncGizmo();
+      });
+      presetGroup.appendChild(btn);
+      presetBtns.push(btn);
+    }
+    // Label-cap select — caps the number of text labels rendered so
+    // the canvas stays readable on big workspaces. Halos + dots stay
+    // visible regardless.
+    const sep = document.createElement('div');
+    sep.className = C.gizmoSep;
+    const labelHint = document.createElement('span');
+    labelHint.className = C.gizmoLabel;
+    labelHint.textContent = 'labels';
+    const labelSelect = document.createElement('select');
+    labelSelect.className = C.gizmoSelect;
+    labelSelect.title = 'Max cluster labels rendered (by camera distance)';
+    for (const opt of LABEL_LIMIT_OPTIONS) {
+      const o = document.createElement('option');
+      o.value = String(opt.value);
+      o.textContent = opt.label;
+      if (opt.value === this.#labelLimit) o.selected = true;
+      labelSelect.appendChild(o);
+    }
+    labelSelect.addEventListener('change', () => {
+      const n = Number.parseInt(labelSelect.value, 10);
+      this.#labelLimit = Number.isFinite(n) ? n : 0;
+      this.#canvas?.set_max_visible_labels(this.#labelLimit);
+    });
+    gizmo.append(home, presetGroup, sep, labelHint, labelSelect);
+    root.appendChild(gizmo);
     this.replaceChildren(root);
-    this.#nodes = { root, canvas, breadcrumb };
+    this.#nodes = { root, canvas, breadcrumb, gizmo, presetBtns, labelSelect };
     this.#wirePointer();
     this.#renderBreadcrumb();
+    this.#syncGizmo();
+  }
+
+  #syncGizmo(): void {
+    const n = this.#nodes;
+    if (n === null) return;
+    for (const btn of n.presetBtns) {
+      const isActive = btn.dataset['preset'] === this.#activePreset;
+      btn.className = classigo(C.gizmoBtn, isActive && C.gizmoBtnActive);
+    }
   }
 
   #renderBreadcrumb(): void {

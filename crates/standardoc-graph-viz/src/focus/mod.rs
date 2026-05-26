@@ -136,6 +136,16 @@ const CARD_RADIUS: f64 = 10.0;
 const EDGE_LINE_WIDTH: f64 = 2.4;
 const ARROW_LEN: f64 = 11.0;
 const ARROW_HALF_WIDTH: f64 = 5.5;
+/// Quadratic Bézier control-point offset perpendicular to the
+/// centre-to-centre direction. Drives how much the edge bows away from
+/// a straight line — at twice the EDGE_LABEL_OFFSET so the curve apex
+/// (t=0.5) coincides with the label's perpendicular lift.
+const EDGE_BEZIER_BOW: f64 = 24.0;
+/// Perpendicular lift applied to edge labels so they sit beside the
+/// line rather than straddling it (the pill background would otherwise
+/// occlude the stroke). World-space pixels, scaled by the camera zoom
+/// at projection time.
+const EDGE_LABEL_OFFSET: f64 = 12.0;
 
 #[derive(Debug, Clone, Copy)]
 enum BucketDirection {
@@ -532,12 +542,25 @@ impl FocusGraphCanvas {
 			let Some(centre_pos) = self.positions.get(&centre_fqdn) else { continue };
 			let (cx, cy) = (centre_pos.x + centre_pos.w * 0.5, centre_pos.y + centre_pos.h * 0.5);
 			let (ox, oy) = (other_pos.x + other_pos.w * 0.5, other_pos.y + other_pos.h * 0.5);
-			// Offset the label 65% of the way from centre toward the
-			// neighbour so it lands away from the centre card (50% put
-			// it on top of the centre card for short radials).
-			let t = 0.65;
-			let wx = cx + (ox - cx) * t;
-			let wy = cy + (oy - cy) * t;
+			// Position labels at the midpoint of the CLIPPED edge segment
+			// (between the two card borders) so they never land on either
+			// endpoint card. A small perpendicular lift keeps the pill
+			// from straddling the stroke.
+			let dx = ox - cx;
+			let dy = oy - cy;
+			let len = dx.hypot(dy).max(1.0);
+			let ux = dx / len;
+			let uy = dy / len;
+			let centre_t = rect_edge_t(centre_pos.w * 0.5, centre_pos.h * 0.5, ux, uy);
+			let other_t = rect_edge_t(other_pos.w * 0.5, other_pos.h * 0.5, ux, uy);
+			let cx_c = cx + ux * centre_t;
+			let cy_c = cy + uy * centre_t;
+			let ox_c = ox - ux * other_t;
+			let oy_c = oy - uy * other_t;
+			let mid_x = (cx_c + ox_c) * 0.5;
+			let mid_y = (cy_c + oy_c) * 0.5;
+			let wx = mid_x + -uy * EDGE_LABEL_OFFSET;
+			let wy = mid_y + ux * EDGE_LABEL_OFFSET;
 			edge_labels.push(EdgeLabelOut {
 				text: edge_phrase(&e.kind),
 				color: edge_color_for_kind(&e.kind),
@@ -697,7 +720,10 @@ impl FocusGraphCanvas {
 	}
 
 	fn draw(&self) {
-		self.ctx.set_fill_style_str("#161616");
+		// Canvas clear — aligned with the modern shell palette
+		// (--sd-bg-deep ≈ #0b0e14) so the focus canvas reads as part
+		// of the shell instead of the legacy gray.
+		self.ctx.set_fill_style_str("#0b0e14");
 		self.ctx.fill_rect(0.0, 0.0, self.width, self.height);
 
 		if self.center.is_none() {
@@ -750,34 +776,47 @@ impl FocusGraphCanvas {
 			self.ctx.set_global_alpha(alpha);
 			self.ctx.set_line_width(line_w);
 			self.ctx.set_stroke_style_str(edge_color_for_kind(&e.kind));
-			// Anchor edges at card centres — the card paint below covers
-			// the line ends, so a centre-to-centre segment reads as a
-			// connector docking on each card's edge.
+			// Clip edge endpoints to card borders, then render as a
+			// quadratic Bézier bowing perpendicular by EDGE_BEZIER_BOW.
+			// Curves separate parallel edges visually and bend away
+			// from intermediate cards on the straight path.
 			let (fx, fy) = (from.x + from.w * 0.5, from.y + from.h * 0.5);
 			let (tx, ty) = (to.x + to.w * 0.5, to.y + to.h * 0.5);
+			let dx = tx - fx;
+			let dy = ty - fy;
+			let len = dx.hypot(dy).max(1.0);
+			let ux = dx / len;
+			let uy = dy / len;
+			let from_t = rect_edge_t(from.w * 0.5, from.h * 0.5, ux, uy);
+			let to_t = rect_edge_t(to.w * 0.5, to.h * 0.5, ux, uy);
+			let fx_c = fx + ux * from_t;
+			let fy_c = fy + uy * from_t;
+			let tx_c = tx - ux * to_t;
+			let ty_c = ty - uy * to_t;
+			let mid_x = (fx_c + tx_c) * 0.5;
+			let mid_y = (fy_c + ty_c) * 0.5;
+			let cp_x = mid_x + -uy * EDGE_BEZIER_BOW;
+			let cp_y = mid_y + ux * EDGE_BEZIER_BOW;
 			// IMPLEMENTS / EXTENDS render as a double-line (two parallel
 			// strokes offset perpendicular to the line direction) so they
 			// read as "inheritance/contract" visually — a single line
 			// would look like any other call/uses edge.
 			let is_double = e.kind == "IMPLEMENTS" || e.kind == "EXTENDS";
 			if is_double {
-				let dx = tx - fx;
-				let dy = ty - fy;
-				let len = dx.hypot(dy).max(1.0);
-				let px = -dy / len * 2.0;
-				let py = dx / len * 2.0;
+				let px = -uy * 2.0;
+				let py = ux * 2.0;
 				self.ctx.begin_path();
-				self.ctx.move_to(fx + px, fy + py);
-				self.ctx.line_to(tx + px, ty + py);
+				self.ctx.move_to(fx_c + px, fy_c + py);
+				self.ctx.quadratic_curve_to(cp_x + px, cp_y + py, tx_c + px, ty_c + py);
 				self.ctx.stroke();
 				self.ctx.begin_path();
-				self.ctx.move_to(fx - px, fy - py);
-				self.ctx.line_to(tx - px, ty - py);
+				self.ctx.move_to(fx_c - px, fy_c - py);
+				self.ctx.quadratic_curve_to(cp_x - px, cp_y - py, tx_c - px, ty_c - py);
 				self.ctx.stroke();
 			} else {
 				self.ctx.begin_path();
-				self.ctx.move_to(fx, fy);
-				self.ctx.line_to(tx, ty);
+				self.ctx.move_to(fx_c, fy_c);
+				self.ctx.quadratic_curve_to(cp_x, cp_y, tx_c, ty_c);
 				self.ctx.stroke();
 			}
 		}
@@ -839,20 +878,30 @@ impl FocusGraphCanvas {
 			let len = dx.hypot(dy).max(1.0);
 			let ux = dx / len;
 			let uy = dy / len;
-			// Find the line-rect intersection on the destination card so
-			// the arrow tip lands flush with the card edge, then pull it
-			// out by 2px so the head sits visibly outside the border.
-			let half_w = to.w * 0.5;
-			let half_h = to.h * 0.5;
-			let t_x = half_w / ux.abs().max(0.001);
-			let t_y = half_h / uy.abs().max(0.001);
-			let edge_t = t_x.min(t_y);
-			let tip_x = tx - ux * (edge_t - 2.0);
-			let tip_y = ty - uy * (edge_t - 2.0);
-			let base_x = tip_x - ux * ARROW_LEN;
-			let base_y = tip_y - uy * ARROW_LEN;
-			let perp_x = -uy * ARROW_HALF_WIDTH;
-			let perp_y = ux * ARROW_HALF_WIDTH;
+			// Recompute clipped endpoints + control point so the arrow
+			// tangent matches the Bézier curve drawn above. Tangent at
+			// t=1 of a quadratic Bézier is (P2 - P1).normalize().
+			let from_t = rect_edge_t(from.w * 0.5, from.h * 0.5, ux, uy);
+			let to_t = rect_edge_t(to.w * 0.5, to.h * 0.5, ux, uy);
+			let fx_c = fx + ux * from_t;
+			let fy_c = fy + uy * from_t;
+			let tx_c = tx - ux * to_t;
+			let ty_c = ty - uy * to_t;
+			let mid_x = (fx_c + tx_c) * 0.5;
+			let mid_y = (fy_c + ty_c) * 0.5;
+			let cp_x = mid_x + -uy * EDGE_BEZIER_BOW;
+			let cp_y = mid_y + ux * EDGE_BEZIER_BOW;
+			let tan_dx = tx_c - cp_x;
+			let tan_dy = ty_c - cp_y;
+			let tan_len = tan_dx.hypot(tan_dy).max(1.0);
+			let tan_ux = tan_dx / tan_len;
+			let tan_uy = tan_dy / tan_len;
+			let tip_x = tx_c + tan_ux * 2.0;
+			let tip_y = ty_c + tan_uy * 2.0;
+			let base_x = tip_x - tan_ux * ARROW_LEN;
+			let base_y = tip_y - tan_uy * ARROW_LEN;
+			let perp_x = -tan_uy * ARROW_HALF_WIDTH;
+			let perp_y = tan_ux * ARROW_HALF_WIDTH;
 			self.ctx.begin_path();
 			self.ctx.move_to(tip_x, tip_y);
 			self.ctx.line_to(base_x + perp_x, base_y + perp_y);
@@ -888,13 +937,10 @@ impl FocusGraphCanvas {
 	fn draw_node(&self, pos: &LaidNode, node: &FocusNode, is_center: bool, highlighted: bool) {
 		let kind = parse_kind(node.kind.as_deref());
 		let kind_color = kind_color_hex(kind);
-		// Bucket-driven border colour: each bucket type owns a hue so the
-		// card border doubles as a categorical badge. The centre keeps a
-		// blue accent (no bucket).
-		let border_color = match pos.bucket {
-			Some(b) => bucket_border_color(b),
-			None => "#5aa9ff",
-		};
+		// Kind-driven border colour: the perimeter doubles as a kind
+		// badge. Bucket categorical info is conveyed by position
+		// (manifesto W=callers / E=deps / N=imports / S=tests).
+		let border_color = kind_color;
 		// Drop shadow under every card — gives the layout real depth
 		// vs the flat VSCode-panel feel the V0 had. Larger soft shadow
 		// for the centre to anchor it as the focal point.
@@ -910,16 +956,16 @@ impl FocusGraphCanvas {
 			rounded_rect_path(&self.ctx, pos.x - 8.0, pos.y - 8.0, pos.w + 16.0, pos.h + 16.0, CARD_RADIUS + 6.0);
 			self.ctx.fill();
 		}
-		// Card body — radial gradient on centre for a subtle "lit"
-		// effect (mockup centre card has the same feel), flat dark on
-		// neighbours so they stay readable backdrop.
+		// Card body — gradient on centre, flat dark on neighbours.
+		// Tinted to the modern shell palette (cool blue-noir vs the
+		// legacy neutral grey) so cards harmonise with --sd-panel-bg.
 		if is_center {
 			let g = self.ctx.create_linear_gradient(pos.x, pos.y, pos.x, pos.y + pos.h);
-			let _ = g.add_color_stop(0.0, "#262b3a");
-			let _ = g.add_color_stop(1.0, "#1c1f29");
+			let _ = g.add_color_stop(0.0, "#1d2433");
+			let _ = g.add_color_stop(1.0, "#13182a");
 			self.ctx.set_fill_style_canvas_gradient(&g);
 		} else {
-			self.ctx.set_fill_style_str("#1a1d22");
+			self.ctx.set_fill_style_str("#161b25");
 		}
 		rounded_rect_path(&self.ctx, pos.x, pos.y, pos.w, pos.h, CARD_RADIUS);
 		self.ctx.fill();
@@ -927,12 +973,6 @@ impl FocusGraphCanvas {
 		self.ctx.set_line_width(if is_center { 2.5 } else { 1.8 });
 		rounded_rect_path(&self.ctx, pos.x, pos.y, pos.w, pos.h, CARD_RADIUS);
 		self.ctx.stroke();
-		// Left accent stripe (kind colour) — thin coloured band on the
-		// card's left edge so the symbol kind reads alongside the bucket
-		// border colour without fighting it.
-		self.ctx.set_fill_style_str(kind_color);
-		rounded_rect_path(&self.ctx, pos.x, pos.y, 3.0, pos.h, CARD_RADIUS * 0.4);
-		self.ctx.fill();
 
 		// Text content. Centre gets 3 lines (name / kind / footer);
 		// neighbour cards get 2 (name / kindLabel).
@@ -1036,6 +1076,17 @@ fn rounded_rect_path(ctx: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: 
 	ctx.close_path();
 }
 
+/// Parametric distance from the centre of a rectangle (half-extents
+/// `hw`/`hh`) to its border along the unit direction `(ux, uy)`. The
+/// border point is `(cx + ux*t, cy + uy*t)` where `t` is the returned
+/// value. Used to clip edge endpoints to card borders so lines don't
+/// cross transparent / dimmed cards.
+fn rect_edge_t(hw: f64, hh: f64, ux: f64, uy: f64) -> f64 {
+	let t_x = hw / ux.abs().max(0.001);
+	let t_y = hh / uy.abs().max(0.001);
+	t_x.min(t_y)
+}
+
 fn format_center_footer(field_count: Option<u32>, method_count: Option<u32>) -> String {
 	let f = field_count.unwrap_or(0);
 	let m = method_count.unwrap_or(0);
@@ -1092,26 +1143,3 @@ fn edge_phrase(kind: &str) -> &'static str {
 	}
 }
 
-/// Bucket border colour mirrors the dominant edge colour for that
-/// bucket so cards in the same group read as a visual cluster:
-///   USED BY     — used-by edges are inbound CALLS, so blue
-///   USES TYPES  — outbound USES_TYPE, yellow
-///   CALLS       — outbound CALLS, blue (same hue as UsedBy reflects
-///                 that both buckets are CALLS-derived; bucket position
-///                 disambiguates direction)
-///   IMPORTS     — outbound IMPORTS, purple
-///   IMPORTED BY — inbound IMPORTS, purple
-///   TESTED BY   — TESTS edges, green
-///   IMPL/EXT    — IMPLEMENTS/EXTENDS, orange
-fn bucket_border_color(bucket: Bucket) -> &'static str {
-	match bucket {
-		Bucket::UsedBy => "#3794ff",
-		Bucket::Calls => "#3794ff",
-		Bucket::UsesTypes => "#cca700",
-		Bucket::Imports => "#b180d7",
-		Bucket::ImportedBy => "#b180d7",
-		Bucket::TestedBy => "#89d185",
-		Bucket::ImplementsExtends => "#f48771",
-		Bucket::Indirect => "#6d6d6d",
-	}
-}

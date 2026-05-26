@@ -16,6 +16,7 @@ export * from './components/overview';
 export * from './components/focus-graph';
 export * from './components/compare-panel';
 export * from './components/panel-host';
+export * from './components/legend';
 export * from './profiler';
 export * from './mcp-client';
 export * from './focus-store';

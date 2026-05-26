@@ -9,6 +9,7 @@
 	background: var(--sd-bg-deep, #161616);
 	border: var(--sd-panel-border, 1px solid #2d2d2d);
 	border-radius: var(--sd-radius-md, 6px);
+	box-shadow: var(--sd-panel-shadow, none);
 	overflow: hidden;
 	color: var(--sd-fg, #cccccc);
 

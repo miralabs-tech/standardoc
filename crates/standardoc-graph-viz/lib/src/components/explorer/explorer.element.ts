@@ -26,12 +26,15 @@
 import classigo from 'classigo';
 
 import { focusStore, type FocusState } from '../../focus-store';
+import '../legend/legend.element';
 import type {
   ExplorerEntryPoint,
   ExplorerExpandDetail,
   ExplorerNodeKind,
   ExplorerSelectDetail,
   ExplorerTreeNode,
+  ExplorerTreeView,
+  ExplorerViewChangeDetail,
   EntryPointKind,
 } from './explorer.type';
 import s from './explorer.module.scss';
@@ -45,6 +48,10 @@ const C = {
   section: s.explorer__section ?? '',
   sectionTitle: s['explorer__section-title'] ?? '',
   empty: s.explorer__empty ?? '',
+  treeHeader: s['explorer__tree-header'] ?? '',
+  treeViewToggle: s['explorer__tree-view-toggle'] ?? '',
+  treeViewBtn: s['explorer__tree-view-btn'] ?? '',
+  treeViewBtnActive: s['explorer__tree-view-btn--active'] ?? '',
   tree: s.explorer__tree ?? '',
   node: s.explorer__node ?? '',
   nodeRow: s['explorer__node-row'] ?? '',
@@ -54,7 +61,9 @@ const C = {
   nodeLabel: s['explorer__node-label'] ?? '',
   nodeChildren: s['explorer__node-children'] ?? '',
   entry: s.explorer__entry ?? '',
+  entryText: s['explorer__entry-text'] ?? '',
   entryLabel: s['explorer__entry-label'] ?? '',
+  entryScope: s['explorer__entry-scope'] ?? '',
   entryBadge: s['explorer__entry-badge'] ?? '',
   entryBadgeBinMain: s['explorer__entry-badge--binary-main'] ?? '',
   entryBadgePublicApi: s['explorer__entry-badge--public-api'] ?? '',
@@ -104,6 +113,14 @@ function shortFqdn(fqdn: string): string {
   return idx >= 0 ? fqdn.slice(idx + 2) : fqdn;
 }
 
+function entryPointScope(fqdn: string): string | null {
+  const colonIdx = fqdn.indexOf('::');
+  if (colonIdx >= 0) return fqdn.slice(0, colonIdx);
+  const dotIdx = fqdn.indexOf('.');
+  if (dotIdx >= 0) return fqdn.slice(0, dotIdx);
+  return null;
+}
+
 /**
  * Depth-first walk returning every id on the path from the top-level
  * roots down to the first node whose `fqdn` matches `target`. Null when
@@ -140,17 +157,38 @@ export class ExplorerElement extends HTMLElement {
   #kindFilter = new Set<ExplorerNodeKind>();
   #visibilityFilter = new Set<string>();
   #entryPointFilter = new Set<EntryPointKind>();
+  #treeView: ExplorerTreeView = 'files';
 
   #nodes: {
     root: HTMLElement;
     treeMount: HTMLElement;
     entryPointsMount: HTMLElement;
     recentsMount: HTMLElement;
+    treeViewBtns: ReadonlyArray<HTMLButtonElement>;
   } | null = null;
 
   set tree(next: ReadonlyArray<ExplorerTreeNode>) {
     this.#tree = next;
     this.#renderTree();
+  }
+
+  set treeView(next: ExplorerTreeView) {
+    if (this.#treeView === next) return;
+    this.#treeView = next;
+    this.#syncTreeViewButtons();
+  }
+
+  get treeView(): ExplorerTreeView {
+    return this.#treeView;
+  }
+
+  #syncTreeViewButtons(): void {
+    const n = this.#nodes;
+    if (n === null) return;
+    for (const btn of n.treeViewBtns) {
+      const v = btn.dataset['view'];
+      btn.className = classigo(C.treeViewBtn, v === this.#treeView && C.treeViewBtnActive);
+    }
   }
 
   set entryPoints(next: ReadonlyArray<ExplorerEntryPoint>) {
@@ -227,7 +265,14 @@ export class ExplorerElement extends HTMLElement {
 			<div data-role="filter-mount"></div>
 			<div class="${C.body}">
 				<section class="${C.section}">
-					<div class="${C.sectionTitle}">Tree</div>
+					<div class="${C.treeHeader}">
+						<span class="${C.sectionTitle}">Tree</span>
+						<span class="${C.treeViewToggle}">
+							<button type="button" class="${C.treeViewBtn}" data-view="files">files</button>
+							<button type="button" class="${C.treeViewBtn}" data-view="modules">modules</button>
+							<button type="button" class="${C.treeViewBtn}" data-view="projects">projects</button>
+						</span>
+					</div>
 					<div data-role="tree-mount"></div>
 				</section>
 				<section class="${C.section}">
@@ -238,16 +283,36 @@ export class ExplorerElement extends HTMLElement {
 					<div class="${C.sectionTitle}">Recently viewed</div>
 					<div data-role="recents-mount"></div>
 				</section>
+				<section class="${C.section}">
+					<standardoc-legend collapsed></standardoc-legend>
+				</section>
 			</div>
 		`;
     this.replaceChildren(root);
+
+    const treeViewBtns = Array.from(root.querySelectorAll<HTMLButtonElement>(`.${C.treeViewBtn}`));
+    for (const btn of treeViewBtns) {
+      btn.addEventListener('click', () => {
+        const next = btn.dataset['view'] as ExplorerTreeView | undefined;
+        if (next === undefined || next === this.#treeView) return;
+        this.#treeView = next;
+        this.#syncTreeViewButtons();
+        this.dispatchEvent(new CustomEvent<ExplorerViewChangeDetail>('sd-explorer-view-change', {
+          detail: { view: next },
+          bubbles: true,
+          composed: true,
+        }));
+      });
+    }
 
     this.#nodes = {
       root,
       treeMount: root.querySelector<HTMLElement>('[data-role="tree-mount"]')!,
       entryPointsMount: root.querySelector<HTMLElement>('[data-role="entry-points-mount"]')!,
       recentsMount: root.querySelector<HTMLElement>('[data-role="recents-mount"]')!,
+      treeViewBtns,
     };
+    this.#syncTreeViewButtons();
 
     this.#renderFilterChips(root.querySelector<HTMLElement>('[data-role="filter-mount"]')!);
     this.#renderTree();
@@ -513,13 +578,23 @@ export class ExplorerElement extends HTMLElement {
     for (const ep of this.#entryPoints) {
       const row = document.createElement('div');
       row.className = C.entry;
+      const text = document.createElement('div');
+      text.className = C.entryText;
       const label = document.createElement('span');
       label.className = C.entryLabel;
       label.textContent = ep.label;
+      text.appendChild(label);
+      const scope = entryPointScope(ep.fqdn);
+      if (scope !== null && scope !== ep.label) {
+        const scopeEl = document.createElement('span');
+        scopeEl.className = C.entryScope;
+        scopeEl.textContent = scope;
+        text.appendChild(scopeEl);
+      }
       const badge = document.createElement('span');
       badge.className = classigo(C.entryBadge, entryBadgeClass[ep.kind] ?? '');
       badge.textContent = entryBadgeLabel[ep.kind] ?? ep.kind;
-      row.appendChild(label);
+      row.appendChild(text);
       row.appendChild(badge);
       row.addEventListener('click', () => {
         this.#selectedId = `entry:${ep.fqdn}`;

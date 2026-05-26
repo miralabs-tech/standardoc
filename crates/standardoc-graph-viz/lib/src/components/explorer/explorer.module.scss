@@ -7,6 +7,7 @@
 	background: var(--sd-panel-bg, #1e1e1e);
 	border: var(--sd-panel-border, 1px solid #2d2d2d);
 	border-radius: var(--sd-radius-md, 6px);
+	box-shadow: var(--sd-panel-shadow, none);
 	overflow: hidden;
 	font-family: var(--sd-font-sans, -apple-system, sans-serif);
 	font-size: var(--sd-text-md, 13px);
@@ -52,6 +53,49 @@
 		color: var(--sd-fg-muted, #9d9d9d);
 		font-weight: 600;
 		padding: var(--sd-space-1, 4px) var(--sd-panel-padding, 12px);
+	}
+
+	&__tree-header {
+		display: flex;
+		align-items: center;
+		gap: var(--sd-space-2, 8px);
+		padding-right: var(--sd-panel-padding, 12px);
+
+		.explorer__section-title {
+			flex: 0 0 auto;
+			padding-right: 0;
+		}
+	}
+
+	&__tree-view-toggle {
+		flex: 1;
+		display: flex;
+		justify-content: flex-end;
+		gap: 2px;
+	}
+
+	&__tree-view-btn {
+		appearance: none;
+		background: transparent;
+		border: 1px solid var(--sd-border-subtle, #2d2d2d);
+		border-radius: var(--sd-radius-sm, 3px);
+		padding: 1px 6px;
+		font-size: var(--sd-text-xs, 10px);
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		color: var(--sd-fg-muted, #9d9d9d);
+		cursor: pointer;
+		text-transform: lowercase;
+
+		&:hover {
+			color: var(--sd-fg, #cccccc);
+			background: var(--sd-hover, #2a2d2e);
+		}
+
+		&--active {
+			color: var(--sd-fg-strong, #ffffff);
+			background: var(--sd-selection, #094771);
+			border-color: var(--sd-accent, #3794ff);
+		}
 	}
 
 	&__empty {
@@ -136,14 +180,31 @@
 		}
 	}
 
-	&__entry-label {
+	&__entry-text {
 		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+	}
+
+	&__entry-label {
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		font-family: var(--sd-font-mono, ui-monospace, monospace);
 		font-size: var(--sd-text-sm, 11px);
+	}
+
+	&__entry-scope {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		font-size: var(--sd-text-xs, 10px);
+		color: var(--sd-fg-muted, #9d9d9d);
 	}
 
 	&__entry-badge {

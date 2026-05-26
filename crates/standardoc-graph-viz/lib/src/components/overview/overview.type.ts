@@ -17,6 +17,13 @@ export interface OverviewCanvasFacade {
   on_wheel(x: number, y: number, deltaY: number): void;
   fit(): void;
   set_camera_preset(preset: string): void;
+  /**
+   * Cap on the number of cluster text labels rendered each frame. `0`
+   * disables the cap (all labels render); any other value picks the
+   * N closest clusters to the camera. Halo + dot still render so the
+   * topology stays readable when the cap is tight.
+   */
+  set_max_visible_labels(n: number): void;
   readonly cluster_count: number;
   readonly edge_count: number;
 }

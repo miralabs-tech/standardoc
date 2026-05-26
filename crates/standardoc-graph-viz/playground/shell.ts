@@ -18,6 +18,7 @@ import '@standarx/standardoc-viz/components/overview';
 import '@standarx/standardoc-viz/components/focus-graph';
 import '@standarx/standardoc-viz/components/compare-panel';
 import '@standarx/standardoc-viz/components/panel-host';
+import '@standarx/standardoc-viz/components/legend';
 
 import { focusStore } from '@standarx/standardoc-viz/focus-store';
 import { panelManager } from '@standarx/standardoc-viz/panel-manager';
@@ -35,6 +36,8 @@ import type {
   ExplorerNodeKind,
   ExplorerSelectDetail,
   ExplorerTreeNode,
+  ExplorerTreeView,
+  ExplorerViewChangeDetail,
   EntryPointKind,
   FocusGraphElement,
   FocusGraphErrorDetail,
@@ -252,8 +255,25 @@ async function boot(): Promise<void> {
     folderById: new Map(),
     projectByExplorerId: new Map(),
   };
-  const workspaceRoot = buildWorkspaceTree('Workspace', projects, treeSymbols, treeOut);
-  explorerEl.tree = [workspaceRoot];
+  const rebuildTree = (view: ExplorerTreeView): void => {
+    treeOut.fileById.clear();
+    treeOut.folderById.clear();
+    treeOut.projectByExplorerId.clear();
+    let root: ExplorerTreeNode;
+    if (view === 'projects') {
+      root = buildProjectsTreeFlat('Workspace', projects, treeSymbols, treeOut);
+    } else if (view === 'modules') {
+      root = buildModulesTree('Workspace', projects, treeSymbols, treeOut);
+    } else {
+      root = buildWorkspaceTree('Workspace', projects, treeSymbols, treeOut);
+    }
+    explorerEl.tree = [root];
+  };
+  rebuildTree(explorerEl.treeView);
+  explorerEl.addEventListener('sd-explorer-view-change', ev => {
+    const detail = (ev as CustomEvent<ExplorerViewChangeDetail>).detail;
+    rebuildTree(detail.view);
+  });
   const { fileById, folderById, projectByExplorerId } = treeOut;
 
   // File click → synthetic SymbolDetail listing the file's symbols.
@@ -749,6 +769,150 @@ function buildWorkspaceTree(
     kind: 'workspace',
     children: trieToExplorerNodes(trie, 'ws', allSymbols, out),
   };
+}
+
+/**
+ * Flat-projects view — workspace → projects → modules. Drops FS layout
+ * but keeps project membership visible; each project expands to a flat
+ * alphabetical list of its modules so the user can drill without
+ * traversing folder hierarchy. Differs from `buildModulesTree` in that
+ * modules are NOT nested by `::` segments — flat.
+ */
+function buildProjectsTreeFlat(
+  workspaceLabel: string,
+  projects: ReadonlyArray<ProjectLike>,
+  allSymbols: ReadonlyArray<BrowseSymbol>,
+  out: TreeOut,
+): ExplorerTreeNode {
+  const modulesByProject = collectModulesByProject(allSymbols);
+  const children: ExplorerTreeNode[] = [];
+  const sorted = [...projects].sort((a, b) => a.label.localeCompare(b.label));
+  for (const p of sorted) {
+    const id = `proj/${p.project_id}`;
+    out.projectByExplorerId.set(id, p);
+    const modules = [...(modulesByProject.get(p.project_id) ?? new Set<string>())]
+      .sort((a, b) => a.localeCompare(b));
+    const moduleNodes: ExplorerTreeNode[] = modules.map(mod => ({
+      id: `${id}::${mod}`,
+      label: mod,
+      kind: 'module',
+      children: undefined,
+      fqdn: mod,
+    }));
+    children.push({
+      id,
+      label: p.label,
+      kind: 'project',
+      children: moduleNodes.length > 0 ? moduleNodes : undefined,
+      fqdn: null,
+      description: p.rel_path,
+    });
+  }
+  return {
+    id: 'workspace',
+    label: workspaceLabel,
+    kind: 'workspace',
+    children,
+  };
+}
+
+function collectModulesByProject(allSymbols: ReadonlyArray<BrowseSymbol>): Map<number, Set<string>> {
+  const byProject = new Map<number, Set<string>>();
+  for (const s of allSymbols) {
+    const pid = s.project_id;
+    if (typeof pid !== 'number') continue;
+    const m = s.module;
+    if (typeof m !== 'string' || m.length === 0) continue;
+    let set = byProject.get(pid);
+    if (set === undefined) {
+      set = new Set<string>();
+      byProject.set(pid, set);
+    }
+    set.add(m);
+  }
+  return byProject;
+}
+
+/**
+ * IR-aligned view — projects → modules nested by `::` segments. Strips
+ * incidental FS layout entirely; each project's module hierarchy is
+ * reconstructed from the daemon's `module` strings via a segment trie.
+ * Modules that exist only as ancestors get virtual nodes so leaves
+ * still nest properly (e.g. `foo::bar::baz` produces foo → bar → baz
+ * even if `foo::bar` itself never holds a symbol).
+ */
+function buildModulesTree(
+  workspaceLabel: string,
+  projects: ReadonlyArray<ProjectLike>,
+  allSymbols: ReadonlyArray<BrowseSymbol>,
+  out: TreeOut,
+): ExplorerTreeNode {
+  const byProject = collectModulesByProject(allSymbols);
+  const sortedProjects = [...projects].sort((a, b) => a.label.localeCompare(b.label));
+  const children: ExplorerTreeNode[] = [];
+  for (const p of sortedProjects) {
+    const projId = `proj/${p.project_id}`;
+    out.projectByExplorerId.set(projId, p);
+    const modules = [...(byProject.get(p.project_id) ?? new Set<string>())].sort((a, b) => a.localeCompare(b));
+    const moduleNodes = modulesToTreeNodes(modules, projId);
+    children.push({
+      id: projId,
+      label: p.label,
+      kind: 'project',
+      children: moduleNodes.length > 0 ? moduleNodes : undefined,
+      fqdn: null,
+      description: p.rel_path,
+    });
+  }
+  return {
+    id: 'workspace',
+    label: workspaceLabel,
+    kind: 'workspace',
+    children,
+  };
+}
+
+interface ModuleTrieNode {
+  fullFqdn?: string;
+  children: Map<string, ModuleTrieNode>;
+}
+
+function modulesToTreeNodes(modules: ReadonlyArray<string>, idPrefix: string): ExplorerTreeNode[] {
+  const root: ModuleTrieNode = { children: new Map() };
+  for (const m of modules) {
+    const segs = m.split('::').filter(s => s.length > 0);
+    if (segs.length === 0) continue;
+    let cur = root;
+    for (const seg of segs) {
+      let next = cur.children.get(seg);
+      if (next === undefined) {
+        next = { children: new Map() };
+        cur.children.set(seg, next);
+      }
+      cur = next;
+    }
+    cur.fullFqdn = m;
+  }
+  return moduleTrieToNodes(root, idPrefix, '');
+}
+
+function moduleTrieToNodes(node: ModuleTrieNode, idPrefix: string, fqdnPrefix: string): ExplorerTreeNode[] {
+  const nodes: ExplorerTreeNode[] = [];
+  for (const seg of [...node.children.keys()].sort((a, b) => a.localeCompare(b))) {
+    const child = node.children.get(seg);
+    if (child === undefined) continue;
+    const fqdn = fqdnPrefix.length > 0 ? `${fqdnPrefix}::${seg}` : seg;
+    const childId = `${idPrefix}::${seg}`;
+    const grandChildren = moduleTrieToNodes(child, childId, fqdn);
+    nodes.push({
+      id: childId,
+      label: seg,
+      kind: 'module',
+      children: grandChildren.length > 0 ? grandChildren : undefined,
+      fqdn: child.fullFqdn ?? fqdn,
+    });
+  }
+  return nodes;
 }
 
 function trieToExplorerNodes(

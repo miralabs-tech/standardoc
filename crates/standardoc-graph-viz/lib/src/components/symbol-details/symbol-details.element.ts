@@ -70,6 +70,15 @@ const C = {
 	iconBtn: s['details__icon-btn'] ?? '',
 	tags: s.details__tags ?? '',
 	tag: s.details__tag ?? '',
+	tagKindCallable: s['details__tag--kind-callable'] ?? '',
+	tagKindType: s['details__tag--kind-type'] ?? '',
+	tagKindValue: s['details__tag--kind-value'] ?? '',
+	tagKindModule: s['details__tag--kind-module'] ?? '',
+	tagKindMacro: s['details__tag--kind-macro'] ?? '',
+	tagVisPublic: s['details__tag--visibility-public'] ?? '',
+	tagVisPrivate: s['details__tag--visibility-private'] ?? '',
+	tagVisCrate: s['details__tag--visibility-crate'] ?? '',
+	tagVisProtected: s['details__tag--visibility-protected'] ?? '',
 	location: s.details__location ?? '',
 	locationPath: s['details__location-path'] ?? '',
 	tabs: s.details__tabs ?? '',
@@ -79,6 +88,12 @@ const C = {
 	empty: s.details__empty ?? '',
 	section: s.details__section ?? '',
 	sectionTitle: s['details__section-title'] ?? '',
+	sectionTitleDoc: s['details__section-title--doc'] ?? '',
+	sectionTitleRelations: s['details__section-title--relations'] ?? '',
+	sectionTitleEntry: s['details__section-title--entry'] ?? '',
+	sectionTitleFields: s['details__section-title--fields'] ?? '',
+	sectionTitleMethods: s['details__section-title--methods'] ?? '',
+	sectionTitleSource: s['details__section-title--source'] ?? '',
 	doc: s.details__doc ?? '',
 	docToggle: s['details__doc-toggle'] ?? '',
 	relation: s.details__relation ?? '',
@@ -125,6 +140,32 @@ const entryPointBadgeClass: Record<EntryPointKind, string> = {
 function shortFqdn(fqdn: string): string {
 	const idx = fqdn.lastIndexOf('::');
 	return idx >= 0 ? fqdn.slice(idx + 2) : fqdn;
+}
+
+const KIND_CALLABLE = new Set(['function', 'fn', 'method', 'impl_fn', 'trait_fn', 'interface_method', 'getter', 'setter', 'constructor']);
+const KIND_TYPE = new Set(['struct', 'enum', 'class', 'interface', 'trait', 'type_alias', 'union']);
+const KIND_VALUE = new Set(['const', 'static', 'let', 'var', 'field', 'enum_variant', 'property', 'interface_property']);
+const KIND_MODULE = new Set(['module', 'namespace', 'package', 'crate']);
+const KIND_MACRO = new Set(['macro', 'macro_rules', 'proc_macro', 'decorator', 'declarativemacro', 'procmacro']);
+
+function kindFamilyTagClass(kindLabel: string): string {
+	const k = kindLabel.toLowerCase();
+	if (KIND_CALLABLE.has(k)) return C.tagKindCallable;
+	if (KIND_TYPE.has(k)) return C.tagKindType;
+	if (KIND_VALUE.has(k)) return C.tagKindValue;
+	if (KIND_MODULE.has(k)) return C.tagKindModule;
+	if (KIND_MACRO.has(k)) return C.tagKindMacro;
+	return '';
+}
+
+function visibilityTagClass(visibility: string): string {
+	switch (visibility.toLowerCase()) {
+		case 'public': return C.tagVisPublic;
+		case 'private': return C.tagVisPrivate;
+		case 'crate': return C.tagVisCrate;
+		case 'protected': return C.tagVisProtected;
+		default: return '';
+	}
 }
 
 export class SymbolDetailsElement extends HTMLElement {
@@ -255,12 +296,12 @@ export class SymbolDetailsElement extends HTMLElement {
 			return;
 		}
 
-		const tags: string[] = [];
-		if (sym.kindLabel) tags.push(sym.kindLabel);
-		if (sym.visibility) tags.push(sym.visibility);
-		const tagsHtml = tags.length === 0
+		const tagDescs: Array<{ text: string; extraClass: string }> = [];
+		if (sym.kindLabel) tagDescs.push({ text: sym.kindLabel, extraClass: kindFamilyTagClass(sym.kindLabel) });
+		if (sym.visibility) tagDescs.push({ text: sym.visibility, extraClass: visibilityTagClass(sym.visibility) });
+		const tagsHtml = tagDescs.length === 0
 			? ''
-			: `<div class="${C.tags}">${tags.map(t => `<span class="${C.tag}">${escapeHtml(t)}</span>`).join('')}</div>`;
+			: `<div class="${C.tags}">${tagDescs.map(d => `<span class="${classigo(C.tag, d.extraClass)}">${escapeHtml(d.text)}</span>`).join('')}</div>`;
 
 		n.head.innerHTML = `
 			<div class="${C.nameRow}">
@@ -397,7 +438,7 @@ export class SymbolDetailsElement extends HTMLElement {
 		const header = document.createElement('div');
 		header.className = C.section;
 		const title = document.createElement('div');
-		title.className = C.sectionTitle;
+		title.className = classigo(C.sectionTitle, C.sectionTitleSource);
 		title.textContent = `${sym.file}:${sym.startLine}`;
 		header.appendChild(title);
 		mount.appendChild(header);
@@ -443,7 +484,7 @@ export class SymbolDetailsElement extends HTMLElement {
 			const docSection = document.createElement('section');
 			docSection.className = C.section;
 			const title = document.createElement('div');
-			title.className = C.sectionTitle;
+			title.className = classigo(C.sectionTitle, C.sectionTitleDoc);
 			title.textContent = 'Documentation';
 			const doc = document.createElement('div');
 			doc.className = C.doc;
@@ -472,7 +513,7 @@ export class SymbolDetailsElement extends HTMLElement {
 			const relSection = document.createElement('section');
 			relSection.className = C.section;
 			const relTitle = document.createElement('div');
-			relTitle.className = C.sectionTitle;
+			relTitle.className = classigo(C.sectionTitle, C.sectionTitleRelations);
 			relTitle.textContent = 'Relations';
 			relSection.appendChild(relTitle);
 			for (const bucket of sym.relations) {
@@ -486,7 +527,7 @@ export class SymbolDetailsElement extends HTMLElement {
 			const epSection = document.createElement('section');
 			epSection.className = C.section;
 			const epTitle = document.createElement('div');
-			epTitle.className = C.sectionTitle;
+			epTitle.className = classigo(C.sectionTitle, C.sectionTitleEntry);
 			epTitle.textContent = 'Entry point';
 			const row = document.createElement('div');
 			row.className = C.entryPoint;

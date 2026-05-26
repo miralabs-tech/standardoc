@@ -87,6 +87,12 @@ const MIN_CLUSTER_RADIUS_WORLD: f32 = 70.0;
 const MAX_CLUSTER_RADIUS_WORLD: f32 = 220.0;
 const CLUSTER_GAP_WORLD: f32 = 380.0;
 const SUNFLOWER_SCALE: f32 = 440.0;
+/// Vertical world-space range across which clusters spread by
+/// popularity. The most-imported cluster sits at `+POPULARITY_Y_RANGE`
+/// world units above the XZ plane; the least-imported sits roughly at
+/// zero. Gives the topology a third axis — hubs literally float above
+/// their consumers — without overloading the sunflower spacing.
+const POPULARITY_Y_RANGE: f32 = 320.0;
 const ZOOM_STEP: f64 = 0.0012;
 const CLICK_DRAG_THRESHOLD: f64 = 4.0;
 const LABEL_OFFSET: f64 = 14.0;
@@ -121,6 +127,12 @@ pub struct OverviewCanvas {
 	hovered: Option<u32>,
 	drag: Option<DragState>,
 	cam: Camera3D,
+	/// Cap on the number of cluster text labels rendered each frame.
+	/// `0` means "no cap, render all visible". Anything else picks the
+	/// N closest clusters to the camera — far-field clusters render
+	/// their halo + dot but skip the text so the canvas stays
+	/// readable at workspace scale.
+	max_visible_labels: u32,
 }
 
 #[wasm_bindgen]
@@ -148,7 +160,20 @@ impl OverviewCanvas {
 			hovered: None,
 			drag: None,
 			cam: Camera3D::identity(),
+			max_visible_labels: 0,
 		})
+	}
+
+	/// Host-driven label cap. `0` renders every visible cluster's
+	/// label; any other value renders text for the N clusters
+	/// closest to the camera and skips the rest. Halos + dots stay
+	/// visible so the topology still reads; only the text drops.
+	pub fn set_max_visible_labels(&mut self, n: u32) {
+		if self.max_visible_labels == n {
+			return;
+		}
+		self.max_visible_labels = n;
+		self.needs_redraw = true;
 	}
 
 	pub fn set_payload(&mut self, json: &str) -> Result<(), JsValue> {
@@ -292,7 +317,8 @@ impl OverviewCanvas {
 		}
 		// Sort by symbol_count desc (id tiebreaker) so the heaviest
 		// project anchors the centre. Sunflower lays the rest outward
-		// in the XZ plane — Y stays zero for a flat nebula sheet.
+		// in the XZ plane; Y is driven separately by inbound-edge
+		// popularity so the topology gets a third axis.
 		let mut order: Vec<usize> = (0..self.clusters.len()).collect();
 		order.sort_by(|&a, &b| {
 			let ca = &self.clusters[a];
@@ -307,6 +333,18 @@ impl OverviewCanvas {
 			.max()
 			.unwrap_or(1) as f32;
 
+		// Popularity = sum of inbound edge weights. Used for the Y
+		// axis: hubs others depend on float above their consumers,
+		// leaves sit at the XZ baseline. ln-compressed because the
+		// inbound distribution is heavy-tailed (one root crate gets
+		// orders of magnitude more inbound than leaves).
+		let mut inbound: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+		for e in &self.edges {
+			*inbound.entry(e.to).or_insert(0) += e.weight;
+		}
+		let max_inbound = inbound.values().copied().max().unwrap_or(0).max(1) as f32;
+		let max_inbound_ln = (max_inbound + 1.0).ln().max(1.0);
+
 		for (i, &cluster_idx) in order.iter().enumerate() {
 			let c = &self.clusters[cluster_idx];
 			let raw = (c.symbol_count.max(1) as f32).sqrt();
@@ -314,14 +352,20 @@ impl OverviewCanvas {
 			let world_r = MIN_CLUSTER_RADIUS_WORLD
 				+ normalised * (MAX_CLUSTER_RADIUS_WORLD - MIN_CLUSTER_RADIUS_WORLD);
 
+			let inbound_w = inbound.get(&c.id).copied().unwrap_or(0) as f32;
+			let popularity = (inbound_w + 1.0).ln() / max_inbound_ln;
+			// Camera up is -Y, so subtract to float popular clusters
+			// upward on screen.
+			let y = -popularity * POPULARITY_Y_RANGE;
+
 			let pos = if i == 0 {
-				Vec3::ZERO
+				Vec3::new(0.0, y, 0.0)
 			} else {
 				let angle = (i as f64) * GOLDEN_ANGLE;
 				let radial = SUNFLOWER_SCALE * (i as f32).sqrt() + CLUSTER_GAP_WORLD;
 				Vec3::new(
 					radial * angle.cos() as f32,
-					0.0,
+					y,
 					radial * angle.sin() as f32,
 				)
 			};
@@ -401,14 +445,16 @@ impl OverviewCanvas {
 			.max()
 			.unwrap_or(1) as f64;
 
-		// Pass 1: wide soft blur behind clusters.
+		// Pass 1: wide soft blur behind clusters. Toned down vs V1 —
+		// thinner widths and lower alpha so the "strand" reads
+		// without screaming for attention.
 		for e in &self.edges {
 			let (Some(from), Some(to)) = (projected.get(&e.from), projected.get(&e.to)) else { continue };
 			if !from.visible || !to.visible { continue; }
 			let w_norm = (f64::from(e.weight.max(1))).ln() / (max_weight.ln().max(1.0));
-			let line_w = 4.0 + w_norm * 6.0;
-			let alpha = 0.18 + w_norm * 0.12;
-			self.ctx.set_stroke_style_str(&format!("rgba(80, 180, 255, {alpha:.3})"));
+			let line_w = 2.0 + w_norm * 3.0;
+			let alpha = 0.10 + w_norm * 0.08;
+			self.ctx.set_stroke_style_str(&format!("rgba(80, 150, 210, {alpha:.3})"));
 			self.ctx.set_line_width(line_w);
 			self.ctx.begin_path();
 			self.ctx.move_to(from.screen_x, from.screen_y);
@@ -424,6 +470,31 @@ impl OverviewCanvas {
 			let db = projected.get(b).map_or(f64::INFINITY, |p| -p.depth);
 			da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
 		});
+
+		// Pick which clusters render their text label. When the host
+		// caps it (max_visible_labels > 0) we take the N closest to
+		// the camera; the hovered cluster always shows its label even
+		// when it would otherwise be culled, since it's the user's
+		// current point of attention.
+		let label_visible_ids: std::collections::HashSet<u32> = if self.max_visible_labels > 0 {
+			let mut by_depth: Vec<(u32, f64)> = projected
+				.iter()
+				.filter_map(|(id, p)| if p.visible { Some((*id, p.depth)) } else { None })
+				.collect();
+			by_depth.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+			let mut keep: std::collections::HashSet<u32> = by_depth
+				.iter()
+				.take(self.max_visible_labels as usize)
+				.map(|(id, _)| *id)
+				.collect();
+			if let Some(h) = self.hovered {
+				keep.insert(h);
+			}
+			keep
+		} else {
+			projected.keys().copied().collect()
+		};
+
 		for id in &order {
 			let Some(proj) = projected.get(id) else { continue };
 			if !proj.visible {
@@ -431,18 +502,20 @@ impl OverviewCanvas {
 			}
 			let Some(c) = self.clusters.iter().find(|c| c.id == *id) else { continue };
 			let highlighted = self.hovered == Some(*id);
-			self.draw_cluster(proj, c, highlighted);
+			let show_label = label_visible_ids.contains(id);
+			self.draw_cluster(proj, c, highlighted, show_label);
 		}
 
-		// Pass 2: bright narrow strand on top of clusters — completes
-		// the glow effect (wide-soft + narrow-bright = volumetric beam).
+		// Pass 2: narrower strand on top of clusters. Alpha cut so
+		// the bright pass adds shape without flashing — pairs with
+		// the toned pass 1 above for a calm beam, not a laser.
 		for e in &self.edges {
 			let (Some(from), Some(to)) = (projected.get(&e.from), projected.get(&e.to)) else { continue };
 			if !from.visible || !to.visible { continue; }
 			let w_norm = (f64::from(e.weight.max(1))).ln() / (max_weight.ln().max(1.0));
-			let line_w = 1.2 + w_norm * 1.4;
-			let alpha = 0.85 + w_norm * 0.15;
-			self.ctx.set_stroke_style_str(&format!("rgba(170, 230, 255, {alpha:.3})"));
+			let line_w = 0.9 + w_norm * 1.0;
+			let alpha = 0.45 + w_norm * 0.20;
+			self.ctx.set_stroke_style_str(&format!("rgba(150, 195, 230, {alpha:.3})"));
 			self.ctx.set_line_width(line_w);
 			self.ctx.begin_path();
 			self.ctx.move_to(from.screen_x, from.screen_y);
@@ -517,68 +590,73 @@ impl OverviewCanvas {
 		out
 	}
 
-	fn draw_cluster(&self, proj: &ProjectedCluster, cluster: &OverviewCluster, highlighted: bool) {
+	fn draw_cluster(&self, proj: &ProjectedCluster, cluster: &OverviewCluster, highlighted: bool, show_label: bool) {
 		let r = proj.screen_radius.max(2.0);
 		let Some(laid) = self.positions.get(&cluster.id) else { return };
 		let hue = laid.hue;
 
-		// Cluster halo — soft volumetric glow that reads as a "system
-		// node" / region marker on the architecture map. Replaces the
-		// V0 satellite-dot constellation (galaxie décorative anti-
-		// pattern per the manifesto). Multi-stop radial gradient for
-		// real dimension instead of a flat disc.
+		// Cluster halo — soft territory marker. Saturations + alphas
+		// dialed down vs the V1 "fluorescent rainbow blob" the user
+		// flagged; the goal is a calm system-topology accent, not a
+		// neon glow stick.
 		if let Ok(halo) = self.ctx.create_radial_gradient(
 			proj.screen_x, proj.screen_y, r * 0.10,
 			proj.screen_x, proj.screen_y, r + 60.0,
 		) {
-			let inner_alpha = if highlighted { 0.65 } else { 0.48 };
-			let mid_alpha = if highlighted { 0.42 } else { 0.26 };
-			let _ = halo.add_color_stop(0.0, &format!("hsla({hue:.0}, 90%, 75%, {inner_alpha:.3})"));
-			let _ = halo.add_color_stop(0.45, &format!("hsla({hue:.0}, 80%, 55%, {mid_alpha:.3})"));
-			let _ = halo.add_color_stop(1.0, &format!("hsla({hue:.0}, 70%, 40%, 0.0)"));
+			let inner_alpha = if highlighted { 0.42 } else { 0.26 };
+			let mid_alpha = if highlighted { 0.22 } else { 0.13 };
+			let _ = halo.add_color_stop(0.0, &format!("hsla({hue:.0}, 55%, 62%, {inner_alpha:.3})"));
+			let _ = halo.add_color_stop(0.45, &format!("hsla({hue:.0}, 45%, 48%, {mid_alpha:.3})"));
+			let _ = halo.add_color_stop(1.0, &format!("hsla({hue:.0}, 40%, 36%, 0.0)"));
 			self.ctx.set_fill_style_canvas_gradient(&halo);
 			self.ctx.begin_path();
 			let _ = self.ctx.arc(proj.screen_x, proj.screen_y, r + 60.0, 0.0, std::f64::consts::TAU);
 			self.ctx.fill();
 		}
 
-		// Bright anchor dot at the cluster centre + its own micro-halo —
-		// reads as the "node" of the topology. The outer halo above is
-		// the cluster's territory; this dot is the cluster's identity.
+		// Core glow — the cluster's identity dot's halo. Lower
+		// saturation/lightness so it reads as a warm node light
+		// instead of a screaming highlight.
 		if let Ok(core_glow) = self.ctx.create_radial_gradient(
 			proj.screen_x, proj.screen_y, 0.0,
 			proj.screen_x, proj.screen_y, (r * 0.40).max(12.0),
 		) {
-			let _ = core_glow.add_color_stop(0.0, &format!("hsla({hue:.0}, 95%, 90%, 1.0)"));
-			let _ = core_glow.add_color_stop(0.5, &format!("hsla({hue:.0}, 85%, 70%, 0.65)"));
-			let _ = core_glow.add_color_stop(1.0, &format!("hsla({hue:.0}, 80%, 60%, 0.0)"));
+			let _ = core_glow.add_color_stop(0.0, &format!("hsla({hue:.0}, 70%, 78%, 0.80)"));
+			let _ = core_glow.add_color_stop(0.5, &format!("hsla({hue:.0}, 60%, 62%, 0.40)"));
+			let _ = core_glow.add_color_stop(1.0, &format!("hsla({hue:.0}, 55%, 52%, 0.0)"));
 			self.ctx.set_fill_style_canvas_gradient(&core_glow);
 			self.ctx.begin_path();
 			let _ = self.ctx.arc(proj.screen_x, proj.screen_y, (r * 0.40).max(12.0), 0.0, std::f64::consts::TAU);
 			self.ctx.fill();
 		}
 
-		// Hard centre point — small bright HSL dot anchors the eye on
-		// the cluster's exact world position even when halo+glow blur.
-		self.ctx.set_fill_style_str(&format!("hsla({hue:.0}, 100%, 92%, 1.0)"));
+		// Hard centre point — anchor dot stays punchier than the
+		// halos so the cluster's exact position never drowns in
+		// gradient blur, but capped at 86% lightness vs full white.
+		self.ctx.set_fill_style_str(&format!("hsla({hue:.0}, 85%, 86%, 0.95)"));
 		self.ctx.begin_path();
 		let _ = self.ctx.arc(proj.screen_x, proj.screen_y, 3.5, 0.0, std::f64::consts::TAU);
 		self.ctx.fill();
 
-		// Label + count below the constellation.
-		self.ctx.set_fill_style_str(if highlighted { "#ffffff" } else { "#e3e3e3" });
-		self.ctx.set_font("600 14px ui-monospace, SFMono-Regular, monospace");
-		self.ctx.set_text_align("center");
-		self.ctx.set_text_baseline("top");
-		let _ = self.ctx.fill_text(&cluster.label, proj.screen_x, proj.screen_y + r + LABEL_OFFSET);
+		// Label + count below the constellation. Skipped when the host
+		// has capped visible labels and this cluster fell outside the
+		// N-closest set — halo+dot still anchor the cluster's
+		// position so the topology remains readable.
+		if show_label {
+			self.ctx.set_fill_style_str(if highlighted { "#ffffff" } else { "#e3e3e3" });
+			self.ctx.set_font("600 14px ui-monospace, SFMono-Regular, monospace");
+			self.ctx.set_text_align("center");
+			self.ctx.set_text_baseline("top");
+			let _ = self.ctx.fill_text(&cluster.label, proj.screen_x, proj.screen_y + r + LABEL_OFFSET);
 
-		self.ctx.set_fill_style_str(&format!("hsla({hue:.0}, 50%, 70%, 0.9)"));
-		self.ctx.set_font("11px ui-monospace, SFMono-Regular, monospace");
-		let _ = self.ctx.fill_text(
-			&format!("{} symbols", format_count(cluster.symbol_count)),
-			proj.screen_x,
-			proj.screen_y + r + LABEL_OFFSET + 18.0,
-		);
+			self.ctx.set_fill_style_str(&format!("hsla({hue:.0}, 50%, 70%, 0.9)"));
+			self.ctx.set_font("11px ui-monospace, SFMono-Regular, monospace");
+			let _ = self.ctx.fill_text(
+				&format!("{} symbols", format_count(cluster.symbol_count)),
+				proj.screen_x,
+				proj.screen_y + r + LABEL_OFFSET + 18.0,
+			);
+		}
 	}
 
 	fn draw_empty_state(&self) {
