@@ -143,6 +143,7 @@ async function boot(): Promise<void> {
   // `treeSymbols`, `symbolByFqdn`, `graphEdges`); the listeners below
   // reference it through this closure box.
   let clusterTargets = new Map<number, ClusterTarget>();
+  let currentOverviewScope: OverviewScope = { kind: 'workspace' };
   let applyOverviewScope: (next: OverviewScope) => void = () => {};
 
   overviewEl.addEventListener('sd-overview-cluster-click', e => {
@@ -151,7 +152,10 @@ async function boot(): Promise<void> {
     if (target === undefined) return;
     switch (target.kind) {
       case 'drill-project':
-        applyOverviewScope({ kind: 'project', projectId: target.projectId, label: target.label });
+        // Workspace → project: enter the project's module hierarchy.
+        // We use the `module` scope (FQDN prefix) so subsequent drills
+        // share the same "one segment deeper at a time" semantics.
+        applyOverviewScope({ kind: 'module', prefix: target.label, label: target.label });
         break;
       case 'drill-folder':
         applyOverviewScope({
@@ -161,6 +165,9 @@ async function boot(): Promise<void> {
           relPath: target.relPath,
         });
         break;
+      case 'drill-module':
+        applyOverviewScope({ kind: 'module', prefix: target.prefix, label: target.label });
+        break;
       case 'focus-symbol':
         focusStore.setFocus(target.fqdn);
         break;
@@ -168,6 +175,22 @@ async function boot(): Promise<void> {
   });
 
   overviewEl.addEventListener('sd-overview-back', () => {
+    // Pop one FQDN segment when in module scope; only `workspace`
+    // when the popped prefix would be empty. Other scopes (project /
+    // folder, coming from Explorer) jump straight back to workspace
+    // since they're not segment-stacked.
+    const current = currentOverviewScope;
+    if (current.kind === 'module') {
+      const segs = current.prefix.split('::');
+      segs.pop();
+      if (segs.length === 0) {
+        applyOverviewScope({ kind: 'workspace' });
+      } else {
+        const prefix = segs.join('::');
+        applyOverviewScope({ kind: 'module', prefix, label: segs[segs.length - 1]! });
+      }
+      return;
+    }
     applyOverviewScope({ kind: 'workspace' });
   });
 
@@ -255,15 +278,17 @@ async function boot(): Promise<void> {
   // Bind the scope handler now that the workspace data is in scope.
   // Initial render = workspace mode (paints projects + project edges).
   applyOverviewScope = (next: OverviewScope) => {
+    currentOverviewScope = next;
     const built = buildOverviewPayloadForScope(next, projects, treeSymbols, graphEdges, symbolByFqdn);
     clusterTargets = built.targets;
     overview.set_payload(built.json);
+    // Workspace = label only depth-0 root packages so the high-level
+    // view stays readable on workspaces with hundreds of modules. Any
+    // drilled scope is small enough to label every node.
+    overview.set_label_depth_cap(next.kind === 'workspace' ? 0 : 0xffff_ffff);
     overview.fit();
-    overviewEl.scopeLabel = next.kind === 'workspace'
-      ? null
-      : next.kind === 'project'
-        ? next.label
-        : `${next.label}/${next.relPath}`;
+    overviewEl.crossEdgeKinds = built.crossKinds;
+    overviewEl.scopeLabel = scopeBreadcrumbLabel(next);
   };
   applyOverviewScope({ kind: 'workspace' });
 
@@ -730,17 +755,20 @@ function emptyDir(): DirNode {
 type OverviewScope =
   | { kind: 'workspace' }
   | { kind: 'project'; projectId: number; label: string }
-  | { kind: 'folder'; projectId: number; label: string; relPath: string };
+  | { kind: 'folder'; projectId: number; label: string; relPath: string }
+  | { kind: 'module'; prefix: string; label: string };
 
 /**
  * What a cluster click should dispatch to. The Overview canvas only
  * knows opaque u32 ids; the shell owns the resolution table so each
  * scope can rewrite click semantics independently — workspace mode
- * drills into projects, module modes focus the module representative.
+ * drills into projects, scoped modes drill one FQDN segment deeper
+ * via `drill-module`.
  */
 type ClusterTarget =
   | { kind: 'drill-project'; projectId: number; label: string }
   | { kind: 'drill-folder'; projectId: number; label: string; relPath: string }
+  | { kind: 'drill-module'; prefix: string; label: string }
   | { kind: 'focus-symbol'; fqdn: string };
 
 interface FileEntry {
@@ -1176,10 +1204,32 @@ function mapBrowseSymbolKind(s: BrowseSymbol): ExplorerNodeKind {
 interface BuiltOverviewPayload {
   readonly json: string;
   readonly targets: Map<number, ClusterTarget>;
+  /** Distinct IR edge kinds present in the cross-edge set; consumed
+   *  by the OverviewElement legend so chips reflect what's actually
+   *  in the current scope (no dead chips for kinds with 0 edges). */
+  readonly crossKinds: ReadonlyArray<string>;
 }
 
 type GraphEdge = { from: string; to: string; kind: string; outbound: boolean };
 
+interface OverviewNodeBuilder {
+  fqdn: string;
+  label: string;
+  depth: number;
+  parent_fqdn: string | null;
+  node_kind: 'module' | 'public_symbol';
+  symbol_count: number;
+  project_kind?: string;
+}
+
+/**
+ * Workspace Overview = flat root-package view. One node per project,
+ * placed at depth 0 in the depth-stacked layout. No sub-modules, no
+ * public symbols — the focus-graph + drill-down are the right tools
+ * for that. Keeps the workspace canvas to ~12 spheres on standardoc
+ * scale, which is the only count that stays readable + 60fps on a
+ * dense workspace.
+ */
 function buildOverviewPayloadForScope(
   scope: OverviewScope,
   projects: ReadonlyArray<{ project_id: number; label: string; rel_path: string; kind: { kind: string } }>,
@@ -1188,13 +1238,297 @@ function buildOverviewPayloadForScope(
   symbolByFqdn: Map<string, BrowseSymbol>,
 ): BuiltOverviewPayload {
   if (scope.kind === 'workspace') {
-    return buildWorkspaceOverviewPayload(projects, symbols, edges, symbolByFqdn);
+    return buildWorkspacePackagesPayload(projects, symbols, edges, symbolByFqdn);
   }
-  return buildModuleOverviewPayload(scope, projects, symbols, edges, symbolByFqdn);
+  return buildScopedModulesPayload(scope, projects, symbols, edges, symbolByFqdn);
 }
 
-function buildWorkspaceOverviewPayload(
-  projects: ReadonlyArray<{ project_id: number; label: string; kind: { kind: string } }>,
+/**
+ * Hierarchical Overview within a drilled scope. Modules only — public
+ * symbols are intentionally excluded so the depth-stacked cone stays
+ * readable even on a heavy crate like standardoc-ir. Recenters the
+ * shallowest in-scope module to depth 0 so the drill root anchors
+ * the bottom of the visible cone.
+ */
+function buildScopedModulesPayload(
+  scope: Exclude<OverviewScope, { kind: 'workspace' }>,
+  projects: ReadonlyArray<{ project_id: number; label: string; rel_path: string; kind: { kind: string } }>,
+  symbols: ReadonlyArray<BrowseSymbol>,
+  edges: ReadonlyArray<GraphEdge>,
+  symbolByFqdn: Map<string, BrowseSymbol>,
+): BuiltOverviewPayload {
+  const project = scope.kind === 'project' || scope.kind === 'folder'
+    ? projects.find(p => p.project_id === scope.projectId) ?? null
+    : null;
+  const projRelPath = project?.rel_path.replace(/\\/g, '/') ?? '';
+  const pathPrefix = scope.kind === 'folder' && scope.relPath.length > 0
+    ? `${projRelPath}/${scope.relPath}`
+    : projRelPath;
+
+  const inScope = (s: BrowseSymbol): boolean => {
+    if (scope.kind === 'module') {
+      // FQDN-prefix drill — accept symbols whose module fqdn is
+      // exactly the prefix or sits under it (`prefix::…`). This is
+      // the "drill one segment deeper" semantics.
+      const mod = typeof s.module === 'string' ? s.module : '';
+      return mod === scope.prefix || mod.startsWith(`${scope.prefix}::`);
+    }
+    if (s.project_id !== scope.projectId) return false;
+    if (scope.kind === 'project') return true;
+    if (pathPrefix.length === 0) return true;
+    const norm = (s.file ?? '').replace(/\\/g, '/');
+    return norm === pathPrefix || norm.startsWith(`${pathPrefix}/`);
+  };
+
+  const inScopeSymbols = symbols.filter(inScope);
+  if (inScopeSymbols.length === 0) {
+    return { json: JSON.stringify({ nodes: [], edges: [] }), targets: new Map(), crossKinds: [] };
+  }
+
+  // Walk an `s.module` fqdn up to the nearest actual module symbol.
+  // The IR sets a struct/enum's fields' `module` to the parent type
+  // fqdn (`WriterContext::pool` → module = `WriterContext`), but the
+  // Overview only shows `kind === 'module'` symbols as spheres —
+  // types are explored via the focus-graph, not by drilling here.
+  const resolveContainingModule = (fqdn: string): string | null => {
+    let cursor: string | null = fqdn;
+    while (cursor !== null) {
+      const sym = symbolByFqdn.get(cursor);
+      if (sym === undefined || sym.kind === 'module') return cursor;
+      const segs: string[] = cursor.split('::');
+      cursor = segs.length > 1 ? segs.slice(0, -1).join('::') : null;
+    }
+    return null;
+  };
+
+  const moduleFqdns = new Set<string>();
+  for (const s of inScopeSymbols) {
+    if (typeof s.module !== 'string' || s.module.length === 0) continue;
+    const resolved = resolveContainingModule(s.module);
+    if (resolved !== null) moduleFqdns.add(resolved);
+  }
+
+  const projectByLabel = new Map<string, { project_id: number; label: string; kind: { kind: string } }>(
+    projects.map(p => [p.label, p]),
+  );
+
+  // Scope root FQDN — the drilled prefix anchors the layout at
+  // depth 0 after recentering, so we MUST stop the parent-chain
+  // synthesis at it (otherwise `ensure` walks up to the package
+  // root, dragging extra strata above the anchor and pushing the
+  // drilled prefix to depth 1, which breaks the "drill +1 seg"
+  // semantics on subsequent clicks). For project scope the root is
+  // the project label; for folder scope there's no clean single
+  // root, so we let synthesis run naturally and recenter by min.
+  const scopeRoot: string | null =
+    scope.kind === 'module' ? scope.prefix :
+    scope.kind === 'project' ? scope.label :
+    null;
+  const isWithinScope = (fqdn: string): boolean => {
+    if (scopeRoot === null) return true;
+    return fqdn === scopeRoot || fqdn.startsWith(`${scopeRoot}::`);
+  };
+
+  const builders = new Map<string, OverviewNodeBuilder>();
+  const ensure = (fqdn: string): OverviewNodeBuilder => {
+    const existing = builders.get(fqdn);
+    if (existing !== undefined) return existing;
+    const segments = fqdn.split('::');
+    const depth = segments.length - 1;
+    const rawParent = depth > 0 ? segments.slice(0, -1).join('::') : null;
+    // Cut the parent chain at the scope boundary so the drilled
+    // prefix sits at the shallowest depth and recenters to 0.
+    const parent_fqdn = (rawParent !== null && isWithinScope(rawParent)) ? rawParent : null;
+    const label = segments[segments.length - 1] ?? fqdn;
+    const proj = projectByLabel.get(fqdn);
+    const builder: OverviewNodeBuilder = {
+      fqdn,
+      label,
+      depth,
+      parent_fqdn,
+      node_kind: 'module',
+      symbol_count: 0,
+      project_kind: proj?.kind.kind,
+    };
+    builders.set(fqdn, builder);
+    if (parent_fqdn !== null) ensure(parent_fqdn);
+    return builder;
+  };
+
+  // Make sure the scope root itself is in the builders even if no
+  // in-scope symbol declares it as its `module` (common when the
+  // drilled prefix is a pure container module with no direct
+  // symbols of its own).
+  if (scopeRoot !== null) ensure(scopeRoot);
+  for (const fqdn of moduleFqdns) {
+    ensure(fqdn);
+  }
+  // 3. Symbol counts per module — total symbols whose `module` matches.
+  for (const s of inScopeSymbols) {
+    if (typeof s.module !== 'string' || s.module.length === 0) continue;
+    const m = builders.get(s.module);
+    if (m !== undefined) m.symbol_count += 1;
+  }
+
+  // Recenter depths so the shallowest in-scope node sits at depth 0.
+  const minDepth = [...builders.values()].reduce((m, b) => Math.min(m, b.depth), Number.MAX_SAFE_INTEGER);
+  if (minDepth > 0) {
+    for (const b of builders.values()) b.depth -= minDepth;
+  }
+
+  // Drill one segment deeper at a time: render only the anchor
+  // (depth 0) + its DIRECT children (depth 1). Grand-children stay
+  // off-screen until the user drills into one of the direct children,
+  // which becomes the new anchor in the next scope.
+  for (const fqdn of [...builders.keys()]) {
+    if (builders.get(fqdn)!.depth > 1) builders.delete(fqdn);
+  }
+
+  // Assign stable u32 ids — sort by (depth asc, fqdn asc) so the id
+  // ordering visually matches the rendered hierarchy.
+  const orderedBuilders = [...builders.values()].sort((a, b) => {
+    if (a.depth !== b.depth) return a.depth - b.depth;
+    return a.fqdn.localeCompare(b.fqdn);
+  });
+  const idByFqdn = new Map<string, number>();
+  let nextId = 0;
+  for (const b of orderedBuilders) {
+    idByFqdn.set(b.fqdn, nextId++);
+  }
+
+  const nodes = orderedBuilders.map(b => ({
+    id: idByFqdn.get(b.fqdn)!,
+    label: b.label,
+    kind: b.project_kind ?? null,
+    symbol_count: b.symbol_count,
+    depth: b.depth,
+    parent_id: b.parent_fqdn !== null ? idByFqdn.get(b.parent_fqdn) ?? null : null,
+    node_kind: b.node_kind,
+  }));
+
+  // Parent_child edges — synthesized from the FQDN tree.
+  const treeEdges = orderedBuilders
+    .filter(b => b.parent_fqdn !== null && idByFqdn.has(b.parent_fqdn))
+    .map(b => ({
+      from: idByFqdn.get(b.parent_fqdn!)!,
+      to: idByFqdn.get(b.fqdn)!,
+      weight: 1,
+      edge_kind: 'parent_child' as const,
+    }));
+
+  // Cross edges — IR edges between in-scope nodes, aggregated by
+  // (from, to, kind) so each kind keeps its own count and color in
+  // the legend. Map each endpoint to its node (the fqdn itself if
+  // it's a node, else its containing module). Drop edges that already
+  // exist as the structural parent_child to avoid double-counting.
+  const resolveNodeFqdn = (fqdn: string): string | null => {
+    if (builders.has(fqdn)) return fqdn;
+    const sym = symbolByFqdn.get(fqdn);
+    if (typeof sym?.module === 'string' && builders.has(sym.module)) {
+      return sym.module;
+    }
+    return null;
+  };
+  const aggregated = new Map<string, { from: number; to: number; weight: number; kind: string }>();
+  for (const e of edges) {
+    const fromFqdn = resolveNodeFqdn(e.from);
+    const toFqdn = resolveNodeFqdn(e.to);
+    if (fromFqdn === null || toFqdn === null) continue;
+    if (fromFqdn === toFqdn) continue;
+    const fromBuilder = builders.get(fromFqdn)!;
+    const toBuilder = builders.get(toFqdn)!;
+    if (fromBuilder.parent_fqdn === toFqdn || toBuilder.parent_fqdn === fromFqdn) continue;
+    const fromId = idByFqdn.get(fromFqdn)!;
+    const toId = idByFqdn.get(toFqdn)!;
+    const key = `${fromId}->${toId}#${e.kind}`;
+    const bucket = aggregated.get(key);
+    if (bucket === undefined) aggregated.set(key, { from: fromId, to: toId, weight: 1, kind: e.kind });
+    else bucket.weight += 1;
+  }
+  const crossEdges = [...aggregated.values()].map(e => ({ ...e, edge_kind: 'cross' as const }));
+
+  // Click targets — bucket symbols by RESOLVED containing module so
+  // a struct's fields/methods (whose raw `module` points to the
+  // struct, not the file) count against the file module they
+  // physically live in. Otherwise leaf modules with no top-level
+  // symbols would end up with an empty `own` bucket and the click
+  // would do nothing.
+  const symbolsByPrefix = new Map<string, BrowseSymbol[]>();
+  for (const s of inScopeSymbols) {
+    if (typeof s.module !== 'string' || s.module.length === 0) continue;
+    const resolved = resolveContainingModule(s.module);
+    if (resolved === null) continue;
+    const bucket = symbolsByPrefix.get(resolved);
+    if (bucket === undefined) symbolsByPrefix.set(resolved, [s]);
+    else bucket.push(s);
+  }
+  // Targets:
+  //   * depth-0 anchor → focus-symbol on its representative (clicking
+  //     "you are here" surfaces details about the current module
+  //     instead of being a no-op).
+  //   * depth-1 with sub-modules → drill-module (one segment deeper).
+  //   * depth-1 leaf module → focus-symbol on representative so the
+  //     focus-graph / details panels react and the user sees the
+  //     module's content even when there's nothing to drill into.
+  const hasDescendants = (fqdn: string): boolean => {
+    const prefix = `${fqdn}::`;
+    for (const candidate of moduleFqdns) {
+      if (candidate !== fqdn && candidate.startsWith(prefix)) return true;
+    }
+    return false;
+  };
+  const targets = new Map<number, ClusterTarget>();
+  for (const b of orderedBuilders) {
+    const id = idByFqdn.get(b.fqdn)!;
+    if (b.depth > 0 && hasDescendants(b.fqdn)) {
+      targets.set(id, { kind: 'drill-module', prefix: b.fqdn, label: b.label });
+      continue;
+    }
+    // Focus the MODULE symbol itself when it exists in the index —
+    // the user clicked "shell", they get details about "shell", not
+    // some arbitrary `BuiltOverviewPayload` interface that happens to
+    // win the alphabetical tiebreaker inside the file. Falls back to
+    // a top-symbol representative when the module fqdn is a pure
+    // synthesized container with no indexed symbol of its own.
+    if (symbolByFqdn.has(b.fqdn)) {
+      targets.set(id, { kind: 'focus-symbol', fqdn: b.fqdn });
+      continue;
+    }
+    const own = symbolsByPrefix.get(b.fqdn) ?? [];
+    if (own.length > 0) {
+      targets.set(id, { kind: 'focus-symbol', fqdn: pickModuleRepresentative(own) });
+    }
+  }
+
+  const crossKinds = [...new Set(crossEdges.map(e => e.kind))].sort();
+  return {
+    json: JSON.stringify({ nodes, edges: [...treeEdges, ...crossEdges] }),
+    targets,
+    crossKinds,
+  };
+}
+
+/**
+ * Breadcrumb label shown in the Overview top-left pill. `null` hides
+ * the breadcrumb entirely (workspace mode).
+ */
+function scopeBreadcrumbLabel(scope: OverviewScope): string | null {
+  switch (scope.kind) {
+    case 'workspace': return null;
+    case 'project': return scope.label;
+    case 'folder': return `${scope.label}/${scope.relPath}`;
+    case 'module': return scope.prefix;
+  }
+}
+
+/**
+ * Workspace flat root view — one sphere per project at depth 0. Edges
+ * aggregated by `(from_project, to_project, kind)` so each IR kind
+ * keeps its swatch in the legend. Click target = drill-project so
+ * the user lands on the scoped hierarchical view of that project.
+ */
+function buildWorkspacePackagesPayload(
+  projects: ReadonlyArray<{ project_id: number; label: string; rel_path: string; kind: { kind: string } }>,
   symbols: ReadonlyArray<BrowseSymbol>,
   edges: ReadonlyArray<GraphEdge>,
   symbolByFqdn: Map<string, BrowseSymbol>,
@@ -1204,123 +1538,56 @@ function buildWorkspaceOverviewPayload(
     if (s.project_id === undefined || s.project_id === null) continue;
     counts.set(s.project_id, (counts.get(s.project_id) ?? 0) + 1);
   }
-  const clusters = projects.map(p => ({
-    id: p.project_id,
-    label: p.label,
-    kind: p.kind.kind,
-    symbol_count: counts.get(p.project_id) ?? 0,
-  }));
-  const targets = new Map<number, ClusterTarget>();
-  for (const p of projects) {
-    targets.set(p.project_id, { kind: 'drill-project', projectId: p.project_id, label: p.label });
-  }
-  const aggregated = new Map<string, { from: number; to: number; weight: number }>();
-  for (const e of edges) {
-    const from = symbolByFqdn.get(e.from)?.project_id;
-    const to = symbolByFqdn.get(e.to)?.project_id;
-    if (from === undefined || from === null) continue;
-    if (to === undefined || to === null) continue;
-    if (from === to) continue;
-    const key = `${from}->${to}`;
-    const bucket = aggregated.get(key);
-    if (bucket === undefined) aggregated.set(key, { from, to, weight: 1 });
-    else bucket.weight += 1;
-  }
-  return {
-    json: JSON.stringify({ clusters, edges: [...aggregated.values()] }),
-    targets,
-  };
-}
-
-function buildModuleOverviewPayload(
-  scope: Exclude<OverviewScope, { kind: 'workspace' }>,
-  projects: ReadonlyArray<{ project_id: number; label: string; rel_path: string }>,
-  symbols: ReadonlyArray<BrowseSymbol>,
-  edges: ReadonlyArray<GraphEdge>,
-  symbolByFqdn: Map<string, BrowseSymbol>,
-): BuiltOverviewPayload {
-  const project = projects.find(p => p.project_id === scope.projectId);
-  const projRelPath = project?.rel_path.replace(/\\/g, '/') ?? '';
-  const pathPrefix = scope.kind === 'folder' && scope.relPath.length > 0
-    ? `${projRelPath}/${scope.relPath}`
-    : projRelPath;
-  const inScope = (s: BrowseSymbol): boolean => {
-    if (s.project_id !== scope.projectId) return false;
-    if (scope.kind === 'project') return true;
-    if (pathPrefix.length === 0) return true;
-    const norm = (s.file ?? '').replace(/\\/g, '/');
-    return norm === pathPrefix || norm.startsWith(`${pathPrefix}/`);
-  };
-
-  // Group in-scope symbols by module fqdn. Symbols without a module
-  // (rare for workspace symbols) collapse under '<root>' so they don't
-  // disappear from the view.
-  const byModule = new Map<string, BrowseSymbol[]>();
-  for (const s of symbols) {
-    if (!inScope(s)) continue;
-    const m = s.module && s.module.length > 0 ? s.module : '<root>';
-    const bucket = byModule.get(m);
-    if (bucket === undefined) byModule.set(m, [s]);
-    else bucket.push(s);
-  }
-
-  const moduleIds = new Map<string, number>();
-  const clusters: { id: number; label: string; kind: string; symbol_count: number }[] = [];
+  const idByProject = new Map<number, number>();
+  const nodes: Array<{
+    id: number;
+    label: string;
+    kind: string | null;
+    symbol_count: number;
+    depth: number;
+    parent_id: number | null;
+    node_kind: 'module';
+  }> = [];
   const targets = new Map<number, ClusterTarget>();
   let nextId = 0;
-  // Stable order: sort by symbol count desc, then alphabetical, so the
-  // heaviest module anchors the sunflower centre.
-  const sorted = [...byModule.entries()].sort(([am, asyms], [bm, bsyms]) => {
-    const dc = bsyms.length - asyms.length;
-    return dc !== 0 ? dc : am.localeCompare(bm);
-  });
-  for (const [module, syms] of sorted) {
+  for (const p of projects) {
     const id = nextId++;
-    moduleIds.set(module, id);
-    clusters.push({
+    idByProject.set(p.project_id, id);
+    nodes.push({
       id,
-      label: shortenModuleLabel(module, project?.label),
-      kind: 'module',
-      symbol_count: syms.length,
+      label: p.label,
+      kind: p.kind.kind,
+      symbol_count: counts.get(p.project_id) ?? 0,
+      depth: 0,
+      parent_id: null,
+      node_kind: 'module',
     });
-    targets.set(id, { kind: 'focus-symbol', fqdn: pickModuleRepresentative(syms) });
+    targets.set(id, { kind: 'drill-project', projectId: p.project_id, label: p.label });
   }
 
-  const aggregated = new Map<string, { from: number; to: number; weight: number }>();
+  const aggregated = new Map<string, { from: number; to: number; weight: number; kind: string }>();
   for (const e of edges) {
-    const fromSym = symbolByFqdn.get(e.from);
-    const toSym = symbolByFqdn.get(e.to);
-    if (fromSym === undefined || toSym === undefined) continue;
-    if (!inScope(fromSym) || !inScope(toSym)) continue;
-    const fromMod = fromSym.module && fromSym.module.length > 0 ? fromSym.module : '<root>';
-    const toMod = toSym.module && toSym.module.length > 0 ? toSym.module : '<root>';
-    if (fromMod === toMod) continue;
-    const fromId = moduleIds.get(fromMod);
-    const toId = moduleIds.get(toMod);
+    const fromProj = symbolByFqdn.get(e.from)?.project_id;
+    const toProj = symbolByFqdn.get(e.to)?.project_id;
+    if (fromProj === undefined || fromProj === null) continue;
+    if (toProj === undefined || toProj === null) continue;
+    if (fromProj === toProj) continue;
+    const fromId = idByProject.get(fromProj);
+    const toId = idByProject.get(toProj);
     if (fromId === undefined || toId === undefined) continue;
-    const key = `${fromId}->${toId}`;
+    const key = `${fromId}->${toId}#${e.kind}`;
     const bucket = aggregated.get(key);
-    if (bucket === undefined) aggregated.set(key, { from: fromId, to: toId, weight: 1 });
+    if (bucket === undefined) aggregated.set(key, { from: fromId, to: toId, weight: 1, kind: e.kind });
     else bucket.weight += 1;
   }
+  const crossEdges = [...aggregated.values()].map(e => ({ ...e, edge_kind: 'cross' as const }));
+  const crossKinds = [...new Set(crossEdges.map(e => e.kind))].sort();
 
   return {
-    json: JSON.stringify({ clusters, edges: [...aggregated.values()] }),
+    json: JSON.stringify({ nodes, edges: crossEdges }),
     targets,
+    crossKinds,
   };
-}
-
-/**
- * Strip the project label prefix from a module fqdn so the Overview
- * shows `query::cache` instead of `standardoc-core::query::cache`.
- * Falls back to the full module string when no clean prefix matches.
- */
-function shortenModuleLabel(module: string, projectLabel: string | undefined): string {
-  if (projectLabel && module.startsWith(`${projectLabel}::`)) {
-    return module.slice(projectLabel.length + 2);
-  }
-  if (projectLabel && module === projectLabel) return '<root>';
-  return module;
 }
 
 /**
