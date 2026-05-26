@@ -963,20 +963,47 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
     if let Some((_, trait_path, _)) = &item.trait_ {
         let trait_str = path_to_string(trait_path);
         let span = item.span();
-        let to = ctx.resolve_path(&trait_str, parent_fqdn);
-        let confidence = to.default_confidence();
-        ctx.push_edge(RawEdge {
-            from_fqdn: target_fqdn.clone(),
-            kind: EdgeKind::Implements,
-            to,
-            sites: vec![Site {
-                file: path.clone(),
-                line: line_from_span(span),
-                col: col_from_span(span),
-            }],
-            attributes: vec![],
-            confidence,
-        });
+        // Bug B fix — consult the builtin registry on the trait's
+        // leftmost segment BEFORE falling through to the local-module
+        // resolver. Pre-fix, `impl Drop for X` produced a bogus
+        // `standardoc-cli::Drop` IMPLEMENTS target because resolve_path's
+        // single-ident fallback prefixes the current module. Now:
+        //   - tier::Drop (Drop/Default/From/Clone/Display/...) → skip,
+        //     mirrors the policy used for value-position references
+        //   - tier::Attribute (Iterator/Future/Stream) → skip the edge;
+        //     attribute promotion is the visitor's job, not an IMPLEMENTS
+        //   - tier::Edge (Error) → emit with the synthetic FQDN +
+        //     via-builtin attrs so the focus-graph keeps the semantic
+        //     "this is an error type" signal
+        let leftmost = trait_str.split("::").next().unwrap_or("");
+        let builtin = global_builtin_registry().lookup(leftmost, Language::Rust);
+        let emit = match builtin {
+            Some(entry) => match entry.tier {
+                BuiltinTier::Drop | BuiltinTier::Attribute => None,
+                BuiltinTier::Edge => Some((
+                    ResolvedOrUnresolved::Resolved {
+                        fqdn: entry.synthetic_fqdn.clone(),
+                    },
+                    vec!["via-builtin".to_string()],
+                )),
+            },
+            None => Some((ctx.resolve_path(&trait_str, parent_fqdn), vec![])),
+        };
+        if let Some((to, attrs)) = emit {
+            let confidence = to.default_confidence();
+            ctx.push_edge(RawEdge {
+                from_fqdn: target_fqdn.clone(),
+                kind: EdgeKind::Implements,
+                to,
+                sites: vec![Site {
+                    file: path.clone(),
+                    line: line_from_span(span),
+                    col: col_from_span(span),
+                }],
+                attributes: attrs,
+                confidence,
+            });
+        }
     }
 
     // Bug C-3 / Stage 3a-8c — impl-level generics live at the impl's
@@ -1489,6 +1516,72 @@ mod tests {
             other => panic!("expected unresolved, got {other:?}"),
         }
         assert!(symbols.iter().any(|s| s.fqdn == "c::Foo::run"));
+    }
+
+    #[test]
+    fn impl_builtin_drop_tier_trait_emits_no_implements_edge() {
+        // `impl Drop for Foo` (and Default, Clone, From, ...): pre-fix
+        // emitted a bogus `c::Drop` Unresolved IMPLEMENTS target via
+        // resolve_path's module-local fallback. Now the builtin
+        // registry catches it (tier::Drop) and we skip the edge,
+        // mirroring the value-position policy.
+        let parsed = parse("struct Foo; impl Drop for Foo { fn drop(&mut self) {} }");
+        let (_symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let imp_count = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Implements)
+            .count();
+        assert_eq!(
+            imp_count, 0,
+            "tier::Drop builtin trait (Drop) must not emit an IMPLEMENTS edge"
+        );
+    }
+
+    #[test]
+    fn impl_builtin_default_clone_emits_no_implements_edges() {
+        let parsed = parse(
+            "struct Foo;\n\
+             impl Default for Foo { fn default() -> Self { Foo } }\n\
+             impl Clone for Foo { fn clone(&self) -> Self { Foo } }",
+        );
+        let (_symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let imp_count = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Implements)
+            .count();
+        assert_eq!(
+            imp_count, 0,
+            "Default + Clone are tier::Drop builtins, no IMPLEMENTS edges expected"
+        );
+    }
+
+    #[test]
+    fn impl_builtin_error_tier_edge_emits_resolved_with_synthetic_fqdn() {
+        // `Error` is tier::Edge — implementing it is a semantic
+        // "this is an error type" signal worth keeping in the graph.
+        // Expect a Resolved IMPLEMENTS target pointing at the
+        // synthetic builtin fqdn + a `via-builtin` attribute.
+        let parsed = parse(
+            "struct MyError; impl Error for MyError { fn description(&self) -> &str { \"\" } }",
+        );
+        let (_symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let imp: Vec<_> = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Implements)
+            .collect();
+        assert_eq!(imp.len(), 1, "Error tier::Edge must emit one IMPLEMENTS");
+        assert_eq!(imp[0].from_fqdn, "c::MyError");
+        match &imp[0].to {
+            ResolvedOrUnresolved::Resolved { fqdn } => {
+                assert!(
+                    fqdn.starts_with("<builtin>::"),
+                    "expected synthetic builtin fqdn, got {fqdn}"
+                );
+                assert!(fqdn.ends_with("::Error"), "expected ::Error tail, got {fqdn}");
+            }
+            other => panic!("expected resolved synthetic fqdn, got {other:?}"),
+        }
+        assert!(imp[0].attributes.iter().any(|a| a == "via-builtin"));
     }
 
     #[test]
