@@ -44,7 +44,14 @@ const DID_YOU_MEAN_THRESHOLD: f32 = 0.6;
 /// Hard cap on the size of the `did_you_mean` array. Five is enough to
 /// surface typo / cluster matches without flooding the tool response.
 const DID_YOU_MEAN_LIMIT: usize = 5;
-const GET_CONTEXT_DEFAULT_DEPTH: u8 = 1;
+/// Default depth for `get_context` when the caller doesn't override.
+/// Bumped from 1 to 2 so each neighbor entry carries its
+/// `resolved_symbol: RawSymbol` payload by default — what the viz
+/// expects to render a focus graph without a follow-up round-trip per
+/// neighbor, and what humans inspecting the raw response expect to
+/// see. Agents that want the cheap shape can pass `depth: 1`
+/// explicitly to opt into the map-first / drill-second protocol.
+const GET_CONTEXT_DEFAULT_DEPTH: u8 = 2;
 const FIND_SIMILAR_DEFAULT_THRESHOLD: f32 = 0.8;
 
 /// Window during which a prior `get_context(fqdn, depth=1)` is considered

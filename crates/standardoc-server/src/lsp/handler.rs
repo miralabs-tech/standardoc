@@ -577,6 +577,7 @@ mod tests {
         });
         let ctx = SymbolContext {
             symbol: s,
+            language: "rust".into(),
             enrichment_description: Some("auto".into()),
             document_description: Some("manual".into()),
         };

@@ -47,6 +47,15 @@ pub struct FileInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolContext {
     pub symbol: RawSymbol,
+    /// Source language slug stored in `symbols.language` (`rust`,
+    /// `typescript`, `lua`, `c`, …). Distinct from
+    /// `symbol.language_kind`, which is the LANGUAGE'S native name
+    /// for the symbol shape (`struct`, `trait`, `class`, `interface`).
+    /// The two names look similar but answer different questions —
+    /// this field is the one that disambiguates "is this a Rust
+    /// struct or a TS class?" at a glance.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub language: String,
     pub enrichment_description: Option<String>,
     pub document_description: Option<String>,
 }
@@ -599,7 +608,7 @@ pub fn context_for_symbol(
         let raw = conn
             .query_row(
                 &format!(
-                    "SELECT {SYMBOL_COLUMNS}, e.description, d.description \
+                    "SELECT {SYMBOL_COLUMNS}, s.language, e.description, d.description \
                      FROM symbols s \
                      LEFT JOIN enrichments e ON e.symbol_id = s.id \
                      LEFT JOIN documents   d ON d.symbol_id = s.id \
@@ -609,18 +618,20 @@ pub fn context_for_symbol(
                 |row| {
                     Ok((
                         read_symbol_row(row)?,
-                        row.get::<_, Option<String>>(18)?,
+                        row.get::<_, String>(18)?,
                         row.get::<_, Option<String>>(19)?,
+                        row.get::<_, Option<String>>(20)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((symbol_raw, enrichment_description, document_description)) = raw else {
+        let Some((symbol_raw, language, enrichment_description, document_description)) = raw else {
             return Ok(None);
         };
         let symbol = build_symbol(symbol_raw)?;
         Ok(Some(SymbolContext {
             symbol,
+            language,
             enrichment_description,
             document_description,
         }))
