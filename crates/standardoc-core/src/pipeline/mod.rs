@@ -13,6 +13,7 @@ pub(crate) mod peer_import;
 pub(crate) mod projects;
 pub(crate) mod provider;
 mod reindex;
+mod resolve_unresolved;
 mod seed_builtins;
 mod watcher;
 mod writer;

@@ -102,6 +102,14 @@ pub fn run(
     // `symbol_ffi_binding` rows seeded by per-provider taggers and
     // emits IMPORTS edges across exact `(abi, abi_name)` matches.
     super::ffi_resolve::apply_ffi_resolve_quietly(handle);
+    // Stage X — second-pass unresolved-edge sweep. The per-file
+    // cross_workspace_post invocation inside reindex::process_one
+    // runs before later chunks commit their module_lookups, so
+    // early-extracted files leave intra-workspace cross-crate edges
+    // as Unresolved even though a sibling crate would have answered
+    // the query later. Now that every module_lookup is in DB, rerun
+    // the resolver across the unresolved edge set and rewrite hits.
+    super::resolve_unresolved::apply_resolve_unresolved_quietly(handle);
     clear_progress(handle)?;
     Ok(())
 }
