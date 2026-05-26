@@ -45,9 +45,29 @@ impl<'a> DbCrossWorkspaceResolver<'a> {
         }
     }
 
-    /// Compute the lookup without touching the cache — exposed for the
-    /// internal trait impl. Storage errors collapse to `Unknown`.
+    /// Compute the lookup without touching the cache. Tries the
+    /// verbatim `origin_module` first (covers crates whose Cargo.toml
+    /// name genuinely uses underscores, e.g. `rust_decimal`); when
+    /// that misses, normalises the leftmost segment `_` → `-` and
+    /// retries, because Rust source uses `use my_crate::Foo` but the
+    /// IR + Cargo metadata key on the hyphenated form `my-crate`.
+    /// Storage errors collapse to `Unknown`.
     fn compute(&self, origin_module: &str, origin_symbol: &str) -> CrossWorkspaceLookup {
+        let direct = self.compute_with_key(origin_module, origin_symbol);
+        if !matches!(direct, CrossWorkspaceLookup::Unknown) {
+            return direct;
+        }
+        let normalized = normalize_crate_prefix_to_hyphen(origin_module);
+        if normalized != origin_module {
+            let alt = self.compute_with_key(&normalized, origin_symbol);
+            if !matches!(alt, CrossWorkspaceLookup::Unknown) {
+                return alt;
+            }
+        }
+        direct
+    }
+
+    fn compute_with_key(&self, origin_module: &str, origin_symbol: &str) -> CrossWorkspaceLookup {
         let Ok(pool) = self.handle.pool() else {
             return CrossWorkspaceLookup::Unknown;
         };
@@ -67,6 +87,27 @@ impl<'a> DbCrossWorkspaceResolver<'a> {
             },
             Err(_) => CrossWorkspaceLookup::Unknown,
         }
+    }
+}
+
+/// Replace `_` with `-` in the leftmost `::`-segment of a module
+/// FQDN. Used by [`DbCrossWorkspaceResolver::compute`] to bridge the
+/// Rust source convention (`use my_crate::*`) with the Cargo +
+/// IR storage convention (`my-crate`). Deeper segments stay literal
+/// because Rust module names are underscore-native (e.g.
+/// `standardoc-core::pipeline::provider`).
+fn normalize_crate_prefix_to_hyphen(module: &str) -> String {
+    let (head, tail) = match module.split_once("::") {
+        Some((h, t)) => (h, Some(t)),
+        None => (module, None),
+    };
+    if !head.contains('_') {
+        return module.to_string();
+    }
+    let head_norm = head.replace('_', "-");
+    match tail {
+        Some(t) => format!("{head_norm}::{t}"),
+        None => head_norm,
     }
 }
 
@@ -166,6 +207,71 @@ mod tests {
         let resolver = DbCrossWorkspaceResolver::new(&handle);
         let result = resolver.resolve("totally::external", "Foo");
         assert_eq!(result, CrossWorkspaceLookup::Unknown);
+    }
+
+    #[test]
+    fn hit_when_only_hyphenated_form_matches_peer_module() {
+        // Rust source writes `use standardoc_core::Foo` but the peer
+        // workspace stores its ModuleLookup keyed on the Cargo-style
+        // hyphenated name `standardoc-core`. The resolver must fall
+        // back to the hyphenated form on miss.
+        let (_dir, handle) = primary_handle();
+        let pool = handle.pool().unwrap();
+        let conn = pool.get().unwrap();
+        let lookup = lookup_with_top_level_symbol("standardoc-core", "Foo");
+        put_module_lookup(&conn, "peer-uuid", &lookup).unwrap();
+        drop(conn);
+
+        let resolver = DbCrossWorkspaceResolver::new(&handle);
+        let result = resolver.resolve("standardoc_core", "Foo");
+        assert_eq!(
+            result,
+            CrossWorkspaceLookup::Hit {
+                workspace_id: "peer-uuid".into(),
+                fqdn: "standardoc-core::Foo".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn hit_returns_canonical_fqdn_when_binding_has_resolved_fqdn() {
+        // Re-export binding: `pub use crate::pipeline::provider::Foo`
+        // stamps `resolved_fqdn` on the IdentResolution pointing at the
+        // canonical FQDN. The resolver must prefer it over the naive
+        // `<origin_module>::<origin_symbol>` re-export FQDN so consumers
+        // querying the canonical (`...::pipeline::provider::Foo`) see
+        // the dependents materialise.
+        let (_dir, handle) = primary_handle();
+        let pool = handle.pool().unwrap();
+        let conn = pool.get().unwrap();
+        let mut lookup = ModuleLookup::new("standardoc-core".into(), Language::Rust);
+        lookup.push_binding(IdentResolution {
+            name: "Foo".into(),
+            source: BindingSource::Import {
+                module_path: "crate::pipeline::provider".into(),
+                original_name: None,
+                is_type_only: false,
+                is_re_export: true,
+            },
+            resolved_fqdn: Some("standardoc-core::pipeline::provider::Foo".into()),
+            aliases_to: None,
+            mutability: None,
+            scope_idx: ModuleLookup::ROOT_SCOPE,
+            attributes: vec![],
+            ir_kind: None,
+        });
+        put_module_lookup(&conn, "peer-uuid", &lookup).unwrap();
+        drop(conn);
+
+        let resolver = DbCrossWorkspaceResolver::new(&handle);
+        let result = resolver.resolve("standardoc-core", "Foo");
+        assert_eq!(
+            result,
+            CrossWorkspaceLookup::Hit {
+                workspace_id: "peer-uuid".into(),
+                fqdn: "standardoc-core::pipeline::provider::Foo".into(),
+            }
+        );
     }
 
     #[test]

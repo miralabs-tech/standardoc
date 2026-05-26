@@ -72,7 +72,18 @@ pub(crate) fn resolve_cross_workspace_import(
         else {
             continue;
         };
-        let resolved_fqdn = format!("{origin_module}::{origin_symbol}");
+        // Prefer the binding's `resolved_fqdn` (set by the extractor
+        // when it followed the re-export chain to the canonical
+        // definition) over `<origin_module>::<origin_symbol>`. Without
+        // this the LuaProvider → `use standardoc_core::LanguageProvider`
+        // edge would resolve to the re-export FQDN
+        // `standardoc-core::pipeline::LanguageProvider` and miss the
+        // canonical trait at `standardoc-core::pipeline::provider::LanguageProvider`
+        // when consumers (viz / MCP) query its dependents.
+        let resolved_fqdn = root_binding
+            .resolved_fqdn
+            .clone()
+            .unwrap_or_else(|| format!("{origin_module}::{origin_symbol}"));
         return Ok(Some(CrossWorkspaceResolution {
             workspace_id,
             resolved_fqdn,
