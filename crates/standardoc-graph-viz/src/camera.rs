@@ -9,6 +9,20 @@ use glam::{Mat4, Vec3};
 const MIN_PITCH: f32 = -1.45;
 const MAX_PITCH: f32 = 1.45;
 const MIN_DISTANCE: f32 = 10.0;
+/// Hard upper bound on the orbit distance. Without it, holding the
+/// keyboard backward key (S) for a few seconds at 1.5% / frame growth
+/// drove `distance` past 10⁶ world units, well outside the `far`
+/// plane — the geometry vanished and only clicking Home could recover.
+/// 30_000 is ~10× the typical workspace fit distance (≈3000 for a
+/// 1000-unit bbox); past this the scene is a sub-pixel dot anyway,
+/// so capping here also keeps the camera in a "scene is meaningful"
+/// regime.
+const MAX_DISTANCE: f32 = 30_000.0;
+/// Half-radius of the "pan playground" — target.length() is soft-
+/// clamped to this in `pan()`. Capped at a multiple of `distance` so
+/// dollying out gives more pan room without ever letting the camera
+/// drift completely off the scene anchor.
+const TARGET_CAP_DISTANCE_FACTOR: f32 = 3.0;
 /// Screen-pixel → radian gain for drag-to-orbit.
 const ORBIT_SPEED: f32 = 0.008;
 /// Preset-transition progress gained per frame (~0.5 s at 60 fps).
@@ -153,12 +167,56 @@ impl Camera3D {
         }
     }
 
-    /// Wheel-to-dolly. `factor > 1` pulls the eye toward `target`. A
-    /// manual dolly cancels any in-flight transition for the same
-    /// reason `orbit` does.
+    /// Wheel-to-dolly. `factor > 1` pulls the eye toward `target`;
+    /// `factor < 1` pushes the eye away. A manual dolly cancels any
+    /// in-flight transition for the same reason `orbit` does.
+    /// `near` / `far` track `distance` so the frustum always covers
+    /// the geometry — without this, sustained keyboard backward held
+    /// the camera past the far plane and the scene rendered empty
+    /// until a preset / Home click ran `frame()` to recompute it.
     pub(crate) fn dolly(&mut self, factor: f32) {
         self.anim = None;
-        self.distance = (self.distance / factor).max(MIN_DISTANCE);
+        self.distance = (self.distance / factor).clamp(MIN_DISTANCE, MAX_DISTANCE);
+        self.near = (self.distance * 0.01).max(0.5);
+        self.far = self.distance * 50.0;
+    }
+
+    /// Drag-to-pan. `dx` / `dy` are screen-pixel deltas; `viewport_h`
+    /// is the canvas height in CSS pixels (needed to convert screen
+    /// pixels to a world distance at the current camera distance).
+    /// Translates `target` in the camera's right/up plane so the world
+    /// point under the cursor stays under the cursor (Figma-style grab
+    /// semantics). A manual pan cancels any in-flight transition.
+    ///
+    /// `target` is soft-clamped to a sphere of radius `distance * 10`
+    /// around the origin: clusters live near the origin in our world
+    /// space, and without the clamp, sustained keyboard pan (A/Q/E/D
+    /// held) drifted the target tens of thousands of units away. The
+    /// scene would still render but appear as a tiny dot at the edge
+    /// of the viewport, indistinguishable from a "stuck camera" bug.
+    pub(crate) fn pan(&mut self, dx: f64, dy: f64, viewport_h: f64) {
+        self.anim = None;
+        let viewport_h = (viewport_h as f32).max(1.0);
+        let world_per_pixel = self.distance * (self.fov_y * 0.5).tan() * 2.0 / viewport_h;
+        let cp = self.pitch.cos();
+        let forward = Vec3::new(cp * self.yaw.sin(), self.pitch.sin(), cp * self.yaw.cos()).normalize_or_zero();
+        let right = forward.cross(Vec3::NEG_Y).normalize_or_zero();
+        let up = right.cross(forward).normalize_or_zero();
+        // Grab semantics: target shifts OPPOSITE to the drag so the
+        // world point under the cursor stays put. dx>0 (drag right) ⇒
+        // target moves -right; dy>0 (drag down on screen ⇒ +Y world
+        // ⇒ -up in our up-is-NEG_Y frame) ⇒ target moves -up.
+        self.target -= right * (dx as f32 * world_per_pixel) + up * (dy as f32 * world_per_pixel);
+        // Soft cap on target wander — keep the camera within a sane
+        // neighbourhood of the scene origin even if a key is held for
+        // a long time. Scaled by distance so dollying out gives more
+        // pan room, but capped tightly enough that we never lose the
+        // scene off-frame.
+        let cap = self.distance * TARGET_CAP_DISTANCE_FACTOR;
+        let target_norm = self.target.length();
+        if target_norm > cap {
+            self.target *= cap / target_norm;
+        }
     }
 
     /// Frame a bounding sphere (`center` + `radius`) so the whole

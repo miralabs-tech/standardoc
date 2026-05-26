@@ -11,12 +11,35 @@ export interface OverviewCanvasFacade {
   set_on_cluster_click(cb: (cluster_id: number) => void): void;
   set_on_cluster_hover(cb: (cluster_id: number | null) => void): void;
   on_pointer_move(x: number, y: number): void;
-  on_pointer_down(x: number, y: number, button: number): void;
+  /**
+   * `panMode` toggles drag semantics: `false` (plain left-drag)
+   * orbits around the target; `true` (alt + left-drag, Maya / Figma
+   * convention) pans the target along the camera plane.
+   */
+  on_pointer_down(x: number, y: number, button: number, panMode: boolean): void;
   on_pointer_up(x: number, y: number, button: number): void;
   on_pointer_leave(): void;
   on_wheel(x: number, y: number, deltaY: number): void;
   fit(): void;
   set_camera_preset(preset: string): void;
+  /**
+   * Drive the camera orbit directly (used by the orbit-ball widget
+   * in `<standardoc-overview>`). `dx`/`dy` are screen-pixel deltas
+   * — same scaling as the in-canvas drag path.
+   */
+  orbit_camera(dx: number, dy: number): void;
+  /**
+   * Drive the camera pan directly (used by Q/D strafe and A/E
+   * rise-fall keyboard nav in `<standardoc-overview>`). `dx`/`dy`
+   * follow the same grab semantics as the alt-drag canvas path.
+   */
+  pan_camera(dx: number, dy: number): void;
+  /**
+   * Dolly the camera along its forward axis (used by Z/S keyboard
+   * nav). `factor > 1` moves forward (closer to target); `factor < 1`
+   * moves backward.
+   */
+  dolly_camera(factor: number): void;
   /**
    * Cap on the number of cluster text labels rendered each frame. `0`
    * disables the cap (all labels render); any other value picks the
@@ -26,6 +49,10 @@ export interface OverviewCanvasFacade {
   set_max_visible_labels(n: number): void;
   readonly cluster_count: number;
   readonly edge_count: number;
+  /** Current orbit yaw in radians — synced into the orbit-ball widget. */
+  readonly camera_yaw: number;
+  /** Current orbit pitch in radians — synced into the orbit-ball widget. */
+  readonly camera_pitch: number;
 }
 
 export type OverviewCanvasFactory = (

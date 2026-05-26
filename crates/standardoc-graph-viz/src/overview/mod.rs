@@ -108,6 +108,9 @@ struct DragState {
 	last_x: f64,
 	last_y: f64,
 	moved: bool,
+	/// `true` when the drag should pan the camera (alt-drag, Maya /
+	/// Figma convention) instead of orbiting around the target.
+	pan_mode: bool,
 }
 
 #[wasm_bindgen]
@@ -236,7 +239,11 @@ impl OverviewCanvas {
 			if dx.hypot(dy) >= CLICK_DRAG_THRESHOLD {
 				drag.moved = true;
 			}
-			self.cam.orbit(dx, dy);
+			if drag.pan_mode {
+				self.cam.pan(dx, dy, self.height);
+			} else {
+				self.cam.orbit(dx, dy);
+			}
 			self.needs_redraw = true;
 			return;
 		}
@@ -252,8 +259,16 @@ impl OverviewCanvas {
 		}
 	}
 
-	pub fn on_pointer_down(&mut self, x: f64, y: f64, _button: i16) {
-		self.drag = Some(DragState { last_x: x, last_y: y, moved: false });
+	/// `pan_mode` toggles the drag semantics:
+	///   * `false` (plain left-drag) → orbit around `target`
+	///   * `true`  (alt + left-drag) → pan `target` along the camera plane
+	pub fn on_pointer_down(&mut self, x: f64, y: f64, _button: i16, pan_mode: bool) {
+		self.drag = Some(DragState {
+			last_x: x,
+			last_y: y,
+			moved: false,
+			pan_mode,
+		});
 	}
 
 	pub fn on_pointer_up(&mut self, x: f64, y: f64, _button: i16) {
@@ -296,6 +311,49 @@ impl OverviewCanvas {
 
 	pub fn set_camera_preset(&mut self, preset: &str) {
 		self.cam.apply_preset(preset);
+		self.needs_redraw = true;
+	}
+
+	/// Current orbit yaw in radians — exposed so the JS orbit-ball
+	/// widget can render the camera frame without having to mirror
+	/// every camera mutation manually.
+	#[wasm_bindgen(getter)]
+	pub fn camera_yaw(&self) -> f32 {
+		self.cam.yaw
+	}
+
+	/// Current orbit pitch in radians — see `camera_yaw`.
+	#[wasm_bindgen(getter)]
+	pub fn camera_pitch(&self) -> f32 {
+		self.cam.pitch
+	}
+
+	/// Orbit the camera directly from JS — used by the orbit-ball
+	/// widget which drives the camera independently of the canvas
+	/// drag path. `dx` / `dy` are screen-pixel deltas, same as the
+	/// internal canvas drag would emit.
+	pub fn orbit_camera(&mut self, dx: f64, dy: f64) {
+		self.cam.orbit(dx, dy);
+		self.needs_redraw = true;
+	}
+
+	/// Pan the camera target directly from JS — used by the keyboard
+	/// nav (Q/D strafe, A/E rise-fall) and by any host that wants to
+	/// drive a camera shift programmatically. `dx` / `dy` follow the
+	/// same grab semantics as the alt-drag canvas path: positive `dx`
+	/// (drag right) shifts the target left so the world drifts right
+	/// under the viewport.
+	pub fn pan_camera(&mut self, dx: f64, dy: f64) {
+		self.cam.pan(dx, dy, self.height);
+		self.needs_redraw = true;
+	}
+
+	/// Dolly the camera along its forward axis (Z/S keyboard binding).
+	/// `factor > 1` pulls the eye toward the target (forward = closer);
+	/// `factor < 1` pushes the eye back (backward = farther). Matches
+	/// the wheel-zoom semantics on the canvas drag path.
+	pub fn dolly_camera(&mut self, factor: f64) {
+		self.cam.dolly(factor as f32);
 		self.needs_redraw = true;
 	}
 

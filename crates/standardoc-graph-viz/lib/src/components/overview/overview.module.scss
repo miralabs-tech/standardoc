@@ -11,9 +11,17 @@
 	box-shadow: var(--sd-panel-shadow, none);
 	overflow: hidden;
 	cursor: grab;
+	// Focusable for the ZQSD / arrow-key nav. Default browser outline
+	// is suppressed and replaced by a subtle accent ring on
+	// :focus-visible so the user knows the panel is "live" for keys.
+	outline: none;
 
 	&--grabbing {
 		cursor: grabbing;
+	}
+
+	&:focus-visible {
+		box-shadow: inset 0 0 0 1px var(--sd-accent, #3794ff);
 	}
 
 	&__canvas {
@@ -69,18 +77,25 @@
 		bottom: 10px;
 		right: 10px;
 		display: flex;
-		align-items: center;
+		flex-direction: column;
+		align-items: stretch;
 		gap: 6px;
-		padding: 5px 8px;
-		background: rgba(24, 29, 39, 0.92);
-		border: 1px solid var(--sd-border, #2a3140);
+		padding: 6px;
+		background: rgba(24, 29, 39, 0.94);
+		border: 1px solid var(--sd-border, #454545);
 		border-radius: var(--sd-radius-md, 8px);
-		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+		box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.05);
 		pointer-events: auto;
 		z-index: 2;
 		backdrop-filter: blur(8px);
 		font-family: var(--sd-font-mono, ui-monospace, monospace);
 		font-size: var(--sd-text-xs, 10px);
+	}
+
+	&__gizmo-row {
+		display: flex;
+		align-items: center;
+		gap: 6px;
 	}
 
 	&__gizmo-group {
@@ -136,6 +151,48 @@
 
 		&:hover {
 			background: var(--sd-hover, #2a2d2e);
+		}
+	}
+
+	// Orbit-ball widget — Maya/Blender-style 3D orientation indicator
+	// floating top-right of the panel. Purely decorative: the axes
+	// sync each rAF tick from the wasm camera, but interaction lives
+	// elsewhere (canvas drag for orbit, alt-drag for pan, ZQSD / arrow
+	// keys for keyboard nav). Pointer events pass through so the ball
+	// never steals a click meant for the canvas underneath.
+	&__ball {
+		position: absolute;
+		top: 8px;
+		right: 8px;
+		pointer-events: none;
+		background: radial-gradient(circle at 35% 30%, rgba(120, 140, 180, 0.10), rgba(0, 0, 0, 0) 70%);
+		border-radius: 50%;
+		z-index: 2;
+	}
+
+	&__ball-axis {
+		transition: opacity 80ms linear;
+
+		&--behind {
+			opacity: 0.32;
+		}
+	}
+
+	&__ball-tip {
+		transition: opacity 80ms linear;
+
+		&--behind {
+			opacity: 0.32;
+		}
+	}
+
+	&__ball-label {
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		user-select: none;
+		transition: opacity 80ms linear;
+
+		&--behind {
+			opacity: 0.40;
 		}
 	}
 }
