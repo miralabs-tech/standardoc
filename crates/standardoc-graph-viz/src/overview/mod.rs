@@ -1,20 +1,19 @@
-//! Phase 3 (Shell) — **Overview canvas**. Workspace-level view: each
-//! project rendered as a luminous cluster (nebula-ish), inter-project
-//! dependencies as glow strands whose intensity tracks edge weight.
+//! Overview canvas — FQDN-hierarchical 3D rendering.
 //!
-//! Phase 3c upgrade: projects live in 3D world space (deterministic
-//! sunflower in the XZ plane, biggest near origin, others spiralling
-//! out via the Fibonacci angle). A `Camera3D` orbits the workspace
-//! centroid — drag rotates yaw + pitch, wheel dollies in/out, presets
-//! re-aim the camera (orbit / top / front / side). Each frame projects
-//! cluster centres through view × proj into screen space; clusters
-//! depth-sort back-to-front so closer nebulae paint over farther ones.
+//! Each node is positioned on a Y plane corresponding to its FQDN
+//! depth (Y = -depth * DEPTH_Y_STRIDE). Within a plane, children
+//! orbit their parent's XZ center via a polar layout. Roots are
+//! laid in a sunflower in the XZ plane (Y = 0).
 //!
-//! Hit-test re-projects the cluster positions every move so the click
-//! target tracks the current camera. Inter-project edges draw as 2D
-//! lines between the projected endpoints with weight-driven width.
+//! Edges come in two kinds:
+//!   * `parent_child` — structural FQDN parent → child, always
+//!     rendered as thin vertical-ish strands (the spine of the tree)
+//!   * `cross` — inter-module imports/calls/uses, rendered as curves
+//!     between projected points; hidden by default, toggle via
+//!     `set_show_cross_edges`
 //!
-//! Phase 3d will slim the legacy GraphEngine path — this module stays.
+//! Camera, hit-test, projection: unchanged from the workspace nebula
+//! era. Layout + render-edges replaced; the rest is reused.
 
 use glam::{Vec3, Vec4};
 use serde::Deserialize;
@@ -23,93 +22,122 @@ use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 
 use crate::camera::Camera3D;
 
-/// One project cluster — a nebula in the workspace overview. Phase 3b
-/// uses `id` / `label` / `symbol_count` for layout + rendering. The
-/// `kind` field is parked for Phase 3c where it'll tint the radial
-/// gradient (rust → violet, bun → orange, node → green, etc.).
-#[allow(dead_code)] // kind consumed in Phase 3c
+/// One node in the FQDN-hierarchical overview. `depth` is the
+/// number of `::` segments minus one (`standardoc-core` = 0,
+/// `standardoc-core::ir` = 1, …). `parent_id` points to the
+/// FQDN-prefix parent in the same payload; `None` only on roots.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct OverviewCluster {
+pub(crate) struct OverviewNode {
 	pub id: u32,
 	pub label: String,
+	#[serde(default)]
 	pub kind: Option<String>,
 	pub symbol_count: u32,
+	pub depth: u32,
+	#[serde(default)]
+	pub parent_id: Option<u32>,
+	/// `"module"` (default) or `"public_symbol"`. Public symbols
+	/// render slightly smaller so the eye reads "leaf" without
+	/// having to look at the label.
+	#[serde(default)]
+	pub node_kind: Option<String>,
 }
 
-/// One inter-project edge. `weight` is the count of cross-project
-/// symbol-level edges aggregated into this lane (e.g. CALLS + IMPORTS
-/// + USES_TYPE from project A symbols into project B symbols).
+/// One edge in the overview. `edge_kind` discriminates structural
+/// parent→child relations (always rendered) from cross-module
+/// relations (rendered only when `show_cross_edges` is true). `kind`
+/// is the IR edge kind (CALLS, IMPORTS, USES_TYPE, IMPLEMENTS, …)
+/// for cross edges, used to pick the per-kind color; absent for
+/// parent_child structural edges.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct OverviewEdge {
 	pub from: u32,
 	pub to: u32,
 	pub weight: u32,
+	#[serde(default = "default_edge_kind")]
+	pub edge_kind: String,
+	#[serde(default)]
+	pub kind: Option<String>,
+}
+
+fn default_edge_kind() -> String {
+	"cross".to_string()
+}
+
+/// Color + dashed style per IR edge kind. Mirrors the global legend
+/// palette in `lib/components/legend` so the Overview reads in the
+/// same visual language as the Focus graph and Explorer chips.
+fn cross_edge_style(kind: Option<&str>) -> (&'static str, bool) {
+	match kind {
+		Some("CALLS") => ("#3794ff", false),
+		Some("IMPORTS") => ("#b180d7", false),
+		Some("USES_TYPE") => ("#cca700", false),
+		Some("IMPLEMENTS") | Some("EXTENDS") => ("#f48771", true),
+		Some("REFERENCES") => ("#9d9d9d", false),
+		_ => ("#88b4d8", false),
+	}
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct OverviewPayload {
 	#[serde(default)]
-	clusters: Vec<OverviewCluster>,
+	nodes: Vec<OverviewNode>,
 	#[serde(default)]
 	edges: Vec<OverviewEdge>,
 }
 
-/// World-space cluster placement. `pos` is the cluster centre in world
-/// coords; `world_radius` is the cluster's outer sphere radius; `hue`
-/// is the deterministic HSL hue used to colour the cluster. The per-
-/// symbol "sub_points constellation" of the V0 was removed per the Dark
-/// Semantic Observatory manifesto — the Overview shows crates / hubs,
-/// not individual symbols, so satellite dots were decorative noise.
+/// World-space node placement. Hue is deterministic per label so
+/// reloads keep colors stable.
 #[derive(Debug, Clone, Copy)]
-struct LaidCluster {
+struct LaidNode {
 	pos: Vec3,
 	world_radius: f32,
 	hue: f32,
 }
 
-/// Screen-space projection of a cluster for the current frame, cached
-/// per-tick so hit_test + draw read the same numbers.
-#[allow(dead_code)] // id retained for debug-print symmetry with positions
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
-struct ProjectedCluster {
+struct ProjectedNode {
 	id: u32,
 	screen_x: f64,
 	screen_y: f64,
 	screen_radius: f64,
-	/// Distance from the camera eye in world units — used for depth
-	/// sort + alpha-fade on far clusters.
 	depth: f64,
-	/// True when the cluster is in front of the near plane (visible).
 	visible: bool,
 }
 
-const MIN_CLUSTER_RADIUS_WORLD: f32 = 70.0;
-const MAX_CLUSTER_RADIUS_WORLD: f32 = 220.0;
-const CLUSTER_GAP_WORLD: f32 = 380.0;
-const SUNFLOWER_SCALE: f32 = 440.0;
-/// Vertical world-space range across which clusters spread by
-/// popularity. The most-imported cluster sits at `+POPULARITY_Y_RANGE`
-/// world units above the XZ plane; the least-imported sits roughly at
-/// zero. Gives the topology a third axis — hubs literally float above
-/// their consumers — without overloading the sunflower spacing.
-const POPULARITY_Y_RANGE: f32 = 320.0;
+const MIN_NODE_RADIUS_WORLD: f32 = 36.0;
+const MAX_NODE_RADIUS_WORLD: f32 = 180.0;
+const PUBLIC_SYMBOL_RADIUS_WORLD: f32 = 22.0;
+
+/// Y distance between two adjacent depth planes. Roots sit at Y=0,
+/// depth=1 at Y=-DEPTH_Y_STRIDE, etc.
+const DEPTH_Y_STRIDE: f32 = 220.0;
+
+/// Root sunflower scale in the XZ plane. Bigger value = more spread
+/// between root packages.
+const ROOT_SUNFLOWER_SCALE: f32 = 520.0;
+const ROOT_GAP_WORLD: f32 = 420.0;
+
+/// Base radius of the orbit ring around a parent at depth 1. Each
+/// subsequent depth shrinks this by `CHILD_RADIUS_DECAY` so deeply
+/// nested subtrees cluster tightly around their root.
+const CHILD_RADIUS_BASE: f32 = 280.0;
+const CHILD_RADIUS_DECAY: f32 = 0.72;
+
 const ZOOM_STEP: f64 = 0.0012;
 const CLICK_DRAG_THRESHOLD: f64 = 4.0;
-const LABEL_OFFSET: f64 = 14.0;
+/// Gap in screen pixels between the sphere outer edge and the label
+/// pill — small so the label reads as "belonging" to the sphere.
+const LABEL_OFFSET: f64 = 5.0;
 const HIT_PAD: f64 = 6.0;
 const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653_3;
-// Sub-points constellation removed (manifesto anti-pattern: "galaxie
-// décorative"). If we ever want per-cluster texture, regenerate from
-// the IR signal (hotspot indicators, complexity score, etc.) — not
-// abstract dot scatter.
 
 #[derive(Debug, Clone, Copy)]
 struct DragState {
 	last_x: f64,
 	last_y: f64,
 	moved: bool,
-	/// `true` when the drag should pan the camera (alt-drag, Maya /
-	/// Figma convention) instead of orbiting around the target.
 	pan_mode: bool,
 }
 
@@ -120,22 +148,29 @@ pub struct OverviewCanvas {
 	width: f64,
 	height: f64,
 	device_pixel_ratio: f64,
-	clusters: Vec<OverviewCluster>,
+	nodes: Vec<OverviewNode>,
 	edges: Vec<OverviewEdge>,
 	on_cluster_click: Option<js_sys::Function>,
 	on_cluster_hover: Option<js_sys::Function>,
 	needs_redraw: bool,
-	positions: std::collections::HashMap<u32, LaidCluster>,
+	positions: std::collections::HashMap<u32, LaidNode>,
 	render_order: Vec<u32>,
 	hovered: Option<u32>,
 	drag: Option<DragState>,
 	cam: Camera3D,
-	/// Cap on the number of cluster text labels rendered each frame.
-	/// `0` means "no cap, render all visible". Anything else picks the
-	/// N closest clusters to the camera — far-field clusters render
-	/// their halo + dot but skip the text so the canvas stays
-	/// readable at workspace scale.
 	max_visible_labels: u32,
+	/// Max FQDN depth at which labels are rendered. `u32::MAX` = no
+	/// cap (every visible node may be labelled, subject to
+	/// `max_visible_labels`). At workspace scope the host clamps
+	/// this to `0` so only root-package labels paint — sub-modules
+	/// stay as halos until the user drills in and the spatial
+	/// crowding drops.
+	label_depth_cap: u32,
+	/// When false, only `parent_child` edges render. Cross edges
+	/// (imports/calls/uses-type between non-parent siblings) are
+	/// hidden by default so the spine of the FQDN tree reads
+	/// without overlay clutter. Host toggles via the gizmo.
+	show_cross_edges: bool,
 }
 
 #[wasm_bindgen]
@@ -153,7 +188,7 @@ impl OverviewCanvas {
 			width: f64::from(width),
 			height: f64::from(height),
 			device_pixel_ratio: dpr,
-			clusters: Vec::new(),
+			nodes: Vec::new(),
 			edges: Vec::new(),
 			on_cluster_click: None,
 			on_cluster_hover: None,
@@ -164,13 +199,11 @@ impl OverviewCanvas {
 			drag: None,
 			cam: Camera3D::identity(),
 			max_visible_labels: 0,
+			label_depth_cap: u32::MAX,
+			show_cross_edges: false,
 		})
 	}
 
-	/// Host-driven label cap. `0` renders every visible cluster's
-	/// label; any other value renders text for the N clusters
-	/// closest to the camera and skips the rest. Halos + dots stay
-	/// visible so the topology still reads; only the text drops.
 	pub fn set_max_visible_labels(&mut self, n: u32) {
 		if self.max_visible_labels == n {
 			return;
@@ -179,10 +212,30 @@ impl OverviewCanvas {
 		self.needs_redraw = true;
 	}
 
+	/// Cap label rendering to nodes whose FQDN depth is `<= cap`.
+	/// Pass `u32::MAX` (or just a very large value) to disable the
+	/// cap. `0` = root-package labels only.
+	pub fn set_label_depth_cap(&mut self, cap: u32) {
+		if self.label_depth_cap == cap {
+			return;
+		}
+		self.label_depth_cap = cap;
+		self.needs_redraw = true;
+	}
+
+	/// Toggle cross-edge rendering. Parent-child edges always render.
+	pub fn set_show_cross_edges(&mut self, show: bool) {
+		if self.show_cross_edges == show {
+			return;
+		}
+		self.show_cross_edges = show;
+		self.needs_redraw = true;
+	}
+
 	pub fn set_payload(&mut self, json: &str) -> Result<(), JsValue> {
 		let parsed: OverviewPayload = serde_json::from_str(json)
 			.map_err(|e| JsValue::from_str(&format!("OverviewCanvas: payload parse error: {e}")))?;
-		self.clusters = parsed.clusters;
+		self.nodes = parsed.nodes;
 		self.edges = parsed.edges;
 		self.layout();
 		self.fit_camera();
@@ -259,9 +312,6 @@ impl OverviewCanvas {
 		}
 	}
 
-	/// `pan_mode` toggles the drag semantics:
-	///   * `false` (plain left-drag) → orbit around `target`
-	///   * `true`  (alt + left-drag) → pan `target` along the camera plane
 	pub fn on_pointer_down(&mut self, x: f64, y: f64, _button: i16, pan_mode: bool) {
 		self.drag = Some(DragState {
 			last_x: x,
@@ -297,8 +347,6 @@ impl OverviewCanvas {
 	}
 
 	pub fn on_wheel(&mut self, _x: f64, _y: f64, delta_y: f64) {
-		// Exponential dolly. Negative delta_y (scroll up) pulls the eye
-		// closer; positive (scroll down) pushes it back.
 		let factor = (-delta_y * ZOOM_STEP).exp() as f32;
 		self.cam.dolly(factor);
 		self.needs_redraw = true;
@@ -314,44 +362,26 @@ impl OverviewCanvas {
 		self.needs_redraw = true;
 	}
 
-	/// Current orbit yaw in radians — exposed so the JS orbit-ball
-	/// widget can render the camera frame without having to mirror
-	/// every camera mutation manually.
 	#[wasm_bindgen(getter)]
 	pub fn camera_yaw(&self) -> f32 {
 		self.cam.yaw
 	}
 
-	/// Current orbit pitch in radians — see `camera_yaw`.
 	#[wasm_bindgen(getter)]
 	pub fn camera_pitch(&self) -> f32 {
 		self.cam.pitch
 	}
 
-	/// Orbit the camera directly from JS — used by the orbit-ball
-	/// widget which drives the camera independently of the canvas
-	/// drag path. `dx` / `dy` are screen-pixel deltas, same as the
-	/// internal canvas drag would emit.
 	pub fn orbit_camera(&mut self, dx: f64, dy: f64) {
 		self.cam.orbit(dx, dy);
 		self.needs_redraw = true;
 	}
 
-	/// Pan the camera target directly from JS — used by the keyboard
-	/// nav (Q/D strafe, A/E rise-fall) and by any host that wants to
-	/// drive a camera shift programmatically. `dx` / `dy` follow the
-	/// same grab semantics as the alt-drag canvas path: positive `dx`
-	/// (drag right) shifts the target left so the world drifts right
-	/// under the viewport.
 	pub fn pan_camera(&mut self, dx: f64, dy: f64) {
 		self.cam.pan(dx, dy, self.height);
 		self.needs_redraw = true;
 	}
 
-	/// Dolly the camera along its forward axis (Z/S keyboard binding).
-	/// `factor > 1` pulls the eye toward the target (forward = closer);
-	/// `factor < 1` pushes the eye back (backward = farther). Matches
-	/// the wheel-zoom semantics on the canvas drag path.
 	pub fn dolly_camera(&mut self, factor: f64) {
 		self.cam.dolly(factor as f32);
 		self.needs_redraw = true;
@@ -359,7 +389,7 @@ impl OverviewCanvas {
 
 	#[wasm_bindgen(getter)]
 	pub fn cluster_count(&self) -> usize {
-		self.clusters.len()
+		self.nodes.len()
 	}
 
 	#[wasm_bindgen(getter)]
@@ -370,72 +400,120 @@ impl OverviewCanvas {
 	fn layout(&mut self) {
 		self.positions.clear();
 		self.render_order.clear();
-		if self.clusters.is_empty() {
+		if self.nodes.is_empty() {
 			return;
 		}
-		// Sort by symbol_count desc (id tiebreaker) so the heaviest
-		// project anchors the centre. Sunflower lays the rest outward
-		// in the XZ plane; Y is driven separately by inbound-edge
-		// popularity so the topology gets a third axis.
-		let mut order: Vec<usize> = (0..self.clusters.len()).collect();
-		order.sort_by(|&a, &b| {
-			let ca = &self.clusters[a];
-			let cb = &self.clusters[b];
-			cb.symbol_count.cmp(&ca.symbol_count).then(ca.id.cmp(&cb.id))
-		});
+
+		// Bucket nodes by parent_id; parent_id == None marks roots.
+		let mut children_of: std::collections::HashMap<Option<u32>, Vec<usize>> =
+			std::collections::HashMap::new();
+		for (i, n) in self.nodes.iter().enumerate() {
+			children_of.entry(n.parent_id).or_default().push(i);
+		}
+
+		// Sort roots by symbol_count desc, id tiebreaker — heaviest
+		// crate anchors the sunflower center.
+		if let Some(roots) = children_of.get_mut(&None) {
+			roots.sort_by(|&a, &b| {
+				let na = &self.nodes[a];
+				let nb = &self.nodes[b];
+				nb.symbol_count.cmp(&na.symbol_count).then(na.id.cmp(&nb.id))
+			});
+		}
 
 		let max_count = self
-			.clusters
+			.nodes
 			.iter()
-			.map(|c| c.symbol_count.max(1))
+			.map(|n| n.symbol_count.max(1))
 			.max()
 			.unwrap_or(1) as f32;
 
-		// Popularity = sum of inbound edge weights. Used for the Y
-		// axis: hubs others depend on float above their consumers,
-		// leaves sit at the XZ baseline. ln-compressed because the
-		// inbound distribution is heavy-tailed (one root crate gets
-		// orders of magnitude more inbound than leaves).
-		let mut inbound: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-		for e in &self.edges {
-			*inbound.entry(e.to).or_insert(0) += e.weight;
-		}
-		let max_inbound = inbound.values().copied().max().unwrap_or(0).max(1) as f32;
-		let max_inbound_ln = (max_inbound + 1.0).ln().max(1.0);
-
-		for (i, &cluster_idx) in order.iter().enumerate() {
-			let c = &self.clusters[cluster_idx];
-			let raw = (c.symbol_count.max(1) as f32).sqrt();
-			let normalised = raw / max_count.sqrt();
-			let world_r = MIN_CLUSTER_RADIUS_WORLD
-				+ normalised * (MAX_CLUSTER_RADIUS_WORLD - MIN_CLUSTER_RADIUS_WORLD);
-
-			let inbound_w = inbound.get(&c.id).copied().unwrap_or(0) as f32;
-			let popularity = (inbound_w + 1.0).ln() / max_inbound_ln;
-			// Camera up is -Y, so subtract to float popular clusters
-			// upward on screen.
-			let y = -popularity * POPULARITY_Y_RANGE;
-
+		// Place roots in a sunflower in XZ plane (Y = 0).
+		let root_indices = children_of.get(&None).cloned().unwrap_or_default();
+		for (i, &root_idx) in root_indices.iter().enumerate() {
 			let pos = if i == 0 {
-				Vec3::new(0.0, y, 0.0)
+				Vec3::ZERO
 			} else {
 				let angle = (i as f64) * GOLDEN_ANGLE;
-				let radial = SUNFLOWER_SCALE * (i as f32).sqrt() + CLUSTER_GAP_WORLD;
-				Vec3::new(
-					radial * angle.cos() as f32,
-					y,
-					radial * angle.sin() as f32,
-				)
+				let radial = ROOT_SUNFLOWER_SCALE * (i as f32).sqrt() + ROOT_GAP_WORLD;
+				Vec3::new(radial * angle.cos() as f32, 0.0, radial * angle.sin() as f32)
 			};
+			self.place_node(root_idx, pos, max_count, &children_of);
+			// Recurse children with parent pos as anchor.
+			self.place_subtree(root_idx, pos, max_count, &children_of);
+		}
 
-			let hue = label_hue(&c.label);
+		// Render order: deepest first so shallower nodes paint over
+		// (better occlusion read). Within a depth, by id for stability.
+		let mut order: Vec<u32> = self.nodes.iter().map(|n| n.id).collect();
+		order.sort_by(|a, b| {
+			let na = self.nodes.iter().find(|n| n.id == *a);
+			let nb = self.nodes.iter().find(|n| n.id == *b);
+			match (na, nb) {
+				(Some(na), Some(nb)) => nb.depth.cmp(&na.depth).then(na.id.cmp(&nb.id)),
+				_ => std::cmp::Ordering::Equal,
+			}
+		});
+		self.render_order = order;
+	}
 
-			self.positions.insert(c.id, LaidCluster {
-				pos,
-				world_radius: world_r,
-				hue,
-			});
-			self.render_order.push(c.id);
+	fn place_node(
+		&mut self,
+		idx: usize,
+		pos: Vec3,
+		max_count: f32,
+		_children_of: &std::collections::HashMap<Option<u32>, Vec<usize>>,
+	) {
+		let n = &self.nodes[idx];
+		let is_leaf_symbol = n.node_kind.as_deref() == Some("public_symbol");
+		let world_r = if is_leaf_symbol {
+			PUBLIC_SYMBOL_RADIUS_WORLD
+		} else {
+			let raw = (n.symbol_count.max(1) as f32).sqrt();
+			let normalised = raw / max_count.sqrt().max(1.0);
+			MIN_NODE_RADIUS_WORLD + normalised * (MAX_NODE_RADIUS_WORLD - MIN_NODE_RADIUS_WORLD)
+		};
+		let hue = label_hue(&n.label);
+		self.positions.insert(n.id, LaidNode { pos, world_radius: world_r, hue });
+	}
+
+	fn place_subtree(
+		&mut self,
+		parent_idx: usize,
+		parent_pos: Vec3,
+		max_count: f32,
+		children_of: &std::collections::HashMap<Option<u32>, Vec<usize>>,
+	) {
+		let parent_id = self.nodes[parent_idx].id;
+		let Some(child_indices) = children_of.get(&Some(parent_id)) else { return };
+		if child_indices.is_empty() {
+			return;
+		}
+		// Stable child order: by symbol_count desc, id tiebreaker.
+		let mut ordered = child_indices.clone();
+		ordered.sort_by(|&a, &b| {
+			let na = &self.nodes[a];
+			let nb = &self.nodes[b];
+			nb.symbol_count.cmp(&na.symbol_count).then(na.id.cmp(&nb.id))
+		});
+		let n = ordered.len() as f32;
+		// Polar around parent. Depth-dependent radius so deep
+		// subtrees stay close to their root.
+		let depth_at_children = self.nodes[ordered[0]].depth.max(1);
+		let radius = CHILD_RADIUS_BASE * CHILD_RADIUS_DECAY.powi((depth_at_children - 1) as i32);
+		// Phase shift per parent so siblings of different subtrees
+		// don't perfectly align (visual breathing room).
+		let phase = ((parent_id as f64) * GOLDEN_ANGLE) % std::f64::consts::TAU;
+		for (i, &child_idx) in ordered.iter().enumerate() {
+			let angle = phase + (i as f64) * std::f64::consts::TAU / (n as f64);
+			let child_depth = self.nodes[child_idx].depth as f32;
+			let pos = Vec3::new(
+				parent_pos.x + radius * angle.cos() as f32,
+				-child_depth * DEPTH_Y_STRIDE,
+				parent_pos.z + radius * angle.sin() as f32,
+			);
+			self.place_node(child_idx, pos, max_count, children_of);
+			self.place_subtree(child_idx, pos, max_count, children_of);
 		}
 	}
 
@@ -461,9 +539,7 @@ impl OverviewCanvas {
 	}
 
 	fn draw(&self) {
-		// Spatial vignette: radial gradient from a deep blue centre out
-		// to near-black at the corners — gives the canvas a sense of
-		// 3D space depth instead of the flat #161616 the V0 used.
+		// Background vignette + starfield, unchanged from V1.
 		if let Ok(bg) = self.ctx.create_radial_gradient(
 			self.width * 0.5, self.height * 0.5, 0.0,
 			self.width * 0.5, self.height * 0.5, (self.width.max(self.height)) * 0.8,
@@ -477,51 +553,82 @@ impl OverviewCanvas {
 			self.ctx.set_fill_style_str("#10121a");
 			self.ctx.fill_rect(0.0, 0.0, self.width, self.height);
 		}
-		// Subtle starfield — 120 tiny dots at deterministic positions
-		// scaled to canvas. The dim alpha keeps them background-only.
 		self.draw_starfield();
 
-		if self.clusters.is_empty() {
+		if self.nodes.is_empty() {
 			self.draw_empty_state();
 			return;
 		}
 
-		// Project every cluster once for this frame. Hit-test in the
-		// next on_pointer_move will re-project — cheap enough at <100
-		// clusters, simpler than a stale screen-space cache.
-		let projected = self.project_clusters();
+		let projected = self.project_nodes();
 
-		// Inter-cluster edges rendered in TWO PASSES around the cluster
-		// stack: a wide blurred backdrop layer first, then narrow bright
-		// strands ON TOP of the clusters so edges remain visible across
-		// the cluster halos instead of disappearing under them like in
-		// the V0. This is the "glow strand" effect from the mockup.
-		let max_weight = self
-			.edges
-			.iter()
-			.map(|e| e.weight.max(1))
-			.max()
-			.unwrap_or(1) as f64;
-
-		// Pass 1: wide soft blur behind clusters. Toned down vs V1 —
-		// thinner widths and lower alpha so the "strand" reads
-		// without screaming for attention.
+		// Pass 1: parent_child spine — thin dim verticals, drawn
+		// BEFORE node halos so they ground each subtree.
 		for e in &self.edges {
+			if e.edge_kind != "parent_child" {
+				continue;
+			}
 			let (Some(from), Some(to)) = (projected.get(&e.from), projected.get(&e.to)) else { continue };
-			if !from.visible || !to.visible { continue; }
-			let w_norm = (f64::from(e.weight.max(1))).ln() / (max_weight.ln().max(1.0));
-			let line_w = 2.0 + w_norm * 3.0;
-			let alpha = 0.10 + w_norm * 0.08;
-			self.ctx.set_stroke_style_str(&format!("rgba(80, 150, 210, {alpha:.3})"));
-			self.ctx.set_line_width(line_w);
+			if !from.visible || !to.visible {
+				continue;
+			}
+			self.ctx.set_stroke_style_str("rgba(120, 140, 180, 0.32)");
+			self.ctx.set_line_width(1.0);
 			self.ctx.begin_path();
 			self.ctx.move_to(from.screen_x, from.screen_y);
 			self.ctx.line_to(to.screen_x, to.screen_y);
 			self.ctx.stroke();
 		}
 
-		// Depth-sort clusters back-to-front so closer nebulae layer over
-		// farther ones (no z-buffer in Canvas2D).
+		// Pass 2: cross-edges underlay (wide soft blur), only when
+		// the host has toggled them on. Color tracks IR edge kind so
+		// CALLS / IMPORTS / USES_TYPE / IMPLEMENTS each read distinct;
+		// IMPLEMENTS / EXTENDS render dashed to mirror the focus graph.
+		// Hovered-node edges glow brighter, unrelated edges fade so
+		// the user can trace the hovered node's relations at a glance.
+		if self.show_cross_edges {
+			let max_weight = self
+				.edges
+				.iter()
+				.filter(|e| e.edge_kind == "cross")
+				.map(|e| e.weight.max(1))
+				.max()
+				.unwrap_or(1) as f64;
+			for e in &self.edges {
+				if e.edge_kind != "cross" {
+					continue;
+				}
+				let (Some(from), Some(to)) = (projected.get(&e.from), projected.get(&e.to)) else { continue };
+				if !from.visible || !to.visible {
+					continue;
+				}
+				let w_norm = (f64::from(e.weight.max(1))).ln() / (max_weight.ln().max(1.0));
+				let connected = self.hovered.is_some_and(|h| h == e.from || h == e.to);
+				let dimmed = self.hovered.is_some() && !connected;
+				let line_w = 2.0 + w_norm * 3.0;
+				let base_alpha = 0.10 + w_norm * 0.08;
+				let alpha = if connected { base_alpha * 1.8 } else if dimmed { base_alpha * 0.25 } else { base_alpha };
+				let (color, dashed) = cross_edge_style(e.kind.as_deref());
+				let rgba = hex_to_rgba(color, alpha);
+				self.ctx.set_stroke_style_str(&rgba);
+				self.ctx.set_line_width(line_w);
+				if dashed {
+					let arr = js_sys::Array::of2(&8.0.into(), &6.0.into());
+					let _ = self.ctx.set_line_dash(&arr);
+				} else {
+					let arr = js_sys::Array::new();
+					let _ = self.ctx.set_line_dash(&arr);
+				}
+				self.ctx.begin_path();
+				self.ctx.move_to(from.screen_x, from.screen_y);
+				self.ctx.line_to(to.screen_x, to.screen_y);
+				self.ctx.stroke();
+			}
+			let arr = js_sys::Array::new();
+			let _ = self.ctx.set_line_dash(&arr);
+		}
+
+		// Depth-sort nodes back-to-front (no z-buffer in Canvas2D).
 		let mut order: Vec<u32> = self.render_order.clone();
 		order.sort_by(|a, b| {
 			let da = projected.get(a).map_or(f64::INFINITY, |p| -p.depth);
@@ -529,11 +636,7 @@ impl OverviewCanvas {
 			da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
 		});
 
-		// Pick which clusters render their text label. When the host
-		// caps it (max_visible_labels > 0) we take the N closest to
-		// the camera; the hovered cluster always shows its label even
-		// when it would otherwise be culled, since it's the user's
-		// current point of attention.
+		// Pick which nodes render their text label.
 		let label_visible_ids: std::collections::HashSet<u32> = if self.max_visible_labels > 0 {
 			let mut by_depth: Vec<(u32, f64)> = projected
 				.iter()
@@ -558,34 +661,58 @@ impl OverviewCanvas {
 			if !proj.visible {
 				continue;
 			}
-			let Some(c) = self.clusters.iter().find(|c| c.id == *id) else { continue };
+			let Some(n) = self.nodes.iter().find(|n| n.id == *id) else { continue };
 			let highlighted = self.hovered == Some(*id);
-			let show_label = label_visible_ids.contains(id);
-			self.draw_cluster(proj, c, highlighted, show_label);
+			let depth_ok = n.depth <= self.label_depth_cap;
+			let show_label = depth_ok && (label_visible_ids.contains(id) || highlighted);
+			self.draw_node(proj, n, highlighted, show_label);
 		}
 
-		// Pass 2: narrower strand on top of clusters. Alpha cut so
-		// the bright pass adds shape without flashing — pairs with
-		// the toned pass 1 above for a calm beam, not a laser.
-		for e in &self.edges {
-			let (Some(from), Some(to)) = (projected.get(&e.from), projected.get(&e.to)) else { continue };
-			if !from.visible || !to.visible { continue; }
-			let w_norm = (f64::from(e.weight.max(1))).ln() / (max_weight.ln().max(1.0));
-			let line_w = 0.9 + w_norm * 1.0;
-			let alpha = 0.45 + w_norm * 0.20;
-			self.ctx.set_stroke_style_str(&format!("rgba(150, 195, 230, {alpha:.3})"));
-			self.ctx.set_line_width(line_w);
-			self.ctx.begin_path();
-			self.ctx.move_to(from.screen_x, from.screen_y);
-			self.ctx.line_to(to.screen_x, to.screen_y);
-			self.ctx.stroke();
+		// Pass 3: cross-edges overlay (bright narrow strand) — ON
+		// TOP of nodes so they remain visible across halos.
+		if self.show_cross_edges {
+			let max_weight = self
+				.edges
+				.iter()
+				.filter(|e| e.edge_kind == "cross")
+				.map(|e| e.weight.max(1))
+				.max()
+				.unwrap_or(1) as f64;
+			for e in &self.edges {
+				if e.edge_kind != "cross" {
+					continue;
+				}
+				let (Some(from), Some(to)) = (projected.get(&e.from), projected.get(&e.to)) else { continue };
+				if !from.visible || !to.visible {
+					continue;
+				}
+				let w_norm = (f64::from(e.weight.max(1))).ln() / (max_weight.ln().max(1.0));
+				let connected = self.hovered.is_some_and(|h| h == e.from || h == e.to);
+				let dimmed = self.hovered.is_some() && !connected;
+				let line_w = if connected { (0.9 + w_norm * 1.0) * 1.6 } else { 0.9 + w_norm * 1.0 };
+				let base_alpha = 0.55 + w_norm * 0.25;
+				let alpha = if connected { (base_alpha * 1.3).min(0.95) } else if dimmed { base_alpha * 0.25 } else { base_alpha };
+				let (color, dashed) = cross_edge_style(e.kind.as_deref());
+				let rgba = hex_to_rgba(color, alpha);
+				self.ctx.set_stroke_style_str(&rgba);
+				self.ctx.set_line_width(line_w);
+				if dashed {
+					let arr = js_sys::Array::of2(&8.0.into(), &6.0.into());
+					let _ = self.ctx.set_line_dash(&arr);
+				} else {
+					let arr = js_sys::Array::new();
+					let _ = self.ctx.set_line_dash(&arr);
+				}
+				self.ctx.begin_path();
+				self.ctx.move_to(from.screen_x, from.screen_y);
+				self.ctx.line_to(to.screen_x, to.screen_y);
+				self.ctx.stroke();
+			}
+			let arr = js_sys::Array::new();
+			let _ = self.ctx.set_line_dash(&arr);
 		}
 	}
 
-	/// Deterministic starfield backdrop — 120 tiny dim dots distributed
-	/// across the canvas via a simple LCG seeded on a fixed constant so
-	/// the pattern is stable across frames + reloads. Gives the empty
-	/// space between clusters texture instead of plain black.
 	fn draw_starfield(&self) {
 		let mut s: u32 = 0x9e37_79b9;
 		for _ in 0..120 {
@@ -604,21 +731,18 @@ impl OverviewCanvas {
 		}
 	}
 
-	fn project_clusters(&self) -> std::collections::HashMap<u32, ProjectedCluster> {
-		let mut out: std::collections::HashMap<u32, ProjectedCluster> = std::collections::HashMap::new();
+	fn project_nodes(&self) -> std::collections::HashMap<u32, ProjectedNode> {
+		let mut out: std::collections::HashMap<u32, ProjectedNode> = std::collections::HashMap::new();
 		let view = self.cam.view();
 		let aspect = (self.width / self.height.max(1.0)) as f32;
 		let proj = self.cam.proj(aspect);
 		let vp = proj * view;
 		let eye = self.cam.eye();
-		// focal_pixels = height/2 / tan(fov_y/2) — converts a world
-		// radius at a given camera-space depth into a screen-space disc
-		// radius. cf. pinhole perspective.
 		let focal_pixels = (self.height * 0.5) / (self.cam.fov_y as f64 * 0.5).tan();
-		for (id, c) in &self.positions {
-			let clip = vp * Vec4::new(c.pos.x, c.pos.y, c.pos.z, 1.0);
+		for (id, n) in &self.positions {
+			let clip = vp * Vec4::new(n.pos.x, n.pos.y, n.pos.z, 1.0);
 			if clip.w <= 0.0 {
-				out.insert(*id, ProjectedCluster {
+				out.insert(*id, ProjectedNode {
 					id: *id,
 					screen_x: 0.0,
 					screen_y: 0.0,
@@ -630,13 +754,11 @@ impl OverviewCanvas {
 			}
 			let ndc_x = clip.x / clip.w;
 			let ndc_y = clip.y / clip.w;
-			// Camera::view() uses up=NEG_Y → ndc Y is already screen-down,
-			// no need to flip.
 			let sx = (ndc_x as f64 * 0.5 + 0.5) * self.width;
 			let sy = (ndc_y as f64 * 0.5 + 0.5) * self.height;
-			let depth = (c.pos - eye).length() as f64;
-			let screen_radius = (c.world_radius as f64) * focal_pixels / depth.max(1.0);
-			out.insert(*id, ProjectedCluster {
+			let depth = (n.pos - eye).length() as f64;
+			let screen_radius = (n.world_radius as f64) * focal_pixels / depth.max(1.0);
+			out.insert(*id, ProjectedNode {
 				id: *id,
 				screen_x: sx,
 				screen_y: sy,
@@ -648,73 +770,102 @@ impl OverviewCanvas {
 		out
 	}
 
-	fn draw_cluster(&self, proj: &ProjectedCluster, cluster: &OverviewCluster, highlighted: bool, show_label: bool) {
+	fn draw_node(&self, proj: &ProjectedNode, node: &OverviewNode, highlighted: bool, show_label: bool) {
 		let r = proj.screen_radius.max(2.0);
-		let Some(laid) = self.positions.get(&cluster.id) else { return };
+		let Some(laid) = self.positions.get(&node.id) else { return };
 		let hue = laid.hue;
+		let is_leaf_symbol = node.node_kind.as_deref() == Some("public_symbol");
 
-		// Cluster halo — soft territory marker. Saturations + alphas
-		// dialed down vs the V1 "fluorescent rainbow blob" the user
-		// flagged; the goal is a calm system-topology accent, not a
-		// neon glow stick.
+		// Halo — barely-there atmospheric tint at rest, only swells
+		// on hover. The dot + core do the heavy lifting for the eye;
+		// halos exist to tag the territory, not to glow.
+		let halo_outer = if is_leaf_symbol { r + 14.0 } else { r + 28.0 };
 		if let Ok(halo) = self.ctx.create_radial_gradient(
 			proj.screen_x, proj.screen_y, r * 0.10,
-			proj.screen_x, proj.screen_y, r + 60.0,
+			proj.screen_x, proj.screen_y, halo_outer,
 		) {
-			let inner_alpha = if highlighted { 0.42 } else { 0.26 };
-			let mid_alpha = if highlighted { 0.22 } else { 0.13 };
-			let _ = halo.add_color_stop(0.0, &format!("hsla({hue:.0}, 55%, 62%, {inner_alpha:.3})"));
-			let _ = halo.add_color_stop(0.45, &format!("hsla({hue:.0}, 45%, 48%, {mid_alpha:.3})"));
-			let _ = halo.add_color_stop(1.0, &format!("hsla({hue:.0}, 40%, 36%, 0.0)"));
+			let inner_alpha = if highlighted { 0.18 } else if is_leaf_symbol { 0.02 } else { 0.03 };
+			let mid_alpha = if highlighted { 0.07 } else if is_leaf_symbol { 0.01 } else { 0.015 };
+			let _ = halo.add_color_stop(0.0, &format!("hsla({hue:.0}, 42%, 52%, {inner_alpha:.3})"));
+			let _ = halo.add_color_stop(0.45, &format!("hsla({hue:.0}, 35%, 42%, {mid_alpha:.3})"));
+			let _ = halo.add_color_stop(1.0, &format!("hsla({hue:.0}, 30%, 28%, 0.0)"));
 			self.ctx.set_fill_style_canvas_gradient(&halo);
 			self.ctx.begin_path();
-			let _ = self.ctx.arc(proj.screen_x, proj.screen_y, r + 60.0, 0.0, std::f64::consts::TAU);
+			let _ = self.ctx.arc(proj.screen_x, proj.screen_y, halo_outer, 0.0, std::f64::consts::TAU);
 			self.ctx.fill();
 		}
 
-		// Core glow — the cluster's identity dot's halo. Lower
-		// saturation/lightness so it reads as a warm node light
-		// instead of a screaming highlight.
+		// Core glow — small bloom around the dot, calm at rest.
+		let core_r = (r * 0.40).max(8.0);
 		if let Ok(core_glow) = self.ctx.create_radial_gradient(
 			proj.screen_x, proj.screen_y, 0.0,
-			proj.screen_x, proj.screen_y, (r * 0.40).max(12.0),
+			proj.screen_x, proj.screen_y, core_r,
 		) {
-			let _ = core_glow.add_color_stop(0.0, &format!("hsla({hue:.0}, 70%, 78%, 0.80)"));
-			let _ = core_glow.add_color_stop(0.5, &format!("hsla({hue:.0}, 60%, 62%, 0.40)"));
-			let _ = core_glow.add_color_stop(1.0, &format!("hsla({hue:.0}, 55%, 52%, 0.0)"));
+			let core_inner = if highlighted { 0.45 } else { 0.22 };
+			let core_mid = if highlighted { 0.18 } else { 0.08 };
+			let _ = core_glow.add_color_stop(0.0, &format!("hsla({hue:.0}, 60%, 68%, {core_inner:.3})"));
+			let _ = core_glow.add_color_stop(0.5, &format!("hsla({hue:.0}, 50%, 55%, {core_mid:.3})"));
+			let _ = core_glow.add_color_stop(1.0, &format!("hsla({hue:.0}, 45%, 48%, 0.0)"));
 			self.ctx.set_fill_style_canvas_gradient(&core_glow);
 			self.ctx.begin_path();
-			let _ = self.ctx.arc(proj.screen_x, proj.screen_y, (r * 0.40).max(12.0), 0.0, std::f64::consts::TAU);
+			let _ = self.ctx.arc(proj.screen_x, proj.screen_y, core_r, 0.0, std::f64::consts::TAU);
 			self.ctx.fill();
 		}
 
-		// Hard centre point — anchor dot stays punchier than the
-		// halos so the cluster's exact position never drowns in
-		// gradient blur, but capped at 86% lightness vs full white.
-		self.ctx.set_fill_style_str(&format!("hsla({hue:.0}, 85%, 86%, 0.95)"));
+		// Hard centre point.
+		let dot_r = if is_leaf_symbol { 2.4 } else { 3.5 };
+		self.ctx.set_fill_style_str(&format!("hsla({hue:.0}, 70%, 75%, 0.80)"));
 		self.ctx.begin_path();
-		let _ = self.ctx.arc(proj.screen_x, proj.screen_y, 3.5, 0.0, std::f64::consts::TAU);
+		let _ = self.ctx.arc(proj.screen_x, proj.screen_y, dot_r, 0.0, std::f64::consts::TAU);
 		self.ctx.fill();
 
-		// Label + count below the constellation. Skipped when the host
-		// has capped visible labels and this cluster fell outside the
-		// N-closest set — halo+dot still anchor the cluster's
-		// position so the topology remains readable.
 		if show_label {
-			self.ctx.set_fill_style_str(if highlighted { "#ffffff" } else { "#e3e3e3" });
-			self.ctx.set_font("600 14px ui-monospace, SFMono-Regular, monospace");
+			let label_size = if is_leaf_symbol { 11 } else { 14 };
+			self.ctx.set_font(&format!("600 {label_size}px ui-monospace, SFMono-Regular, monospace"));
 			self.ctx.set_text_align("center");
 			self.ctx.set_text_baseline("top");
-			let _ = self.ctx.fill_text(&cluster.label, proj.screen_x, proj.screen_y + r + LABEL_OFFSET);
 
-			self.ctx.set_fill_style_str(&format!("hsla({hue:.0}, 50%, 70%, 0.9)"));
-			self.ctx.set_font("11px ui-monospace, SFMono-Regular, monospace");
-			let _ = self.ctx.fill_text(
-				&format!("{} symbols", format_count(cluster.symbol_count)),
-				proj.screen_x,
-				proj.screen_y + r + LABEL_OFFSET + 18.0,
-			);
+			// Position the label just under the VISIBLE bright zone
+			// (dot + core glow), not under the faint outer halo. The
+			// halo extends way beyond core_r but is mostly invisible,
+			// so anchoring on `r` makes the label feel detached.
+			let label_y = proj.screen_y + core_r + LABEL_OFFSET;
+			self.draw_label_pill(&node.label, proj.screen_x, label_y, f64::from(label_size));
+			self.ctx.set_fill_style_str(if highlighted { "#ffffff" } else { "#e3e3e3" });
+			let _ = self.ctx.fill_text(&node.label, proj.screen_x, label_y);
+
+			if !is_leaf_symbol && node.symbol_count > 0 {
+				self.ctx.set_font("11px ui-monospace, SFMono-Regular, monospace");
+				let count_text = format!("{} symbols", format_count(node.symbol_count));
+				let count_y = label_y + f64::from(label_size as u32) + 2.0;
+				self.draw_label_pill(&count_text, proj.screen_x, count_y, 11.0);
+				self.ctx.set_fill_style_str(&format!("hsla({hue:.0}, 50%, 70%, 0.9)"));
+				let _ = self.ctx.fill_text(&count_text, proj.screen_x, count_y);
+			}
 		}
+	}
+
+	/// Dark semi-transparent pill behind a label so the text stays
+	/// legible across the parent_child spine + cross-edge strands.
+	/// Without this, labels disappear into edge lines at certain
+	/// camera angles. Assumes the current `set_font` / `set_text_align`
+	/// is what will be used for the upcoming `fill_text` call.
+	fn draw_label_pill(&self, text: &str, cx: f64, top_y: f64, font_px: f64) {
+		let metrics = match self.ctx.measure_text(text) {
+			Ok(m) => m,
+			Err(_) => return,
+		};
+		let w = metrics.width().max(8.0);
+		let pad_x = 5.0;
+		let pad_y = 2.0;
+		let pill_w = w + pad_x * 2.0;
+		let pill_h = font_px + pad_y * 2.0;
+		let pill_x = cx - pill_w * 0.5;
+		let pill_y = top_y - pad_y;
+		self.ctx.set_fill_style_str("rgba(8, 9, 14, 0.78)");
+		self.ctx.begin_path();
+		let _ = self.ctx.round_rect_with_f64(pill_x, pill_y, pill_w, pill_h, 4.0);
+		self.ctx.fill();
 	}
 
 	fn draw_empty_state(&self) {
@@ -730,7 +881,7 @@ impl OverviewCanvas {
 	}
 
 	fn hit_test(&self, screen_x: f64, screen_y: f64) -> Option<u32> {
-		let projected = self.project_clusters();
+		let projected = self.project_nodes();
 		let mut best: Option<(f64, u32)> = None;
 		for (id, p) in &projected {
 			if !p.visible {
@@ -747,9 +898,16 @@ impl OverviewCanvas {
 	}
 }
 
-/// Deterministic HSL hue (0-360°) from a cluster label. DJB-2 hash
-/// modulo 360 — cheap, stable across reloads, distributes adjacent
-/// crate names to visually distinct hues.
+/// Convert a `#rrggbb` color literal + alpha [0..1] into an
+/// `rgba(R, G, B, A)` CSS string usable by Canvas2D stroke/fill.
+fn hex_to_rgba(hex: &str, alpha: f64) -> String {
+	let h = hex.trim_start_matches('#');
+	let r = u8::from_str_radix(&h[0..2], 16).unwrap_or(0);
+	let g = u8::from_str_radix(&h[2..4], 16).unwrap_or(0);
+	let b = u8::from_str_radix(&h[4..6], 16).unwrap_or(0);
+	format!("rgba({r}, {g}, {b}, {alpha:.3})")
+}
+
 fn label_hue(label: &str) -> f32 {
 	let mut h: u32 = 5381;
 	for b in label.bytes() {
@@ -758,9 +916,6 @@ fn label_hue(label: &str) -> f32 {
 	(h % 360) as f32
 }
 
-/// Compact symbol-count formatter for cluster labels. `2400` → `2.4k`,
-/// `1_200_000` → `1.2M`, anything below 1000 prints as-is. Matches the
-/// mockup's `compiler  2.4k symbols` reading.
 fn format_count(n: u32) -> String {
 	if n < 1000 {
 		return n.to_string();
