@@ -77,6 +77,12 @@ pub struct NeighborSymbol {
 /// - `dependents`  — `edges_to(fqdn)`   for all OTHER kinds (Extends,
 ///   Implements, References, UsesType).
 ///   "Anything that breaks if this symbol changes shape".
+/// - `depends_on`  — `edges_from(fqdn)` for all OTHER kinds (Extends,
+///   Implements, References, UsesType). Mirror of `dependents`:
+///   "the traits this symbol implements / types it uses / supertypes
+///   it extends". Without this field outgoing IMPLEMENTS edges were
+///   silently swallowed — the LuaProvider→LanguageProvider impl was
+///   in the DB but never made it to the viz response.
 /// - `tests`       — subset of `callers ∪ dependents` whose source FQDN
 ///   matches a test naming convention (contains `::tests::`, `::test::`,
 ///   or ends in `_test` / `_tests`). Coarse heuristic; treats false
@@ -90,6 +96,8 @@ pub struct SymbolContextWithNeighbors {
     pub imported_by: Vec<NeighborSymbol>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependents: Vec<NeighborSymbol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<NeighborSymbol>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tests: Vec<NeighborSymbol>,
 }
@@ -652,11 +660,15 @@ pub fn context_for_symbol_with_neighbors(
 
     let mut callees = Vec::new();
     let mut imports = Vec::new();
+    let mut depends_on = Vec::new();
     for edge in edges_from(handle, fqdn)? {
         match edge.kind {
             EdgeKind::Calls => callees.push(neighbor_outbound(handle, edge, depth)?),
             EdgeKind::Imports => imports.push(neighbor_outbound(handle, edge, depth)?),
-            _ => {}
+            EdgeKind::Extends
+            | EdgeKind::Implements
+            | EdgeKind::References
+            | EdgeKind::UsesType => depends_on.push(neighbor_outbound(handle, edge, depth)?),
         }
     }
 
@@ -688,6 +700,7 @@ pub fn context_for_symbol_with_neighbors(
         imports,
         imported_by,
         dependents,
+        depends_on,
         tests,
     }))
 }
