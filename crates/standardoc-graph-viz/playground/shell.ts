@@ -385,7 +385,12 @@ async function boot(): Promise<void> {
     const fqdn = state.current;
     if (fqdn === null) return;
     const sym = symbolByFqdn.get(fqdn);
-    if (sym === undefined || sym.module === null || sym.module.length === 0) return;
+    if (sym === undefined) return;
+    // `sym.module` can be null OR undefined (BrowseSymbol fields
+    // come from the daemon which omits falsy strings); use a typeof
+    // guard to cover both safely. Same bug bit the Overview payload
+    // builder a few commits back.
+    if (typeof sym.module !== 'string' || sym.module.length === 0) return;
     const targetModule = sym.module;
     const current = currentOverviewScope;
     if (current.kind === 'module' && current.prefix === targetModule) return;

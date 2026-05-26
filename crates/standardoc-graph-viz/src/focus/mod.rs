@@ -1147,21 +1147,26 @@ impl FocusGraphCanvas {
 			if !kind_label.is_empty() {
 				let _ = self.ctx.fill_text(&kind_label, pad_x, pos.y + 21.0);
 			}
-			// 3rd line: file basename + line number, only when both are
-			// present and the card has room. Truncate the file basename
-			// so it fits — readers care about the relative location, not
-			// the full path which is already in the inspector panel.
-			if let (Some(f), Some(line)) = (&node.file, node.start_line) {
-				let basename = f.rsplit(|c: char| c == '/' || c == '\\').next().unwrap_or(f);
-				let max_chars = 22;
-				let trimmed = if basename.len() > max_chars {
-					format!("…{}", &basename[basename.len() - (max_chars - 1)..])
+			// 3rd line: the node's parent FQDN path — disambiguates
+			// same-named neighbours (`pipeline::projects` vs
+			// `query::projects` both render as "projects" on line 1
+			// without this) and surfaces the cross-crate origin for
+			// imports like `standardoc-ir::ProjectKind`. The file:line
+			// already lives in the Symbol Details panel; the graph
+			// needs the SEMANTIC location more than the disk path.
+			// Truncated from the left so the most-specific segments
+			// (closest to the node itself) survive the cut.
+			let parent_path = node.fqdn.rsplit_once("::").map(|(p, _)| p).unwrap_or("");
+			if !parent_path.is_empty() {
+				let max_chars = 28;
+				let trimmed = if parent_path.len() > max_chars {
+					format!("…{}", &parent_path[parent_path.len() - (max_chars - 1)..])
 				} else {
-					basename.to_string()
+					parent_path.to_string()
 				};
 				self.ctx.set_fill_style_str("#6e7079");
 				self.ctx.set_font("9px ui-monospace, SFMono-Regular, monospace");
-				let _ = self.ctx.fill_text(&format!("{trimmed}:{line}"), pad_x, pos.y + 32.0);
+				let _ = self.ctx.fill_text(&trimmed, pad_x, pos.y + 32.0);
 			}
 		}
 	}
