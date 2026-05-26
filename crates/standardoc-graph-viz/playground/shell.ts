@@ -322,10 +322,12 @@ async function boot(): Promise<void> {
   };
   applyOverviewScope({ kind: 'workspace' });
 
-  // Re-trigger both Overview and Focus on hide-tests toggle so the
-  // wasm canvases pick up the new filter without the user manually
-  // re-navigating. Symbol Details panel subscribes on its own; this
-  // wires the canvas-backed views.
+  // Re-trigger Overview + Focus + Explorer tree on hide-tests toggle
+  // so all three views pick up the new filter without the user
+  // manually re-navigating. Symbol Details panel subscribes on its
+  // own. The Explorer tree rebuild happens later in this boot()
+  // (after `rebuildTree` is defined); we attach the same subscribe
+  // there so the closure has access to it.
   viewPrefsStore.subscribe(() => {
     applyOverviewScope(currentOverviewScope);
     const fqdn = focusStore.get().current;
@@ -410,13 +412,21 @@ async function boot(): Promise<void> {
     treeOut.fileById.clear();
     treeOut.folderById.clear();
     treeOut.projectByExplorerId.clear();
+    // Same `excludeTests` filter the Focus + Overview wiring applies
+    // so the three views agree on what counts as "production". The
+    // tree builders walk symbols' file paths; passing them a pre-
+    // filtered set drops the test files entirely (their parent
+    // folders / projects collapse if they end up empty).
+    const symbols = viewPrefsStore.get().excludeTests
+      ? treeSymbols.filter(s => !looksLikeTest(s.fqdn, s.file))
+      : treeSymbols;
     let root: ExplorerTreeNode;
     if (view === 'projects') {
-      root = buildProjectsTreeFlat('Workspace', projects, treeSymbols, treeOut);
+      root = buildProjectsTreeFlat('Workspace', projects, symbols, treeOut);
     } else if (view === 'modules') {
-      root = buildModulesTree('Workspace', projects, treeSymbols, treeOut);
+      root = buildModulesTree('Workspace', projects, symbols, treeOut);
     } else {
-      root = buildWorkspaceTree('Workspace', projects, treeSymbols, treeOut);
+      root = buildWorkspaceTree('Workspace', projects, symbols, treeOut);
     }
     explorerEl.tree = [root];
   };
@@ -425,6 +435,11 @@ async function boot(): Promise<void> {
     const detail = (ev as CustomEvent<ExplorerViewChangeDetail>).detail;
     rebuildTree(detail.view);
   });
+  // Pick up shell-wide hide-tests toggles for the tree too. The
+  // canvas-backed views have their own subscribe above; this one
+  // handles the DOM tree which can't share that closure (the tree
+  // builder lives later in boot()).
+  viewPrefsStore.subscribe(() => rebuildTree(explorerEl.treeView));
   const { fileById, folderById, projectByExplorerId } = treeOut;
 
   // File click → synthetic SymbolDetail listing the file's symbols.
