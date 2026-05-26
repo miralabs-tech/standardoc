@@ -32,6 +32,7 @@ features = [
     "Document",
     "HtmlElement",
     "HtmlCanvasElement",
+    "CanvasGradient",
     "CanvasRenderingContext2d",
     "CssStyleDeclaration",
     "TextMetrics",

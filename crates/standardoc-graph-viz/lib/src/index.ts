@@ -8,5 +8,16 @@ export type { RenderMode, Status, StatusKind } from './types';
 // declares them under `sideEffects`.
 export * from './components/toolbar';
 export * from './components/hud';
-export * from './components/graph';
+export * from './components/panel-layout';
+export * from './components/explorer';
+export * from './components/symbol-details';
+export * from './components/search';
+export * from './components/overview';
+export * from './components/focus-graph';
+export * from './components/compare-panel';
+export * from './components/panel-host';
+export * from './components/legend';
 export * from './profiler';
+export * from './mcp-client';
+export * from './focus-store';
+export * from './panel-manager';

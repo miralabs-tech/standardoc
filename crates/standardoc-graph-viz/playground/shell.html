@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>standardoc — shell (multi-panel)</title>
+    <style>
+      /* Design tokens — inlined from @standarx/standardoc-viz/styles/tokens.
+         Bun's resolver follows tsconfig `paths` first and can't pivot from
+         the .ts-implying glob to a .scss target on a wildcard subpath, so
+         tokens are duplicated here. Update this block AND the SCSS source
+         together; component fallbacks (`var(--sd-foo, hardcoded)`) keep
+         the rest of the lib functional regardless. */
+      :root {
+        /* Backgrounds — cool dark stack vs the V0 flat gray. Reads
+           more like a modern dev UI (Git Kraken / Linear / GH Dark)
+           than VSCode's neutral gray. */
+        --sd-bg-deep: #0b0e14;
+        --sd-bg: #11151c;
+        --sd-bg-elevated: #181d27;
+        /* Foreground stack — softer near-whites + cool muted greys
+           so text doesn't feel as harsh as #cccccc on #1e1e1e. */
+        --sd-fg-strong: #f5f7fa;
+        --sd-fg: #c9cfd9;
+        --sd-fg-muted: #8b94a3;
+        --sd-fg-dim: #5a6275;
+        /* Borders — subtle, blue-tinted so they read as edges of
+           glass surfaces rather than hard lines. */
+        --sd-border: #2a3140;
+        --sd-border-subtle: #1c2230;
+        --sd-border-strong: #3a4256;
+        /* Accent — saturated cool blue, slightly softer than VSCode's
+           #007acc / #3794ff so it feels modern not corporate. */
+        --sd-accent: #4d8cff;
+        --sd-accent-strong: #6ba1ff;
+        --sd-accent-dim: rgba(77, 140, 255, 0.18);
+        /* Surfaces — hovers blue-tinted instead of neutral grey;
+           selection uses translucent accent for the "highlighted
+           glass" feel modern UIs lean on. */
+        --sd-hover: rgba(77, 140, 255, 0.08);
+        --sd-selection: rgba(77, 140, 255, 0.22);
+        /* Status — same intent as V0 but slightly desaturated so
+           they harmonise with the new palette. */
+        --sd-status-ok: #7ed18a;
+        --sd-status-warn: #d4b455;
+        --sd-status-err: #ef8b6f;
+        /* Kind palette — preserved hue intent (Module purple, Type
+           amber, Callable blue, Value green, Macro orange) but
+           re-tuned to sit in the cool palette without screaming. */
+        --sd-kind-module: #b888da;
+        --sd-kind-type: #d4b455;
+        --sd-kind-callable: #4d8cff;
+        --sd-kind-value: #7ed18a;
+        --sd-kind-macro: #ef8b6f;
+        --sd-kind-unknown: #8b94a3;
+        /* Entry-point palette — kept warm so they pop on the cool
+           bg, but adjusted to the new white point. */
+        --sd-ep-binary-main: #5fa3ff;
+        --sd-ep-public-api: #f0bc55;
+        --sd-ep-ffi-export: #ff9560;
+        /* Visibility / section accents — used by symbol-details
+           sections + chips. */
+        --sd-vis-public: #7ed18a;
+        --sd-vis-private: #8b94a3;
+        --sd-vis-crate: #d4b455;
+        --sd-vis-protected: #b888da;
+        --sd-section-doc: #5cd1c2;
+        --sd-section-relations: #f0bc55;
+        --sd-section-entry: #5fa3ff;
+        --sd-section-fields: #b888da;
+        --sd-section-methods: #4d8cff;
+        /* Radii — slightly more rounded so surfaces read as soft
+           cards instead of boxes. */
+        --sd-radius-sm: 4px;
+        --sd-radius-md: 8px;
+        --sd-radius-lg: 12px;
+        --sd-radius-pill: 999px;
+        --sd-space-1: 4px;
+        --sd-space-2: 8px;
+        --sd-space-3: 12px;
+        --sd-space-4: 16px;
+        --sd-space-5: 24px;
+        --sd-space-6: 32px;
+        --sd-text-xs: 10px;
+        --sd-text-sm: 11px;
+        --sd-text-md: 13px;
+        --sd-text-lg: 15px;
+        --sd-text-xl: 18px;
+        --sd-font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+        --sd-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto, sans-serif;
+        --sd-shell-grid-cols: 260px 1fr 360px;
+        --sd-shell-grid-rows: 48px 1fr 1fr;
+        --sd-shell-panel-min-h: 180px;
+        --sd-shell-gap: var(--sd-space-2);
+        /* Panel surfaces — subtle vertical gradient + soft drop
+           shadow gives every panel a "lifted glass card" feel. */
+        --sd-panel-bg: linear-gradient(180deg, #161b25 0%, #11151c 100%);
+        --sd-panel-header-h: 36px;
+        --sd-panel-header-bg: linear-gradient(180deg, #1c222e 0%, #161b25 100%);
+        --sd-panel-padding: var(--sd-space-3);
+        --sd-panel-border: 1px solid var(--sd-border-subtle);
+        --sd-panel-shadow: 0 2px 12px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+        --sd-panel-host-h: 240px;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100vh;
+        /* Subtle radial vignette pulls the eye toward the centre and
+           gives the whole shell depth instead of feeling like a flat
+           page. */
+        background:
+          radial-gradient(ellipse at 50% 30%, #141a26 0%, #0b0e14 70%),
+          #0b0e14;
+        color: var(--sd-fg, #c9cfd9);
+        font-family: var(--sd-font-sans);
+        overflow: hidden;
+      }
+      .sd-shell-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 0 12px;
+        background: var(--sd-panel-header-bg);
+        border: var(--sd-panel-border);
+        border-radius: var(--sd-radius-md);
+        box-shadow: var(--sd-panel-shadow);
+        height: 100%;
+        box-sizing: border-box;
+      }
+      .sd-shell-toolbar__brand {
+        color: var(--sd-accent);
+        font-family: var(--sd-font-mono);
+        font-weight: 600;
+        font-size: 14px;
+        letter-spacing: 0.01em;
+        white-space: nowrap;
+      }
+      .sd-shell-toolbar__spacer {
+        flex: 1;
+      }
+      .sd-shell-toolbar standardoc-search {
+        flex: 0 1 380px;
+        max-width: 380px;
+      }
+      .sd-shell-panel-placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        background: var(--sd-panel-bg);
+        border: var(--sd-panel-border);
+        border-radius: var(--sd-radius-md);
+        box-shadow: var(--sd-panel-shadow);
+        color: var(--sd-fg-muted);
+        font-style: italic;
+        padding: 16px;
+        text-align: center;
+      }
+      standardoc-graph {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: var(--sd-panel-bg);
+        border: var(--sd-panel-border);
+        border-radius: var(--sd-radius-md);
+        box-shadow: var(--sd-panel-shadow);
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <standardoc-panel-layout id="shell">
+      <div data-slot="toolbar" class="sd-shell-toolbar">
+        <span class="sd-shell-toolbar__brand">standardoc</span>
+        <standardoc-search id="search" global-shortcut placeholder="Search symbols, files, types…"></standardoc-search>
+        <span class="sd-shell-toolbar__spacer"></span>
+        <span id="status" style="font-size: 11px; color: #9d9d9d;">booting…</span>
+      </div>
+      <standardoc-explorer id="explorer" data-slot="explorer"></standardoc-explorer>
+      <standardoc-overview id="overview" data-slot="overview"></standardoc-overview>
+      <standardoc-focus-graph id="focus" data-slot="focus"></standardoc-focus-graph>
+      <standardoc-symbol-details id="details" data-slot="details"></standardoc-symbol-details>
+    </standardoc-panel-layout>
+    <standardoc-panel-host id="panels"></standardoc-panel-host>
+    <script type="module" src="/shell.js"></script>
+  </body>
+</html>
