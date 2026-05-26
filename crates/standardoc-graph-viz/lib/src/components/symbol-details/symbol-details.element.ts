@@ -45,6 +45,7 @@
 import classigo from 'classigo';
 
 import { focusStore, type FocusState } from '../../focus-store';
+import { viewPrefsStore } from '../../view-prefs-store';
 import type { EntryPointKind } from '../explorer/explorer.type';
 import type {
   SymbolDetail,
@@ -127,28 +128,11 @@ const C = {
   itemPopupTags: s['details__item-popup-tags'] ?? '',
   subItemChip: s['details__sub-item-chip'] ?? '',
   subItemChipAsync: s['details__sub-item-chip--async'] ?? '',
+  subItemChipType: s['details__sub-item-chip--type'] ?? '',
   headerToggle: s['details__header-toggle'] ?? '',
   headerToggleActive: s['details__header-toggle--active'] ?? '',
   markdown: s.details__markdown ?? '',
 } as const;
-
-const EXCLUDE_TESTS_STORAGE_KEY = 'sd-details-exclude-tests';
-
-function readPersistedExcludeTests(): boolean {
-  try {
-    return globalThis.localStorage?.getItem(EXCLUDE_TESTS_STORAGE_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
-function writePersistedExcludeTests(value: boolean): void {
-  try {
-    globalThis.localStorage?.setItem(EXCLUDE_TESTS_STORAGE_KEY, value ? '1' : '0');
-  } catch {
-    /* localStorage unavailable (private mode, sandbox) — silently skip. */
-  }
-}
 
 /**
  * Coarse test-symbol detector mirroring the Rust
@@ -293,7 +277,8 @@ export class SymbolDetailsElement extends HTMLElement {
   #sourceLoading = false;
   #tab: SymbolDetailsTab = 'overview';
   #docExpanded = false;
-  #excludeTests = readPersistedExcludeTests();
+  #excludeTests = viewPrefsStore.get().excludeTests;
+  #unsubscribeViewPrefs: (() => void) | null = null;
   #expandedBuckets = new Set<SymbolRelationKind>();
   #bucketSortBy = new Map<SymbolRelationKind, 'default' | 'name' | 'kind'>();
   #unsubscribeFocus: (() => void) | null = null;
@@ -369,6 +354,8 @@ export class SymbolDetailsElement extends HTMLElement {
   disconnectedCallback(): void {
     this.#unsubscribeFocus?.();
     this.#unsubscribeFocus = null;
+    this.#unsubscribeViewPrefs?.();
+    this.#unsubscribeViewPrefs = null;
   }
 
   #render(): void {
@@ -391,8 +378,15 @@ export class SymbolDetailsElement extends HTMLElement {
     const hideTestsBtn = root.querySelector<HTMLButtonElement>('[data-role="hide-tests"]')!;
     this.#syncHideTestsBtn(hideTestsBtn);
     hideTestsBtn.addEventListener('click', () => {
-      this.#excludeTests = !this.#excludeTests;
-      writePersistedExcludeTests(this.#excludeTests);
+      // Toggle via the shared store so sibling panels (Focus Graph,
+      // future Explorer / Overview wiring) stay in sync. The
+      // subscribe() below picks up the change for THIS panel — no
+      // need to mutate `#excludeTests` directly here.
+      viewPrefsStore.setPrefs({ excludeTests: !viewPrefsStore.get().excludeTests });
+    });
+    this.#unsubscribeViewPrefs = viewPrefsStore.subscribe(state => {
+      if (state.excludeTests === this.#excludeTests) return;
+      this.#excludeTests = state.excludeTests;
       this.#syncHideTestsBtn(hideTestsBtn);
       this.#renderBody();
     });
@@ -563,6 +557,18 @@ export class SymbolDetailsElement extends HTMLElement {
         label.appendChild(sig);
       }
       li.appendChild(label);
+      // Type chip — only on the Fields tab. Surfaces the field's
+      // type as a standalone column so `pool: Arc<DbPool>` reads as
+      // `pool  Arc<DbPool>  pub  field` instead of the ambiguous
+      // `pool: Arc<DbPool>` cramped into the label. Methods skip
+      // this — the return type is already visible in `signature`.
+      if (kind === 'fields' && it.type) {
+        const typeChip = document.createElement('span');
+        typeChip.className = classigo(C.subItemChip, C.subItemChipType);
+        typeChip.textContent = it.type;
+        typeChip.title = it.type;
+        li.appendChild(typeChip);
+      }
       // Visibility + async chips sit between the label and the
       // kind so they read as "what is this symbol" attributes
       // rather than getting lost at the row edge. Visibility

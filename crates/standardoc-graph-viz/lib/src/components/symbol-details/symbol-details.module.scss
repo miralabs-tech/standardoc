@@ -350,6 +350,15 @@
 		background: rgba(55, 148, 255, 0.12);
 	}
 
+	&__sub-item-chip--type {
+		color: var(--sd-kind-type, #cca700);
+		background: rgba(204, 167, 0, 0.10);
+		max-width: 280px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
 	// Hover popup showing the FULL name + signature for items whose
 	// row label gets truncated by `text-overflow: ellipsis`. Uses
 	// `position: fixed` so it escapes `.details__body`'s scroll

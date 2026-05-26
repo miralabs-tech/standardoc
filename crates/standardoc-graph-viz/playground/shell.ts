@@ -22,6 +22,7 @@ import '@standarx/standardoc-viz/components/legend';
 
 import { focusStore } from '@standarx/standardoc-viz/focus-store';
 import { panelManager } from '@standarx/standardoc-viz/panel-manager';
+import { viewPrefsStore } from '@standarx/standardoc-viz/view-prefs-store';
 import { McpBrowse } from '@standarx/standardoc-viz/mcp-client';
 import type {
   BrowseSymbol,
@@ -94,6 +95,22 @@ shellEl.addEventListener('sd-panel-layout-change', () => { syncToggleBtns(); });
 // Initial sync — the element may have restored a persisted layout
 // on `connectedCallback` before we wired the listener.
 syncToggleBtns();
+
+// Shell-wide "hide tests" toggle — writes through the shared
+// `viewPrefsStore` so every panel that subscribes (Symbol Details
+// today, focus/explorer/overview as they get wired) sees the same
+// state without per-panel local copies drifting apart.
+const hideTestsBtn = document.getElementById('hide-tests-toggle') as HTMLButtonElement | null;
+if (hideTestsBtn !== null) {
+  const syncHideTestsBtn = (excludeTests: boolean): void => {
+    hideTestsBtn.setAttribute('aria-pressed', excludeTests ? 'true' : 'false');
+  };
+  syncHideTestsBtn(viewPrefsStore.get().excludeTests);
+  hideTestsBtn.addEventListener('click', () => {
+    viewPrefsStore.setPrefs({ excludeTests: !viewPrefsStore.get().excludeTests });
+  });
+  viewPrefsStore.subscribe(state => syncHideTestsBtn(state.excludeTests));
+}
 
 function setStatus(text: string): void {
   if (statusEl) statusEl.textContent = text;
@@ -1822,6 +1839,14 @@ function buildSymbolDetail(
   for (const s of subItems) {
     const cls = classifySubItem(s);
     if (cls === null) continue;
+    // Field-shaped items (no params, return = the field's type)
+    // get a standalone `type` so the Fields tab can render the
+    // type as its own chip. Methods leave it null — their return
+    // type is already inside `signature`.
+    const sig = s.signature;
+    const fieldType = sig && (!sig.params || sig.params.length === 0)
+      ? (sig.returns?.display ?? null)
+      : null;
     const item: SymbolSubItem = {
       fqdn: s.fqdn,
       name: s.name,
@@ -1831,6 +1856,7 @@ function buildSymbolDetail(
       signature: formatSignature(s.signature),
       visibility: s.visibility ?? null,
       isAsync: Array.isArray(s.flags) && s.flags.includes('async'),
+      type: fieldType,
     };
     if (cls === 'field') fields.push(item);
     else methods.push(item);

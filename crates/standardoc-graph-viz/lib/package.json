@@ -24,6 +24,7 @@
     "./profiler": "./src/profiler/index.ts",
     "./mcp-client": "./src/mcp-client/index.ts",
     "./focus-store": "./src/focus-store/index.ts",
+    "./view-prefs-store": "./src/view-prefs-store/index.ts",
     "./panel-manager": "./src/panel-manager/index.ts",
     "./styles/tokens": "./src/styles/_tokens.scss",
     "./styles/mixins": "./src/styles/_mixins.scss"

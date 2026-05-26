@@ -21,4 +21,5 @@ export * from './components/select';
 export * from './profiler';
 export * from './mcp-client';
 export * from './focus-store';
+export * from './view-prefs-store';
 export * from './panel-manager';

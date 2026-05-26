@@ -55,6 +55,12 @@ export interface SymbolSubItem {
    *  chip in the Fields/Methods rows so the call shape reads at a
    *  glance without opening Source. */
   readonly isAsync: boolean;
+  /** Standalone type display for FIELD-shaped sub-items (no params,
+   *  return = the field's type). Methods leave this `null` — their
+   *  return type is already visible in `signature` and a separate
+   *  chip would be redundant. Source: `sig.returns.display` filtered
+   *  by `params.length === 0`. */
+  readonly type: string | null;
 }
 
 export interface SymbolDetail {
