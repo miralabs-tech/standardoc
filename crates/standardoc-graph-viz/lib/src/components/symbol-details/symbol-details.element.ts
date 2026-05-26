@@ -5,7 +5,7 @@
  *   ┌──────────────────────────────────────────────┐
  *   │ name                            ★  ⋮         │  head (sticky-ish)
  *   │ struct  public                               │
- *   │ file/path.rs:42                    ⧉  ⤴      │
+ *   │ file/path.rs:42                    ⧉  ⤴     │
  *   ├──────────────────────────────────────────────┤
  *   │ Overview │ Fields (10) │ Methods (2) │ Source│  tabs
  *   ├──────────────────────────────────────────────┤
@@ -114,7 +114,80 @@ const C = {
 	entryPointBadgeFfiExport: s['details__entry-point-badge--ffi-export'] ?? '',
 	actions: s.details__actions ?? '',
 	action: s.details__action ?? '',
+	relationKindCalls: s['details__relation--kind-calls'] ?? '',
+	relationKindImports: s['details__relation--kind-imports'] ?? '',
+	relationKindUsesType: s['details__relation--kind-uses-type'] ?? '',
+	relationKindImplements: s['details__relation--kind-implements'] ?? '',
+	relationKindTests: s['details__relation--kind-tests'] ?? '',
+	relationKindUsedBy: s['details__relation--kind-used-by'] ?? '',
+	relationKindDefined: s['details__relation--kind-defined'] ?? '',
+	itemPopup: s['details__item-popup'] ?? '',
+	markdown: s.details__markdown ?? '',
 } as const;
+
+const RELATION_KIND_CLASS: Record<SymbolRelationKind, string> = {
+	calls: C.relationKindCalls,
+	usedBy: C.relationKindUsedBy,
+	imports: C.relationKindImports,
+	importedBy: C.relationKindImports,
+	usesTypes: C.relationKindUsesType,
+	implements: C.relationKindImplements,
+	extends: C.relationKindImplements,
+	testedBy: C.relationKindTests,
+	definedHere: C.relationKindDefined,
+};
+
+/**
+ * Minimal markdown → HTML renderer for doc comments. Covers the
+ * subset that shows up in real Rust/TS doc strings:
+ *   - `# / ## / ###` headings
+ *   - **bold**, *italic*, `inline code`
+ *   - ```fenced code blocks```
+ *   - bullet + numbered lists
+ *   - [text](url) links (opens in new tab)
+ *   - paragraphs separated by blank lines, single newlines as <br>
+ *
+ * All non-code text is HTML-escaped before substitution so a stray
+ * `<script>` in a doc comment can't inject. Code blocks / inline
+ * code escape their bodies too. The output is meant to be assigned
+ * via `innerHTML` — the styling lives in `.details__markdown` SCSS.
+ */
+function renderMarkdown(md: string): string {
+	const escape = (s: string): string =>
+		s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+	const codeBlocks: string[] = [];
+	const inlineCodes: string[] = [];
+	let text = md.replace(/```([\w-]*)\n?([\s\S]*?)```/g, (_, lang: string, body: string) => {
+		const cls = lang ? ` class="lang-${escape(lang)}"` : '';
+		codeBlocks.push(`<pre><code${cls}>${escape(body.replace(/\n$/, ''))}</code></pre>`);
+		return `CB${codeBlocks.length - 1}`;
+	});
+	text = text.replace(/`([^`\n]+)`/g, (_, body: string) => {
+		inlineCodes.push(`<code>${escape(body)}</code>`);
+		return `IC${inlineCodes.length - 1}`;
+	});
+	text = escape(text);
+	text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+	text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+	text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+	text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+	text = text.replace(/(^|[^\w*])\*([^*\n]+)\*(?!\w)/g, '$1<em>$2</em>');
+	text = text.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_, t: string, u: string) =>
+		`<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`);
+	text = text.replace(/^(\s*)[-*] (.+)$/gm, '$1<li>$2</li>');
+	text = text.replace(/^(\s*)\d+\. (.+)$/gm, '$1<li data-ord="1">$2</li>');
+	text = text.replace(/((?:^<li[^>]*>.*<\/li>\n?)+)/gm, m =>
+		m.includes('data-ord') ? `<ol>${m}</ol>` : `<ul>${m}</ul>`);
+	text = text.split(/\n{2,}/).map(p => {
+		const trimmed = p.trim();
+		if (!trimmed) return '';
+		if (/^<(h[1-6]|ul|ol|pre|CB)/.test(trimmed)) return trimmed;
+		return `<p>${trimmed.replace(/\n/g, '<br/>')}</p>`;
+	}).join('\n');
+	text = text.replace(/CB(\d+)/g, (_, i: string) => codeBlocks[Number(i)] ?? '');
+	text = text.replace(/IC(\d+)/g, (_, i: string) => inlineCodes[Number(i)] ?? '');
+	return text;
+}
 
 const RELATION_TITLE: Record<SymbolRelationKind, string> = {
 	usedBy: 'Used by',
@@ -420,6 +493,25 @@ export class SymbolDetailsElement extends HTMLElement {
 			k.textContent = it.kindLabel;
 			li.appendChild(label);
 			li.appendChild(k);
+			// Hover popup with the FULL name + signature — the row's
+			// label has `text-overflow: ellipsis` so long sigs get cut
+			// (`Result<Option<RawSymbol>, ExternalsError>` truncates to
+			// `Result<Option<Ra…`). The popup shows the unbroken text
+			// on hover so the user never has to click-to-focus just
+			// to read the return type. Uses `position: fixed` because
+			// `.details__body` scrolls with `overflow: auto` and would
+			// clip an absolute-positioned popup behind the tabs bar.
+			if (it.signature) {
+				const popup = document.createElement('div');
+				popup.className = C.itemPopup;
+				popup.textContent = `${it.name}${it.signature}`;
+				li.appendChild(popup);
+				li.addEventListener('mouseenter', () => {
+					const rect = li.getBoundingClientRect();
+					popup.style.left = `${rect.left + rect.width / 2}px`;
+					popup.style.top = `${rect.top}px`;
+				});
+			}
 			li.addEventListener('click', () => {
 				focusStore.setFocus(it.fqdn);
 				this.dispatchEvent(new CustomEvent<SymbolDetailsRelationClickDetail>('sd-symbol-relation-click', {
@@ -487,11 +579,12 @@ export class SymbolDetailsElement extends HTMLElement {
 			title.className = classigo(C.sectionTitle, C.sectionTitleDoc);
 			title.textContent = 'Documentation';
 			const doc = document.createElement('div');
-			doc.className = C.doc;
+			doc.className = classigo(C.doc, C.markdown);
 			const truncated = sym.documentation.length > DOC_COLLAPSED_CHARS;
-			doc.textContent = !truncated || this.#docExpanded
+			const raw = !truncated || this.#docExpanded
 				? sym.documentation
 				: `${sym.documentation.slice(0, DOC_COLLAPSED_CHARS)}…`;
+			doc.innerHTML = renderMarkdown(raw);
 			docSection.appendChild(title);
 			docSection.appendChild(doc);
 			if (truncated) {
@@ -546,7 +639,7 @@ export class SymbolDetailsElement extends HTMLElement {
 
 	#renderRelation(bucket: SymbolRelationBucket, _ownFqdn: string): HTMLElement {
 		const wrap = document.createElement('div');
-		wrap.className = C.relation;
+		wrap.className = classigo(C.relation, RELATION_KIND_CLASS[bucket.kind]);
 		const expanded = this.#expandedBuckets.has(bucket.kind);
 		const sortBy = this.#bucketSortBy.get(bucket.kind) ?? 'default';
 

@@ -115,28 +115,39 @@
 	&__tabs {
 		flex: 0 0 auto;
 		display: flex;
+		gap: 2px;
+		padding: 4px 8px 0;
 		border-bottom: 1px solid var(--sd-border-subtle, #2d2d2d);
-		background: var(--sd-bg, #1e1e1e);
+		background: var(--sd-panel-header-bg, #252526);
 	}
 
 	&__tab {
 		flex: 0 0 auto;
-		padding: var(--sd-space-2, 8px) var(--sd-space-3, 12px);
+		padding: 6px 12px;
 		background: transparent;
 		color: var(--sd-fg-muted, #9d9d9d);
 		border: 0;
 		border-bottom: 2px solid transparent;
+		border-radius: var(--sd-radius-sm, 3px) var(--sd-radius-sm, 3px) 0 0;
 		cursor: pointer;
 		font: inherit;
-		font-size: var(--sd-text-sm, 11px);
+		font-size: var(--sd-text-md, 13px);
+		font-weight: 500;
+		transition: background 80ms ease, color 80ms ease;
+		// Sit on top of the tabs bar's bottom border so the active
+		// tab visually "joins" the body underneath.
+		margin-bottom: -1px;
 
 		&:hover:not(:disabled) {
 			color: var(--sd-fg, #cccccc);
+			background: rgba(255, 255, 255, 0.04);
 		}
 
 		&--active {
 			color: var(--sd-fg-strong, #ffffff);
+			background: var(--sd-bg, #1e1e1e);
 			border-bottom-color: var(--sd-accent, #3794ff);
+			font-weight: 600;
 		}
 
 		&:disabled {
@@ -162,7 +173,11 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--sd-space-2, 8px);
-		margin-bottom: var(--sd-space-4, 16px);
+		margin-bottom: var(--sd-space-3, 12px);
+		padding: var(--sd-space-3, 12px);
+		background: rgba(255, 255, 255, 0.025);
+		border: 1px solid var(--sd-border-subtle, #2d2d2d);
+		border-radius: var(--sd-radius-md, 6px);
 
 		&:last-child {
 			margin-bottom: 0;
@@ -192,7 +207,9 @@
 		font-size: var(--sd-text-md, 13px);
 		line-height: 1.5;
 		color: var(--sd-fg, #cccccc);
-		white-space: pre-wrap;
+		// No `white-space: pre-wrap` — the markdown renderer owns
+		// paragraph/line breaks via <p> + <br> so raw newlines from
+		// the source don't double-collapse.
 	}
 
 	&__doc-toggle {
@@ -206,7 +223,25 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--sd-space-1, 4px);
-		margin-bottom: var(--sd-space-2, 8px);
+		padding: 4px 8px;
+		border-left: 2px solid var(--sd-border-subtle, #2d2d2d);
+
+		& + & {
+			margin-top: 6px;
+			padding-top: 8px;
+			border-top: 1px solid var(--sd-border-subtle, #2d2d2d);
+		}
+
+		// Per-kind accent — colors the lead-in stripe + title so each
+		// bucket reads as its own thing inside the Relations card,
+		// matching the focus-graph edge palette.
+		&--kind-calls      { border-left-color: #3794ff; .details__relation-title { color: #3794ff; } }
+		&--kind-imports    { border-left-color: #b180d7; .details__relation-title { color: #b180d7; } }
+		&--kind-uses-type  { border-left-color: #cca700; .details__relation-title { color: #cca700; } }
+		&--kind-implements { border-left-color: #f48771; .details__relation-title { color: #f48771; } }
+		&--kind-tests      { border-left-color: #89d185; .details__relation-title { color: #89d185; } }
+		&--kind-used-by    { border-left-color: #3794ff; .details__relation-title { color: #3794ff; } }
+		&--kind-defined    { border-left-color: var(--sd-fg-muted, #9d9d9d); .details__relation-title { color: var(--sd-fg-muted, #9d9d9d); } }
 	}
 
 	&__relation-header {
@@ -219,6 +254,8 @@
 		font-size: var(--sd-text-sm, 11px);
 		font-weight: 600;
 		color: var(--sd-fg, #cccccc);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
 	}
 
 	&__relation-count {
@@ -254,10 +291,44 @@
 		padding: 2px 6px;
 		border-radius: var(--sd-radius-sm, 3px);
 		cursor: pointer;
+		position: relative;
 
 		&:hover {
 			background: var(--sd-hover, #2a2d2e);
 		}
+
+		&:hover .details__item-popup {
+			opacity: 1;
+		}
+	}
+
+	// Hover popup showing the FULL name + signature for items whose
+	// row label gets truncated by `text-overflow: ellipsis`. Uses
+	// `position: fixed` so it escapes `.details__body`'s scroll
+	// container (which clips with `overflow: auto` — hid the popup
+	// behind the tabs bar in V1). Host sets `top` / `left` from
+	// JS on mouseenter; CSS handles the translate so the anchor
+	// point is the row centre, popup sits just above it.
+	&__item-popup {
+		position: fixed;
+		top: 0;
+		left: 0;
+		transform: translate(-50%, calc(-100% - 6px));
+		max-width: 480px;
+		padding: 6px 10px;
+		background: rgba(8, 9, 14, 0.96);
+		border: 1px solid var(--sd-border, #454545);
+		border-radius: var(--sd-radius-md, 6px);
+		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		font-size: var(--sd-text-sm, 11px);
+		color: var(--sd-fg, #cccccc);
+		white-space: pre-wrap;
+		word-break: break-word;
+		pointer-events: none;
+		opacity: 0;
+		transition: opacity 80ms ease;
+		z-index: 1000;
 	}
 
 	&__relation-item-label {
@@ -326,5 +397,75 @@
 		padding: var(--sd-space-2, 8px) var(--sd-space-3, 12px);
 		font-size: var(--sd-text-sm, 11px);
 		text-align: center;
+	}
+
+	// Rendered markdown inside doc sections. Tuned to feel native to
+	// the panel rather than a foreign HTML block — headings dim and
+	// compact, code in the mono token color, lists tight.
+	&__markdown {
+		h1, h2, h3 {
+			margin: var(--sd-space-2, 8px) 0 var(--sd-space-1, 4px);
+			font-weight: 600;
+			color: var(--sd-fg-strong, #ffffff);
+			line-height: 1.3;
+		}
+
+		h1 { font-size: 15px; }
+		h2 { font-size: 14px; }
+		h3 { font-size: 13px; color: var(--sd-fg, #cccccc); }
+
+		p {
+			margin: 0 0 var(--sd-space-2, 8px);
+			line-height: 1.5;
+		}
+
+		ul, ol {
+			margin: 0 0 var(--sd-space-2, 8px);
+			padding-left: 20px;
+		}
+
+		li {
+			margin: 2px 0;
+			line-height: 1.5;
+		}
+
+		a {
+			color: var(--sd-accent, #3794ff);
+			text-decoration: none;
+
+			&:hover { text-decoration: underline; }
+		}
+
+		strong { color: var(--sd-fg-strong, #ffffff); font-weight: 600; }
+		em { font-style: italic; color: var(--sd-fg, #cccccc); }
+
+		code {
+			padding: 1px 4px;
+			background: rgba(255, 255, 255, 0.06);
+			border-radius: var(--sd-radius-sm, 3px);
+			font-family: var(--sd-font-mono, ui-monospace, monospace);
+			font-size: 0.92em;
+			color: var(--sd-kind-callable, #3794ff);
+		}
+
+		pre {
+			margin: var(--sd-space-2, 8px) 0;
+			padding: 8px 10px;
+			background: rgba(0, 0, 0, 0.30);
+			border: 1px solid var(--sd-border-subtle, #2d2d2d);
+			border-radius: var(--sd-radius-sm, 3px);
+			overflow-x: auto;
+			line-height: 1.45;
+
+			code {
+				padding: 0;
+				background: transparent;
+				color: var(--sd-fg, #cccccc);
+				font-size: var(--sd-text-sm, 11px);
+			}
+		}
+
+		> :first-child { margin-top: 0; }
+		> :last-child { margin-bottom: 0; }
 	}
 }
