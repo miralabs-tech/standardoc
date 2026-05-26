@@ -186,6 +186,51 @@
 		}
 	}
 
+	// Mini-legend — one chip per cross-edge kind present in the
+	// current scope. Hidden when the cross-edge toggle is off so
+	// the canvas stays minimal until the user asks for relations.
+	&__legend {
+		position: absolute;
+		bottom: 10px;
+		left: 10px;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 4px 8px;
+		max-width: 60%;
+		padding: 4px 8px;
+		background: rgba(15, 18, 28, 0.85);
+		border: 1px solid var(--sd-border-subtle, #2d2d2d);
+		border-radius: var(--sd-radius-md, 6px);
+		font-size: var(--sd-text-xs, 10px);
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		color: var(--sd-fg, #cccccc);
+		pointer-events: none;
+		z-index: 2;
+		backdrop-filter: blur(4px);
+	}
+
+	&__legend--empty {
+		display: none;
+	}
+
+	&__legend-item {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+	}
+
+	&__legend-swatch {
+		display: inline-block;
+		width: 14px;
+		height: 0;
+		border-top: 2px solid currentColor;
+	}
+
+	&__legend-swatch--dashed {
+		border-top-style: dashed;
+	}
+
 	&__ball-label {
 		font-family: var(--sd-font-mono, ui-monospace, monospace);
 		user-select: none;

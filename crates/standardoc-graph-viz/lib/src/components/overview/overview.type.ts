@@ -47,6 +47,22 @@ export interface OverviewCanvasFacade {
    * topology stays readable when the cap is tight.
    */
   set_max_visible_labels(n: number): void;
+  /**
+   * Toggle inter-module ("cross") edge rendering. Parent-child
+   * structural edges (the FQDN spine) always render; cross edges
+   * are off by default to keep the depth-stacked layout readable
+   * and surface them on demand.
+   */
+  set_show_cross_edges(show: boolean): void;
+  /**
+   * Cap label rendering to nodes whose FQDN depth is `<= cap`. A
+   * very large number (e.g. 2 ** 32 - 1) disables the cap; `0`
+   * paints only root-package labels and leaves deeper nodes as
+   * unlabelled halos. The host clamps this to `0` at workspace
+   * scope so the high-level view stays readable across hundreds
+   * of modules.
+   */
+  set_label_depth_cap(cap: number): void;
   readonly cluster_count: number;
   readonly edge_count: number;
   /** Current orbit yaw in radians — synced into the orbit-ball widget. */

@@ -57,12 +57,36 @@ const C = {
   gizmoBtnActive: s['overview__gizmo-btn--active'] ?? '',
   gizmoLabel: s['overview__gizmo-label'] ?? '',
   gizmoSelect: s['overview__gizmo-select'] ?? '',
+  legend: s.overview__legend ?? '',
+  legendEmpty: s['overview__legend--empty'] ?? '',
+  legendItem: s['overview__legend-item'] ?? '',
+  legendSwatch: s['overview__legend-swatch'] ?? '',
+  legendSwatchDashed: s['overview__legend-swatch--dashed'] ?? '',
   ball: s.overview__ball ?? '',
   ballAxis: s['overview__ball-axis'] ?? '',
   ballAxisBehind: s['overview__ball-axis--behind'] ?? '',
   ballTip: s['overview__ball-tip'] ?? '',
   ballLabel: s['overview__ball-label'] ?? '',
 } as const;
+
+/// Cross-edge kind palette — must stay in sync with `cross_edge_style`
+/// in `src/overview/mod.rs` and the global legend in `lib/components/legend`.
+/// Used to render the mini-legend chips and to map unknown kinds to a
+/// neutral gray (the `?? FALLBACK` at call sites).
+interface CrossEdgeKindSpec {
+  readonly kind: string;
+  readonly label: string;
+  readonly color: string;
+  readonly dashed: boolean;
+}
+const CROSS_EDGE_KINDS: ReadonlyArray<CrossEdgeKindSpec> = [
+  { kind: 'CALLS', label: 'Calls', color: '#3794ff', dashed: false },
+  { kind: 'IMPORTS', label: 'Imports', color: '#b180d7', dashed: false },
+  { kind: 'USES_TYPE', label: 'Uses type', color: '#cca700', dashed: false },
+  { kind: 'IMPLEMENTS', label: 'Implements', color: '#f48771', dashed: true },
+  { kind: 'EXTENDS', label: 'Extends', color: '#f48771', dashed: true },
+  { kind: 'REFERENCES', label: 'References', color: '#9d9d9d', dashed: false },
+];
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -144,6 +168,26 @@ const LABEL_LIMIT_OPTIONS: ReadonlyArray<SelectOption> = [
 
 const DEFAULT_PRESET = 'orbit';
 const DEFAULT_LABEL_LIMIT = 0;
+const DEFAULT_SHOW_CROSS_EDGES = false;
+const CROSS_EDGES_STORAGE_KEY = 'sd-overview-cross-edges';
+
+function readPersistedCrossEdges(): boolean {
+  try {
+    const raw = globalThis.localStorage?.getItem(CROSS_EDGES_STORAGE_KEY);
+    if (raw === null || raw === undefined) return DEFAULT_SHOW_CROSS_EDGES;
+    return raw === '1';
+  } catch {
+    return DEFAULT_SHOW_CROSS_EDGES;
+  }
+}
+
+function writePersistedCrossEdges(value: boolean): void {
+  try {
+    globalThis.localStorage?.setItem(CROSS_EDGES_STORAGE_KEY, value ? '1' : '0');
+  } catch {
+    /* localStorage unavailable (private mode, sandbox) — silently skip. */
+  }
+}
 
 /// Per-frame pan speed in screen pixels when a Q/D/A/E key is held.
 /// Tuned so a 1-second hold pans ~half a viewport at the default
@@ -208,9 +252,13 @@ export class OverviewElement extends HTMLElement {
     ballAxes: ReadonlyArray<OrbitAxisNodes>;
     presetBtns: ReadonlyArray<HTMLButtonElement>;
     labelSelect: SelectElement;
+    crossEdgesBtn: HTMLButtonElement;
+    legend: HTMLElement;
   } | null = null;
   #activePreset = DEFAULT_PRESET;
   #labelLimit = DEFAULT_LABEL_LIMIT;
+  #showCrossEdges = readPersistedCrossEdges();
+  #crossEdgeKinds: ReadonlyArray<string> = [];
   /// Currently-held key codes (`event.code`), populated by the
   /// keyboard nav listeners. The set is read in `#loop` so multiple
   /// keys pressed at once compose smoothly (e.g. Z+D for diagonal).
@@ -420,18 +468,52 @@ export class OverviewElement extends HTMLElement {
     labelRow.append(labelHint, labelSelect);
     gizmo.appendChild(labelRow);
 
+    // Cross-edges toggle — when off (default), only the FQDN spine
+    // (parent_child edges) renders. Flip on to surface inter-module
+    // imports/calls/uses-type as glow strands across the depth planes.
+    const crossRow = document.createElement('div');
+    crossRow.className = C.gizmoRow;
+    const crossHint = document.createElement('span');
+    crossHint.className = C.gizmoLabel;
+    crossHint.textContent = 'cross';
+    const crossEdgesBtn = document.createElement('button');
+    crossEdgesBtn.type = 'button';
+    crossEdgesBtn.className = C.gizmoBtn;
+    crossEdgesBtn.title = 'Toggle inter-module edges (imports / calls / uses-type)';
+    crossEdgesBtn.textContent = this.#showCrossEdges ? 'on' : 'off';
+    crossEdgesBtn.addEventListener('click', () => {
+      this.#showCrossEdges = !this.#showCrossEdges;
+      writePersistedCrossEdges(this.#showCrossEdges);
+      this.#canvas?.set_show_cross_edges(this.#showCrossEdges);
+      this.#syncCrossEdgesBtn();
+      this.#renderLegend();
+    });
+    crossRow.append(crossHint, crossEdgesBtn);
+    gizmo.appendChild(crossRow);
+
     root.appendChild(gizmo);
+
+    // Mini-legend pinned bottom-left — one chip per IR edge kind
+    // present in the current scope's cross edges. Hidden whenever
+    // the cross-edge toggle is off (the spine alone is monochrome
+    // by design — adding a legend then would be lying).
+    const legend = document.createElement('div');
+    legend.className = classigo(C.legend, C.legendEmpty);
+    root.appendChild(legend);
+
     // Focusable so the ZQSD / arrow-key nav listeners can pick up
     // keydown events scoped to this panel. `outline: none` in SCSS
     // hides the default browser outline; `:focus-visible` paints a
     // subtle accent border instead.
     root.tabIndex = 0;
     this.replaceChildren(root);
-    this.#nodes = { root, canvas, breadcrumb, gizmo, ball, ballAxes, presetBtns, labelSelect };
+    this.#nodes = { root, canvas, breadcrumb, gizmo, ball, ballAxes, presetBtns, labelSelect, crossEdgesBtn, legend };
     this.#wirePointer();
     this.#wireKeyboard();
     this.#renderBreadcrumb();
     this.#syncGizmo();
+    this.#syncCrossEdgesBtn();
+    this.#renderLegend();
     this.#syncOrbitBall();
   }
 
@@ -442,6 +524,62 @@ export class OverviewElement extends HTMLElement {
       const isActive = btn.dataset['preset'] === this.#activePreset;
       btn.className = classigo(C.gizmoBtn, isActive && C.gizmoBtnActive);
     }
+  }
+
+  #syncCrossEdgesBtn(): void {
+    const n = this.#nodes;
+    if (n === null) return;
+    n.crossEdgesBtn.textContent = this.#showCrossEdges ? 'on' : 'off';
+    n.crossEdgesBtn.className = classigo(C.gizmoBtn, this.#showCrossEdges && C.gizmoBtnActive);
+  }
+
+  /**
+   * Host-pushed list of IR edge kinds present in the current scope's
+   * cross edges (`CALLS`, `IMPORTS`, `USES_TYPE`, …). The legend
+   * renders one chip per known kind; unknown kinds are skipped so the
+   * chip row stays in sync with the canvas palette.
+   */
+  set crossEdgeKinds(kinds: ReadonlyArray<string>) {
+    this.#crossEdgeKinds = kinds;
+    this.#renderLegend();
+  }
+
+  get crossEdgeKinds(): ReadonlyArray<string> {
+    return this.#crossEdgeKinds;
+  }
+
+  #renderLegend(): void {
+    const n = this.#nodes;
+    if (n === null) return;
+    // Hide the legend whenever cross-edges are off — the spine alone
+    // is monochrome and labelling it would just add noise. Also hide
+    // when the scope has no cross kinds at all (e.g. drilled deep
+    // enough that no inter-module edges remain).
+    const visible = this.#showCrossEdges && this.#crossEdgeKinds.length > 0;
+    if (!visible) {
+      n.legend.className = classigo(C.legend, C.legendEmpty);
+      n.legend.replaceChildren();
+      return;
+    }
+    const present = new Set(this.#crossEdgeKinds);
+    const chips = CROSS_EDGE_KINDS.filter(spec => present.has(spec.kind));
+    const frag = document.createDocumentFragment();
+    for (const chip of chips) {
+      const item = document.createElement('span');
+      item.className = C.legendItem;
+      item.style.color = chip.color;
+      const swatch = document.createElement('span');
+      swatch.className = chip.dashed
+        ? classigo(C.legendSwatch, C.legendSwatchDashed)
+        : C.legendSwatch;
+      const label = document.createElement('span');
+      label.textContent = chip.label;
+      label.style.color = 'var(--sd-fg, #cccccc)';
+      item.append(swatch, label);
+      frag.appendChild(item);
+    }
+    n.legend.className = C.legend;
+    n.legend.replaceChildren(frag);
   }
 
   #wireKeyboard(): void {
@@ -672,6 +810,10 @@ export class OverviewElement extends HTMLElement {
     void Promise.resolve(this.#factory(n.canvas, w, h, dpr))
       .then(canvas => {
         this.#canvas = canvas;
+        // Sync the persisted cross-edges preference into the freshly
+        // bound canvas so the toggle survives reloads without the user
+        // having to flip it again.
+        canvas.set_show_cross_edges(this.#showCrossEdges);
         // Wire wasm-side hover + click callbacks to DOM events.
         // Without this the cluster-click in the overview canvas
         // fired into the void and the shell never saw the drill
