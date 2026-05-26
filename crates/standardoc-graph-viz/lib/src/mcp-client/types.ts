@@ -85,6 +85,11 @@ export interface RawSymbol {
   readonly entry_point?: string | null;
   readonly receiver_type?: string | null;
   readonly implements_trait?: string | null;
+  /** Semantic flags computed post-extraction by the resolver/walker
+   *  (Rust `Future`/TS `Promise` returns → `"async"`, iterator
+   *  shapes → `"iter"`, language-specific tags like
+   *  `"lua:coroutine-yielding"`). Omitted when empty. */
+  readonly flags?: ReadonlyArray<string>;
 }
 
 export interface ListSymbolsOptions {

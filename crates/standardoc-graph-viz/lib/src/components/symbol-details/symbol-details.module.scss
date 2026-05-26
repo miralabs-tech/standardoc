@@ -17,6 +17,7 @@
 		flex: 0 0 auto;
 		display: flex;
 		align-items: center;
+		justify-content: space-between;
 		gap: var(--sd-space-2, 8px);
 		height: var(--sd-panel-header-h, 32px);
 		padding: 0 var(--sd-panel-padding, 12px);
@@ -27,6 +28,32 @@
 		letter-spacing: 0.05em;
 		color: var(--sd-fg-muted, #9d9d9d);
 		font-weight: 600;
+	}
+
+	&__header-toggle {
+		appearance: none;
+		background: transparent;
+		border: 1px solid var(--sd-border-subtle, #2d2d2d);
+		border-radius: var(--sd-radius-sm, 3px);
+		padding: 2px 8px;
+		font: inherit;
+		font-size: var(--sd-text-xs, 10px);
+		text-transform: lowercase;
+		letter-spacing: 0;
+		color: var(--sd-fg-muted, #9d9d9d);
+		cursor: pointer;
+		transition: background 80ms ease, color 80ms ease, border-color 80ms ease;
+
+		&:hover {
+			color: var(--sd-fg, #cccccc);
+			background: var(--sd-hover, #2a2d2e);
+		}
+	}
+
+	&__header-toggle--active {
+		color: var(--sd-fg-strong, #ffffff);
+		background: var(--sd-selection, #094771);
+		border-color: var(--sd-accent, #3794ff);
 	}
 
 	&__head {
@@ -302,6 +329,27 @@
 		}
 	}
 
+	// Compact chip rendered inline in a sub-item row (Fields /
+	// Methods tab) to surface visibility + async at a glance. Mirrors
+	// the head-area `&__tag` palette but smaller so the row stays
+	// dense.
+	&__sub-item-chip {
+		flex: 0 0 auto;
+		padding: 0 6px;
+		border-radius: var(--sd-radius-pill, 999px);
+		font-size: var(--sd-text-xs, 10px);
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		background: var(--sd-hover, #2a2d2e);
+		color: var(--sd-fg-muted, #9d9d9d);
+		text-transform: lowercase;
+		line-height: 1.6;
+	}
+
+	&__sub-item-chip--async {
+		color: var(--sd-kind-callable, #3794ff);
+		background: rgba(55, 148, 255, 0.12);
+	}
+
 	// Hover popup showing the FULL name + signature for items whose
 	// row label gets truncated by `text-overflow: ellipsis`. Uses
 	// `position: fixed` so it escapes `.details__body`'s scroll
@@ -323,12 +371,35 @@
 		font-family: var(--sd-font-mono, ui-monospace, monospace);
 		font-size: var(--sd-text-sm, 11px);
 		color: var(--sd-fg, #cccccc);
-		white-space: pre-wrap;
+		white-space: normal;
 		word-break: break-word;
 		pointer-events: none;
 		opacity: 0;
 		transition: opacity 80ms ease;
 		z-index: 1000;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		min-width: 220px;
+	}
+
+	&__item-popup-name {
+		font-weight: 600;
+		color: var(--sd-fg-strong, #ffffff);
+		font-size: var(--sd-text-md, 13px);
+	}
+
+	&__item-popup-signature {
+		color: var(--sd-fg-muted, #9d9d9d);
+		font-size: var(--sd-text-sm, 11px);
+		line-height: 1.4;
+	}
+
+	&__item-popup-tags {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+		margin-top: 2px;
 	}
 
 	&__relation-item-label {

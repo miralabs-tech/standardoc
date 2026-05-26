@@ -1829,6 +1829,8 @@ function buildSymbolDetail(
       file: s.location.file,
       startLine: s.location.start_line,
       signature: formatSignature(s.signature),
+      visibility: s.visibility ?? null,
+      isAsync: Array.isArray(s.flags) && s.flags.includes('async'),
     };
     if (cls === 'field') fields.push(item);
     else methods.push(item);

@@ -11,75 +11,83 @@ import type { EntryPointKind } from '../explorer/explorer.type';
 export type SymbolKindLabel = string; // free-form for now; lower-cased decl_kind
 
 export interface SymbolRelationItem {
-	readonly fqdn: string;
-	readonly label: string;
-	readonly kindLabel: SymbolKindLabel;
+  readonly fqdn: string;
+  readonly label: string;
+  readonly kindLabel: SymbolKindLabel;
 }
 
 export type SymbolRelationKind =
-	| 'usedBy'
-	| 'usesTypes'
-	| 'calls'
-	| 'imports'
-	| 'importedBy'
-	| 'testedBy'
-	| 'implements'
-	| 'extends'
-	| 'definedHere';
+  | 'usedBy'
+  | 'usesTypes'
+  | 'calls'
+  | 'imports'
+  | 'importedBy'
+  | 'testedBy'
+  | 'implements'
+  | 'extends'
+  | 'definedHere';
 
 export interface SymbolRelationBucket {
-	readonly kind: SymbolRelationKind;
-	readonly items: ReadonlyArray<SymbolRelationItem>;
-	/** Total count including items beyond what's surfaced in `items`. */
-	readonly total: number;
+  readonly kind: SymbolRelationKind;
+  readonly items: ReadonlyArray<SymbolRelationItem>;
+  /** Total count including items beyond what's surfaced in `items`. */
+  readonly total: number;
 }
 
 export interface SymbolSubItem {
-	readonly fqdn: string;
-	readonly name: string;
-	readonly kindLabel: SymbolKindLabel;
-	readonly file: string | null;
-	readonly startLine: number | null;
-	/**
-	 * Pre-formatted anatomy hint shown next to the name in Fields/Methods
-	 * tabs. Field-style `": T"` when params are absent, function-style
-	 * `"(p: T, q: U) → R"` otherwise. `null` for entries whose extractor
-	 * did not capture a signature (re-exports, builtins, externals).
-	 */
-	readonly signature: string | null;
+  readonly fqdn: string;
+  readonly name: string;
+  readonly kindLabel: SymbolKindLabel;
+  readonly file: string | null;
+  readonly startLine: number | null;
+  /**
+   * Pre-formatted anatomy hint shown next to the name in Fields/Methods
+   * tabs. Field-style `": T"` when params are absent, function-style
+   * `"(p: T, q: U) → R"` otherwise. `null` for entries whose extractor
+   * did not capture a signature (re-exports, builtins, externals).
+   */
+  readonly signature: string | null;
+  /** `public` / `private` / `crate` / `protected`. `null` when the
+   *  extractor didn't classify (re-exports, builtins). */
+  readonly visibility: string | null;
+  /** True when the symbol's `flags` carries `"async"` (TS Promise
+   *  return / `async` keyword, Rust `Future` return). Surfaced as a
+   *  chip in the Fields/Methods rows so the call shape reads at a
+   *  glance without opening Source. */
+  readonly isAsync: boolean;
 }
 
 export interface SymbolDetail {
-	readonly fqdn: string;
-	readonly name: string;
-	readonly kindLabel: SymbolKindLabel;
-	readonly visibility: string | null;
-	readonly file: string;
-	readonly startLine: number;
-	readonly documentation: string | null;
-	readonly entryPointKind: EntryPointKind | null;
-	readonly fields: ReadonlyArray<SymbolSubItem>;
-	readonly methods: ReadonlyArray<SymbolSubItem>;
-	readonly relations: ReadonlyArray<SymbolRelationBucket>;
+  readonly fqdn: string;
+  readonly name: string;
+  readonly kindLabel: SymbolKindLabel;
+  readonly visibility: string | null;
+  readonly file: string;
+  readonly startLine: number;
+  readonly documentation: string | null;
+  readonly entryPointKind: EntryPointKind | null;
+  readonly fields: ReadonlyArray<SymbolSubItem>;
+  readonly methods: ReadonlyArray<SymbolSubItem>;
+  readonly relations: ReadonlyArray<SymbolRelationBucket>;
 }
 
 export type SymbolDetailsTab = 'overview' | 'fields' | 'methods' | 'source';
 
 export type SymbolDetailsAction =
-	| 'open-in-editor'
-	| 'copy-fqdn'
-	| 'add-to-compare';
+  | 'open-in-editor'
+  | 'copy-fqdn'
+  | 'add-to-compare';
 
 export interface SymbolDetailsActionDetail {
-	readonly action: SymbolDetailsAction;
-	readonly fqdn: string;
+  readonly action: SymbolDetailsAction;
+  readonly fqdn: string;
 }
 
 export interface SymbolDetailsRelationClickDetail {
-	readonly fqdn: string;
-	readonly relationKind: SymbolRelationKind;
+  readonly fqdn: string;
+  readonly relationKind: SymbolRelationKind;
 }
 
 export interface SymbolDetailsTabChangeDetail {
-	readonly tab: SymbolDetailsTab;
+  readonly tab: SymbolDetailsTab;
 }
