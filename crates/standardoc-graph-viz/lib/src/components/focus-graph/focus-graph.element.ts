@@ -22,12 +22,15 @@
  *   - `sd-focus-graph-node-hover`  detail: { fqdn | null }
  *   - `sd-focus-graph-node-click`  detail: { fqdn }
  *   - `sd-focus-graph-hop-change`  detail: { hops }
+ *   - `sd-focus-bucket-expand`     detail: { bucket, hiddenCount, newCap }
  *   - `sd-focus-graph-error`       detail: { source, message }
  */
 
 import classigo from 'classigo';
 
 import type {
+  FocusBucketExpandDetail,
+  FocusGraphBackDetail,
   FocusGraphCanvasFacade,
   FocusGraphCanvasFactory,
   FocusGraphErrorDetail,
@@ -52,7 +55,17 @@ const C = {
   canvas: s.focus__canvas ?? '',
   overlay: s.focus__overlay ?? '',
   label: s.focus__label ?? '',
-  edgeLabel: s['focus__edge-label'] ?? '',
+  legend: s.focus__legend ?? '',
+  legendEmpty: s['focus__legend--empty'] ?? '',
+  legendItem: s['focus__legend-item'] ?? '',
+  legendSwatch: s['focus__legend-swatch'] ?? '',
+  legendSwatchDashed: s['focus__legend-swatch--dashed'] ?? '',
+  breadcrumb: s.focus__breadcrumb ?? '',
+  breadcrumbEmpty: s['focus__breadcrumb--empty'] ?? '',
+  breadcrumbBack: s['focus__breadcrumb-back'] ?? '',
+  breadcrumbSeg: s['focus__breadcrumb-seg'] ?? '',
+  breadcrumbSegCurrent: s['focus__breadcrumb-seg--current'] ?? '',
+  breadcrumbSep: s['focus__breadcrumb-sep'] ?? '',
 } as const;
 
 interface BucketLabel {
@@ -62,16 +75,18 @@ interface BucketLabel {
   readonly y: number;
 }
 
-interface EdgeLabel {
+interface EdgeKindChip {
   readonly text: string;
   readonly color: string;
-  readonly x: number;
-  readonly y: number;
+  /// `true` when the kind renders as a dashed curve on the canvas
+  /// (IMPLEMENTS / EXTENDS). The legend swatch mirrors this so the
+  /// chip and the actual arrow share the same visual language.
+  readonly dashed: boolean;
 }
 
 interface OverlayPayload {
   readonly buckets: ReadonlyArray<BucketLabel>;
-  readonly edges: ReadonlyArray<EdgeLabel>;
+  readonly edges: ReadonlyArray<EdgeKindChip>;
 }
 
 const HOPS: ReadonlyArray<{ hops: number; label: string }> = [
@@ -94,8 +109,14 @@ export class FocusGraphElement extends HTMLElement {
     stage: HTMLElement;
     canvas: HTMLCanvasElement;
     overlay: HTMLElement;
+    legend: HTMLElement;
+    breadcrumb: HTMLElement;
   } | null = null;
   #hops = 1;
+  /// Last FQDN reflected in the breadcrumb — diffed against
+  /// `canvas.focus_fqdn` each rAF tick so we only re-render the
+  /// breadcrumb when the focal symbol actually changes.
+  #breadcrumbFqdn = '';
 
   set canvasFactory(factory: FocusGraphCanvasFactory) {
     this.#factory = factory;
@@ -145,6 +166,8 @@ export class FocusGraphElement extends HTMLElement {
 			</div>
 			<div class="${C.stage}" data-role="stage">
 				<canvas class="${C.canvas}" data-role="canvas"></canvas>
+				<div class="${C.breadcrumb} ${C.breadcrumbEmpty}" data-role="breadcrumb"></div>
+				<div class="${C.legend} ${C.legendEmpty}" data-role="legend" aria-label="Edge kinds"></div>
 				<div class="${C.overlay}" data-role="overlay" aria-hidden="true"></div>
 			</div>
 		`;
@@ -155,6 +178,8 @@ export class FocusGraphElement extends HTMLElement {
       stage: root.querySelector<HTMLElement>('[data-role="stage"]')!,
       canvas: root.querySelector<HTMLCanvasElement>('[data-role="canvas"]')!,
       overlay: root.querySelector<HTMLElement>('[data-role="overlay"]')!,
+      legend: root.querySelector<HTMLElement>('[data-role="legend"]')!,
+      breadcrumb: root.querySelector<HTMLElement>('[data-role="breadcrumb"]')!,
     };
     this.#syncHopChips();
     this.#wireHopChips();
@@ -239,18 +264,41 @@ export class FocusGraphElement extends HTMLElement {
       .then(canvas => {
         this.#canvas = canvas;
         canvas.set_hop_count(this.#hops);
+        // `queueMicrotask` defers the DOM dispatch until after the
+        // current wasm call returns, dropping the wasm-bindgen mutable
+        // borrow before any host listener can re-enter the canvas
+        // (e.g. via `set_payload` on a node-click drill). Without this
+        // wasm-bindgen panics with "recursive use of an object
+        // detected" the moment a click handler calls back into wasm.
         canvas.set_on_node_hover((fqdn: string | null) => {
-          this.dispatchEvent(new CustomEvent<FocusGraphNodeHoverDetail>('sd-focus-graph-node-hover', {
-            detail: { fqdn }, bubbles: true, composed: true,
-          }));
+          queueMicrotask(() => {
+            this.dispatchEvent(new CustomEvent<FocusGraphNodeHoverDetail>('sd-focus-graph-node-hover', {
+              detail: { fqdn }, bubbles: true, composed: true,
+            }));
+          });
         });
         canvas.set_on_node_click((fqdn: string) => {
-          this.dispatchEvent(new CustomEvent<FocusGraphNodeClickDetail>('sd-focus-graph-node-click', {
-            detail: { fqdn }, bubbles: true, composed: true,
-          }));
+          queueMicrotask(() => {
+            this.dispatchEvent(new CustomEvent<FocusGraphNodeClickDetail>('sd-focus-graph-node-click', {
+              detail: { fqdn }, bubbles: true, composed: true,
+            }));
+          });
         });
+        canvas.set_on_overflow_click((bucket: string, hiddenCount: number, newCap: number) => {
+          queueMicrotask(() => {
+            this.dispatchEvent(new CustomEvent<FocusBucketExpandDetail>('sd-focus-bucket-expand', {
+              detail: { bucket, hiddenCount, newCap }, bubbles: true, composed: true,
+            }));
+          });
+        });
+        // Observe the STAGE wrapper, not the canvas itself. The
+        // canvas carries an inline `width: ${px}` set by
+        // `apply_canvas_size` (Rust pin to dodge the DPR-bitmap →
+        // intrinsic-size resize loop), so it does NOT auto-track its
+        // parent. The stage is `flex: 1 1 auto` inside the focus
+        // panel, so observing it catches every layout reflow.
         this.#observer = new ResizeObserver(() => this.#syncSize());
-        this.#observer.observe(n.canvas);
+        this.#observer.observe(n.stage);
         this.dispatchEvent(new CustomEvent<FocusGraphReadyDetail>('sd-focus-graph-ready', {
           detail: { canvas }, bubbles: true, composed: true,
         }));
@@ -267,7 +315,10 @@ export class FocusGraphElement extends HTMLElement {
   #syncSize(): void {
     const n = this.#nodes;
     if (n === null || this.#canvas === null) return;
-    const rect = n.canvas.getBoundingClientRect();
+    // Use the stage's rect, not the canvas's: the canvas inline size
+    // is pinned by `apply_canvas_size` and lags the parent's reflow
+    // until we resize it ourselves.
+    const rect = n.stage.getBoundingClientRect();
     const w = Math.max(1, Math.round(rect.width));
     const h = Math.max(1, Math.round(rect.height));
     this.#canvas.resize(w, h);
@@ -279,7 +330,64 @@ export class FocusGraphElement extends HTMLElement {
     if (this.#canvas === null) return;
     this.#canvas.tick();
     this.#syncOverlay();
+    this.#syncBreadcrumb();
     this.#rafHandle = requestAnimationFrame(() => this.#loop());
+  }
+
+  #syncBreadcrumb(): void {
+    const n = this.#nodes;
+    if (n === null || this.#canvas === null) return;
+    const fqdn = this.#canvas.focus_fqdn;
+    if (fqdn === this.#breadcrumbFqdn) return;
+    this.#breadcrumbFqdn = fqdn;
+    if (fqdn === '') {
+      n.breadcrumb.replaceChildren();
+      n.breadcrumb.classList.add(C.breadcrumbEmpty);
+      return;
+    }
+    // FQDN segments — Rust / TS / Lua all use `::` as a path
+    // separator in our IR. Last segment is the symbol name itself
+    // (highlighted current), earlier segments are the module / file
+    // path leading to it.
+    const segments = fqdn.split('::').filter(s => s.length > 0);
+    if (segments.length === 0) {
+      n.breadcrumb.replaceChildren();
+      n.breadcrumb.classList.add(C.breadcrumbEmpty);
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    // Back button — mirrors the overview's `← Workspace` affordance.
+    // Emits `sd-focus-graph-back` so the host can decide what "back"
+    // means (pop history, navigate to parent module, switch to the
+    // workspace view, …).
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = C.breadcrumbBack;
+    back.textContent = '← Back';
+    back.title = 'Back';
+    back.addEventListener('click', () => {
+      this.dispatchEvent(new CustomEvent<FocusGraphBackDetail>('sd-focus-graph-back', {
+        detail: { from: this.#breadcrumbFqdn },
+        bubbles: true,
+        composed: true,
+      }));
+    });
+    frag.appendChild(back);
+    segments.forEach((seg, i) => {
+      const sep = document.createElement('span');
+      sep.className = C.breadcrumbSep;
+      sep.textContent = '›';
+      frag.appendChild(sep);
+      const segEl = document.createElement('span');
+      const isLast = i === segments.length - 1;
+      segEl.className = isLast
+        ? classigo(C.breadcrumbSeg, C.breadcrumbSegCurrent)
+        : C.breadcrumbSeg;
+      segEl.textContent = seg;
+      frag.appendChild(segEl);
+    });
+    n.breadcrumb.replaceChildren(frag);
+    n.breadcrumb.classList.remove(C.breadcrumbEmpty);
   }
 
   #syncOverlay(): void {
@@ -293,32 +401,47 @@ export class FocusGraphElement extends HTMLElement {
     } catch {
       return;
     }
-    if (parsed.buckets.length === 0 && parsed.edges.length === 0) {
+    // Bucket headers — DOM overlay positioned in camera space.
+    if (parsed.buckets.length === 0) {
       if (n.overlay.childNodes.length > 0) n.overlay.replaceChildren();
-      return;
+    } else {
+      const frag = document.createDocumentFragment();
+      for (const l of parsed.buckets) {
+        const el = document.createElement('span');
+        el.className = C.label;
+        el.textContent = `${l.text} (${l.count})`;
+        el.style.left = `${l.x}px`;
+        el.style.top = `${l.y}px`;
+        frag.appendChild(el);
+      }
+      n.overlay.replaceChildren(frag);
     }
-    const frag = document.createDocumentFragment();
-    // Edge labels first (lower z visually) so bucket pills land on
-    // top if they ever overlap.
-    for (const l of parsed.edges) {
-      const el = document.createElement('span');
-      el.className = C.edgeLabel;
-      el.textContent = l.text;
-      el.style.left = `${l.x}px`;
-      el.style.top = `${l.y}px`;
-      el.style.color = l.color;
-      el.style.borderColor = l.color;
-      frag.appendChild(el);
+    // Mini-legend — pinned top-left, one chip per unique edge kind
+    // present in the current focus view. The chip itself is coloured
+    // via `color: <kind-color>`; both the swatch (currentColor) and
+    // the border inherit, so a single style assignment paints both.
+    if (parsed.edges.length === 0) {
+      if (n.legend.childNodes.length > 0) n.legend.replaceChildren();
+      n.legend.classList.add(C.legendEmpty);
+    } else {
+      const frag = document.createDocumentFragment();
+      for (const chip of parsed.edges) {
+        const el = document.createElement('span');
+        el.className = C.legendItem;
+        el.style.color = chip.color;
+        const swatch = document.createElement('span');
+        swatch.className = chip.dashed
+          ? classigo(C.legendSwatch, C.legendSwatchDashed)
+          : C.legendSwatch;
+        const label = document.createElement('span');
+        label.textContent = chip.text;
+        label.style.color = 'var(--sd-fg, #cccccc)';
+        el.append(swatch, label);
+        frag.appendChild(el);
+      }
+      n.legend.replaceChildren(frag);
+      n.legend.classList.remove(C.legendEmpty);
     }
-    for (const l of parsed.buckets) {
-      const el = document.createElement('span');
-      el.className = C.label;
-      el.textContent = `${l.text} (${l.count})`;
-      el.style.left = `${l.x}px`;
-      el.style.top = `${l.y}px`;
-      frag.appendChild(el);
-    }
-    n.overlay.replaceChildren(frag);
   }
 }
 
@@ -341,6 +464,8 @@ declare global {
 }
 
 export type {
+  FocusBucketExpandDetail,
+  FocusGraphBackDetail,
   FocusGraphNodeClickDetail,
   FocusGraphNodeHoverDetail,
 };

@@ -92,17 +92,131 @@
 		border: 1px solid var(--sd-border-subtle, #2d2d2d);
 	}
 
-	&__edge-label {
+	// Breadcrumb pinned top-left of the focus stage. Mirrors the
+	// overview's `← Workspace › <scope>` affordance but reads the
+	// FQDN segments of the current focal symbol instead. Back button
+	// emits `sd-focus-graph-back` for the host to decide what
+	// "back" means (history pop, parent module, …).
+	&__breadcrumb {
 		position: absolute;
-		transform: translate(-50%, -50%);
+		top: 8px;
+		left: 8px;
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		max-width: calc(100% - 16px);
+		padding: 4px 10px;
+		background: rgba(15, 18, 28, 0.85);
+		border: 1px solid var(--sd-border-subtle, #2d2d2d);
+		border-radius: var(--sd-radius-pill, 999px);
+		backdrop-filter: blur(4px);
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		font-size: var(--sd-text-xs, 10px);
+		color: var(--sd-fg, #cccccc);
+		pointer-events: auto;
+		z-index: 2;
+		overflow: hidden;
+	}
+
+	&__breadcrumb--empty {
+		display: none;
+	}
+
+	&__breadcrumb-back {
+		background: transparent;
+		border: none;
+		color: var(--sd-fg-muted, #9d9d9d);
+		cursor: pointer;
+		padding: 0 4px;
+		font-family: inherit;
+		font-size: inherit;
+
+		&:hover {
+			color: var(--sd-fg-strong, #ffffff);
+		}
+	}
+
+	&__breadcrumb-sep {
+		color: var(--sd-fg-dim, #6e7681);
+	}
+
+	&__breadcrumb-seg {
+		color: var(--sd-fg-muted, #9d9d9d);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 160px;
+	}
+
+	&__breadcrumb-seg--current {
+		color: var(--sd-fg-strong, #ffffff);
+		font-weight: 600;
+		max-width: 240px;
+	}
+
+	// Mini-legend pinned TOP-RIGHT of the focus stage now that the
+	// breadcrumb owns the top-left corner. Replaces the per-edge
+	// floating midpoint labels which overlapped expanded buckets and
+	// visually noised the graph. Chips track edge kinds present in
+	// the current focus view (one chip per unique kind).
+	&__legend {
+		position: absolute;
+		top: 8px;
+		right: 8px;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+		max-width: calc(60% - 16px);
+		padding: 4px 6px;
+		background: rgba(15, 18, 28, 0.85);
+		border: 1px solid var(--sd-border-subtle, #2d2d2d);
+		border-radius: var(--sd-radius-md, 6px);
+		backdrop-filter: blur(4px);
 		font-family: var(--sd-font-mono, ui-monospace, monospace);
 		font-size: 9px;
-		font-weight: 500;
-		letter-spacing: 0;
+		pointer-events: auto;
+		z-index: 2;
+		justify-content: flex-end;
+	}
+
+	&__legend--empty {
+		display: none;
+	}
+
+	&__legend-item {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		padding: 1px 6px 1px 4px;
 		background: var(--sd-bg-deep, #161616);
-		padding: 1px 5px;
-		border-radius: 3px;
 		border: 1px solid;
+		border-radius: 3px;
+		font-weight: 500;
 		white-space: nowrap;
+	}
+
+	// Swatch is a tiny horizontal line so the legend matches the
+	// actual arrow style on the canvas — Git Kraken's legend doesn't
+	// show "filled swatches" either, the chips show the same stroke
+	// the user is reading in the graph.
+	&__legend-swatch {
+		flex: 0 0 auto;
+		width: 14px;
+		height: 2px;
+		background: currentColor;
+		border-radius: 1px;
+	}
+
+	// Dashed variant — mirrors IMPLEMENTS / EXTENDS edges on the
+	// canvas. `repeating-linear-gradient` is a one-liner equivalent
+	// of `stroke-dasharray` for div-based swatches.
+	&__legend-swatch--dashed {
+		background: repeating-linear-gradient(
+			to right,
+			currentColor 0,
+			currentColor 3px,
+			transparent 3px,
+			transparent 5px
+		);
 	}
 }

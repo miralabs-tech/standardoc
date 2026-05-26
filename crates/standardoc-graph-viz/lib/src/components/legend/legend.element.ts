@@ -37,7 +37,7 @@ const C = {
 	entry: s.legend__entry ?? '',
 	swatchKind: s['legend__swatch-kind'] ?? '',
 	swatchEdge: s['legend__swatch-edge'] ?? '',
-	swatchEdgeDouble: s['legend__swatch-edge--double'] ?? '',
+	swatchEdgeDashed: s['legend__swatch-edge--dashed'] ?? '',
 	swatchLang: s['legend__swatch-lang'] ?? '',
 	entryLabel: s['legend__entry-label'] ?? '',
 } as const;
@@ -46,7 +46,10 @@ interface SwatchEntry {
 	readonly value: string;
 	readonly label: string;
 	readonly color: string;
-	readonly double?: boolean;
+	/// Renders the edge swatch with a dashed pattern instead of a
+	/// solid stroke. Mirrors the canvas-side rendering of
+	/// IMPLEMENTS / EXTENDS edges in the focus graph.
+	readonly dashed?: boolean;
 	readonly short?: string;
 }
 
@@ -65,7 +68,7 @@ const EDGE_ENTRIES: ReadonlyArray<SwatchEntry> = [
 	{ value: 'CALLS', label: 'Calls', color: '#3794ff' },
 	{ value: 'IMPORTS', label: 'Imports', color: '#b180d7' },
 	{ value: 'USES_TYPE', label: 'Uses type', color: '#cca700' },
-	{ value: 'IMPLEMENTS', label: 'Implements', color: '#f48771', double: true },
+	{ value: 'IMPLEMENTS', label: 'Implements', color: '#f48771', dashed: true },
 	{ value: 'REFERENCES', label: 'References', color: '#9d9d9d' },
 ];
 
@@ -177,7 +180,7 @@ export class LegendElement extends HTMLElement {
 			swatch.className = C.swatchKind;
 			swatch.style.setProperty('--swatch-color', entry.color);
 		} else if (category === 'edge') {
-			swatch.className = classigo(C.swatchEdge, entry.double === true && C.swatchEdgeDouble);
+			swatch.className = classigo(C.swatchEdge, entry.dashed === true && C.swatchEdgeDashed);
 			swatch.style.setProperty('--swatch-color', entry.color);
 		} else {
 			swatch.className = C.swatchLang;

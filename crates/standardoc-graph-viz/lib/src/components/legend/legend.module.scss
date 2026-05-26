@@ -105,10 +105,19 @@
 			border-radius: 1px;
 		}
 
-		&--double::before {
-			height: 6px;
-			background:
-				linear-gradient(to bottom, var(--swatch-color, #9d9d9d) 0 2px, transparent 2px 4px, var(--swatch-color, #9d9d9d) 4px 6px);
+		// Dashed variant — mirrors the focus-graph canvas rendering of
+		// IMPLEMENTS / EXTENDS edges (dashed quadratic curves) so the
+		// legend swatch and the actual arrow share the same visual
+		// language. `repeating-linear-gradient` is the CSS one-liner
+		// equivalent of `stroke-dasharray`.
+		&--dashed::before {
+			background: repeating-linear-gradient(
+				to right,
+				var(--swatch-color, #9d9d9d) 0,
+				var(--swatch-color, #9d9d9d) 3px,
+				transparent 3px,
+				transparent 5px
+			);
 		}
 	}
 

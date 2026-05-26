@@ -102,6 +102,24 @@ enum Bucket {
 	Indirect,
 }
 
+/// Stable machine-readable name for a bucket, surfaced to JS hosts via
+/// the `on_overflow_click` callback. Display labels (used in the DOM
+/// overlay) live in `BUCKET_PLACEMENTS` and are NOT what we want here —
+/// hosts that want to react to a bucket expand need a string they can
+/// compare against without worrying about i18n.
+fn bucket_name(b: Bucket) -> &'static str {
+	match b {
+		Bucket::UsedBy => "used_by",
+		Bucket::UsesTypes => "uses_types",
+		Bucket::Calls => "calls",
+		Bucket::Imports => "imports",
+		Bucket::ImportedBy => "imported_by",
+		Bucket::TestedBy => "tested_by",
+		Bucket::ImplementsExtends => "implements_extends",
+		Bucket::Indirect => "indirect",
+	}
+}
+
 #[derive(Serialize)]
 struct BucketLabelOut<'a> {
 	text: &'a str,
@@ -110,12 +128,20 @@ struct BucketLabelOut<'a> {
 	y: f64,
 }
 
+/// One entry per **unique** edge kind present in the current focus
+/// view. Replaces the per-edge floating midpoint labels of the prior
+/// revision — those labels overlapped expanded buckets and were
+/// visually noisy. The host renders them as a chip strip in the focus
+/// graph's top-left, pinned to the panel (NOT to camera coordinates),
+/// so the user can read the relation palette without parsing every
+/// arrow. The `dashed` flag mirrors the on-canvas line style
+/// (IMPLEMENTS / EXTENDS render as dashed curves) so the legend
+/// swatch matches what the user sees in the graph.
 #[derive(Serialize)]
 struct EdgeLabelOut<'a> {
 	text: &'a str,
 	color: &'a str,
-	x: f64,
-	y: f64,
+	dashed: bool,
 }
 
 #[derive(Serialize)]
@@ -132,20 +158,15 @@ const ITEM_GAP: f64 = 6.0;
 const ITEM_GAP_H: f64 = 10.0; // horizontal gap when bucket lays items in a row
 const BUCKET_HEADER_GAP: f64 = 22.0;
 const MORE_BADGE_H: f64 = 18.0;
-const CARD_RADIUS: f64 = 10.0;
+const CARD_RADIUS: f64 = 12.0;
+const ACCENT_STRIPE_H: f64 = 4.0;
 const EDGE_LINE_WIDTH: f64 = 2.4;
 const ARROW_LEN: f64 = 11.0;
 const ARROW_HALF_WIDTH: f64 = 5.5;
 /// Quadratic Bézier control-point offset perpendicular to the
 /// centre-to-centre direction. Drives how much the edge bows away from
-/// a straight line — at twice the EDGE_LABEL_OFFSET so the curve apex
-/// (t=0.5) coincides with the label's perpendicular lift.
+/// a straight line.
 const EDGE_BEZIER_BOW: f64 = 24.0;
-/// Perpendicular lift applied to edge labels so they sit beside the
-/// line rather than straddling it (the pill background would otherwise
-/// occlude the stroke). World-space pixels, scaled by the camera zoom
-/// at projection time.
-const EDGE_LABEL_OFFSET: f64 = 12.0;
 
 #[derive(Debug, Clone, Copy)]
 enum BucketDirection {
@@ -161,11 +182,19 @@ const ZOOM_MIN: f64 = 0.1;
 const ZOOM_MAX: f64 = 8.0;
 const ZOOM_STEP: f64 = 0.0012;
 const CLICK_DRAG_THRESHOLD: f64 = 4.0;
-/// Cap the number of items rendered per bucket. Matches the mockup
+/// Default cap on items rendered per bucket. Matches the mockup
 /// (each bucket shows 2-5 items, the rest collapsed into a "+N more"
 /// badge under the column). Real symbols can have dozens of inbound
 /// CALLS — rendering them all turned the V0 into a giga-list wall.
+/// Clicking the "+N more" badge raises the per-bucket cap up to
+/// `BUCKET_CAP_MAX` so power users can drill on a single column
+/// without losing the dense overview.
 const BUCKET_TOP_N: usize = 5;
+/// Hard ceiling on the per-bucket cap reached by repeated "+N more"
+/// clicks. Twenty is enough to surface the long tail of CALLS-heavy
+/// symbols without re-introducing the V0 giga-list (the user can
+/// fall back to a list panel if they truly need everything).
+const BUCKET_CAP_MAX: usize = 20;
 
 /// Ordered bucket placements at 6 distinct compass positions around
 /// the centre — NW / NE / W / E / SW / SE. Eight placements were
@@ -180,17 +209,29 @@ const BUCKET_PLACEMENTS: &[(Bucket, &str, f64, f64, BucketDirection)] = &[
 	//   • E (right) = dependencies / uses types
 	//   • N (up)    = imports / API
 	//   • S (down)  = tests / implementations
-	// Each cardinal axis gets ±0.10π offset to split inbound vs outbound
-	// without overlapping columns. Reading the graph by direction tells
-	// the user the relationship immediately — no hover needed.
-	(Bucket::UsedBy,            "Used by",     std::f64::consts::PI * 1.00, 380.0, BucketDirection::Vertical),   // W   — callers
-	(Bucket::Imports,           "Imports",     std::f64::consts::PI * 1.40, 380.0, BucketDirection::Vertical),   // N-L — outbound API namespace
-	(Bucket::ImportedBy,        "Imported by", std::f64::consts::PI * 1.60, 380.0, BucketDirection::Vertical),   // N-R — inbound API namespace
-	(Bucket::UsesTypes,         "Uses types",  std::f64::consts::PI * 1.90, 380.0, BucketDirection::Vertical),   // E-↑ — outbound type deps
-	(Bucket::Calls,             "Calls",       std::f64::consts::PI * 0.10, 380.0, BucketDirection::Vertical),   // E-↓ — outbound behaviour deps
-	(Bucket::ImplementsExtends, "Impl/Extend", std::f64::consts::PI * 0.40, 380.0, BucketDirection::Vertical),   // S-R — implementations
-	(Bucket::TestedBy,          "Tested by",   std::f64::consts::PI * 0.60, 380.0, BucketDirection::Horizontal), // S-L — tests
-	(Bucket::Indirect,          "Indirect",    std::f64::consts::PI * 0.50, 580.0, BucketDirection::Horizontal), // S-far — depth-2+
+	// Each cardinal axis gets ±0.15π offset to split inbound vs outbound.
+	// The prior ±0.10π setting put symmetric pairs (UsesTypes/Calls on
+	// the East side, ImpExt/TestedBy on the South side) too close in
+	// angle — at radial 380 their `cy` gap was 234 px while the bucket
+	// vertical extent was 264 px, so the columns visibly overlapped by
+	// ~30 px even at the default 5-item cap. 0.15π pushes the gap to
+	// 346 px, comfortably above the column height. TestedBy also flips
+	// from `Horizontal` to `Vertical` so it no longer threads a wide
+	// horizontal row through ImpExt's vertical column on the SE side.
+	//
+	// Radial is bumped from 380 → 420 to clear the diagonal corner-
+	// overlap between Calls (E-down) and ImpExt (S-R): at radial 380
+	// their bbox corners still kissed by ~12 px on the SE diagonal,
+	// at 420 the gap turns positive (no overlap). Indirect stays at
+	// radial 700 — far south, single horizontal row of depth-2+ nodes.
+	(Bucket::UsedBy,            "Used by",     std::f64::consts::PI * 1.00, 420.0, BucketDirection::Vertical),   // W   — callers
+	(Bucket::Imports,           "Imports",     std::f64::consts::PI * 1.35, 420.0, BucketDirection::Vertical),   // N-L — outbound API namespace
+	(Bucket::ImportedBy,        "Imported by", std::f64::consts::PI * 1.65, 420.0, BucketDirection::Vertical),   // N-R — inbound API namespace
+	(Bucket::UsesTypes,         "Uses types",  std::f64::consts::PI * 1.85, 420.0, BucketDirection::Vertical),   // E-↑ — outbound type deps
+	(Bucket::Calls,             "Calls",       std::f64::consts::PI * 0.15, 420.0, BucketDirection::Vertical),   // E-↓ — outbound behaviour deps
+	(Bucket::ImplementsExtends, "Impl/Extend", std::f64::consts::PI * 0.35, 420.0, BucketDirection::Vertical),   // S-R — implementations
+	(Bucket::TestedBy,          "Tested by",   std::f64::consts::PI * 0.65, 420.0, BucketDirection::Vertical),   // S-L — tests
+	(Bucket::Indirect,          "Indirect",    std::f64::consts::PI * 0.50, 700.0, BucketDirection::Horizontal), // S-far — depth-2+
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -216,15 +257,22 @@ pub struct FocusGraphCanvas {
 	hop_count: u32,
 	on_node_click: Option<js_sys::Function>,
 	on_node_hover: Option<js_sys::Function>,
+	on_overflow_click: Option<js_sys::Function>,
 	needs_redraw: bool,
 	/// FQDN → laid-out position, recomputed on `set_payload` /
 	/// `resize`. Centre lives under the focal FQDN; neighbours each
 	/// have their own entry.
 	positions: std::collections::HashMap<String, LaidNode>,
 	/// Per-bucket "+N more" badge anchor (x, y, hidden_count). Populated
-	/// during layout() for buckets whose item count exceeded BUCKET_TOP_N.
-	/// Rendered as a non-interactive badge under the column.
+	/// during layout() for buckets whose item count exceeded the cap.
+	/// Clicking a badge raises the cap for that bucket (see
+	/// `bucket_cap_overrides`) and re-layouts.
 	overflow_badges: Vec<(Bucket, f64, f64, usize)>,
+	/// Per-bucket cap override. Buckets absent from the map render with
+	/// the default `BUCKET_TOP_N` cap; entries set the cap higher (cap
+	/// hard-clamped at `BUCKET_CAP_MAX`). Cleared on `set_payload` so a
+	/// fresh focal symbol starts from the default density.
+	bucket_cap_overrides: std::collections::HashMap<Bucket, usize>,
 	hovered: Option<String>,
 	drag: Option<DragState>,
 	/// Camera translation in screen pixels — pan offset applied via
@@ -256,9 +304,11 @@ impl FocusGraphCanvas {
 			hop_count: 1,
 			on_node_click: None,
 			on_node_hover: None,
+			on_overflow_click: None,
 			needs_redraw: true,
 			positions: std::collections::HashMap::new(),
 			overflow_badges: Vec::new(),
+			bucket_cap_overrides: std::collections::HashMap::new(),
 			hovered: None,
 			drag: None,
 			cam_offset_x: 0.0,
@@ -270,6 +320,16 @@ impl FocusGraphCanvas {
 	pub fn set_payload(&mut self, json: &str) -> Result<(), JsValue> {
 		let parsed: FocusPayload = serde_json::from_str(json)
 			.map_err(|e| JsValue::from_str(&format!("FocusGraphCanvas: payload parse error: {e}")))?;
+		// Preserve per-bucket "+N more" expansions when the host reloads
+		// the SAME focal symbol with a different scope (typically a
+		// hop-count change pulls more depth without changing the
+		// centre). A genuinely different focal symbol still clears
+		// caps so the user always lands on the dense default density.
+		let prev_center_fqdn = self.center.as_ref().map(|c| c.fqdn.clone());
+		let next_center_fqdn = parsed.center.as_ref().map(|c| c.fqdn.clone());
+		if prev_center_fqdn != next_center_fqdn {
+			self.bucket_cap_overrides.clear();
+		}
 		self.center = parsed.center;
 		self.neighbors = parsed.neighbors;
 		// Stable visual order — alphabetical by name so the same payload
@@ -333,6 +393,28 @@ impl FocusGraphCanvas {
 		self.on_node_hover = Some(cb);
 	}
 
+	/// FQDN of the currently focal symbol — empty string when no
+	/// payload has been pushed yet. Exposed so `<standardoc-focus-graph>`
+	/// can render a breadcrumb without the host having to mirror its
+	/// own focus state into a property setter.
+	#[wasm_bindgen(getter)]
+	pub fn focus_fqdn(&self) -> String {
+		self.center
+			.as_ref()
+			.map(|c| c.fqdn.clone())
+			.unwrap_or_default()
+	}
+
+	/// Wire a callback fired when the user clicks a "+N more" overflow
+	/// badge. Args: `(bucket_name: &str, hidden_count: usize,
+	/// new_cap: usize)`. The canvas has already raised the cap for that
+	/// bucket and re-laid by the time this fires — the callback is
+	/// informational (analytics, drawer host that wants to surface the
+	/// full bucket alongside the in-canvas expansion).
+	pub fn set_on_overflow_click(&mut self, cb: js_sys::Function) {
+		self.on_overflow_click = Some(cb);
+	}
+
 	pub fn on_pointer_move(&mut self, x: f64, y: f64) {
 		// If a drag is active, the pointer move pans the camera. The
 		// world point under the cursor stays put because we shift the
@@ -374,6 +456,22 @@ impl FocusGraphCanvas {
 		let was_click = self.drag.as_ref().is_some_and(|d| !d.moved);
 		self.drag = None;
 		if !was_click {
+			return;
+		}
+		// Overflow badge takes priority over node hit-test — badges
+		// extend below the bucket column where a real node never lives,
+		// so there is no overlap in practice, but checking the badge
+		// first keeps the contract trivial to reason about.
+		if let Some((bucket, hidden)) = self.hit_overflow_badge(x, y) {
+			let new_cap = self.expand_bucket(bucket);
+			if let Some(cb) = &self.on_overflow_click {
+				let _ = cb.call3(
+					&JsValue::NULL,
+					&JsValue::from_str(bucket_name(bucket)),
+					&JsValue::from_f64(hidden as f64),
+					&JsValue::from_f64(new_cap as f64),
+				);
+			}
 			return;
 		}
 		if let Some(fqdn) = self.hit_test(x, y) {
@@ -510,64 +608,31 @@ impl FocusGraphCanvas {
 			});
 		}
 
-		// Per-edge labels — depth-1 only (depth-2+ floods the canvas),
-		// positioned at the midpoint of each centre↔neighbour edge.
-		// One label per bucket suffices to read the relation type at a
-		// glance, but the mockup labels each edge so we render them all
-		// up to a reasonable cap (FIRST_BUCKET_ITEM only when more than
-		// 3 items share the same kind, otherwise per-edge).
-		let mut edge_labels = Vec::new();
-		let mut per_bucket_labelled: std::collections::HashMap<Bucket, usize> = std::collections::HashMap::new();
+		// Mini-legend payload — one entry per **unique** edge kind
+		// present in the current focus view (any depth honoured by
+		// `hop_count`: 0 = unlimited, N = cap at depth N). The chip
+		// strip dedupes by kind so multi-hop views don't flood; order
+		// tracks first-seen across the edge list so chips stay stable
+		// across renders.
+		let mut seen_kinds: Vec<String> = Vec::new();
 		for e in &self.edges {
-			if e.depth > 1 { continue; }
-			let other_fqdn = if e.from == centre_fqdn {
-				&e.to
-			} else if e.to == centre_fqdn {
-				&e.from
-			} else {
+			if self.hop_count != 0 && e.depth > self.hop_count {
 				continue;
-			};
-			let Some(other_pos) = self.positions.get(other_fqdn) else { continue };
-			// Find the bucket for this neighbour so we can rate-limit
-			// labels per bucket (max 2 labels per bucket — beyond that
-			// the bucket header already conveys the kind).
-			let bucket_opt = self.neighbors.iter()
-				.find(|n| n.fqdn == *other_fqdn)
-				.and_then(|n| self.bucket_for_neighbor(n, &centre_fqdn));
-			if let Some(b) = bucket_opt {
-				let n = per_bucket_labelled.entry(b).or_insert(0);
-				if *n >= 2 { continue; }
-				*n += 1;
 			}
-			let Some(centre_pos) = self.positions.get(&centre_fqdn) else { continue };
-			let (cx, cy) = (centre_pos.x + centre_pos.w * 0.5, centre_pos.y + centre_pos.h * 0.5);
-			let (ox, oy) = (other_pos.x + other_pos.w * 0.5, other_pos.y + other_pos.h * 0.5);
-			// Position labels at the midpoint of the CLIPPED edge segment
-			// (between the two card borders) so they never land on either
-			// endpoint card. A small perpendicular lift keeps the pill
-			// from straddling the stroke.
-			let dx = ox - cx;
-			let dy = oy - cy;
-			let len = dx.hypot(dy).max(1.0);
-			let ux = dx / len;
-			let uy = dy / len;
-			let centre_t = rect_edge_t(centre_pos.w * 0.5, centre_pos.h * 0.5, ux, uy);
-			let other_t = rect_edge_t(other_pos.w * 0.5, other_pos.h * 0.5, ux, uy);
-			let cx_c = cx + ux * centre_t;
-			let cy_c = cy + uy * centre_t;
-			let ox_c = ox - ux * other_t;
-			let oy_c = oy - uy * other_t;
-			let mid_x = (cx_c + ox_c) * 0.5;
-			let mid_y = (cy_c + oy_c) * 0.5;
-			let wx = mid_x + -uy * EDGE_LABEL_OFFSET;
-			let wy = mid_y + ux * EDGE_LABEL_OFFSET;
-			edge_labels.push(EdgeLabelOut {
-				text: edge_phrase(&e.kind),
-				color: edge_color_for_kind(&e.kind),
-				x: wx * self.cam_zoom + self.cam_offset_x,
-				y: wy * self.cam_zoom + self.cam_offset_y,
-			});
+			if !seen_kinds.iter().any(|k| k == &e.kind) {
+				seen_kinds.push(e.kind.clone());
+			}
 		}
+		let edge_labels: Vec<EdgeLabelOut> = seen_kinds
+			.iter()
+			.map(|k| EdgeLabelOut {
+				text: edge_phrase(k),
+				color: edge_color_for_kind(k),
+				// Mirror the canvas-side dashed kinds (see the draw loop)
+				// so the chip strip and the actual arrows match.
+				dashed: k == "IMPLEMENTS" || k == "EXTENDS",
+			})
+			.collect();
 
 		let payload = OverlayPayload { buckets, edges: edge_labels };
 		serde_json::to_string(&payload).unwrap_or_else(|_| r#"{"buckets":[],"edges":[]}"#.to_string())
@@ -631,16 +696,49 @@ impl FocusGraphCanvas {
 				Some(v) if !v.is_empty() => v,
 				_ => continue,
 			};
-			let visible = items.len().min(BUCKET_TOP_N);
+			// Per-bucket cap honours any "+N more" click on this bucket
+			// (see `expand_bucket`); buckets the user has never touched
+			// stay at the dense default `BUCKET_TOP_N`.
+			let cap = self
+				.bucket_cap_overrides
+				.get(bucket)
+				.copied()
+				.unwrap_or(BUCKET_TOP_N);
+			let visible = items.len().min(cap);
 			let hidden = items.len().saturating_sub(visible);
-			let bucket_cx = cx + radial * angle.cos();
-			let bucket_cy = cy + radial * angle.sin();
+			// Expansion push — Figma/Unreal-style: as a bucket grows it
+			// slides AWAY from the centre along its compass axis instead
+			// of bleeding into neighbouring buckets or the centre card.
+			// `extra_half` is the half-extent the bucket gains over the
+			// default cap; the sign of sin/cos picks the direction along
+			// the bucket's main axis. The 0.05 threshold matters: angles
+			// like π give `sin(π) ≈ 1.22e-16` (not exactly 0), so a naive
+			// `signum` would push purely-horizontal buckets like UsedBy
+			// downward by hundreds of pixels — buggy. Anything below the
+			// threshold counts as on-axis and gets zero push.
+			let default_h = (BUCKET_TOP_N as f64) * (ITEM_H + ITEM_GAP) - ITEM_GAP;
+			let new_h = (visible as f64) * (ITEM_H + ITEM_GAP) - ITEM_GAP;
+			let default_w = (BUCKET_TOP_N as f64) * (ITEM_W + ITEM_GAP_H) - ITEM_GAP_H;
+			let new_w = (visible as f64) * (ITEM_W + ITEM_GAP_H) - ITEM_GAP_H;
+			let axis_dir = |v: f64| -> f64 {
+				if v.abs() < 0.05 { 0.0 } else { v.signum() }
+			};
+			let push_y = match direction {
+				BucketDirection::Vertical => axis_dir(angle.sin()) * ((new_h - default_h) * 0.5).max(0.0),
+				BucketDirection::Horizontal => 0.0,
+			};
+			let push_x = match direction {
+				BucketDirection::Horizontal => axis_dir(angle.cos()) * ((new_w - default_w) * 0.5).max(0.0),
+				BucketDirection::Vertical => 0.0,
+			};
+			let bucket_cx = cx + radial * angle.cos() + push_x;
+			let bucket_cy = cy + radial * angle.sin() + push_y;
 
 			match direction {
 				BucketDirection::Vertical => {
-					let total_h = (visible as f64) * (ITEM_H + ITEM_GAP) - ITEM_GAP;
+					let total_h = new_h;
 					let start_y = bucket_cy - total_h * 0.5;
-					for (i, n) in items.iter().take(BUCKET_TOP_N).enumerate() {
+					for (i, n) in items.iter().take(cap).enumerate() {
 						let item_y = start_y + (i as f64) * (ITEM_H + ITEM_GAP);
 						self.positions.insert(n.fqdn.clone(), LaidNode {
 							x: bucket_cx - ITEM_W * 0.5,
@@ -657,9 +755,9 @@ impl FocusGraphCanvas {
 					}
 				}
 				BucketDirection::Horizontal => {
-					let total_w = (visible as f64) * (ITEM_W + ITEM_GAP_H) - ITEM_GAP_H;
+					let total_w = new_w;
 					let start_x = bucket_cx - total_w * 0.5;
-					for (i, n) in items.iter().take(BUCKET_TOP_N).enumerate() {
+					for (i, n) in items.iter().take(cap).enumerate() {
 						let item_x = start_x + (i as f64) * (ITEM_W + ITEM_GAP_H);
 						self.positions.insert(n.fqdn.clone(), LaidNode {
 							x: item_x,
@@ -773,8 +871,6 @@ impl FocusGraphCanvas {
 				(None, _) => base_alpha,
 			};
 			let line_w = if touches_hover { EDGE_LINE_WIDTH * 1.8 } else { EDGE_LINE_WIDTH };
-			self.ctx.set_global_alpha(alpha);
-			self.ctx.set_line_width(line_w);
 			self.ctx.set_stroke_style_str(edge_color_for_kind(&e.kind));
 			// Clip edge endpoints to card borders, then render as a
 			// quadratic Bézier bowing perpendicular by EDGE_BEZIER_BOW.
@@ -797,23 +893,37 @@ impl FocusGraphCanvas {
 			let mid_y = (fy_c + ty_c) * 0.5;
 			let cp_x = mid_x + -uy * EDGE_BEZIER_BOW;
 			let cp_y = mid_y + ux * EDGE_BEZIER_BOW;
-			// IMPLEMENTS / EXTENDS render as a double-line (two parallel
-			// strokes offset perpendicular to the line direction) so they
-			// read as "inheritance/contract" visually — a single line
-			// would look like any other call/uses edge.
-			let is_double = e.kind == "IMPLEMENTS" || e.kind == "EXTENDS";
-			if is_double {
-				let px = -uy * 2.0;
-				let py = ux * 2.0;
+			// IMPLEMENTS / EXTENDS render as a DASHED single curve — the
+			// dashed pattern reads as "inheritance/contract" without the
+			// visual weight of the prior double-line. Halo pass is
+			// skipped for dashed edges (the dashes + glow combo blurs
+			// the pattern into a fuzzy line).
+			let is_dashed = e.kind == "IMPLEMENTS" || e.kind == "EXTENDS";
+			self.ctx.set_line_cap("round");
+			if is_dashed {
+				let dash = js_sys::Array::of2(&JsValue::from_f64(9.0), &JsValue::from_f64(6.0));
+				let _ = self.ctx.set_line_dash(&dash);
+				self.ctx.set_global_alpha(alpha);
+				self.ctx.set_line_width(line_w * 1.2);
 				self.ctx.begin_path();
-				self.ctx.move_to(fx_c + px, fy_c + py);
-				self.ctx.quadratic_curve_to(cp_x + px, cp_y + py, tx_c + px, ty_c + py);
+				self.ctx.move_to(fx_c, fy_c);
+				self.ctx.quadratic_curve_to(cp_x, cp_y, tx_c, ty_c);
 				self.ctx.stroke();
-				self.ctx.begin_path();
-				self.ctx.move_to(fx_c - px, fy_c - py);
-				self.ctx.quadratic_curve_to(cp_x - px, cp_y - py, tx_c - px, ty_c - py);
-				self.ctx.stroke();
+				// Reset dash for the next iteration / arrowhead pass.
+				let _ = self.ctx.set_line_dash(&js_sys::Array::new());
 			} else {
+				// 2-pass edge: wide+dim halo first (acts as a soft glow),
+				// narrow+full core on top. Cheaper than Canvas2D's
+				// `shadowBlur` (which can stall on dense graphs) and the
+				// visual effect is indistinguishable at these widths.
+				self.ctx.set_global_alpha(alpha * 0.35);
+				self.ctx.set_line_width(line_w * 2.8);
+				self.ctx.begin_path();
+				self.ctx.move_to(fx_c, fy_c);
+				self.ctx.quadratic_curve_to(cp_x, cp_y, tx_c, ty_c);
+				self.ctx.stroke();
+				self.ctx.set_global_alpha(alpha);
+				self.ctx.set_line_width(line_w);
 				self.ctx.begin_path();
 				self.ctx.move_to(fx_c, fy_c);
 				self.ctx.quadratic_curve_to(cp_x, cp_y, tx_c, ty_c);
@@ -941,13 +1051,13 @@ impl FocusGraphCanvas {
 		// badge. Bucket categorical info is conveyed by position
 		// (manifesto W=callers / E=deps / N=imports / S=tests).
 		let border_color = kind_color;
-		// Drop shadow under every card — gives the layout real depth
-		// vs the flat VSCode-panel feel the V0 had. Larger soft shadow
-		// for the centre to anchor it as the focal point.
-		let shadow_off = if is_center { 6.0 } else { 4.0 };
-		let shadow_alpha = if is_center { 0.6 } else { 0.45 };
+		// Drop shadow under every card — deeper than VSCode list-row
+		// flat. Larger offset + alpha for the centre so it floats higher
+		// than the neighbour cards, hierarchy-by-elevation.
+		let shadow_off = if is_center { 8.0 } else { 5.0 };
+		let shadow_alpha = if is_center { 0.88 } else { 0.72 };
 		self.ctx.set_fill_style_str(&format!("rgba(0, 0, 0, {shadow_alpha:.3})"));
-		rounded_rect_path(&self.ctx, pos.x + shadow_off * 0.4, pos.y + shadow_off, pos.w, pos.h, CARD_RADIUS);
+		rounded_rect_path(&self.ctx, pos.x + shadow_off * 0.35, pos.y + shadow_off, pos.w, pos.h, CARD_RADIUS);
 		self.ctx.fill();
 		// Soft halo behind the centre / hovered card for visual anchor.
 		if is_center || highlighted {
@@ -956,22 +1066,51 @@ impl FocusGraphCanvas {
 			rounded_rect_path(&self.ctx, pos.x - 8.0, pos.y - 8.0, pos.w + 16.0, pos.h + 16.0, CARD_RADIUS + 6.0);
 			self.ctx.fill();
 		}
-		// Card body — gradient on centre, flat dark on neighbours.
-		// Tinted to the modern shell palette (cool blue-noir vs the
-		// legacy neutral grey) so cards harmonise with --sd-panel-bg.
+		// Card body — stronger top-to-bottom gradient. The kind colour
+		// is mixed into the very top of the gradient (10% blend) so the
+		// card surface itself carries a subtle kind cue even before the
+		// border or accent stripe register.
 		if is_center {
 			let g = self.ctx.create_linear_gradient(pos.x, pos.y, pos.x, pos.y + pos.h);
-			let _ = g.add_color_stop(0.0, "#1d2433");
-			let _ = g.add_color_stop(1.0, "#13182a");
+			let _ = g.add_color_stop(0.0, "#222a3a");
+			let _ = g.add_color_stop(1.0, "#0e1322");
 			self.ctx.set_fill_style_canvas_gradient(&g);
 		} else {
-			self.ctx.set_fill_style_str("#161b25");
+			let g = self.ctx.create_linear_gradient(pos.x, pos.y, pos.x, pos.y + pos.h);
+			let _ = g.add_color_stop(0.0, "#1a2030");
+			let _ = g.add_color_stop(1.0, "#0f1320");
+			self.ctx.set_fill_style_canvas_gradient(&g);
 		}
 		rounded_rect_path(&self.ctx, pos.x, pos.y, pos.w, pos.h, CARD_RADIUS);
 		self.ctx.fill();
-		self.ctx.set_stroke_style_str(border_color);
-		self.ctx.set_line_width(if is_center { 2.5 } else { 1.8 });
+
+		// Accent top stripe — kind-coloured bar across the top of the
+		// card, fades horizontally so the right edge doesn't read as a
+		// hard line. Acts as the primary kind cue, lets the outer
+		// border stay thin/subtle. Clipping a child path to the card's
+		// rounded rect would be cleanest, but Canvas2D `clip()` mutates
+		// the active path stack and is fiddly; instead the stripe is
+		// just a flat-top rounded rect riding the top edge.
+		let stripe_g = self.ctx.create_linear_gradient(pos.x, pos.y, pos.x + pos.w, pos.y);
+		let _ = stripe_g.add_color_stop(0.0, border_color);
+		let _ = stripe_g.add_color_stop(0.7, border_color);
+		let _ = stripe_g.add_color_stop(1.0, &format!("{border_color}00"));
+		self.ctx.set_fill_style_canvas_gradient(&stripe_g);
+		rounded_rect_top_path(&self.ctx, pos.x, pos.y, pos.w, ACCENT_STRIPE_H, CARD_RADIUS);
+		self.ctx.fill();
+
+		// Outer border — much thinner now that the stripe carries the
+		// kind identity. Keeps the card outline crisp without the
+		// "colour-coded box" VSCode-list feel.
+		self.ctx.set_stroke_style_str(&format!("{border_color}66")); // ~40% alpha kind tint
+		self.ctx.set_line_width(if is_center { 1.5 } else { 1.0 });
 		rounded_rect_path(&self.ctx, pos.x, pos.y, pos.w, pos.h, CARD_RADIUS);
+		self.ctx.stroke();
+		// Inner highlight — 1px stroke inset by 1px, cranked to 12%
+		// white so the "glass top edge" reads even on dark gradients.
+		self.ctx.set_stroke_style_str("rgba(255, 255, 255, 0.12)");
+		self.ctx.set_line_width(1.0);
+		rounded_rect_path(&self.ctx, pos.x + 1.0, pos.y + 1.0, pos.w - 2.0, pos.h - 2.0, CARD_RADIUS - 1.0);
 		self.ctx.stroke();
 
 		// Text content. Centre gets 3 lines (name / kind / footer);
@@ -982,29 +1121,31 @@ impl FocusGraphCanvas {
 		if is_center {
 			self.ctx.set_fill_style_str("#ffffff");
 			self.ctx.set_font("600 14px ui-monospace, SFMono-Regular, monospace");
-			let _ = self.ctx.fill_text(&node.name, pad_x, pos.y + 10.0);
+			let _ = self.ctx.fill_text(&node.name, pad_x, pos.y + 14.0);
 			self.ctx.set_fill_style_str("#9d9d9d");
 			self.ctx.set_font("11px ui-monospace, SFMono-Regular, monospace");
 			let kind_label = node.kind.clone().unwrap_or_else(|| "symbol".to_string());
-			let _ = self.ctx.fill_text(&kind_label, pad_x, pos.y + 30.0);
+			let _ = self.ctx.fill_text(&kind_label, pad_x, pos.y + 33.0);
 			let footer = format_center_footer(node.field_count, node.method_count);
 			if !footer.is_empty() {
 				self.ctx.set_fill_style_str("#cccccc");
 				self.ctx.set_font("11px ui-monospace, SFMono-Regular, monospace");
-				let _ = self.ctx.fill_text(&footer, pad_x, pos.y + 50.0);
+				let _ = self.ctx.fill_text(&footer, pad_x, pos.y + 52.0);
 			}
 		} else {
 			// Three-line neighbour card: name (bold), kind (muted), file:line
 			// (small muted) — matches the manifesto's "mini semantic record"
-			// per node so the graph reads without hover.
+			// per node so the graph reads without hover. Top offset bumped
+			// past `ACCENT_STRIPE_H` so text never collides with the kind
+			// stripe at the top of the card.
 			self.ctx.set_fill_style_str("#e3e3e3");
 			self.ctx.set_font("12px ui-monospace, SFMono-Regular, monospace");
-			let _ = self.ctx.fill_text(&node.name, pad_x, pos.y + 4.0);
+			let _ = self.ctx.fill_text(&node.name, pad_x, pos.y + 8.0);
 			self.ctx.set_fill_style_str("#8a8d96");
 			self.ctx.set_font("10px ui-monospace, SFMono-Regular, monospace");
 			let kind_label = node.kind.clone().unwrap_or_default();
 			if !kind_label.is_empty() {
-				let _ = self.ctx.fill_text(&kind_label, pad_x, pos.y + 17.0);
+				let _ = self.ctx.fill_text(&kind_label, pad_x, pos.y + 21.0);
 			}
 			// 3rd line: file basename + line number, only when both are
 			// present and the card has room. Truncate the file basename
@@ -1020,7 +1161,7 @@ impl FocusGraphCanvas {
 				};
 				self.ctx.set_fill_style_str("#6e7079");
 				self.ctx.set_font("9px ui-monospace, SFMono-Regular, monospace");
-				let _ = self.ctx.fill_text(&format!("{trimmed}:{line}"), pad_x, pos.y + 28.0);
+				let _ = self.ctx.fill_text(&format!("{trimmed}:{line}"), pad_x, pos.y + 32.0);
 			}
 		}
 	}
@@ -1035,6 +1176,48 @@ impl FocusGraphCanvas {
 			self.width * 0.5,
 			self.height * 0.5,
 		);
+	}
+
+	/// Hit-test the "+N more" overflow badges. Returns the bucket whose
+	/// badge was clicked plus the hidden count at click time. World-
+	/// space inversion matches `hit_test` so the badge stays clickable
+	/// under any camera zoom/pan. Badge dimensions mirror the literals
+	/// used by `draw()` (badge_w = 96, height = `MORE_BADGE_H`).
+	fn hit_overflow_badge(&self, screen_x: f64, screen_y: f64) -> Option<(Bucket, usize)> {
+		let world_x = (screen_x - self.cam_offset_x) / self.cam_zoom;
+		let world_y = (screen_y - self.cam_offset_y) / self.cam_zoom;
+		let badge_w = 96.0;
+		for (bucket, x, y, count) in &self.overflow_badges {
+			let badge_left = x - badge_w * 0.5;
+			let inside = world_x >= badge_left
+				&& world_x <= badge_left + badge_w
+				&& world_y >= *y
+				&& world_y <= *y + MORE_BADGE_H;
+			if inside {
+				return Some((*bucket, *count));
+			}
+		}
+		None
+	}
+
+	/// Raise the per-bucket cap for `bucket` toward `BUCKET_CAP_MAX`,
+	/// doubling each call so the user reaches the ceiling in two clicks
+	/// from the default. No-ops once the cap is already at the ceiling.
+	/// Triggers a relayout + redraw so the freshly-expanded bucket is
+	/// visible immediately. Returns the new cap.
+	fn expand_bucket(&mut self, bucket: Bucket) -> usize {
+		let prev = self
+			.bucket_cap_overrides
+			.get(&bucket)
+			.copied()
+			.unwrap_or(BUCKET_TOP_N);
+		let next = (prev * 2).min(BUCKET_CAP_MAX);
+		if next > prev {
+			self.bucket_cap_overrides.insert(bucket, next);
+			self.layout();
+			self.needs_redraw = true;
+		}
+		next
 	}
 
 	fn hit_test(&self, screen_x: f64, screen_y: f64) -> Option<String> {
@@ -1071,6 +1254,23 @@ fn rounded_rect_path(ctx: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: 
 	let _ = ctx.arc_to(x + w, y + h, x + w - r, y + h, r);
 	ctx.line_to(x + r, y + h);
 	let _ = ctx.arc_to(x, y + h, x, y + h - r, r);
+	ctx.line_to(x, y + r);
+	let _ = ctx.arc_to(x, y, x + r, y, r);
+	ctx.close_path();
+}
+
+/// Path that traces the TOP edge of a rounded rect — rounded top
+/// corners, flat bottom edge. Used for the kind accent stripe that
+/// rides the top of each card without poking past the card's rounded
+/// silhouette.
+fn rounded_rect_top_path(ctx: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f64, r: f64) {
+	let r = r.min(w * 0.5).min(h);
+	ctx.begin_path();
+	ctx.move_to(x + r, y);
+	ctx.line_to(x + w - r, y);
+	let _ = ctx.arc_to(x + w, y, x + w, y + r, r);
+	ctx.line_to(x + w, y + h);
+	ctx.line_to(x, y + h);
 	ctx.line_to(x, y + r);
 	let _ = ctx.arc_to(x, y, x + r, y, r);
 	ctx.close_path();
