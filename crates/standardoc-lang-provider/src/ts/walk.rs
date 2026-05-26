@@ -133,6 +133,31 @@ impl<'a> TsWalkContext<'a> {
         if let Some(import) = self.import_aliases.get(name) {
             return ResolutionOutcome::Emit(CallTarget::plain(import.target.clone()));
         }
+        // Bug C: dotted name whose head is a namespace/default/named import
+        // alias (e.g. `vscode.Disposable` after `import * as vscode from
+        // 'vscode'`). Route through the alias's target and replace remaining
+        // `.` with `::` so the resolver sees `vscode::Disposable` instead of
+        // the bogus module-local fallback `<current_module>::vscode.Disposable`.
+        if let Some((head, rest)) = name.split_once('.') {
+            if let Some(import) = self.import_aliases.get(head) {
+                let suffix = rest.replace('.', "::");
+                let combined = match &import.target {
+                    ResolvedOrUnresolved::Resolved { fqdn } => ResolvedOrUnresolved::Resolved {
+                        fqdn: format!("{fqdn}::{suffix}"),
+                    },
+                    ResolvedOrUnresolved::Unresolved { name } => ResolvedOrUnresolved::Unresolved {
+                        name: format!("{name}::{suffix}"),
+                    },
+                    ResolvedOrUnresolved::UnresolvedBridge { bridge, name } => {
+                        ResolvedOrUnresolved::UnresolvedBridge {
+                            bridge: bridge.clone(),
+                            name: format!("{name}::{suffix}"),
+                        }
+                    }
+                };
+                return ResolutionOutcome::Emit(CallTarget::plain(combined));
+            }
+        }
         let local = format!("{current_module_fqdn}::{name}");
         if self.core.defined_fqdns.contains(&local) {
             return ResolutionOutcome::Emit(CallTarget::plain(ResolvedOrUnresolved::Resolved {
@@ -2034,6 +2059,26 @@ mod tests {
     }
 
     #[test]
+    fn class_implements_namespace_qualified_routes_through_alias() {
+        // Bug C: `class Foo implements vscode.Disposable` after
+        // `import * as vscode from 'vscode'` must produce an IMPLEMENTS edge
+        // targeting `vscode::Disposable`, not the bogus module-local
+        // fallback `src::vscode.Disposable`.
+        let (_, edges, _, _) = run(
+            "import * as vscode from 'vscode';\nclass Foo implements vscode.Disposable {}",
+        );
+        let imp: Vec<_> = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Implements)
+            .collect();
+        assert_eq!(imp.len(), 1);
+        match &imp[0].to {
+            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "vscode::Disposable"),
+            other => panic!("expected unresolved namespace-qualified, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn class_method_accessibility_maps_to_visibility() {
         let (symbols, _, _, _) =
             run("class Foo { public a() {} private b() {} protected c() {} d() {} }");
@@ -2204,6 +2249,52 @@ mod tests {
                 assert_eq!(name, "@app::src::foo::Foo");
             }
             other => panic!("expected unresolved canonical via alias, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_call_dotted_name_routes_through_alias_prefix() {
+        // Bug C narrow: `vscode.Disposable` where `vscode` is a namespace
+        // import alias resolves to `<aliased_target>::Disposable`, not the
+        // bogus module-local fallback.
+        let (cm, _module, comments) = parse_ts("");
+        let mut ctx = TsWalkContext::new(
+            "src/index.ts".into(),
+            "@app".into(),
+            "src".into(),
+            cm,
+            PathBuf::new(),
+            PathBuf::new(),
+            None,
+            &comments,
+        );
+        ctx.add_import_alias(
+            "vscode".into(),
+            ResolvedImport {
+                target: ResolvedOrUnresolved::Unresolved {
+                    name: "vscode".into(),
+                },
+            },
+        );
+        // Single-dot suffix
+        let t1 = expect_emit(ctx.resolve_call("vscode.Disposable", "src"));
+        match t1.to {
+            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "vscode::Disposable"),
+            other => panic!("expected unresolved vscode::Disposable, got {other:?}"),
+        }
+        // Multi-segment suffix: dots are replaced with `::`
+        let t2 = expect_emit(ctx.resolve_call("vscode.commands.executeCommand", "src"));
+        match t2.to {
+            ResolvedOrUnresolved::Unresolved { name } => {
+                assert_eq!(name, "vscode::commands::executeCommand");
+            }
+            other => panic!("expected unresolved vscode::commands::executeCommand, got {other:?}"),
+        }
+        // Head not an alias → unchanged module-local fallback
+        let t3 = expect_emit(ctx.resolve_call("local.foo", "src"));
+        match t3.to {
+            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "src::local.foo"),
+            other => panic!("expected module-local fallback, got {other:?}"),
         }
     }
 
