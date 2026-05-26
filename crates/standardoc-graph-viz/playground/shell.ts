@@ -47,6 +47,8 @@ import type {
   OverviewElement,
   OverviewErrorDetail,
   PanelHostElement,
+  PanelLayoutElement,
+  PanelSlot,
   SearchElement,
   SymbolDetail,
   SymbolDetailsActionDetail,
@@ -65,6 +67,33 @@ const overviewEl = document.getElementById('overview') as OverviewElement;
 const focusEl = document.getElementById('focus') as FocusGraphElement;
 const panelsEl = document.getElementById('panels') as PanelHostElement;
 const statusEl = document.getElementById('status') as HTMLSpanElement;
+const shellEl = document.getElementById('shell') as PanelLayoutElement;
+
+// Wire toolbar panel toggle buttons → `panelLayout.togglePanel(slot)`.
+// The element handles the actual show/hide + persistence; the host
+// only needs to keep the button `aria-pressed` state in sync with the
+// real state (covers both user-driven toggles and persisted state
+// restored from a previous session).
+const toggleBtns = document.querySelectorAll<HTMLButtonElement>('button[data-toggle-panel]');
+const syncToggleBtns = (): void => {
+  const vis = shellEl.state.visibility;
+  toggleBtns.forEach(btn => {
+    const slot = btn.dataset['togglePanel'] as PanelSlot | undefined;
+    if (slot === undefined) return;
+    btn.setAttribute('aria-pressed', vis[slot] ? 'true' : 'false');
+  });
+};
+toggleBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    const slot = btn.dataset['togglePanel'] as PanelSlot | undefined;
+    if (slot === undefined) return;
+    shellEl.togglePanel(slot);
+  });
+});
+shellEl.addEventListener('sd-panel-layout-change', () => { syncToggleBtns(); });
+// Initial sync — the element may have restored a persisted layout
+// on `connectedCallback` before we wired the listener.
+syncToggleBtns();
 
 function setStatus(text: string): void {
   if (statusEl) statusEl.textContent = text;
@@ -146,6 +175,40 @@ async function boot(): Promise<void> {
   focusEl.addEventListener('sd-focus-graph-node-click', e => {
     const { fqdn } = (e as CustomEvent<FocusGraphNodeClickDetail>).detail;
     focusStore.setFocus(fqdn);
+  });
+
+  // Focus breadcrumb back button → real history navigation. We can't
+  // use `focusStore.recent` for this because that ring is sorted MRU
+  // and re-promotes whatever we navigate to; clicking back twice with
+  // it just toggles between the last two focals. Instead we maintain
+  // a dedicated linear back-stack synced via `focusStore.subscribe`:
+  // every forward focus change pushes the OUTGOING focal onto the
+  // stack; every back action pops it. An `isBackNav` flag keeps the
+  // subscribe handler from double-counting our own pop.
+  const focusBackStack: string[] = [];
+  let isBackNav = false;
+  let lastFocus: string | null = focusStore.get().current;
+  focusStore.subscribe(state => {
+    if (isBackNav) {
+      isBackNav = false;
+    } else if (lastFocus !== null && state.current !== lastFocus) {
+      focusBackStack.push(lastFocus);
+    }
+    lastFocus = state.current;
+  });
+  focusEl.addEventListener('sd-focus-graph-back', () => {
+    if (focusBackStack.length > 0) {
+      const prev = focusBackStack.pop()!;
+      isBackNav = true;
+      focusStore.setFocus(prev);
+      return;
+    }
+    // No deeper history — un-focus so the user lands on the empty
+    // state instead of a dead button.
+    if (focusStore.get().current !== null) {
+      isBackNav = true;
+      focusStore.setFocus(null);
+    }
   });
 
   // Project list — we keep the full project records around because

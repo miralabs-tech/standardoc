@@ -144,6 +144,32 @@
         flex: 0 1 380px;
         max-width: 380px;
       }
+      .sd-shell-toggle {
+        appearance: none;
+        background: transparent;
+        border: 1px solid var(--sd-border-subtle, #2d2d2d);
+        border-radius: var(--sd-radius-sm, 3px);
+        color: var(--sd-fg-muted, #9d9d9d);
+        cursor: pointer;
+        font: inherit;
+        font-size: 10px;
+        padding: 3px 7px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .sd-shell-toggle:hover {
+        background: var(--sd-hover, #2a2d2e);
+        color: var(--sd-fg, #cccccc);
+      }
+      .sd-shell-toggle[aria-pressed='true'] {
+        background: var(--sd-selection, #094771);
+        color: var(--sd-fg-strong, #ffffff);
+        border-color: var(--sd-accent, #3794ff);
+      }
+      .sd-shell-toggles {
+        display: flex;
+        gap: 4px;
+      }
       .sd-shell-panel-placeholder {
         display: flex;
         align-items: center;
@@ -176,6 +202,12 @@
         <span class="sd-shell-toolbar__brand">standardoc</span>
         <standardoc-search id="search" global-shortcut placeholder="Search symbols, files, types…"></standardoc-search>
         <span class="sd-shell-toolbar__spacer"></span>
+        <div class="sd-shell-toggles" role="toolbar" aria-label="Panel visibility">
+          <button type="button" class="sd-shell-toggle" data-toggle-panel="explorer" aria-pressed="true" title="Toggle Explorer">Explorer</button>
+          <button type="button" class="sd-shell-toggle" data-toggle-panel="overview" aria-pressed="true" title="Toggle Overview">Overview</button>
+          <button type="button" class="sd-shell-toggle" data-toggle-panel="focus" aria-pressed="true" title="Toggle Focus">Focus</button>
+          <button type="button" class="sd-shell-toggle" data-toggle-panel="details" aria-pressed="true" title="Toggle Details">Details</button>
+        </div>
         <span id="status" style="font-size: 11px; color: #9d9d9d;">booting…</span>
       </div>
       <standardoc-explorer id="explorer" data-slot="explorer"></standardoc-explorer>
