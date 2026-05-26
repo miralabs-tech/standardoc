@@ -332,6 +332,29 @@ async function boot(): Promise<void> {
   pushRecentsToSearch();
   focusStore.subscribe(() => pushRecentsToSearch());
 
+  // Auto-scope the Overview to the module containing the focused
+  // symbol. Without this, navigating via Explorer / Focus Graph /
+  // Search left the 3D view stuck on the previous scope — the user
+  // had to drill manually to see where the new focal sits. Skips when
+  // the focal is already inside the current scope (drill stays put),
+  // and ignores transitions where we already drilled to that exact
+  // module (no-op re-render).
+  focusStore.subscribe(state => {
+    const fqdn = state.current;
+    if (fqdn === null) return;
+    const sym = symbolByFqdn.get(fqdn);
+    if (sym === undefined || sym.module === null || sym.module.length === 0) return;
+    const targetModule = sym.module;
+    const current = currentOverviewScope;
+    if (current.kind === 'module' && current.prefix === targetModule) return;
+    // If the focused symbol's module is already under the active drill
+    // scope (workspace, project, folder, or a shallower module), don't
+    // re-scope — the user can drill deeper themselves.
+    if (current.kind === 'module' && targetModule.startsWith(`${current.prefix}::`)) return;
+    const label = targetModule.split('::').pop() ?? targetModule;
+    applyOverviewScope({ kind: 'module', prefix: targetModule, label });
+  });
+
   // IDE-style workspace tree built from the full paginated symbol
   // set so every indexed file shows even when the workspace has more
   // than 5000 symbols (the fetch_graph cap). The fileById index lets
