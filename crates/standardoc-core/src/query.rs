@@ -716,6 +716,64 @@ pub fn context_for_symbol_with_neighbors(
     }))
 }
 
+/// Coarse, fqdn + file-path heuristic for detecting test symbols.
+/// Used by MCP tools that take an `exclude_tests` opt-in so callers
+/// (LLMs, viz) can scope their queries to the production graph and
+/// keep the response focused. Catches:
+///
+///   * Rust: `::tests::` / `::test::` modules, `_test` / `_tests`
+///     trailing segments, files under `tests/` / `test/` directories,
+///     `*_test.rs` / `*_tests.rs` siblings
+///   * TS / JS: `.test.ts` / `.spec.ts` (+ `.tsx`, `.js`, `.jsx`)
+///     suffixes, files under `__tests__/`
+///
+/// False positives accepted: a real symbol named `find_test` or living
+/// under a directory called `tests` (the legacy Rust integration-test
+/// idiom) is treated as test code. That matches the user's mental
+/// model — "show me production".
+pub fn symbol_looks_like_test(symbol: &RawSymbol) -> bool {
+    fqdn_looks_like_test(&symbol.fqdn) || file_path_looks_like_test(&symbol.location.file)
+}
+
+/// Same heuristic as [`symbol_looks_like_test`] but takes only the
+/// FQDN. Use when the caller has no `RawSymbol` (e.g. *_fqdns MCP
+/// tools that return `{fqdn, kind}` pairs). Misses file-path-based
+/// signals (`*.spec.ts`, `__tests__/`); pair with `symbol_looks_like_test`
+/// when the full symbol is available.
+pub fn fqdn_looks_like_test_only(fqdn: &str) -> bool {
+    fqdn_looks_like_test(fqdn)
+}
+
+fn fqdn_looks_like_test(fqdn: &str) -> bool {
+    fqdn.contains("::tests::")
+        || fqdn.contains("::test::")
+        || fqdn.ends_with("::tests")
+        || fqdn.ends_with("::test")
+        || fqdn.ends_with("_test")
+        || fqdn.ends_with("_tests")
+        || fqdn.ends_with(".test")
+        || fqdn.ends_with(".spec")
+}
+
+fn file_path_looks_like_test(file: &str) -> bool {
+    // Normalise separators so the heuristic works on Windows-style
+    // paths (`\`) the same as POSIX (`/`).
+    let norm = file.replace('\\', "/");
+    norm.contains("/tests/")
+        || norm.contains("/test/")
+        || norm.contains("/__tests__/")
+        || norm.ends_with("_test.rs")
+        || norm.ends_with("_tests.rs")
+        || norm.ends_with(".test.ts")
+        || norm.ends_with(".test.tsx")
+        || norm.ends_with(".test.js")
+        || norm.ends_with(".test.jsx")
+        || norm.ends_with(".spec.ts")
+        || norm.ends_with(".spec.tsx")
+        || norm.ends_with(".spec.js")
+        || norm.ends_with(".spec.jsx")
+}
+
 /// Coarse, fqdn-based detection of test sites for the blast-radius view.
 /// Captures Rust's `mod tests { ... }` / `#[cfg(test)]` convention, TS's
 /// `*.test.ts` / `*.spec.ts` patterns when surfaced as a `::test` /
@@ -890,6 +948,12 @@ pub struct BodyOptions {
     /// Lines fully consumed by a stripped comment become blank rather
     /// than disappearing, so line-number correspondence is preserved.
     pub strip_inline_comments: bool,
+    /// Collapse runs of consecutive blank lines (lines containing only
+    /// whitespace) down to a single blank line. Off by default so
+    /// `get_body` preserves line-number alignment with the source;
+    /// `get_code` flips it on so the cleaned output doesn't carry
+    /// vestigial blanks where inline-comment-only lines used to sit.
+    pub collapse_blank_lines: bool,
 }
 
 /// Returns the raw source text of the symbol at `fqdn`, sliced from the file
@@ -955,10 +1019,15 @@ pub fn body_for_fqdn(
         _ => (after_signature, false),
     };
     let compact = compact_body_indent(taken);
-    let final_body = if opts.strip_inline_comments {
+    let stripped = if opts.strip_inline_comments {
         strip_inline_comments_in_body(&compact.body)
     } else {
         compact.body
+    };
+    let final_body = if opts.collapse_blank_lines {
+        collapse_blank_lines_in_body(&stripped)
+    } else {
+        stripped
     };
     Ok(Some(BodySlice {
         fqdn: symbol.fqdn.clone(),
@@ -990,6 +1059,31 @@ pub fn body_for_fqdn(
 /// state transitions — every non-token byte is included via
 /// `out.push_str(&body[copy_from..i])` slice copies, so multi-byte
 /// UTF8 sequences stay intact.
+/// Collapse runs of 2+ consecutive blank lines (whitespace-only) down
+/// to a single blank line. Used by [`BodyOptions::collapse_blank_lines`]
+/// to clean up the vestigial gaps left by `strip_inline_comments_in_body`
+/// when an inline-comment-only line is stripped (the stripper preserves
+/// the newline for line-number alignment; `get_code` doesn't care about
+/// alignment so it asks for the collapse).
+fn collapse_blank_lines_in_body(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut prev_blank = false;
+    let mut first = true;
+    for line in body.split('\n') {
+        let is_blank = line.chars().all(char::is_whitespace);
+        if is_blank && prev_blank {
+            continue;
+        }
+        if !first {
+            out.push('\n');
+        }
+        out.push_str(line);
+        prev_blank = is_blank;
+        first = false;
+    }
+    out
+}
+
 fn strip_inline_comments_in_body(body: &str) -> String {
     enum St {
         Code,

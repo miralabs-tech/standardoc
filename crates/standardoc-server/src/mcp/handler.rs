@@ -153,9 +153,19 @@ impl StandardocMcp {
         let raw_fqdn = params.fqdn.clone();
         let cache_key = normalize_fqdn(&raw_fqdn);
 
-        let depth = params.depth.unwrap_or(GET_CONTEXT_DEFAULT_DEPTH);
+        let explicit_depth = params.depth;
+        let depth = explicit_depth.unwrap_or(GET_CONTEXT_DEFAULT_DEPTH);
         let now = current_unix_seconds();
-        let routing_hint = self.compute_routing_hint(&cache_key, depth, now);
+        // Only fire the map-first / drill-second nudge when the caller
+        // EXPLICITLY asked for depth=2. With depth=2 now the default,
+        // an unspecified `depth` field means "give me the standard
+        // shape" — that's not a protocol breach worth warning about
+        // and was polluting every viz / human get_context response.
+        let routing_hint = if explicit_depth.is_some() {
+            self.compute_routing_hint(&cache_key, depth, now)
+        } else {
+            None
+        };
         if depth <= 1 {
             self.record_recent_depth1(&cache_key, now);
         }
@@ -361,6 +371,15 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
+        let result: Vec<RawSymbol> = if params.exclude_tests.unwrap_or(false) {
+            result
+                .into_iter()
+                .filter(|s| !query::symbol_looks_like_test(s))
+                .collect()
+        } else {
+            result
+        };
+
         if result.is_empty() {
             let suggestions = compute_did_you_mean(self.handle.clone(), trimmed, filter).await?;
             if !suggestions.is_empty() {
@@ -418,6 +437,15 @@ impl StandardocMcp {
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
+
+        let result: Vec<RawSymbol> = if params.exclude_tests.unwrap_or(false) {
+            result
+                .into_iter()
+                .filter(|s| !query::symbol_looks_like_test(s))
+                .collect()
+        } else {
+            result
+        };
 
         if result.is_empty() {
             let suggestions = compute_did_you_mean(self.handle.clone(), trimmed, filter).await?;
@@ -481,8 +509,16 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
+        let items: Vec<_> = if params.exclude_tests.unwrap_or(false) {
+            page.items
+                .into_iter()
+                .filter(|s| !query::symbol_looks_like_test(s))
+                .collect()
+        } else {
+            page.items
+        };
         let envelope = serde_json::json!({
-            "items": page.items,
+            "items": items,
             "next_cursor": page.next_cursor,
         });
         Ok(success_json(&envelope))
@@ -522,9 +558,16 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
+        let items: Vec<_> = if params.exclude_tests.unwrap_or(false) {
+            page.items
+                .into_iter()
+                .filter(|s| !query::symbol_looks_like_test(s))
+                .collect()
+        } else {
+            page.items
+        };
         let relative_to = params.relative_to.unwrap_or_default();
-        let projected: Vec<_> = page
-            .items
+        let projected: Vec<_> = items
             .into_iter()
             .map(|s| {
                 serde_json::json!({
@@ -589,6 +632,15 @@ impl StandardocMcp {
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
+
+        let result: Vec<RawSymbol> = if params.exclude_tests.unwrap_or(false) {
+            result
+                .into_iter()
+                .filter(|s| !query::symbol_looks_like_test(s))
+                .collect()
+        } else {
+            result
+        };
 
         if result.is_empty() {
             let core = glob_core_text(&trimmed);
@@ -695,6 +747,7 @@ impl StandardocMcp {
             strip_attrs: params.strip_attrs.unwrap_or(false),
             signature_only: params.signature_only.unwrap_or(false),
             strip_inline_comments: params.strip_inline_comments.unwrap_or(false),
+            collapse_blank_lines: false,
         };
         let raw_for_call = raw_fqdn.clone();
         let opts_clone = opts.clone();
@@ -748,6 +801,11 @@ impl StandardocMcp {
             strip_attrs: params.strip_attrs.unwrap_or(true),
             signature_only: params.signature_only.unwrap_or(false),
             strip_inline_comments: params.strip_inline_comments.unwrap_or(true),
+            // `get_code` is the agent-facing "pure code" view, so it
+            // also collapses the vestigial blank lines that
+            // `strip_inline_comments` leaves behind. `get_body` keeps
+            // line-number alignment intact by leaving them in place.
+            collapse_blank_lines: true,
         };
         let raw_for_call = raw_fqdn.clone();
         let opts_clone = opts.clone();
@@ -1433,6 +1491,13 @@ pub(crate) struct FindSymbolParams {
     /// `false` to scope a query to workspace-only symbols.
     #[serde(default)]
     pub include_external: Option<bool>,
+    /// Optional — exclude symbols that look like tests (Rust
+    /// `#[cfg(test)] mod tests`, files under `tests/` or matching
+    /// `*_test.rs`, TS `*.test.ts` / `*.spec.ts`, files under
+    /// `__tests__/`). Defaults to `false` — pass `true` to scope a
+    /// query to production code when test noise drowns the signal.
+    #[serde(default)]
+    pub exclude_tests: Option<bool>,
     /// Optional — scope the query to a single workspace by its UUID
     /// (as returned by `link_workspace`). Defaults to the primary
     /// workspace ("MY symbols"). Pass a peer's workspace_id to query
@@ -1461,6 +1526,10 @@ pub(crate) struct FindSymbolFqdnsParams {
     /// Optional — include `is_external = 1` symbols. Defaults to `true`.
     #[serde(default)]
     pub include_external: Option<bool>,
+    /// Optional — exclude test-looking symbols (same heuristic as
+    /// `find_symbol`). Defaults to `false`.
+    #[serde(default)]
+    pub exclude_tests: Option<bool>,
     /// Optional — scope to a peer workspace by UUID.
     #[serde(default)]
     pub workspace_id: Option<String>,
@@ -1494,6 +1563,11 @@ pub(crate) struct ListSymbolsParams {
     /// `false` to scope a query to workspace-only symbols.
     #[serde(default)]
     pub include_external: Option<bool>,
+    /// Optional — exclude test-looking symbols (`::tests::` modules,
+    /// `*_test.rs`, `*.test.ts`, `*.spec.ts`, `__tests__/` dirs).
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub exclude_tests: Option<bool>,
     /// Optional pagination anchor — pass the `next_cursor` value from
     /// the previous page to continue the walk. Server-side this is a
     /// strict `fqdn > cursor` filter; ordering is always by `fqdn`.
@@ -1523,6 +1597,9 @@ pub(crate) struct ListSymbolFqdnsParams {
     /// Optional — include `is_external = 1` symbols. Defaults to `true`.
     #[serde(default)]
     pub include_external: Option<bool>,
+    /// Optional — exclude test-looking symbols. Defaults to `false`.
+    #[serde(default)]
+    pub exclude_tests: Option<bool>,
     /// Optional pagination anchor — pass the `next_cursor` value from
     /// the previous page to continue the walk.
     #[serde(default)]
@@ -1559,6 +1636,9 @@ pub(crate) struct FindSymbolsByPatternParams {
     /// `false` to scope a query to workspace-only symbols.
     #[serde(default)]
     pub include_external: Option<bool>,
+    /// Optional — exclude test-looking symbols. Defaults to `false`.
+    #[serde(default)]
+    pub exclude_tests: Option<bool>,
     /// Optional — scope the query to a single workspace by its UUID.
     /// Defaults to the primary workspace.
     #[serde(default)]
@@ -2358,6 +2438,7 @@ mod tests {
                 visibility: None,
                 module: None,
                 include_external: None,
+                exclude_tests: None,
                 workspace_id: None,
             }))
             .await
@@ -2379,6 +2460,7 @@ mod tests {
                 module: None,
                 limit: None,
                 include_external: None,
+                exclude_tests: None,
                 cursor: None,
                 workspace_id: None,
             }))
@@ -2401,6 +2483,7 @@ mod tests {
                 module: None,
                 limit: None,
                 include_external: Some(false),
+                exclude_tests: None,
                 cursor: None,
                 workspace_id: None,
             }))
@@ -2438,6 +2521,7 @@ mod tests {
                 module: None,
                 limit: Some(2),
                 include_external: Some(false),
+                exclude_tests: None,
                 cursor: Some("crate::anchor".into()),
                 workspace_id: None,
             }))
@@ -2459,6 +2543,7 @@ mod tests {
                 module: None,
                 limit: None,
                 include_external: None,
+                exclude_tests: None,
                 workspace_id: None,
             }))
             .await
@@ -2568,6 +2653,7 @@ mod tests {
                 visibility: None,
                 module: None,
                 include_external: None,
+                exclude_tests: None,
                 workspace_id: None,
             }))
             .await
@@ -2591,6 +2677,7 @@ mod tests {
                 module: None,
                 limit: None,
                 include_external: None,
+                exclude_tests: None,
                 workspace_id: None,
             }))
             .await
@@ -2796,6 +2883,7 @@ mod tests {
                 visibility: None,
                 module: None,
                 include_external: None,
+                exclude_tests: None,
                 workspace_id: None,
             }))
             .await;
@@ -3066,6 +3154,7 @@ mod tests {
                 visibility: None,
                 module: None,
                 include_external: None,
+                exclude_tests: None,
                 workspace_id: None,
             }))
             .await
@@ -3084,6 +3173,7 @@ mod tests {
                 visibility: None,
                 module: None,
                 include_external: None,
+                exclude_tests: None,
                 workspace_id: Some("nonexistent-peer-uuid".into()),
             }))
             .await
