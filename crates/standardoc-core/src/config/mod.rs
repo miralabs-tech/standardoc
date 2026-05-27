@@ -9,6 +9,6 @@
 pub mod sxd;
 
 pub use sxd::{
-    GroupBlock, IgnoreBlock, ProjectsBlock, SXD_CONFIG_FILENAME, SxdConfig, SxdConfigError,
+    GroupBlock, IgnoreBlock, ProjectBlock, SXD_CONFIG_FILENAME, SxdConfig, SxdConfigError,
     load_workspace_config, parse_sxd_source,
 };

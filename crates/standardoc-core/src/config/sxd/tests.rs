@@ -11,18 +11,19 @@ target/
 ```
 }
 
-projects {
-  exclude ["crates-standardoc-graph-viz-pkg"]
-}
-
-group "standardoc" {
+project "standardoc" {
   label "Standardoc"
-  members ["standardoc-core" "standardoc-ir"]
+  paths ["crates" "ext/vscode"]
 }
 
-group "lurlang" {
+project "lur-workspace" {
   label "Lurlang"
-  members ["lur-syntax" "lur-sema"]
+  path ".projects/lur-workspace"
+}
+
+group "platform" {
+  label "Platform"
+  members ["standardoc" "lur-workspace"]
 }
 "#;
 
@@ -31,8 +32,8 @@ fn parses_full_sample() {
     let cfg = parse_sxd_source(FULL_SAMPLE).expect("parse full sample");
     assert_eq!(cfg.version.as_deref(), Some("0.1.0"));
     assert!(cfg.ignore.is_some());
-    assert!(cfg.projects.is_some());
-    assert_eq!(cfg.groups.len(), 2);
+    assert_eq!(cfg.projects.len(), 2);
+    assert_eq!(cfg.groups.len(), 1);
 }
 
 #[test]
@@ -45,22 +46,34 @@ fn ignore_patterns_preserved_verbatim() {
 }
 
 #[test]
-fn projects_exclude_collected() {
+fn project_paths_multi_collected() {
     let cfg = parse_sxd_source(FULL_SAMPLE).unwrap();
-    let p = cfg.projects.unwrap();
-    assert_eq!(
-        p.exclude,
-        vec!["crates-standardoc-graph-viz-pkg".to_string()]
-    );
-    assert!(p.include.is_empty());
+    let std = cfg
+        .projects
+        .iter()
+        .find(|p| p.slug == "standardoc")
+        .unwrap();
+    assert_eq!(std.label.as_deref(), Some("Standardoc"));
+    assert_eq!(std.paths, vec!["crates", "ext/vscode"]);
+}
+
+#[test]
+fn project_path_single_expanded_to_paths() {
+    let cfg = parse_sxd_source(FULL_SAMPLE).unwrap();
+    let lur = cfg
+        .projects
+        .iter()
+        .find(|p| p.slug == "lur-workspace")
+        .unwrap();
+    assert_eq!(lur.paths, vec![".projects/lur-workspace"]);
 }
 
 #[test]
 fn group_slug_label_members_extracted() {
     let cfg = parse_sxd_source(FULL_SAMPLE).unwrap();
-    let g = cfg.groups.iter().find(|g| g.slug == "standardoc").unwrap();
-    assert_eq!(g.label.as_deref(), Some("Standardoc"));
-    assert_eq!(g.members, vec!["standardoc-core", "standardoc-ir"]);
+    let g = cfg.groups.iter().find(|g| g.slug == "platform").unwrap();
+    assert_eq!(g.label.as_deref(), Some("Platform"));
+    assert_eq!(g.members, vec!["standardoc", "lur-workspace"]);
 }
 
 #[test]
@@ -68,7 +81,7 @@ fn empty_sxd_yields_default_config() {
     let cfg = parse_sxd_source("").unwrap();
     assert_eq!(cfg.version, None);
     assert!(cfg.ignore.is_none());
-    assert!(cfg.projects.is_none());
+    assert!(cfg.projects.is_empty());
     assert!(cfg.groups.is_empty());
 }
 
@@ -94,8 +107,29 @@ fn group_without_label_rejected() {
 }
 
 #[test]
-fn projects_with_unknown_field_rejected() {
-    let err = parse_sxd_source("projects { foo [] }").expect_err("must reject");
+fn project_without_slug_rejected() {
+    let err = parse_sxd_source(r#"project { path "foo" }"#).expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(msg.contains("requires a string slug"));
+}
+
+#[test]
+fn project_without_paths_rejected() {
+    let err = parse_sxd_source(r#"project "x" { label "X" }"#).expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(msg.contains("must declare at least one"));
+}
+
+#[test]
+fn project_path_and_paths_conflict_rejected() {
+    let err = parse_sxd_source(r#"project "x" { path "a" paths ["b"] }"#).expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(msg.contains("declares both `path` and `paths`"));
+}
+
+#[test]
+fn project_with_unknown_field_rejected() {
+    let err = parse_sxd_source(r#"project "x" { foo "bar" }"#).expect_err("must reject");
     let msg = format!("{err}");
     assert!(msg.contains("unknown field `foo`"));
 }
@@ -135,4 +169,19 @@ fn load_workspace_config_returns_some_when_present() {
         .expect("load ok")
         .expect("config present");
     assert_eq!(cfg.version.as_deref(), Some("0.1.0"));
+}
+
+#[test]
+fn parses_real_standardoc_workspace_template() {
+    // Regression check : the template authored at the workspace root
+    // (see standardoc.sxd) must parse cleanly with the production schema.
+    let src = include_str!("../../../../../standardoc.sxd");
+    let cfg = parse_sxd_source(src).expect("parse real .sxd");
+    assert_eq!(cfg.version.as_deref(), Some("0.1.0"));
+    assert!(cfg.ignore.is_some(), "ignore block present");
+    let slugs: Vec<&str> = cfg.projects.iter().map(|p| p.slug.as_str()).collect();
+    assert!(slugs.contains(&"standardoc"));
+    assert!(slugs.contains(&"lur-workspace"));
+    assert!(slugs.contains(&"matchigo-lua"));
+    assert!(slugs.contains(&"standarx-dsl"));
 }

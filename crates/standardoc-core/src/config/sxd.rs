@@ -8,7 +8,10 @@
 //! Schema v0.1:
 //!   * `version "<semver>"` — required
 //!   * `ignore { patterns ```...``` }` — optional
-//!   * `projects { include [...] exclude [...] }` — optional
+//!   * `project "<slug>" { label "..." path "..." | paths [...] }`
+//!     — optional, repeatable. When at least one `project` block is
+//!     present, mechanical detection is short-circuited and only the
+//!     declared paths are indexed.
 //!   * `group "<slug>" { label "..." members [...] }` — optional, repeatable
 
 use std::fs;
@@ -39,11 +42,16 @@ impl From<Diag> for SxdConfigError {
 }
 
 /// Typed workspace config — output of [`parse_sxd_source`] / [`load_workspace_config`].
+///
+/// When `projects` is non-empty, the discovery pipeline short-circuits
+/// the mechanical cargo/npm/lua detection and indexes ONLY the listed
+/// paths under each named project. Empty `projects` keeps the legacy
+/// behaviour.
 #[derive(Debug, Clone, Default)]
 pub struct SxdConfig {
     pub version: Option<String>,
     pub ignore: Option<IgnoreBlock>,
-    pub projects: Option<ProjectsBlock>,
+    pub projects: Vec<ProjectBlock>,
     pub groups: Vec<GroupBlock>,
 }
 
@@ -54,14 +62,22 @@ pub struct IgnoreBlock {
     pub patterns: String,
 }
 
-/// `projects { include [...] exclude [...] }` block.
-#[derive(Debug, Clone, Default)]
-pub struct ProjectsBlock {
-    pub include: Vec<String>,
-    pub exclude: Vec<String>,
+/// `project "<slug>" { label "..." path "..." | paths [...] }` block.
+///
+/// Repeatable. `path` (singular) is a shorthand for a single-entry
+/// `paths` array. `paths` is always a workspace-relative directory.
+#[derive(Debug, Clone)]
+pub struct ProjectBlock {
+    pub slug: String,
+    pub label: Option<String>,
+    pub paths: Vec<String>,
 }
 
 /// `group "<slug>" { label "..." members [...] }` block.
+///
+/// Optional layer ABOVE projects — bundles multiple projects under one
+/// label (e.g. one "platform" group with several projects inside).
+/// Members must reference declared project slugs.
 #[derive(Debug, Clone)]
 pub struct GroupBlock {
     pub slug: String,
@@ -115,8 +131,8 @@ fn lower_stmt(stmt: &StmtNode, out: &mut SxdConfig) -> Result<(), SxdConfigError
                     out.ignore = Some(lower_ignore(b)?);
                     Ok(())
                 }
-                "projects" => {
-                    out.projects = Some(lower_projects(b)?);
+                "project" => {
+                    out.projects.push(lower_project(b)?);
                     Ok(())
                 }
                 "group" => {
@@ -125,7 +141,7 @@ fn lower_stmt(stmt: &StmtNode, out: &mut SxdConfig) -> Result<(), SxdConfigError
                 }
                 _ => Err(SxdConfigError::Schema(format!(
                     "unknown top-level block `{kind}` \
-                     (expected `ignore`, `projects`, or `group`)"
+                     (expected `ignore`, `project`, or `group`)"
                 ))),
             }
         }
@@ -151,28 +167,54 @@ fn lower_ignore(b: &Block) -> Result<IgnoreBlock, SxdConfigError> {
     Ok(IgnoreBlock { patterns })
 }
 
-fn lower_projects(b: &Block) -> Result<ProjectsBlock, SxdConfigError> {
-    let mut out = ProjectsBlock::default();
+fn lower_project(b: &Block) -> Result<ProjectBlock, SxdConfigError> {
+    let slug = b.label.as_ref().map(|s| s.node.clone()).ok_or_else(|| {
+        SxdConfigError::Schema(
+            "`project` block requires a string slug, e.g. `project \"standardoc\" { ... }`".into(),
+        )
+    })?;
+    let mut label = None;
+    let mut path_single: Option<String> = None;
+    let mut paths_multi: Option<Vec<String>> = None;
     for stmt in &b.stmts {
         let Stmt::Assign(a) = &stmt.node else {
-            return Err(SxdConfigError::Schema(
-                "`projects` block only accepts `include`/`exclude` assignments, no nested blocks"
-                    .into(),
-            ));
+            return Err(SxdConfigError::Schema(format!(
+                "`project \"{slug}\"` block only accepts assignments (`label`, `path`, `paths`)"
+            )));
         };
         let key = a.key.node.as_str();
         match key {
-            "include" => out.include = expect_string_list(&a.value, "projects.include")?,
-            "exclude" => out.exclude = expect_string_list(&a.value, "projects.exclude")?,
+            "label" => label = Some(expect_string(&a.value, "project.label")?),
+            "path" => path_single = Some(expect_string(&a.value, "project.path")?),
+            "paths" => paths_multi = Some(expect_string_list(&a.value, "project.paths")?),
             other => {
                 return Err(SxdConfigError::Schema(format!(
-                    "unknown field `{other}` inside `projects` \
-                     (expected `include` or `exclude`)"
+                    "unknown field `{other}` inside `project \"{slug}\"` \
+                     (expected `label`, `path`, or `paths`)"
                 )));
             }
         }
     }
-    Ok(out)
+    let paths = match (path_single, paths_multi) {
+        (Some(_), Some(_)) => {
+            return Err(SxdConfigError::Schema(format!(
+                "`project \"{slug}\"` declares both `path` and `paths` — pick one"
+            )));
+        }
+        (Some(p), None) => vec![p],
+        (None, Some(ps)) => ps,
+        (None, None) => {
+            return Err(SxdConfigError::Schema(format!(
+                "`project \"{slug}\"` must declare at least one `path \"...\"` or `paths [...]`"
+            )));
+        }
+    };
+    if paths.is_empty() {
+        return Err(SxdConfigError::Schema(format!(
+            "`project \"{slug}\"` has an empty `paths` array"
+        )));
+    }
+    Ok(ProjectBlock { slug, label, paths })
 }
 
 fn lower_group(b: &Block) -> Result<GroupBlock, SxdConfigError> {

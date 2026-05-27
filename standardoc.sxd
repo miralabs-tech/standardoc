@@ -1,0 +1,41 @@
+# Standardoc workspace config.
+# Replaces the legacy .stdignore + drives explicit project discovery.
+# When at least one `project` block is present, mechanical detection
+# (cargo workspace + npm packages + lua rockspecs) is short-circuited
+# and ONLY these projects are indexed.
+
+version "0.1.0"
+
+# Path patterns excluded from indexing (gitignore syntax).
+ignore {
+  patterns ```
+.git/
+node_modules/
+target/
+dist/
+build/
+.old/
+*-old/
+test-export/
+```
+}
+
+project "standardoc" {
+  label "Standardoc"
+  paths ["crates" "ext/vscode"]
+}
+
+project "lur-workspace" {
+  label "Lurlang"
+  path ".projects/lur-workspace"
+}
+
+project "matchigo-lua" {
+  label "Matchigo (Lua)"
+  path ".projects/matchigo-lua"
+}
+
+project "standarx-dsl" {
+  label "Standarx DSL"
+  path ".projects/standarx-dsl"
+}
