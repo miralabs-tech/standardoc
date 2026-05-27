@@ -149,10 +149,7 @@ pub enum TypeNode {
     /// Record / object: `{ x: number, y: number }`.
     Record { fields: Vec<TypeField> },
     /// Map: `{ [K]: V }`.
-    Map {
-        key: Box<Self>,
-        value: Box<Self>,
-    },
+    Map { key: Box<Self>, value: Box<Self> },
     /// Array: `{T}`.
     Array { inner: Box<Self> },
     /// Function: `fun(P1, P2): R`. `generics` is reserved for inline generic
@@ -214,10 +211,7 @@ pub enum PatternNode {
     Tuple { items: Vec<Self> },
     /// As-binding: `pat @ name`. Inner pattern matches AND the whole
     /// matched value gets bound to `name`.
-    As {
-        name: String,
-        inner: Box<Self>,
-    },
+    As { name: String, inner: Box<Self> },
     /// `_` wildcard. Matches anything, binds nothing.
     Wildcard,
 }

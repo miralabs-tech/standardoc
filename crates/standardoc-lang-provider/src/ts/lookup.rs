@@ -352,12 +352,13 @@ impl LookupBuilder<'_> {
                     ModuleExportName::Ident(i) => i.sym.to_string(),
                     ModuleExportName::Str(s) => s.value.to_string_lossy().into_owned(),
                 };
-                let local_alias = named_spec
-                    .exported
-                    .as_ref().map_or_else(|| local_export_name.clone(), |m| match m {
+                let local_alias = named_spec.exported.as_ref().map_or_else(
+                    || local_export_name.clone(),
+                    |m| match m {
                         ModuleExportName::Ident(i) => i.sym.to_string(),
                         ModuleExportName::Str(s) => s.value.to_string_lossy().into_owned(),
-                    });
+                    },
+                );
                 let is_type_only = decl_type_only || named_spec.is_type_only;
                 self.add_binding(
                     local_alias.clone(),

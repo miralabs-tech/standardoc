@@ -49,6 +49,7 @@ pub(crate) fn apply_resolve_unresolved_quietly(handle: &IndexHandle) {
     }
 }
 
+#[allow(clippy::similar_names)]
 fn apply_resolve_unresolved(handle: &IndexHandle) -> Result<ResolveReport, StorageError> {
     let resolver = DbCrossWorkspaceResolver::new(handle);
     let pool = handle.pool()?;
@@ -108,9 +109,7 @@ fn apply_resolve_unresolved(handle: &IndexHandle) -> Result<ResolveReport, Stora
     // edge; we count it as a duplicate skip and leave the unresolved
     // row in place for a future cleanup pass to delete.
     let tx = conn.unchecked_transaction()?;
-    #[allow(clippy::similar_names)]
     let mut resolved = 0usize;
-    #[allow(clippy::similar_names)]
     let mut duplicate_skipped = 0usize;
     {
         let mut stmt = tx.prepare(

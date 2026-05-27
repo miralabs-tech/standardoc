@@ -221,9 +221,7 @@ fn read_peer_module_lookups(peer: &Connection) -> Result<Vec<ModuleLookupRow>, S
     Ok(rows)
 }
 
-fn read_peer_workspace_imports(
-    peer: &Connection,
-) -> Result<Vec<WorkspaceImportRow>, StorageError> {
+fn read_peer_workspace_imports(peer: &Connection) -> Result<Vec<WorkspaceImportRow>, StorageError> {
     let mut stmt = peer.prepare(
         "SELECT module_fqdn, local_name, origin_module, origin_symbol, \
                 is_type_only, is_re_export \

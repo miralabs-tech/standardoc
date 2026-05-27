@@ -110,3 +110,11 @@ option_if_let_else = "allow"
 default_trait_access = "allow"
 unnecessary_struct_initialization = "allow"
 needless_collect = "allow"
+
+# Doc-list lints frequently misfire on visually-aligned bullet continuations
+# (e.g. `///   - Item one`
+#       `///                  Item two` for readability). We keep the
+# alignment intentional — clippy's "fix" hurts readability more than it
+# helps. Revisit if the lint becomes less flaky upstream.
+doc_overindented_list_items = "allow"
+doc_lazy_continuation = "allow"
