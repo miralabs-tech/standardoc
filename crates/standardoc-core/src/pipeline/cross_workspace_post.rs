@@ -92,7 +92,7 @@ pub(crate) fn rewrite_cross_workspace_edges(
 /// stays as a suffix to append to the resolver's hit FQDN. The first
 /// `Hit` wins ; if every split returns `Unknown` we fall back to the
 /// first `KnownPeerMissingSymbol` (or `None`).
-fn resolve_with_suffix_chain(
+pub(crate) fn resolve_with_suffix_chain(
     resolver: &dyn CrossWorkspaceResolver,
     candidate: &str,
 ) -> Option<CrossWorkspaceLookup> {

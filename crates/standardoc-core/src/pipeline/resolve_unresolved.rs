@@ -21,9 +21,10 @@
 use std::collections::HashMap;
 
 use rusqlite::{Connection, OptionalExtension};
-use standardoc_ir::{CrossWorkspaceLookup, CrossWorkspaceResolver};
+use standardoc_ir::CrossWorkspaceLookup;
 
 use crate::cross_workspace_resolver::DbCrossWorkspaceResolver;
+use crate::pipeline::cross_workspace_post::resolve_with_suffix_chain;
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
 
@@ -74,11 +75,16 @@ fn apply_resolve_unresolved(handle: &IndexHandle) -> Result<ResolveReport, Stora
     let mut still_unresolved = 0usize;
     let mut fqdn_cache: HashMap<String, Option<i64>> = HashMap::new();
     for (edge_id, raw_name) in unresolved {
-        let Some((module, symbol)) = raw_name.rsplit_once("::") else {
+        // Bug E-2: walk split points longest-module-first and append any
+        // remaining tail to the resolver's hit FQDN. Without this, edges
+        // pointing through a re-export (e.g. `lur_common::Span::new`
+        // when `Span` is `pub use`-ed from `lur-common::span`) stay
+        // unresolved because `rsplit_once` asks the resolver about a
+        // non-module prefix.
+        let Some(lookup) = resolve_with_suffix_chain(&resolver, &raw_name) else {
             still_unresolved += 1;
             continue;
         };
-        let lookup = resolver.resolve(module, symbol);
         let CrossWorkspaceLookup::Hit { fqdn, .. } = lookup else {
             still_unresolved += 1;
             continue;
