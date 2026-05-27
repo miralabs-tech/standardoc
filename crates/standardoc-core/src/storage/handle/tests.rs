@@ -1,4 +1,3 @@
-
 use std::time::{Duration, Instant};
 
 use standardoc_ir::{

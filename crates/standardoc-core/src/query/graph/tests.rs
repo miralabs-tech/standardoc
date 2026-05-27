@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::storage::conv::{edge_confidence_to_sql_text, edge_kind_to_sql_text};
 use standardoc_ir::{EdgeConfidence, Kind, LanguageKind, Visibility};

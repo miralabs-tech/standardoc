@@ -1,4 +1,3 @@
-
 use super::*;
 use standardoc_ir::{
     Blake3Hash, EdgeKind, ExtractedFile, Language, ModuleLookup, RawEdge, SourceOrigin,

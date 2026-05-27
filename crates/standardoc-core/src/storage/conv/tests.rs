@@ -1,4 +1,3 @@
-
 use super::*;
 use standardoc_ir::{BridgeKind, Modifiers, Param, Signature, TypeRef};
 

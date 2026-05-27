@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::storage::migrate::ensure_schema;
 use standardoc_ir::{

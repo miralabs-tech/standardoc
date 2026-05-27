@@ -1,4 +1,3 @@
-
 use std::time::{Duration, Instant};
 
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
