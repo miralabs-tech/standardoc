@@ -1,3 +1,5 @@
+#![allow(clippy::case_sensitive_file_extension_comparisons)]
+
 use super::super::walk::walk;
 use standardoc_ir::{EdgeKind, ResolvedOrUnresolved};
 

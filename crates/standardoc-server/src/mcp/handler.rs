@@ -1,6 +1,15 @@
 #![allow(
     clippy::significant_drop_tightening,
-    clippy::significant_drop_in_scrutinee
+    clippy::significant_drop_in_scrutinee,
+    // Wildcard re-exports are intentional — params + helpers are
+    // implementation modules whose public surface is the union of their
+    // exports, kept as a single namespace at the handler level.
+    clippy::wildcard_imports,
+    // Items here are used by handler/tests.rs via `use super::*;` but
+    // clippy doesn't track sub-module usage so it flags them as unused
+    // in handler.rs body. Keep until the tool_router impl is split into
+    // sub-modules (Phase 3.2+) where the imports can be co-located.
+    unused_imports
 )]
 
 use std::collections::HashMap;

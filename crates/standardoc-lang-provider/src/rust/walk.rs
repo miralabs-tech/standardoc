@@ -360,6 +360,7 @@ pub(crate) fn path_to_string(path: &syn::Path) -> String {
     out
 }
 
+#[cfg(test)]
 pub(crate) fn walk(
     parsed: &syn::File,
     module_fqdn: &str,

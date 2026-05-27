@@ -1,3 +1,5 @@
+#![allow(clippy::match_wildcard_for_single_variants)]
+
 use super::*;
 
 fn parse(src: &str) -> syn::File {

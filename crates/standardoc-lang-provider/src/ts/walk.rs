@@ -226,6 +226,7 @@ impl<'a> TsWalkContext<'a> {
         self.cm.span_to_snippet(span).ok()
     }
 
+    #[cfg(test)]
     pub(crate) fn into_outputs(
         self,
     ) -> (
@@ -359,6 +360,7 @@ fn push_heritage_edge(
     });
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn walk(
     module: &Module,

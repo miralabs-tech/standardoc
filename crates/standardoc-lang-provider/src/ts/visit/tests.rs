@@ -1,3 +1,5 @@
+#![allow(clippy::match_wildcard_for_single_variants)]
+
 use super::*;
 use std::path::PathBuf;
 use swc_core::common::comments::SingleThreadedComments;
