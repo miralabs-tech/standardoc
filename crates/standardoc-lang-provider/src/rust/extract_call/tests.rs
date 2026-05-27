@@ -974,16 +974,23 @@ fn method_on_unknown_binding_yields_none() {
 }
 
 #[test]
-fn deep_chain_yields_none() {
+fn deep_chain_propagates_via_builtin_returns() {
+    // Bug E-3 Phase 3: chained calls inherit receiver_type from the
+    // preceding step's registered `returns`. `v.iter()` (Vec) returns
+    // Iterator, `.map(...)` keeps Iterator, `.collect(...)`'s receiver
+    // is therefore Iterator (collect itself has no registered return —
+    // polymorphic — but the edge's receiver_type is still set).
     let parsed =
         parse("fn caller() { let v = Vec::new(); v.iter().map(|x| x).collect::<Vec<_>>(); }");
     let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
     let mc = method_calls(&edges);
-    // Three method calls: v.iter(), .map(...), .collect(...).
-    // Only the first (v.iter) has chain.len()==1 with known binding.
-    let with_rt: Vec<_> = mc.iter().filter(|e| e.receiver_type.is_some()).collect();
-    assert_eq!(with_rt.len(), 1);
-    assert_eq!(with_rt[0].receiver_type.as_deref(), Some("Vec"));
+    assert_eq!(mc.len(), 3, "three method calls in the chain");
+    let mut types: Vec<&str> = mc
+        .iter()
+        .filter_map(|e| e.receiver_type.as_deref())
+        .collect();
+    types.sort_unstable();
+    assert_eq!(types, vec!["Iterator", "Iterator", "Vec"]);
 }
 
 #[test]
@@ -1007,4 +1014,92 @@ fn path_form_call_carries_no_receiver_type() {
             "path-form call must have no receiver_type"
         );
     }
+}
+
+// --- Bug E-3 Phase 3 chain propagation tests ---
+
+#[test]
+fn iterator_adapter_chain_keeps_iterator_type() {
+    // Iterator → map → filter → enumerate — every step's receiver_type
+    // should resolve to "Iterator" via the builtin returns table.
+    let parsed = parse(
+        "fn caller() { let v = Vec::new(); \
+         v.iter().map(|x| x).filter(|x| true).enumerate(); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    assert_eq!(mc.len(), 4);
+    let iter_count = mc
+        .iter()
+        .filter(|e| e.receiver_type.as_deref() == Some("Iterator"))
+        .count();
+    // .map, .filter, .enumerate all see Iterator as receiver_type.
+    assert_eq!(iter_count, 3, "three adapters after .iter() see Iterator");
+}
+
+#[test]
+fn str_chars_returns_iterator_for_next_step() {
+    let parsed = parse("fn caller(s: &str) { s.chars().count(); }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    assert_eq!(mc.len(), 2);
+    // s.chars() → recv str, count() → recv Iterator
+    let count_call = mc
+        .iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "count"))
+        .expect("count() edge");
+    assert_eq!(count_call.receiver_type.as_deref(), Some("Iterator"));
+}
+
+#[test]
+fn option_map_propagates_option() {
+    let parsed = parse("fn caller(x: Option<u8>) { x.map(|v| v + 1).unwrap_or(0); }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    // x.map → Option (returns Option), .unwrap_or → recv Option
+    let unwrap_or = mc
+        .iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "unwrap_or"))
+        .expect("unwrap_or edge");
+    assert_eq!(unwrap_or.receiver_type.as_deref(), Some("Option"));
+}
+
+#[test]
+fn result_ok_returns_option() {
+    let parsed = parse("fn caller(r: Result<u8, ()>) { r.ok().unwrap(); }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    let unwrap = mc
+        .iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "unwrap"))
+        .expect("unwrap edge");
+    // r.ok() returns Option; .unwrap() receiver = Option.
+    assert_eq!(unwrap.receiver_type.as_deref(), Some("Option"));
+}
+
+#[test]
+fn path_parent_returns_option() {
+    let parsed = parse("fn caller(p: &Path) { p.parent().unwrap(); } struct Path;");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    let unwrap = mc
+        .iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "unwrap"))
+        .expect("unwrap edge");
+    assert_eq!(unwrap.receiver_type.as_deref(), Some("Option"));
+}
+
+#[test]
+fn chain_break_on_unknown_step_falls_through() {
+    // .custom_method() isn't in the registry. The chain breaks there
+    // and downstream receivers go back to None.
+    let parsed = parse("fn caller() { let v = Vec::new(); v.iter().custom_method().another(); }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    // v.iter() → Vec, .custom_method() → Iterator (recv known), .another() → ??? (recv unknown)
+    let another = mc
+        .iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "another"))
+        .expect("another edge");
+    assert_eq!(another.receiver_type, None);
 }

@@ -256,6 +256,18 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             reg.register_method(BuiltinMethodEntry::new(parent_type, *m, Language::Rust));
         }
     };
+    // Bug E-3 Phase 3.1: bulk-register methods that share an unambiguous
+    // return type. Read by `compute_receiver_type` to walk chained calls
+    // like `x.iter().map(...).filter(...)` — each step's return becomes
+    // the next step's receiver.
+    let add_returning =
+        |reg: &mut BuiltinRegistry, parent_type: &str, returns: &str, methods: &[&str]| {
+            for m in methods {
+                reg.register_method(
+                    BuiltinMethodEntry::new(parent_type, *m, Language::Rust).with_returns(returns),
+                );
+            }
+        };
 
     add(
         reg,
@@ -265,9 +277,6 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "pop",
             "len",
             "is_empty",
-            "iter",
-            "iter_mut",
-            "into_iter",
             "clear",
             "clone",
             "contains",
@@ -281,12 +290,9 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "remove",
             "swap_remove",
             "truncate",
-            "drain",
             "retain",
             "first",
             "last",
-            "as_slice",
-            "as_mut_slice",
             "split_off",
             "with_capacity",
             "capacity",
@@ -296,6 +302,13 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "join",
         ],
     );
+    add_returning(
+        reg,
+        "Vec",
+        "Iterator",
+        &["iter", "iter_mut", "into_iter", "drain"],
+    );
+    add_returning(reg, "Vec", "slice", &["as_slice", "as_mut_slice"]);
 
     add(
         reg,
@@ -309,27 +322,33 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "is_some",
             "is_none",
             "is_some_and",
+            "map_or",
+            "map_or_else",
+            "take",
+            "replace",
+            "cloned",
+            "copied",
+        ],
+    );
+    add_returning(
+        reg,
+        "Option",
+        "Option",
+        &[
             "as_ref",
             "as_mut",
             "as_deref",
             "as_deref_mut",
             "map",
-            "map_or",
-            "map_or_else",
             "and",
             "and_then",
             "or",
             "or_else",
-            "take",
-            "replace",
             "filter",
-            "ok_or",
-            "ok_or_else",
-            "cloned",
-            "copied",
-            "iter",
         ],
     );
+    add_returning(reg, "Option", "Result", &["ok_or", "ok_or_else"]);
+    add_returning(reg, "Option", "Iterator", &["iter"]);
 
     add(
         reg,
@@ -346,31 +365,25 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "is_err",
             "is_ok_and",
             "is_err_and",
-            "ok",
-            "err",
-            "as_ref",
-            "as_mut",
-            "map",
-            "map_err",
             "map_or",
             "map_or_else",
-            "and",
-            "and_then",
-            "or",
-            "or_else",
         ],
     );
+    add_returning(
+        reg,
+        "Result",
+        "Result",
+        &[
+            "as_ref", "as_mut", "map", "map_err", "and", "and_then", "or", "or_else",
+        ],
+    );
+    add_returning(reg, "Result", "Option", &["ok", "err"]);
 
     add(
         reg,
         "Iterator",
         &[
             "next",
-            "map",
-            "filter",
-            "filter_map",
-            "flat_map",
-            "flatten",
             "collect",
             "count",
             "sum",
@@ -378,17 +391,24 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "fold",
             "reduce",
             "for_each",
-            "find",
-            "find_map",
-            "position",
             "any",
             "all",
-            "min",
-            "max",
-            "min_by",
-            "max_by",
-            "min_by_key",
-            "max_by_key",
+            "size_hint",
+        ],
+    );
+    // Iterator adapters return `impl Iterator` — treated nominally as
+    // "Iterator" so the chain `x.iter().map(...).filter(...).collect()`
+    // keeps walking.
+    add_returning(
+        reg,
+        "Iterator",
+        "Iterator",
+        &[
+            "map",
+            "filter",
+            "filter_map",
+            "flat_map",
+            "flatten",
             "zip",
             "chain",
             "take",
@@ -404,10 +424,25 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "step_by",
             "inspect",
             "by_ref",
+            "scan",
+        ],
+    );
+    add_returning(
+        reg,
+        "Iterator",
+        "Option",
+        &[
+            "find",
+            "find_map",
+            "position",
+            "min",
+            "max",
+            "min_by",
+            "max_by",
+            "min_by_key",
+            "max_by_key",
             "last",
             "nth",
-            "size_hint",
-            "scan",
         ],
     );
 
@@ -419,35 +454,17 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "push_str",
             "len",
             "is_empty",
-            "as_str",
             "as_bytes",
             "as_mut_str",
             "clone",
             "into_bytes",
             "clear",
             "truncate",
-            "trim",
-            "trim_start",
-            "trim_end",
-            "to_string",
-            "to_owned",
             "contains",
             "starts_with",
             "ends_with",
-            "split",
-            "splitn",
-            "split_whitespace",
-            "replace",
-            "replacen",
-            "to_lowercase",
-            "to_uppercase",
-            "chars",
-            "bytes",
-            "lines",
             "find",
             "rfind",
-            "parse",
-            "repeat",
             "capacity",
             "with_capacity",
             "from_utf8",
@@ -455,6 +472,40 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "into",
         ],
     );
+    add_returning(
+        reg,
+        "String",
+        "String",
+        &[
+            "to_string",
+            "replace",
+            "replacen",
+            "to_lowercase",
+            "to_uppercase",
+            "repeat",
+            "to_owned",
+        ],
+    );
+    add_returning(
+        reg,
+        "String",
+        "str",
+        &["as_str", "trim", "trim_start", "trim_end"],
+    );
+    add_returning(
+        reg,
+        "String",
+        "Iterator",
+        &[
+            "chars",
+            "bytes",
+            "lines",
+            "split",
+            "splitn",
+            "split_whitespace",
+        ],
+    );
+    add_returning(reg, "String", "Result", &["parse"]);
 
     add(
         reg,
@@ -463,37 +514,48 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "len",
             "is_empty",
             "as_bytes",
-            "to_string",
-            "to_owned",
             "contains",
             "starts_with",
             "ends_with",
+            "find",
+            "rfind",
+            "as_ptr",
+            "is_ascii",
+            "split_at",
+        ],
+    );
+    add_returning(
+        reg,
+        "str",
+        "String",
+        &[
+            "to_string",
+            "to_owned",
+            "to_lowercase",
+            "to_uppercase",
+            "replace",
+            "replacen",
+            "repeat",
+        ],
+    );
+    add_returning(reg, "str", "str", &["trim", "trim_start", "trim_end"]);
+    add_returning(
+        reg,
+        "str",
+        "Iterator",
+        &[
             "split",
             "splitn",
             "split_whitespace",
-            "split_at",
-            "replace",
-            "replacen",
-            "to_lowercase",
-            "to_uppercase",
             "chars",
             "bytes",
             "lines",
-            "find",
-            "rfind",
-            "parse",
-            "repeat",
-            "trim",
-            "trim_start",
-            "trim_end",
-            "strip_prefix",
-            "strip_suffix",
             "matches",
             "char_indices",
-            "as_ptr",
-            "is_ascii",
         ],
     );
+    add_returning(reg, "str", "Option", &["strip_prefix", "strip_suffix"]);
+    add_returning(reg, "str", "Result", &["parse"]);
 
     add(
         reg,
@@ -507,18 +569,25 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "len",
             "is_empty",
             "entry",
+            "clear",
+            "with_capacity",
+            "capacity",
+            "extend",
+            "retain",
+        ],
+    );
+    add_returning(
+        reg,
+        "HashMap",
+        "Iterator",
+        &[
             "iter",
             "iter_mut",
             "into_iter",
             "keys",
             "values",
             "values_mut",
-            "clear",
-            "with_capacity",
-            "capacity",
-            "extend",
             "drain",
-            "retain",
         ],
     );
 
@@ -534,17 +603,24 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "len",
             "is_empty",
             "entry",
+            "clear",
+            "first_key_value",
+            "last_key_value",
+        ],
+    );
+    add_returning(
+        reg,
+        "BTreeMap",
+        "Iterator",
+        &[
             "iter",
             "iter_mut",
             "into_iter",
             "keys",
             "values",
             "values_mut",
-            "clear",
             "range",
             "range_mut",
-            "first_key_value",
-            "last_key_value",
         ],
     );
 
@@ -557,17 +633,24 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "contains",
             "len",
             "is_empty",
-            "iter",
-            "into_iter",
             "clear",
             "with_capacity",
+            "extend",
+            "retain",
+        ],
+    );
+    add_returning(
+        reg,
+        "HashSet",
+        "Iterator",
+        &[
+            "iter",
+            "into_iter",
+            "drain",
             "intersection",
             "union",
             "difference",
             "symmetric_difference",
-            "extend",
-            "drain",
-            "retain",
         ],
     );
 
@@ -575,19 +658,10 @@ fn register_methods(reg: &mut BuiltinRegistry) {
         reg,
         "BTreeSet",
         &[
-            "insert",
-            "remove",
-            "contains",
-            "len",
-            "is_empty",
-            "iter",
-            "into_iter",
-            "clear",
-            "range",
-            "first",
-            "last",
+            "insert", "remove", "contains", "len", "is_empty", "clear", "first", "last",
         ],
     );
+    add_returning(reg, "BTreeSet", "Iterator", &["iter", "into_iter", "range"]);
 
     add(
         reg,
@@ -598,7 +672,6 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "pop",
             "set_extension",
             "set_file_name",
-            "as_path",
             "into_os_string",
             "with_capacity",
             "capacity",
@@ -609,23 +682,27 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "exists",
             "is_file",
             "is_dir",
-            "file_name",
-            "file_stem",
-            "extension",
-            "parent",
-            "components",
-            "ancestors",
-            "join",
-            "display",
-            "canonicalize",
-            "read_dir",
-            "metadata",
             "starts_with",
             "ends_with",
-            "strip_prefix",
             "is_absolute",
             "is_relative",
+            "display",
         ],
+    );
+    add_returning(reg, "PathBuf", "Path", &["as_path"]);
+    add_returning(
+        reg,
+        "PathBuf",
+        "Option",
+        &["file_name", "file_stem", "extension", "parent"],
+    );
+    add_returning(reg, "PathBuf", "Iterator", &["components", "ancestors"]);
+    add_returning(reg, "PathBuf", "PathBuf", &["join"]);
+    add_returning(
+        reg,
+        "PathBuf",
+        "Result",
+        &["canonicalize", "read_dir", "metadata", "strip_prefix"],
     );
 
     add(
@@ -633,29 +710,31 @@ fn register_methods(reg: &mut BuiltinRegistry) {
         "Path",
         &[
             "new",
-            "to_path_buf",
             "to_string_lossy",
             "to_str",
             "exists",
             "is_file",
             "is_dir",
-            "file_name",
-            "file_stem",
-            "extension",
-            "parent",
-            "components",
-            "ancestors",
-            "join",
-            "display",
-            "canonicalize",
-            "read_dir",
-            "metadata",
             "starts_with",
             "ends_with",
-            "strip_prefix",
             "is_absolute",
             "is_relative",
             "as_os_str",
+            "display",
         ],
+    );
+    add_returning(reg, "Path", "PathBuf", &["to_path_buf", "join"]);
+    add_returning(
+        reg,
+        "Path",
+        "Option",
+        &["file_name", "file_stem", "extension", "parent"],
+    );
+    add_returning(reg, "Path", "Iterator", &["components", "ancestors"]);
+    add_returning(
+        reg,
+        "Path",
+        "Result",
+        &["canonicalize", "read_dir", "metadata", "strip_prefix"],
     );
 }

@@ -94,6 +94,15 @@ pub struct BuiltinMethodEntry {
     pub language: Language,
     /// Synthetic symbol fqdn, e.g. `"<builtin>::rust::Vec::push"`.
     pub synthetic_fqdn: String,
+    /// Bug E-3 Phase 3: nominal return type of the method when known
+    /// unambiguously (e.g. `Vec::iter` → `"Iterator"`, `Path::parent`
+    /// → `"Option"`). Used by `compute_receiver_type` to propagate
+    /// types through chained method calls like
+    /// `x.iter().map(...).filter(...)`. `None` for methods whose return
+    /// depends on type parameters / inner types (e.g. `Iterator::collect`,
+    /// `Option::unwrap`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returns: Option<String>,
 }
 
 impl BuiltinMethodEntry {
@@ -112,7 +121,16 @@ impl BuiltinMethodEntry {
             method,
             language,
             synthetic_fqdn,
+            returns: None,
         }
+    }
+
+    /// Chainable setter: `BuiltinMethodEntry::new(...).with_returns("Iterator")`.
+    /// Drop the call to leave `returns = None` for polymorphic methods.
+    #[must_use]
+    pub fn with_returns(mut self, returns: impl Into<String>) -> Self {
+        self.returns = Some(returns.into());
+        self
     }
 }
 

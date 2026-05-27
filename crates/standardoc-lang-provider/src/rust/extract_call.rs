@@ -194,31 +194,61 @@ impl CallVisitor<'_> {
         });
     }
 
-    /// Bug E-3 Phase 1: derive a nominal receiver type for an
-    /// `obj.method(...)` call from the dotted receiver chain. Rules:
+    /// Bug E-3 Phase 1-3: derive a nominal receiver type for any
+    /// expression that can stand in receiver position. Walks the AST
+    /// recursively so chained calls propagate types via the builtin
+    /// method registry's `returns` table:
     ///
-    ///   * `chain = ["self"]` → `self_type` (full FQDN of impl block,
-    ///     e.g. `crate::Foo`); the resolver post-pass forms
-    ///     `<FQDN>::<method>` directly.
-    ///   * `chain = ["self", <field>]` → `struct_fields.lookup(self_type,
-    ///     field)` — nominal type of the field.
-    ///   * `chain = [<binding>]` → `local_env.lookup(binding)` — nominal
-    ///     type inferred from fn params + `let` initializers.
-    ///   * Anything deeper (`x.field.method`, chains with parens) →
-    ///     `None` (deferred to Phase 3).
-    fn compute_receiver_type(&self, chain: &[String]) -> Option<String> {
-        match chain {
-            [head] if head == "self" => self.self_type.clone(),
-            [head] => self.local_env.lookup(head).map(str::to_string),
-            [head, field] if head == "self" => {
-                let self_fqdn = self.self_type.as_deref()?;
-                self.ctx
-                    .struct_fields
-                    .lookup(self_fqdn, field)
-                    .map(str::to_string)
-            }
+    ///   * `self`                       → `self_type` (FQDN)
+    ///   * `<binding>` (Phase 1)        → `local_env.lookup`
+    ///   * `self.<field>` (Phase 1)     → `struct_fields.lookup(self_type, field)`
+    ///   * `<recv>.<method>()` (Phase 3) → registry `lookup_method.returns`
+    ///   * `&<expr>` / `(<expr>)` / `{<expr>}` → recurse through
+    ///
+    /// Out of scope: closure-arg type inference (`|i|` in
+    /// `.map(|i| ...)`), explicit turbofish (`collect::<Vec<_>>()`),
+    /// `?` unwrap, tuple/index access.
+    fn type_of_expr(&self, expr: &syn::Expr) -> Option<String> {
+        match expr {
+            syn::Expr::Path(p) => self.type_of_path_expr(&p.path),
+            syn::Expr::Field(f) => self.type_of_field_expr(f),
+            syn::Expr::MethodCall(m) => self.type_of_method_call_expr(m),
+            syn::Expr::Reference(r) => self.type_of_expr(&r.expr),
+            syn::Expr::Paren(p) => self.type_of_expr(&p.expr),
+            syn::Expr::Group(g) => self.type_of_expr(&g.expr),
             _ => None,
         }
+    }
+
+    fn type_of_path_expr(&self, path: &syn::Path) -> Option<String> {
+        if path.segments.len() != 1 {
+            return None;
+        }
+        let head = path.segments[0].ident.to_string();
+        if head == "self" {
+            return self.self_type.clone();
+        }
+        self.local_env.lookup(&head).map(str::to_string)
+    }
+
+    fn type_of_field_expr(&self, f: &syn::ExprField) -> Option<String> {
+        let base_type = self.type_of_expr(&f.base)?;
+        let field_name = match &f.member {
+            syn::Member::Named(i) => i.to_string(),
+            syn::Member::Unnamed(_) => return None,
+        };
+        self.ctx
+            .struct_fields
+            .lookup(&base_type, &field_name)
+            .map(str::to_string)
+    }
+
+    fn type_of_method_call_expr(&self, m: &syn::ExprMethodCall) -> Option<String> {
+        let recv_type = self.type_of_expr(&m.receiver)?;
+        let method = m.method.to_string();
+        global_builtin_registry()
+            .lookup_method(&recv_type, &method, Language::Rust)
+            .and_then(|e| e.returns.clone())
     }
 
     /// Stage 3e-2-ter — emit a `Calls` edge for a `path` in call
@@ -432,10 +462,10 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
         // walking down through ExprField layers (final segment is the
         // receiver-text base, the method ident is NOT in the chain).
         let receiver_chain = receiver_chain_from(&node.receiver);
-        // Bug E-3 Phase 1: derive the receiver's nominal type from the
-        // chain + local_env + struct_fields. Consumed by the resolver
-        // post-pass to form `<receiver_type>::<method>`.
-        let receiver_type = self.compute_receiver_type(&receiver_chain);
+        // Bug E-3 Phase 1-3: derive the receiver's nominal type via an
+        // AST walk so chained calls (`x.iter().map(...).filter(...)`)
+        // propagate through builtin method `returns` annotations.
+        let receiver_type = self.type_of_expr(&node.receiver);
         let callee_text = format!("{}.{}", receiver_chain.join("."), method);
         self.emit_call_site(
             callee_text,
