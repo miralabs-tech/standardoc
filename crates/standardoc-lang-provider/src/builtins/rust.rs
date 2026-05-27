@@ -178,4 +178,61 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
         },
         BuiltinTier::Drop,
     );
+
+    // --- Tier::Drop --- declarative + compile-time macros. The macro
+    // itself is a well-known API surface, and its body can't be analyzed
+    // without macro expansion ; emitting Calls edges to them adds noise
+    // proportional to test density (~7300 test-macro CALLS pre-fix) with
+    // zero audit value. The matching `RawCallSite` row is still emitted
+    // upstream of the registry check so consumers wanting raw macro
+    // counts continue to get them.
+    add(
+        reg,
+        &[
+            // Assertions
+            "assert",
+            "assert_eq",
+            "assert_ne",
+            "debug_assert",
+            "debug_assert_eq",
+            "debug_assert_ne",
+            // Diverging
+            "panic",
+            "unimplemented",
+            "unreachable",
+            "todo",
+            // Print / debug
+            "print",
+            "println",
+            "eprint",
+            "eprintln",
+            "dbg",
+            // Format
+            "format",
+            "write",
+            "writeln",
+            // Collection
+            "vec",
+            // Pattern
+            "matches",
+            // Compile-time
+            "include_str",
+            "include_bytes",
+            "include",
+            "env",
+            "option_env",
+            "cfg",
+            "file",
+            "line",
+            "column",
+            "module_path",
+            "stringify",
+            "concat",
+        ],
+        Kind::Macro,
+        BuiltinTag::Custom {
+            tag: "macro".into(),
+        },
+        BuiltinTier::Drop,
+    );
 }

@@ -1,8 +1,13 @@
 use proc_macro2::Span;
 use quote::ToTokens;
-use standardoc_ir::{EdgeKind, RawCallArg, RawCallSite, RawEdge, ResolvedOrUnresolved, Site};
+use standardoc_ir::{
+    BuiltinTier, EdgeKind, Kind, Language, RawCallArg, RawCallSite, RawEdge, ResolvedOrUnresolved,
+    Site,
+};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
+
+use crate::builtins::global as global_builtin_registry;
 
 use super::walk::{
     NameResolution, WalkContext, col_from_span, line_from_span, lookup_scope_for, path_to_string,
@@ -390,6 +395,19 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
         // about macro payload can re-parse the token text from source
         // — the IR layer doesn't try to interpret it.
         self.emit_call_site(format!("{path_str}!"), Vec::new(), Vec::new(), span);
+        // Bug E-1: skip the Calls edge for builtin Drop-tier macros
+        // (`assert!`, `panic!`, `vec!`, `format!`, `env!`, ...).
+        // The call_site row above still records the invocation for
+        // consumers that want raw macro counts ; the graph edge would
+        // be pure noise. Mirrors the Drop-tier handling in
+        // `resolve_name` for type-level builtins.
+        let leftmost = path_str.split("::").next().unwrap_or("");
+        if let Some(entry) = global_builtin_registry().lookup(leftmost, Language::Rust)
+            && entry.kind == Kind::Macro
+            && entry.tier == BuiltinTier::Drop
+        {
+            return;
+        }
         let to = self.ctx.resolve_path(&path_str, &self.current_module);
         self.emit_call_with_attributes(to, span, vec!["macro".to_string()]);
     }
@@ -513,11 +531,13 @@ mod tests {
     }
 
     #[test]
-    fn macro_invocation_emits_call_edge_with_macro_attribute() {
-        let parsed = parse("fn caller() { println!(\"hi\"); }");
+    fn user_macro_invocation_emits_call_edge_with_macro_attribute() {
+        // User-defined macro (not in the Drop-tier builtin registry) still
+        // emits a Calls edge so plugins can reach the macro definition.
+        let parsed = parse("fn caller() { my_user_macro!(\"hi\"); }");
         let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
-        assert_eq!(cs.len(), 1, "exactly one macro call expected");
+        assert_eq!(cs.len(), 1, "exactly one user-macro call expected");
         assert!(
             cs[0].attributes.iter().any(|a| a == "macro"),
             "macro call edge must carry attribute=`macro`, got {:?}",
@@ -525,24 +545,52 @@ mod tests {
         );
         match &cs[0].to {
             ResolvedOrUnresolved::Unresolved { name } => {
-                assert!(name.ends_with("println"), "macro target = {name:?}");
+                assert!(name.ends_with("my_user_macro"), "macro target = {name:?}");
             }
             other => panic!("expected unresolved macro target, got {other:?}"),
         }
     }
 
     #[test]
+    fn builtin_macro_invocation_drops_calls_edge_keeps_call_site() {
+        // Bug E-1: `println!` / `assert!` / `panic!` / `vec!` / etc. are
+        // Drop-tier in the builtin registry. The Calls edge is suppressed
+        // (graph noise) but the RawCallSite row is still emitted upstream
+        // of the registry check so consumers wanting raw macro counts
+        // continue to get them.
+        let parsed =
+            parse("fn caller() { println!(\"hi\"); assert!(true); panic!(\"x\"); vec![1]; }");
+        let (_, edges, _, call_sites) = walk(&parsed, "c", "src/lib.rs", "c");
+        let macro_edges: Vec<_> = calls(&edges)
+            .into_iter()
+            .filter(|e| e.attributes.iter().any(|a| a == "macro"))
+            .collect();
+        assert!(
+            macro_edges.is_empty(),
+            "builtin Drop-tier macros must not emit Calls edges, got {macro_edges:?}"
+        );
+        let macro_callees: Vec<_> = call_sites
+            .iter()
+            .filter(|c| c.callee_text.ends_with('!'))
+            .map(|c| c.callee_text.as_str())
+            .collect();
+        for expected in ["println!", "assert!", "panic!", "vec!"] {
+            assert!(
+                macro_callees.contains(&expected),
+                "call_site for {expected} must still be emitted, got {macro_callees:?}"
+            );
+        }
+    }
+
+    #[test]
     fn macro_invocation_args_remain_opaque() {
         // Tokens inside `println!(...)` are NOT parsed as Rust; only the path is captured.
+        // After Bug E-1 the println! Calls edge itself is dropped (Drop-tier), but the
+        // contract under test is that `outside()` doesn't leak out of the opaque token
+        // stream — which still holds.
         let parsed = parse("fn outside() {} fn caller() { println!(\"{}\", outside()); }");
         let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let cs = calls(&edges);
-        // ONE edge for the println macro itself; the `outside()` inside is unreachable.
-        let macro_edges: Vec<_> = cs
-            .iter()
-            .filter(|e| e.attributes.iter().any(|a| a == "macro"))
-            .collect();
-        assert_eq!(macro_edges.len(), 1);
         let outside_walked = cs.iter().any(|e| match &e.to {
             ResolvedOrUnresolved::Resolved { fqdn } => fqdn == "c::outside",
             _ => false,
