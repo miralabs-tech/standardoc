@@ -11,7 +11,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: '1.91'
+  RUST_TOOLCHAIN: '1.95'
 
 jobs:
   fmt:
