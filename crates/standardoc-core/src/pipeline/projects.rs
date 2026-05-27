@@ -275,11 +275,9 @@ pub(crate) fn discover_and_persist_projects_with(
 /// `workspace_kind` in `schema_meta`. The plain
 /// [`discover_and_persist_projects`] flow ignores it and only persists
 /// the project list.
-// pub(crate) fn discover_workspace(workspace_root: &Path) -> DetectionResult {
-//     discover_workspace_with(workspace_root, &DetectorRegistry::with_builtins())
-// }
-
-/// Same as [`discover_workspace`] but against a custom registry.
+///
+/// Same shape as the original (now removed) `discover_workspace` wrapper,
+/// kept available against a custom registry for tests + Stage 3e-3 callers.
 pub(crate) fn discover_workspace_with(
     workspace_root: &Path,
     registry: &DetectorRegistry,

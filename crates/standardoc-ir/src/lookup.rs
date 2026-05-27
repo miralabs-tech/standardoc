@@ -267,6 +267,7 @@ impl ModuleLookup {
     }
 
     /// Push a new scope range and return its arena index.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn push_scope(&mut self, range: ScopeRange) -> u32 {
         let idx = self.scopes.len() as u32;
         self.scopes.push(range);
@@ -324,6 +325,7 @@ impl ModuleLookup {
     }
 }
 
+#[allow(clippy::cast_possible_truncation)]
 fn epoch_ms_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

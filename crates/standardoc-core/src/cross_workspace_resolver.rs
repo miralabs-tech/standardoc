@@ -1,3 +1,7 @@
+#![allow(
+    clippy::significant_drop_tightening,
+    clippy::significant_drop_in_scrutinee
+)]
 //! Stage 3 R3 — DB-backed `CrossWorkspaceResolver` for the visitor.
 //!
 //! The resolver answers `(origin_module, origin_symbol) -> CrossWorkspaceLookup`

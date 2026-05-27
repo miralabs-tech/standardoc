@@ -282,7 +282,6 @@ impl FfiVisitor<'_> {
 fn index_is(index: &full_moon::ast::Index, target: &str) -> bool {
     match index {
         full_moon::ast::Index::Dot { name, .. } => name.token().to_string() == target,
-        full_moon::ast::Index::Brackets { .. } => false,
         _ => false,
     }
 }

@@ -108,6 +108,7 @@ fn apply_resolve_unresolved(handle: &IndexHandle) -> Result<ResolveReport, Stora
     // edge; we count it as a duplicate skip and leave the unresolved
     // row in place for a future cleanup pass to delete.
     let tx = conn.unchecked_transaction()?;
+    #[allow(clippy::similar_names)]
     let mut resolved = 0usize;
     let mut duplicate_skipped = 0usize;
     {

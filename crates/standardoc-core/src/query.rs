@@ -922,6 +922,7 @@ pub struct BodySlice {
 /// Knobs controlling the slice returned by [`body_for_fqdn`]. Defaults give
 /// the legacy "verbatim slice" behavior.
 #[derive(Debug, Default, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct BodyOptions {
     /// Cap on the number of returned lines. When the slice exceeds this
     /// count, the response is truncated and `BodySlice.truncated = true`.

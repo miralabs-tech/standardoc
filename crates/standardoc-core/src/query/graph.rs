@@ -229,7 +229,7 @@ fn compose_focal(
         for node in &frontier {
             // Outbound expansion (edges_from).
             for e in edges_from(handle, node)? {
-                if !kind_allowed(kinds, &e.kind) {
+                if !kind_allowed(kinds, e.kind) {
                     continue;
                 }
                 let Some(target) = resolved_fqdn(&e.to) else {
@@ -251,7 +251,7 @@ fn compose_focal(
             // Inbound expansion (edges_to). `from_fqdn` is always
             // resolved because it is JOINed from `symbols.fqdn`.
             for e in edges_to(handle, node)? {
-                if !kind_allowed(kinds, &e.kind) {
+                if !kind_allowed(kinds, e.kind) {
                     continue;
                 }
                 push_edge(
@@ -296,7 +296,7 @@ fn compose_bounded(
     let mut seen_edges: HashSet<(String, String, EdgeKind)> = HashSet::new();
     for from in &node_fqdns {
         for e in edges_from(handle, from)? {
-            if !kind_allowed(kinds, &e.kind) {
+            if !kind_allowed(kinds, e.kind) {
                 continue;
             }
             let Some(target) = resolved_fqdn(&e.to) else {
@@ -345,8 +345,8 @@ fn load_graph_projects(handle: &IndexHandle) -> Result<Vec<GraphProject>, Storag
         .collect())
 }
 
-fn kind_allowed(allow: Option<&HashSet<EdgeKind>>, kind: &EdgeKind) -> bool {
-    allow.is_none_or(|set| set.contains(kind))
+fn kind_allowed(allow: Option<&HashSet<EdgeKind>>, kind: EdgeKind) -> bool {
+    allow.is_none_or(|set| set.contains(&kind))
 }
 
 const fn resolved_fqdn(target: &ResolvedOrUnresolved) -> Option<&str> {

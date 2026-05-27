@@ -1,3 +1,8 @@
+#![allow(
+    clippy::significant_drop_tightening,
+    clippy::significant_drop_in_scrutinee
+)]
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -174,7 +179,7 @@ impl StandardocMcp {
         // LLM consumers that emit `Type.method` instead of `::`.
         let handle = self.handle.clone();
         let raw_for_call = raw_fqdn.clone();
-        let (resolved_fqdn, result) = tokio::task::spawn_blocking(move || {
+        let (_resolved_fqdn, result) = tokio::task::spawn_blocking(move || {
             if let Some(ctx) =
                 query::context_for_symbol_with_neighbors(&handle, &raw_for_call, depth)?
             {
@@ -196,7 +201,6 @@ impl StandardocMcp {
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
-        params.fqdn = resolved_fqdn;
 
         match result {
             Some(ctx) => {

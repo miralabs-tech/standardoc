@@ -826,6 +826,7 @@ fn push_struct_fields(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_field(
     ctx: &mut WalkContext,
     field: &syn::Field,
