@@ -150,6 +150,15 @@ impl WalkContext {
     /// 4. fall back to text-as-written ; the pipeline `promote_unresolved`
     ///    may still match by exact FQDN.
     pub(crate) fn resolve_path(&self, path: &str, current_module: &str) -> ResolvedOrUnresolved {
+        // Verbatim FQDN already defined locally (e.g. caller passed an
+        // absolute path after `Self::xxx` → `<self_type>::xxx`
+        // substitution). Skip canonicalize / ancestor-walk and return
+        // the FQDN directly so the edge resolves to the matching symbol.
+        if self.core.defined_fqdns.contains(path) {
+            return ResolvedOrUnresolved::Resolved {
+                fqdn: path.to_string(),
+            };
+        }
         if let Some(canonical) = self.canonicalize(path, current_module) {
             return if self.core.defined_fqdns.contains(&canonical) {
                 ResolvedOrUnresolved::Resolved { fqdn: canonical }
@@ -546,7 +555,7 @@ fn process_item_p2(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
     match item {
         syn::Item::Fn(it) => {
             let fn_fqdn = format!("{current_module}::{}", it.sig.ident);
-            extract_call::visit_block(ctx, &it.block, current_module, &fn_fqdn);
+            extract_call::visit_block(ctx, &it.block, current_module, &fn_fqdn, None);
         }
         syn::Item::Impl(it) => {
             let Some(target_name) = self_ty_target_name(&it.self_ty) else {
@@ -559,7 +568,13 @@ fn process_item_p2(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
             for impl_item in &it.items {
                 if let syn::ImplItem::Fn(item_fn) = impl_item {
                     let fn_fqdn = format!("{target_fqdn}::{}", item_fn.sig.ident);
-                    extract_call::visit_block(ctx, &item_fn.block, current_module, &fn_fqdn);
+                    extract_call::visit_block(
+                        ctx,
+                        &item_fn.block,
+                        current_module,
+                        &fn_fqdn,
+                        Some(&target_fqdn),
+                    );
                 }
             }
         }
@@ -570,7 +585,11 @@ fn process_item_p2(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
                     && let Some(block) = &item_fn.default
                 {
                     let fn_fqdn = format!("{trait_fqdn}::{}", item_fn.sig.ident);
-                    extract_call::visit_block(ctx, block, current_module, &fn_fqdn);
+                    // Trait default-method bodies see `Self` as the
+                    // implementing type (unknown at extract time), so
+                    // we leave self_type = None and let `Self::method`
+                    // remain unresolved as before.
+                    extract_call::visit_block(ctx, block, current_module, &fn_fqdn, None);
                 }
             }
         }

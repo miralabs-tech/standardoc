@@ -83,6 +83,7 @@ pub(crate) fn visit_block(
     block: &syn::Block,
     current_module: &str,
     enclosing_fqdn: &str,
+    self_type: Option<&str>,
 ) {
     let file_path = ctx.core.file_path.clone();
     let initial_scope = lookup_scope_for(ctx, block.span());
@@ -90,6 +91,7 @@ pub(crate) fn visit_block(
         ctx,
         current_module: current_module.to_string(),
         enclosing_fqdn: enclosing_fqdn.to_string(),
+        self_type: self_type.map(str::to_string),
         file_path,
         current_scope_idx: initial_scope,
     };
@@ -100,6 +102,13 @@ struct CallVisitor<'a> {
     ctx: &'a mut WalkContext,
     current_module: String,
     enclosing_fqdn: String,
+    /// The concrete `Self` type FQDN when the surrounding block lives
+    /// inside an `impl Foo { ... }` body (e.g. `c::Foo`). Used to
+    /// substitute `Self::method` paths before resolution so calls like
+    /// `Self::new()` resolve to `c::Foo::new` instead of staying as
+    /// unresolved `Self::new`. `None` for free functions and trait
+    /// default-method bodies (where `Self` is unknown at extract time).
+    self_type: Option<String>,
     file_path: String,
     /// Stage 3e-2-bis — current scope_idx into `ctx.core.lookup.scopes`,
     /// maintained as a save/restore stack across `visit_block` and
@@ -108,6 +117,21 @@ struct CallVisitor<'a> {
     /// works for scope-creation spans (exact HashMap match) — arbitrary
     /// expression spans inside a scope require this maintained value.
     current_scope_idx: u32,
+}
+
+impl CallVisitor<'_> {
+    /// Rewrite paths starting with `Self::` (or bare `Self`) to use the
+    /// concrete impl-block type FQDN when one is set. Returns the path
+    /// unchanged when no substitution applies — caller can keep its
+    /// borrow on the original `&str`.
+    fn substitute_self(&self, path: &str) -> Option<String> {
+        let self_type = self.self_type.as_deref()?;
+        if path == "Self" {
+            return Some(self_type.to_string());
+        }
+        path.strip_prefix("Self::")
+            .map(|rest| format!("{self_type}::{rest}"))
+    }
 }
 
 impl CallVisitor<'_> {
@@ -173,11 +197,14 @@ impl CallVisitor<'_> {
     /// legitimate recursion signal (different from value-position self-
     /// reads which are structural artifacts).
     fn emit_call_via_resolve_name(&mut self, path: &str, span: Span) {
+        let substituted = self.substitute_self(path);
+        let resolved_path = substituted.as_deref().unwrap_or(path);
         let (target, alias_mut, via_builtin) =
-            match self
-                .ctx
-                .resolve_name(path, self.current_scope_idx, &self.current_module)
-            {
+            match self.ctx.resolve_name(
+                resolved_path,
+                self.current_scope_idx,
+                &self.current_module,
+            ) {
                 NameResolution::Drop | NameResolution::Local => return,
                 NameResolution::Attribute(tag) => {
                     self.ctx.register_attribute_flag(&self.enclosing_fqdn, &tag);
@@ -221,11 +248,14 @@ impl CallVisitor<'_> {
     ///    plus optional `via-alias[-mutable]` (scope-alias propagation)
     ///    and `via-builtin` / `builtin-<slug>` (Edge-tier builtin hit).
     fn emit_value_ref(&mut self, path: &str, span: Span) {
+        let substituted = self.substitute_self(path);
+        let resolved_path = substituted.as_deref().unwrap_or(path);
         let (target, alias_mut, via_builtin) =
-            match self
-                .ctx
-                .resolve_name(path, self.current_scope_idx, &self.current_module)
-            {
+            match self.ctx.resolve_name(
+                resolved_path,
+                self.current_scope_idx,
+                &self.current_module,
+            ) {
                 NameResolution::Drop | NameResolution::Local => return,
                 NameResolution::Attribute(tag) => {
                     self.ctx.register_attribute_flag(&self.enclosing_fqdn, &tag);
@@ -509,6 +539,67 @@ mod tests {
         let cs = calls(&edges);
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0].from_fqdn, "c::T::run");
+    }
+
+    #[test]
+    fn self_method_in_impl_block_resolves_to_target_type() {
+        // `impl Foo { fn new() -> Self {...} fn other(&self) { Self::new() } }`
+        // — `Self::new` inside `other()` should resolve to `c::Foo::new`,
+        // not stay as the bogus `Self::new` text-as-written.
+        let parsed = parse(
+            "struct Foo; impl Foo { fn new() -> Self { Foo } fn other(&self) { Self::new(); } }",
+        );
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let cs = calls(&edges);
+        assert_eq!(cs.len(), 1, "exactly one Self::new call expected");
+        match &cs[0].to {
+            ResolvedOrUnresolved::Resolved { fqdn } => assert_eq!(fqdn, "c::Foo::new"),
+            other => panic!("expected Resolved c::Foo::new, got {other:?}"),
+        }
+        assert_eq!(cs[0].from_fqdn, "c::Foo::other");
+    }
+
+    #[test]
+    fn self_default_in_impl_block_resolves_via_substitution() {
+        // `Self::default()` inside an impl Foo block must rewrite to
+        // `c::Foo::default` before resolution. Since `default` isn't
+        // defined in this file, the edge stays Unresolved BUT with the
+        // composed canonical name (no longer the raw `Self::default`).
+        let parsed = parse("struct Foo; impl Foo { fn other(&self) { Self::default(); } }");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let cs = calls(&edges);
+        assert_eq!(cs.len(), 1);
+        match &cs[0].to {
+            ResolvedOrUnresolved::Unresolved { name } => {
+                assert!(
+                    name.contains("Foo::default"),
+                    "Self was not substituted, got {name:?}"
+                );
+                assert!(!name.contains("Self::"), "Self leaked, got {name:?}");
+            }
+            other => panic!("expected Unresolved with Self substituted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn self_outside_impl_block_stays_unresolved() {
+        // `Self::xxx` inside a free fn or trait default body has no
+        // concrete self_type to substitute. The CallVisitor's self_type
+        // is None, so substitution is a no-op and the path goes through
+        // resolve_name verbatim — Unresolved with the original text.
+        let parsed = parse("fn outside() { Self::new(); }");
+        let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+        let cs = calls(&edges);
+        // resolve_path's module-local fallback prefixes the current
+        // module, so the unresolved name becomes `c::Self::new`. The
+        // key invariant is that no spurious Foo-substitution happened.
+        assert!(
+            cs.iter().any(|e| match &e.to {
+                ResolvedOrUnresolved::Unresolved { name } => name.contains("Self::new"),
+                _ => false,
+            }),
+            "Self::new outside impl must stay as Self::new in the edge target, got {cs:?}"
+        );
     }
 
     #[test]
