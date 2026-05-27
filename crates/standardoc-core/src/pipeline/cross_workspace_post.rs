@@ -55,10 +55,10 @@ pub(crate) fn rewrite_cross_workspace_edges(
         if is_local(&candidate, local_prefix) {
             continue;
         }
-        let Some((origin_module, origin_symbol)) = candidate.rsplit_once("::") else {
+        let Some(outcome) = resolve_with_suffix_chain(resolver, &candidate) else {
             continue;
         };
-        match resolver.resolve(origin_module, origin_symbol) {
+        match outcome {
             CrossWorkspaceLookup::Hit { workspace_id, fqdn } => {
                 edge.to = ResolvedOrUnresolved::Resolved { fqdn };
                 stamp_attrs(&mut edge.attributes, &workspace_id);
@@ -75,6 +75,60 @@ pub(crate) fn rewrite_cross_workspace_edges(
             CrossWorkspaceLookup::Unknown => {}
         }
     }
+}
+
+/// Bug E-2 — find a (module, symbol) split that the resolver can answer
+/// and compose the result with any trailing path segments preserved.
+///
+/// `candidate.rsplit_once("::")` alone fails for the common
+/// `<crate>::<re_export>::<method>` pattern :
+/// `lur_common::Span::new` → (`lur_common::Span`, `new`) is asked, but
+/// `lur_common::Span` isn't a module (it's a re-export symbol), so the
+/// resolver returns `Unknown` even though `lur_common` does export
+/// `Span` (whose `resolved_fqdn` is the canonical `lur-common::span::Span`).
+///
+/// Walk split points longest-module-first. Each candidate split is
+/// `(prefix, head)` where `head` is one segment and any remaining tail
+/// stays as a suffix to append to the resolver's hit FQDN. The first
+/// `Hit` wins ; if every split returns `Unknown` we fall back to the
+/// first `KnownPeerMissingSymbol` (or `None`).
+fn resolve_with_suffix_chain(
+    resolver: &dyn CrossWorkspaceResolver,
+    candidate: &str,
+) -> Option<CrossWorkspaceLookup> {
+    let segments: Vec<&str> = candidate.split("::").collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    let mut fallback: Option<CrossWorkspaceLookup> = None;
+    for split in (1..segments.len()).rev() {
+        let prefix = segments[..split].join("::");
+        let head = segments[split];
+        let tail = if split + 1 < segments.len() {
+            Some(segments[split + 1..].join("::"))
+        } else {
+            None
+        };
+        match resolver.resolve(&prefix, head) {
+            CrossWorkspaceLookup::Hit { workspace_id, fqdn } => {
+                let final_fqdn = match &tail {
+                    Some(t) => format!("{fqdn}::{t}"),
+                    None => fqdn,
+                };
+                return Some(CrossWorkspaceLookup::Hit {
+                    workspace_id,
+                    fqdn: final_fqdn,
+                });
+            }
+            CrossWorkspaceLookup::KnownPeerMissingSymbol { workspace_id } => {
+                if fallback.is_none() {
+                    fallback = Some(CrossWorkspaceLookup::KnownPeerMissingSymbol { workspace_id });
+                }
+            }
+            CrossWorkspaceLookup::Unknown => {}
+        }
+    }
+    fallback
 }
 
 const fn language_supports_workspace_prefix(lang: Language) -> bool {
@@ -326,6 +380,104 @@ mod tests {
             other => panic!("expected Resolved, got {other:?}"),
         }
         assert!(edge.attributes.contains(&"cross-workspace".to_string()));
+    }
+
+    #[test]
+    fn suffix_chain_resolves_method_on_re_exported_type() {
+        // Bug E-2: `lur_common::Span::new` — caller wrote
+        // `use lur_common::Span; Span::new()`. The peer's `Span` is a
+        // re-export pointing to `lur-common::span::Span` (canonical), so
+        // (`lur_common::Span`, `new`) misses (Span is a symbol, not a
+        // module). Walking split points longest-first finds
+        // (`lur_common`, `Span`) → Hit with canonical, then appends
+        // `::new` → `lur-common::span::Span::new`.
+        let mut extracted = empty_extracted(Language::Rust, "primary::lib");
+        extracted
+            .edges
+            .push(unresolved_edge("lur_common::Span::new"));
+        let mut hits = HashMap::new();
+        hits.insert(
+            ("lur_common".to_string(), "Span".to_string()),
+            CrossWorkspaceLookup::Hit {
+                workspace_id: "peer-uuid".into(),
+                fqdn: "lur-common::span::Span".into(),
+            },
+        );
+        let resolver = FakeResolver::new(hits);
+        rewrite_cross_workspace_edges(&mut extracted, &resolver);
+        let edge = &extracted.edges[0];
+        match &edge.to {
+            ResolvedOrUnresolved::Resolved { fqdn } => {
+                assert_eq!(fqdn, "lur-common::span::Span::new");
+            }
+            other => panic!("expected Resolved with appended tail, got {other:?}"),
+        }
+        assert!(edge.attributes.contains(&"cross-workspace".to_string()));
+    }
+
+    #[test]
+    fn suffix_chain_prefers_longest_module_match() {
+        // When both (`crate::sub`, `Sym`) and (`crate`, `sub`) could hit,
+        // the longest-module-first iteration must pick the more specific
+        // (`crate::sub`, `Sym`) hit so we don't accidentally re-route
+        // through a shorter (and semantically different) prefix.
+        let mut extracted = empty_extracted(Language::Rust, "primary::lib");
+        extracted
+            .edges
+            .push(unresolved_edge("peer::module::Symbol"));
+        let mut hits = HashMap::new();
+        hits.insert(
+            ("peer::module".to_string(), "Symbol".to_string()),
+            CrossWorkspaceLookup::Hit {
+                workspace_id: "peer-uuid".into(),
+                fqdn: "peer::module::Symbol".into(),
+            },
+        );
+        // Decoy that should NOT be picked because of longest-first preference.
+        hits.insert(
+            ("peer".to_string(), "module".to_string()),
+            CrossWorkspaceLookup::Hit {
+                workspace_id: "wrong-uuid".into(),
+                fqdn: "peer::DECOY".into(),
+            },
+        );
+        let resolver = FakeResolver::new(hits);
+        rewrite_cross_workspace_edges(&mut extracted, &resolver);
+        let edge = &extracted.edges[0];
+        match &edge.to {
+            ResolvedOrUnresolved::Resolved { fqdn } => assert_eq!(fqdn, "peer::module::Symbol"),
+            other => panic!("expected longest-match Resolved, got {other:?}"),
+        }
+        assert!(edge.attributes.contains(&"peer-peer-uuid".to_string()));
+    }
+
+    #[test]
+    fn suffix_chain_falls_back_to_known_peer_missing_symbol() {
+        // No split yields a Hit, but the shortest (`peer`, `lib`)
+        // returns KnownPeerMissingSymbol — the peer exists but doesn't
+        // export the symbol. Surface this as UnresolvedBridge with the
+        // original full candidate so the viz can show "tried, missing".
+        let mut extracted = empty_extracted(Language::Rust, "primary::lib");
+        extracted
+            .edges
+            .push(unresolved_edge("peer::lib::Missing::method"));
+        let mut hits = HashMap::new();
+        hits.insert(
+            ("peer::lib".to_string(), "Missing".to_string()),
+            CrossWorkspaceLookup::KnownPeerMissingSymbol {
+                workspace_id: "peer-uuid".into(),
+            },
+        );
+        let resolver = FakeResolver::new(hits);
+        rewrite_cross_workspace_edges(&mut extracted, &resolver);
+        let edge = &extracted.edges[0];
+        match &edge.to {
+            ResolvedOrUnresolved::UnresolvedBridge { name, .. } => {
+                assert_eq!(name, "peer::lib::Missing::method");
+            }
+            other => panic!("expected UnresolvedBridge fallback, got {other:?}"),
+        }
+        assert!(edge.attributes.contains(&"peer-peer-uuid".to_string()));
     }
 
     #[test]
