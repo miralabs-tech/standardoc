@@ -141,9 +141,14 @@ impl WalkContext {
     /// 1. strict canonicalize (keyword + alias)
     /// 2. for a single-ident path with no alias, fall back to module-local
     ///    (`<current_module>::<ident>`)
-    /// 3. multi-segment paths with no alias are kept text-as-written (likely
-    ///    absolute/extern crate path); the pipeline `promote_unresolved` may
-    ///    still match by exact FQDN.
+    /// 3. multi-segment paths with no alias : try each ancestor module from
+    ///    `current_module` up to `file_module_fqdn` as the prefix for the
+    ///    leftmost segment ; if any composes a defined FQDN, append the
+    ///    rest. Without this, `IndexHandle::open()` called inside a test
+    ///    submodule of the same file stays unresolved despite
+    ///    `IndexHandle` being right there at the file's root scope.
+    /// 4. fall back to text-as-written ; the pipeline `promote_unresolved`
+    ///    may still match by exact FQDN.
     pub(crate) fn resolve_path(&self, path: &str, current_module: &str) -> ResolvedOrUnresolved {
         if let Some(canonical) = self.canonicalize(path, current_module) {
             return if self.core.defined_fqdns.contains(&canonical) {
@@ -153,12 +158,44 @@ impl WalkContext {
             };
         }
         let segments: Vec<&str> = path.split("::").filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            return ResolvedOrUnresolved::Unresolved {
+                name: path.to_string(),
+            };
+        }
         if segments.len() == 1 {
             let module_local = format!("{current_module}::{}", segments[0]);
             if self.core.defined_fqdns.contains(&module_local) {
                 return ResolvedOrUnresolved::Resolved { fqdn: module_local };
             }
             return ResolvedOrUnresolved::Unresolved { name: module_local };
+        }
+        // Multi-segment fallback : the leftmost may be a locally-defined
+        // type at the file root (e.g. `struct IndexHandle` here) accessed
+        // from a nested `mod tests { use super::*; ... }` block. Walk
+        // `current_module` up to the file's root looking for a defined
+        // `<probe>::<leftmost>` ; when found, append the rest and try
+        // the full FQDN.
+        let leftmost = segments[0];
+        let rest = segments[1..].join("::");
+        let mut probe = current_module.to_string();
+        loop {
+            let candidate = format!("{probe}::{leftmost}");
+            if self.core.defined_fqdns.contains(&candidate) {
+                let full = format!("{candidate}::{rest}");
+                return if self.core.defined_fqdns.contains(&full) {
+                    ResolvedOrUnresolved::Resolved { fqdn: full }
+                } else {
+                    ResolvedOrUnresolved::Unresolved { name: full }
+                };
+            }
+            if probe == self.core.file_module_fqdn {
+                break;
+            }
+            match probe.rsplit_once("::") {
+                Some((parent, _)) => probe = parent.to_string(),
+                None => break,
+            }
         }
         ResolvedOrUnresolved::Unresolved {
             name: path.to_string(),
@@ -1861,6 +1898,52 @@ mod tests {
             ctx.resolve_path("self::foo", "c"),
             ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "c::foo"
         ));
+    }
+
+    #[test]
+    fn resolve_path_multi_segment_walks_up_to_file_root_for_local_type() {
+        // Bug E-2 follow-up : `IndexHandle::open()` called inside a test
+        // submodule of the same file (current_module = `c::handle::tests`)
+        // must resolve through the file root where `struct IndexHandle`
+        // lives. Without the ancestor walk, the path stays text-as-written.
+        let mut ctx = WalkContext::new("src/handle.rs", "c", "c::handle".to_string());
+        ctx.core.defined_fqdns.insert("c::handle::IndexHandle".into());
+        ctx.core.defined_fqdns.insert("c::handle::IndexHandle::open".into());
+        match ctx.resolve_path("IndexHandle::open", "c::handle::tests") {
+            ResolvedOrUnresolved::Resolved { fqdn } => {
+                assert_eq!(fqdn, "c::handle::IndexHandle::open");
+            }
+            other => panic!("expected Resolved via ancestor walk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_path_multi_segment_unresolved_with_canonical_when_method_not_defined() {
+        // Same ancestor-walk path but the method itself isn't in
+        // defined_fqdns (impl methods are emitted in p2 ; the lookup-time
+        // resolve_path runs in p1/p2 boundary). Composing the canonical is
+        // still a win — the pipeline edge-resolve step matches against
+        // `symbols.fqdn` so the canonical can still tie to a real symbol_id.
+        let mut ctx = WalkContext::new("src/handle.rs", "c", "c::handle".to_string());
+        ctx.core.defined_fqdns.insert("c::handle::IndexHandle".into());
+        match ctx.resolve_path("IndexHandle::open", "c::handle::tests::nested::fn") {
+            ResolvedOrUnresolved::Unresolved { name } => {
+                assert_eq!(name, "c::handle::IndexHandle::open");
+            }
+            other => panic!("expected unresolved-with-canonical, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_path_multi_segment_stays_text_when_no_ancestor_defines_leftmost() {
+        // External path like `std::mem::take` — no ancestor of the
+        // current_module has a `std` symbol, so the walk falls through
+        // to the text-as-written branch (same outcome as pre-fix).
+        let ctx = WalkContext::new("src/lib.rs", "c", "c".to_string());
+        match ctx.resolve_path("std::mem::take", "c::tests") {
+            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "std::mem::take"),
+            other => panic!("expected unresolved as-written, got {other:?}"),
+        }
     }
 
     // --- Stage 3e-2 foundation: resolve_name tests ---
