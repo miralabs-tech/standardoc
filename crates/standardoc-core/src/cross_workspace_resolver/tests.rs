@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::storage::module_lookup::put_module_lookup;
 use standardoc_ir::{BindingSource, IdentResolution, Language, LocalDeclKind, ModuleLookup};

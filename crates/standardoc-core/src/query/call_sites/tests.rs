@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::storage::call_sites::insert_call_site;
 use standardoc_ir::Site as IrSite;
