@@ -66,7 +66,21 @@ impl GitignoreStack {
     /// Returns an empty stack when no `.stdignore` is present anywhere.
     pub fn build(workspace_root: &Path) -> Self {
         let workspace_root = workspace_root.to_path_buf();
-        let layers = collect_layers(&workspace_root);
+        let layers = collect_layers(&workspace_root, None);
+        Self {
+            layers,
+            workspace_root,
+        }
+    }
+
+    /// Bug E-3 follow-up — same as [`Self::build`] but seeds the root
+    /// layer from the supplied patterns string (the `ignore.patterns`
+    /// block of `standardoc.sxd`) instead of reading `.stdignore`.
+    /// Nested `.stdignore` files are still cascaded for back-compat
+    /// during the migration window.
+    pub fn build_with_root_patterns(workspace_root: &Path, patterns: &str) -> Self {
+        let workspace_root = workspace_root.to_path_buf();
+        let layers = collect_layers(&workspace_root, Some(patterns));
         Self {
             layers,
             workspace_root,
@@ -115,9 +129,22 @@ impl ScanFilters {
         Self { stack }
     }
 
-    /// Loads filters from a workspace root. Equivalent to
-    /// `Self::from_stack(GitignoreStack::build(workspace_root))`.
+    /// Loads filters from a workspace root.
+    ///
+    /// Bug E-3 follow-up — checks `standardoc.sxd` first ; when an
+    /// `ignore.patterns` block is present it overrides the root
+    /// `.stdignore` (nested `.stdignore` files still cascade for the
+    /// migration window). Falls back to the legacy `.stdignore`-only
+    /// path when no `.sxd` is present (or it carries no ignore block).
     pub fn load(workspace_root: &Path) -> Self {
+        if let Ok(Some(cfg)) = crate::config::load_workspace_config(workspace_root)
+            && let Some(ignore) = cfg.ignore
+        {
+            return Self::from_stack(GitignoreStack::build_with_root_patterns(
+                workspace_root,
+                &ignore.patterns,
+            ));
+        }
         Self::from_stack(GitignoreStack::build(workspace_root))
     }
 
@@ -247,11 +274,15 @@ pub fn preview_pattern_matches(
     })
 }
 
-fn collect_layers(workspace_root: &Path) -> Vec<Layer> {
+fn collect_layers(workspace_root: &Path, root_patterns_override: Option<&str>) -> Vec<Layer> {
     let mut layers = Vec::new();
 
     let root_file = workspace_root.join(STDIGNORE_FILENAME);
-    if root_file.is_file()
+    if let Some(patterns) = root_patterns_override {
+        if let Some(layer) = build_layer_from_patterns(workspace_root, patterns) {
+            layers.push(layer);
+        }
+    } else if root_file.is_file()
         && let Some(layer) = build_layer(workspace_root, &root_file)
     {
         layers.push(layer);
@@ -266,6 +297,36 @@ fn collect_layers(workspace_root: &Path) -> Vec<Layer> {
     );
     layers.sort_by_key(|l| l.rooted_at.components().count());
     layers
+}
+
+/// Bug E-3 follow-up — build a root layer from a patterns string
+/// (e.g. the `ignore.patterns` block of `standardoc.sxd`). Empty or
+/// blank lines are skipped ; lines starting with `#` are treated as
+/// comments. Behaves identically to a `.stdignore` file otherwise.
+fn build_layer_from_patterns(rooted_at: &Path, patterns: &str) -> Option<Layer> {
+    let mut builder = GitignoreBuilder::new(rooted_at);
+    for line in patterns.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Err(err) = builder.add_line(None, trimmed) {
+            eprintln!(
+                "standardoc: failed to load standardoc.sxd ignore pattern `{trimmed}`: {err}"
+            );
+            return None;
+        }
+    }
+    match builder.build() {
+        Ok(matcher) => Some(Layer {
+            matcher,
+            rooted_at: rooted_at.to_path_buf(),
+        }),
+        Err(err) => {
+            eprintln!("standardoc: failed to build gitignore matcher from standardoc.sxd: {err}");
+            None
+        }
+    }
 }
 
 fn add_nested_layers(

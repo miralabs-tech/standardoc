@@ -191,3 +191,58 @@ fn preview_pattern_matches_truncates_at_limit_while_counting_total() {
     assert_eq!(preview.total_count, 10);
     assert!(preview.truncated);
 }
+
+// --- Bug E-3 follow-up : standardoc.sxd back-compat tests ---
+
+#[test]
+fn build_with_root_patterns_overrides_stdignore() {
+    // .sxd ignore patterns take precedence over .stdignore at root.
+    let dir = tempdir().unwrap();
+    write(dir.path(), ".stdignore", "build/\n");
+    let stack = GitignoreStack::build_with_root_patterns(dir.path(), "target/\n");
+
+    assert!(stack.is_ignored("target/debug.rs"));
+    // .stdignore root layer is shadowed by the .sxd patterns.
+    assert!(!stack.is_ignored("build/out.js"));
+}
+
+#[test]
+fn build_with_root_patterns_skips_blank_and_comment_lines() {
+    let dir = tempdir().unwrap();
+    let patterns = "\n# leading comment\ntarget/\n\n# trailing\nbuild/\n";
+    let stack = GitignoreStack::build_with_root_patterns(dir.path(), patterns);
+    assert!(stack.is_ignored("target/foo"));
+    assert!(stack.is_ignored("build/bar"));
+}
+
+#[test]
+fn scan_filters_load_reads_sxd_when_present() {
+    let dir = tempdir().unwrap();
+    write(dir.path(), ".stdignore", "build/\n");
+    write(
+        dir.path(),
+        "standardoc.sxd",
+        "version \"0.1.0\"\nignore { patterns ```\ntarget/\n``` }\n",
+    );
+    let filters = ScanFilters::load(dir.path());
+    assert!(filters.is_skipped("target/x"));
+    // .sxd's ignore block replaces the root .stdignore patterns.
+    assert!(!filters.is_skipped("build/y"));
+}
+
+#[test]
+fn scan_filters_load_falls_back_to_stdignore_when_sxd_absent() {
+    let dir = tempdir().unwrap();
+    write(dir.path(), ".stdignore", "target/\n");
+    let filters = ScanFilters::load(dir.path());
+    assert!(filters.is_skipped("target/x"));
+}
+
+#[test]
+fn scan_filters_load_falls_back_to_stdignore_when_sxd_has_no_ignore_block() {
+    let dir = tempdir().unwrap();
+    write(dir.path(), ".stdignore", "target/\n");
+    write(dir.path(), "standardoc.sxd", "version \"0.1.0\"\n");
+    let filters = ScanFilters::load(dir.path());
+    assert!(filters.is_skipped("target/x"));
+}

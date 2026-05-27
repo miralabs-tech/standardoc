@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# `.projects/*` holds sibling repos (standarx-dsl path-dep, lur-workspace,
+# matchigo-lua) — each carries its own workspace root. Exclude so cargo
+# doesn't try to absorb them into this workspace.
+exclude = [".projects/*"]
 
 [workspace.package]
 version = "1.0.0-beta.2"
@@ -61,6 +65,9 @@ ctrlc       = "3"
 ignore      = "0.4"
 strsim      = "0.11"
 standarbuild-detect = "0.3"
+# Bug E-3 follow-up — DSL parser for standardoc.sxd config. Path-dep until
+# standarx-dsl is published on crates.io (sibling repo .projects/standarx-dsl/).
+standarx-dsl        = { path = ".projects/standarx-dsl" }
 wasm-bindgen              = "0.2"
 wasm-bindgen-futures      = "0.4"
 js-sys                    = "0.3"

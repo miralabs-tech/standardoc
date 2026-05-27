@@ -1,4 +1,5 @@
 mod commands;
+pub mod config;
 mod cross_workspace_resolver;
 pub mod externals;
 mod pipeline;
