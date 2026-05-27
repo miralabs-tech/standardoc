@@ -69,6 +69,7 @@ pub(crate) mod mock {
     use super::{ExtractContext, ExtractError, ExtractedFile, LanguageProvider};
 
     #[derive(Debug, Clone)]
+    #[allow(clippy::large_enum_variant)]
     pub(crate) enum MockResponse {
         Ok(ExtractedFile),
         ParseError(String),

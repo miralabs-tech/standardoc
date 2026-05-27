@@ -1391,6 +1391,7 @@ impl StandardocMcp {
 
 /// Drop empty / whitespace-only strings to `None` so an MCP caller can
 /// pass `from_fqdn: ""` without smuggling a vacuous filter into the SQL.
+#[allow(clippy::needless_pass_by_value)]
 fn non_empty(s: String) -> Option<String> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -2108,6 +2109,7 @@ const fn watches_peer(d: LinkDirection) -> bool {
 /// call site. Best-effort: any failure (slot empty, debouncer dropped,
 /// notify error) is logged and swallowed — the catalog write already
 /// succeeded and the next cold_start will reconcile.
+#[allow(clippy::needless_pass_by_value)]
 fn register_peer_with_watcher(
     slot: &Arc<Mutex<Option<WatcherHandle>>>,
     workspace_id: String,

@@ -14,6 +14,7 @@ use standardoc_ir::{ProjectInfo, ProjectKind};
 
 use crate::storage::error::StorageError;
 
+#[allow(clippy::needless_pass_by_value)]
 fn row_to_project(
     project_id: i64,
     label: String,

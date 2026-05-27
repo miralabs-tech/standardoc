@@ -42,6 +42,7 @@ fn epoch_ms_now() -> i64 {
     .unwrap_or(i64::MAX)
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn row_to_linked_workspace(
     workspace_id: String,
     root_path: String,

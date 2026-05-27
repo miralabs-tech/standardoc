@@ -131,6 +131,13 @@ pub(crate) fn import_peer_workspace(
     }
 }
 
+/// (module_fqdn, language, built_at, payload) — one row of `module_lookups`.
+type ModuleLookupRow = (String, String, i64, Vec<u8>);
+
+/// (module_fqdn, local_name, origin_module, origin_symbol, is_type_only, is_re_export)
+/// — one row of `workspace_imports`.
+type WorkspaceImportRow = (String, String, String, Option<String>, i64, i64);
+
 fn do_import(
     primary: &mut Connection,
     peer: &Connection,
@@ -196,9 +203,7 @@ fn do_import(
     Ok((m_count, i_count))
 }
 
-fn read_peer_module_lookups(
-    peer: &Connection,
-) -> Result<Vec<(String, String, i64, Vec<u8>)>, StorageError> {
+fn read_peer_module_lookups(peer: &Connection) -> Result<Vec<ModuleLookupRow>, StorageError> {
     let mut stmt = peer.prepare(
         "SELECT module_fqdn, language, built_at, payload \
          FROM module_lookups WHERE workspace_id = 'primary'",
@@ -218,7 +223,7 @@ fn read_peer_module_lookups(
 
 fn read_peer_workspace_imports(
     peer: &Connection,
-) -> Result<Vec<(String, String, String, Option<String>, i64, i64)>, StorageError> {
+) -> Result<Vec<WorkspaceImportRow>, StorageError> {
     let mut stmt = peer.prepare(
         "SELECT module_fqdn, local_name, origin_module, origin_symbol, \
                 is_type_only, is_re_export \

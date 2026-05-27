@@ -29,6 +29,7 @@ pub enum ColdStartError {
     Walk(#[from] walkdir::Error),
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Outcome {
     Upsert {
         rel: String,

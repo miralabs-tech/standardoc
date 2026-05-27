@@ -65,6 +65,7 @@ impl WorkspaceKind {
     /// Inverse of [`Self::as_str`]. Returns `Self::Custom` for any slug
     /// not matched against the built-in variants (mirrors
     /// `WorkspaceKindId::from_slug` shape — total function).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "cargo" => Self::Cargo,
@@ -153,6 +154,7 @@ impl LinkedWorkspaceStatus {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "active" => Some(Self::Active),
@@ -191,6 +193,7 @@ impl IndexingMode {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "blob_import" => Some(Self::BlobImport),
