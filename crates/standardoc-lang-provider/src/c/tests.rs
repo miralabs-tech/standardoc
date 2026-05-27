@@ -1,4 +1,3 @@
-
 use super::*;
 use standardoc_ir::{
     EdgeKind, FfiAbi, FfiDirection, Kind, Language, ResolvedOrUnresolved, Visibility,

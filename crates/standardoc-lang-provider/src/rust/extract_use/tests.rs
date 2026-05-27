@@ -1,4 +1,3 @@
-
 use super::super::walk::walk;
 use standardoc_ir::{EdgeKind, ResolvedOrUnresolved};
 

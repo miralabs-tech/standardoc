@@ -1,4 +1,3 @@
-
 use super::*;
 use swc_core::common::{FileName, SourceMap, sync::Lrc};
 use swc_core::ecma::ast::EsVersion;

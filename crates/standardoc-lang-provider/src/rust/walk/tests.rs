@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn parse(src: &str) -> syn::File {

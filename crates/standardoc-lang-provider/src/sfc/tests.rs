@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn extract(src: &str) -> SfcDocument {
