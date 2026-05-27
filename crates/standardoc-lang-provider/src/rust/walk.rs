@@ -163,26 +163,37 @@ impl WalkContext {
                 name: path.to_string(),
             };
         }
-        if segments.len() == 1 {
-            let module_local = format!("{current_module}::{}", segments[0]);
-            if self.core.defined_fqdns.contains(&module_local) {
-                return ResolvedOrUnresolved::Resolved { fqdn: module_local };
-            }
-            return ResolvedOrUnresolved::Unresolved { name: module_local };
-        }
-        // Multi-segment fallback : the leftmost may be a locally-defined
-        // type at the file root (e.g. `struct IndexHandle` here) accessed
-        // from a nested `mod tests { use super::*; ... }` block. Walk
-        // `current_module` up to the file's root looking for a defined
-        // `<probe>::<leftmost>` ; when found, append the rest and try
-        // the full FQDN.
+        // Walk `current_module` up to the file's root looking for a
+        // defined `<probe>::<leftmost>`. Catches two related patterns :
+        //
+        // - Single-ident calls from nested `mod tests { use super::*; }`
+        //   blocks to parent-module fns/items (e.g. `walk(...)` calling
+        //   `parent::walk` from `parent::tests::test_fn`). The glob
+        //   import doesn't bind enumerated parent items into the test
+        //   scope, so the module-local fallback `<current_module>::walk`
+        //   misses ; walking up finds `parent::walk`.
+        //
+        // - Multi-segment paths like `IndexHandle::open()` where the
+        //   leftmost is a locally-defined type at the file root. Same
+        //   ancestor walk, append the remaining segments.
+        //
+        // External paths (`std::mem::take`, `serde::Deserialize`) still
+        // fall through to the text-as-written branch — no ancestor of
+        // ours owns `std` or `serde`, so the walk is a no-op for them.
         let leftmost = segments[0];
-        let rest = segments[1..].join("::");
+        let rest = if segments.len() > 1 {
+            Some(segments[1..].join("::"))
+        } else {
+            None
+        };
         let mut probe = current_module.to_string();
         loop {
             let candidate = format!("{probe}::{leftmost}");
             if self.core.defined_fqdns.contains(&candidate) {
-                let full = format!("{candidate}::{rest}");
+                let full = match &rest {
+                    Some(r) => format!("{candidate}::{r}"),
+                    None => candidate,
+                };
                 return if self.core.defined_fqdns.contains(&full) {
                     ResolvedOrUnresolved::Resolved { fqdn: full }
                 } else {
@@ -196,6 +207,15 @@ impl WalkContext {
                 Some((parent, _)) => probe = parent.to_string(),
                 None => break,
             }
+        }
+        // No ancestor owns the leftmost. Single-ident falls back to the
+        // module-local unresolved (preserves pre-fix shape for callers
+        // doing `let x = unknown;`) ; multi-segment falls back to
+        // text-as-written (likely an external crate path).
+        if rest.is_none() {
+            return ResolvedOrUnresolved::Unresolved {
+                name: format!("{current_module}::{leftmost}"),
+            };
         }
         ResolvedOrUnresolved::Unresolved {
             name: path.to_string(),
@@ -1898,6 +1918,33 @@ mod tests {
             ctx.resolve_path("self::foo", "c"),
             ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "c::foo"
         ));
+    }
+
+    #[test]
+    fn resolve_path_single_ident_walks_up_for_parent_fn_via_glob() {
+        // `walk(...)` called from `c::walk::tests::test_fn` after
+        // `mod tests { use super::*; ... }`. The glob doesn't enumerate
+        // the parent fn `walk` into the test scope's bindings ; the
+        // ancestor walk finds `c::walk::walk` at the file root.
+        let mut ctx = WalkContext::new("src/walk.rs", "c", "c::walk".to_string());
+        ctx.core.defined_fqdns.insert("c::walk::walk".into());
+        match ctx.resolve_path("walk", "c::walk::tests") {
+            ResolvedOrUnresolved::Resolved { fqdn } => {
+                assert_eq!(fqdn, "c::walk::walk");
+            }
+            other => panic!("expected Resolved via ancestor walk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_path_single_ident_unresolved_keeps_module_local_name() {
+        // Unknown single ident at any nested scope falls back to the
+        // module-local unresolved name (preserves pre-fix shape).
+        let ctx = WalkContext::new("src/lib.rs", "c", "c".to_string());
+        match ctx.resolve_path("missing", "c::tests") {
+            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "c::tests::missing"),
+            other => panic!("expected module-local unresolved, got {other:?}"),
+        }
     }
 
     #[test]
