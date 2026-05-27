@@ -29,7 +29,7 @@ impl AliasMutability {
 /// [`crate::SubstrateBridge`] can express e.g. Tauri (Native↔Browser)
 /// or Prisma (Node↔Database) without falling back to `Custom`. Fine-
 /// grained disambiguation (`postgres` vs `mysql`, `chromium` vs
-/// `webkit`) stays in [`Custom`] via tags like `"database:postgres"`
+/// `webkit`) stays in `Custom` via tags like `"database:postgres"`
 /// or `"browser:webkit"` — and in [`crate::BridgeKind`] (`prisma`,
 /// `sqlx`, …) for the access mechanism.
 ///

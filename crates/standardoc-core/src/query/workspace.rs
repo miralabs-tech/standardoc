@@ -67,7 +67,7 @@ impl std::error::Error for LinkWorkspaceError {}
 /// Walk UP `input` until an existing ancestor directory is found, then
 /// jaro-winkler match sibling directory names against the first missing
 /// component (case-insensitive). Returns the top-N rebuilt paths whose
-/// score meets [`PATH_DID_YOU_MEAN_THRESHOLD`].
+/// score meets the internal `PATH_DID_YOU_MEAN_THRESHOLD` (0.7 today).
 ///
 /// Returns an empty vec when no existing ancestor is reachable or no
 /// sibling clears the threshold.
@@ -162,7 +162,7 @@ pub fn unlink_workspace(handle: &IndexHandle, workspace_id: &str) -> Result<(), 
 
 /// Stage 3b-7-b L3-bis: explicit re-extraction of a single linked peer.
 /// Looks up the peer by `workspace_id`, then delegates to
-/// [`peer_extract::extract_peer_workspace`] — same code path cold_start
+/// `peer_extract::extract_peer_workspace` — same code path cold_start
 /// uses, but scoped to one peer rather than the full sweep. Intended
 /// as the user-facing escape hatch for the Q4 staleness gap: peer
 /// source can drift between cold_starts, and the watcher (L3d) only
@@ -265,8 +265,8 @@ pub fn read_primary_workspace_kind(
 }
 
 /// Fetch the persisted `ModuleLookup` for `(workspace_id, module_fqdn)`.
-/// `workspace_id` defaults to the [`PRIMARY_WORKSPACE_ID`] sentinel when
-/// the caller omits it.
+/// `workspace_id` defaults to the internal `PRIMARY_WORKSPACE_ID`
+/// sentinel (`"primary"`) when the caller omits it.
 pub fn get_module_lookup(
     handle: &IndexHandle,
     workspace_id: Option<&str>,
@@ -279,8 +279,9 @@ pub fn get_module_lookup(
 }
 
 /// Persist (UPSERT) a `ModuleLookup` blob under `(workspace_id, module_fqdn)`.
-/// `workspace_id` defaults to the [`PRIMARY_WORKSPACE_ID`] sentinel. This is
-/// the write-side symmetric to [`get_module_lookup`]; the daemon's walk
+/// `workspace_id` defaults to the internal `PRIMARY_WORKSPACE_ID` sentinel
+/// (`"primary"`). This is the write-side symmetric to [`get_module_lookup`];
+/// the daemon's walk
 /// pipeline uses it after the AOT pre-pass for each module, and Stage
 /// 3b-6 tests use it to seed peer workspaces.
 pub fn put_module_lookup(

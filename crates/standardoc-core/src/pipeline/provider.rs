@@ -31,7 +31,7 @@ pub struct ExtractContext<'a> {
     pub workspace_root: &'a Path,
     /// Stage 3 R3 — when `Some`, providers consult this resolver to
     /// strengthen imports that target a peer workspace. `None` for
-    /// tests and entry points that don't have an [`IndexHandle`]
+    /// tests and entry points that don't have an `IndexHandle`
     /// (mocks, parsing-only paths). Visitors must tolerate `None`
     /// (fall through to local-unresolved).
     pub cross_workspace: Option<&'a (dyn CrossWorkspaceResolver + 'a)>,
