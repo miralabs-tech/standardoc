@@ -265,11 +265,11 @@ mod tests {
 
     #[test]
     fn rust_fn_without_extern_is_ignored() {
-        let src = r#"
+        let src = r"
             pub fn normal() {}
             #[no_mangle]
             pub fn no_mangle_but_rust_abi() {}
-        "#;
+        ";
         let bindings = extract_ffi_bindings(&parse(src), "x");
         assert!(
             bindings.is_empty(),

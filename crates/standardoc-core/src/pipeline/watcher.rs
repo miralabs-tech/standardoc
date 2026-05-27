@@ -324,7 +324,7 @@ fn process_primary_path(
     // table + `schema_meta.workspace_kind` stay in sync. Returns early
     // because manifest files are not indexed as workspace source.
     match manifest_invalidation::handle_manifest_change(handle, workspace_root, abs_path) {
-        Ok(Some(_)) => return,
+        Ok(Some(())) => return,
         Ok(None) => {}
         Err(e) => {
             eprintln!("standardoc watcher: manifest re-detection failed: {e}");
@@ -511,7 +511,7 @@ fn upsert_path(
                     path: rel.to_string(),
                     extracted,
                 },
-            )
+            );
         }
         Err(ExtractError::Parse { detail, .. }) => {
             if let Some(language) = guess_language(rel) {
@@ -1084,7 +1084,7 @@ mod tests {
         let provider: Arc<dyn LanguageProvider> = mock;
         let filters = fresh_filters(&handle);
 
-        let mut watcher = spawn_watcher(handle.clone(), provider, filters).unwrap();
+        let mut watcher = spawn_watcher(handle, provider, filters).unwrap();
         watcher
             .add_peer("peer-ccc".into(), peer_dir.path())
             .unwrap();

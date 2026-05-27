@@ -284,15 +284,9 @@ impl Visit for FfiVisitor<'_> {
         let abi_name = node_path_basename(&src_value);
         for spec in &decl.specifiers {
             let (local_name, span) = match spec {
-                ImportSpecifier::Default(d) => {
-                    (d.local.sym.as_ref().to_owned(), d.local.span)
-                }
-                ImportSpecifier::Namespace(n) => {
-                    (n.local.sym.as_ref().to_owned(), n.local.span)
-                }
-                ImportSpecifier::Named(n) => {
-                    (n.local.sym.as_ref().to_owned(), n.local.span)
-                }
+                ImportSpecifier::Default(d) => (d.local.sym.as_ref().to_owned(), d.local.span),
+                ImportSpecifier::Namespace(n) => (n.local.sym.as_ref().to_owned(), n.local.span),
+                ImportSpecifier::Named(n) => (n.local.sym.as_ref().to_owned(), n.local.span),
             };
             self.emit_napi_binding(&local_name, &abi_name, span);
         }
@@ -351,7 +345,7 @@ impl FfiVisitor<'_> {
 fn node_path_basename(path: &str) -> String {
     let stripped = path.strip_suffix(NODE_ADDON_EXT).unwrap_or(path);
     stripped
-        .rsplit(|c: char| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(stripped)
         .to_owned()
@@ -485,7 +479,10 @@ mod tests {
 
     fn parse(src: &str) -> (Module, Lrc<SourceMap>) {
         let cm: Lrc<SourceMap> = Default::default();
-        let fm = cm.new_source_file(Lrc::new(FileName::Custom("test.ts".into())), src.to_string());
+        let fm = cm.new_source_file(
+            Lrc::new(FileName::Custom("test.ts".into())),
+            src.to_string(),
+        );
         let lexer = Lexer::new(
             Syntax::Typescript(TsSyntax::default()),
             EsVersion::EsNext,

@@ -156,7 +156,10 @@ mod tests {
         )
         .unwrap();
         ensure_schema(&conn).unwrap();
-        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
         let leftover: i64 = conn
             .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
             .unwrap();
@@ -172,7 +175,10 @@ mod tests {
         )
         .unwrap();
         ensure_schema(&conn).unwrap();
-        assert_eq!(read_schema_version(&conn).unwrap(), SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            SUPPORTED_SCHEMA_VERSION
+        );
         // Real v0 has many tables — proxy for "reset happened".
         assert!(table_count(&conn) > 5);
     }

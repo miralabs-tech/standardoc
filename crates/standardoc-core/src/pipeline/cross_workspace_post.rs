@@ -134,11 +134,7 @@ pub(crate) fn resolve_with_suffix_chain(
 const fn language_supports_workspace_prefix(lang: Language) -> bool {
     matches!(
         lang,
-        Language::Rust
-            | Language::TypeScript
-            | Language::JavaScript
-            | Language::C
-            | Language::Lua
+        Language::Rust | Language::TypeScript | Language::JavaScript | Language::C | Language::Lua
     )
 }
 

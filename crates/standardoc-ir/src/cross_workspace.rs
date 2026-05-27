@@ -33,10 +33,7 @@ pub enum CrossWorkspaceLookup {
     /// A peer workspace exposes `origin_symbol` at the root scope of
     /// `origin_module`. `fqdn` is the synthesised
     /// `<origin_module>::<origin_symbol>` for downstream edge targets.
-    Hit {
-        workspace_id: String,
-        fqdn: String,
-    },
+    Hit { workspace_id: String, fqdn: String },
     /// A peer workspace owns `origin_module` but does not expose
     /// `origin_symbol` at the root scope. Caller emits a typed
     /// `UnresolvedBridge` so the gap is visible in the viz payload

@@ -54,10 +54,10 @@ pub(crate) fn extract_lua_exports(
 }
 
 fn visit(node: Node, src: &str, module_fqdn: &str, bindings: &mut Vec<RawFfiBinding>) {
-    if node.kind() == "call_expression" {
-        if let Some(binding) = try_match_lua_register(node, src, module_fqdn) {
-            bindings.push(binding);
-        }
+    if node.kind() == "call_expression"
+        && let Some(binding) = try_match_lua_register(node, src, module_fqdn)
+    {
+        bindings.push(binding);
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -129,9 +129,7 @@ mod tests {
         let wrapped = format!("void wrapper(void) {{ {body_src} }}");
         let tree = parser.parse(&wrapped, None).expect("parse");
         let root = tree.root_node();
-        let fn_def = root
-            .child(0)
-            .expect("function_definition");
+        let fn_def = root.child(0).expect("function_definition");
         assert_eq!(fn_def.kind(), "function_definition");
         let body = fn_def
             .child_by_field_name("body")
@@ -155,10 +153,8 @@ mod tests {
 
     #[test]
     fn multiple_lua_register_calls_emit_one_binding_each() {
-        let out = run(
-            "lua_register(L, \"add\", c_add); \
-             lua_register(L, \"sub\", c_sub);",
-        );
+        let out = run("lua_register(L, \"add\", c_add); \
+             lua_register(L, \"sub\", c_sub);");
         let names: Vec<&str> = out.iter().map(|b| b.abi_name.as_str()).collect();
         assert_eq!(names, vec!["add", "sub"]);
         let impls: Vec<&str> = out.iter().map(|b| b.symbol_fqdn.as_str()).collect();
@@ -167,10 +163,8 @@ mod tests {
 
     #[test]
     fn lua_register_nested_in_control_flow_is_captured() {
-        let out = run(
-            "if (cond) { lua_register(L, \"a\", a_fn); } \
-             else { lua_register(L, \"b\", b_fn); }",
-        );
+        let out = run("if (cond) { lua_register(L, \"a\", a_fn); } \
+             else { lua_register(L, \"b\", b_fn); }");
         assert_eq!(out.len(), 2);
     }
 

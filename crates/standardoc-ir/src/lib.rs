@@ -22,8 +22,8 @@ pub use bridge_kind::{BUILTIN_BRIDGE_KINDS, BridgeKind, BridgeKindError, CUSTOM_
 pub use builtins::{
     BridgeMapping, BuiltinEntry, BuiltinRegistry, BuiltinTier, SubstrateBridge, make_synthetic_fqdn,
 };
-pub use cross_workspace::{CrossWorkspaceLookup, CrossWorkspaceResolver};
 pub use call_site::{RawCallArg, RawCallSite};
+pub use cross_workspace::{CrossWorkspaceLookup, CrossWorkspaceResolver};
 pub use document::RawDocument;
 pub use edge::{RawEdge, ResolvedOrUnresolved};
 pub use extracted::ExtractedFile;

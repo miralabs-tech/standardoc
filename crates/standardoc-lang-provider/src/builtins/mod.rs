@@ -47,9 +47,8 @@ mod tests {
             Language::C,
         ] {
             assert!(
-                reg.by_language.get(&lang).map(Vec::len).unwrap_or(0) > 0,
-                "{:?} must have at least one registered builtin",
-                lang
+                reg.by_language.get(&lang).map_or(0, Vec::len) > 0,
+                "{lang:?} must have at least one registered builtin"
             );
         }
     }

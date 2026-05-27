@@ -190,7 +190,7 @@ struct TypeRefVisitor<'a> {
     scope_idx: u32,
 }
 
-impl<'a, 'ast> Visit<'ast> for TypeRefVisitor<'a> {
+impl<'ast> Visit<'ast> for TypeRefVisitor<'_> {
     fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
         let path_str = path_to_string(&node.path);
         emit_uses_type_path(

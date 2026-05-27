@@ -37,7 +37,7 @@ pub struct ExtractContext<'a> {
     pub cross_workspace: Option<&'a (dyn CrossWorkspaceResolver + 'a)>,
 }
 
-impl<'a> std::fmt::Debug for ExtractContext<'a> {
+impl std::fmt::Debug for ExtractContext<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExtractContext")
             .field("workspace_root", &self.workspace_root)

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 /// `@stdoc:match-begin` — emitted before the lowered scrutinee assignment of
 /// a `match ... with ... end` cluster.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MatchBeginAnnotation {
     pub v: u32,
     pub mid: String,
@@ -39,7 +39,7 @@ pub struct MatchArmAnnotation {
 /// `@stdoc:match-end` — emitted after the closing `end` of a match cluster.
 /// `result` is the synthesized local name aggregating the arm results, or
 /// `None` for the statement form (no result var).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MatchEndAnnotation {
     pub v: u32,
     pub mid: String,
@@ -51,7 +51,7 @@ pub struct MatchEndAnnotation {
 
 /// `@stdoc:safe-nav` — emitted alongside the desugared wrapper of a `?.` /
 /// `?:` operator.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SafeNavAnnotation {
     pub v: u32,
     pub source: String,
@@ -72,7 +72,7 @@ pub enum SafeNavOp {
 
 /// `@stdoc:compound-op` — emitted alongside the desugared plain assignment of
 /// a compound operator (`+=`, `-=`, `..=`, etc.).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompoundOpAnnotation {
     pub v: u32,
     pub op: String,
@@ -138,9 +138,9 @@ pub enum TypeNode {
     /// Primitives: `"number"`, `"string"`, `"boolean"`, `"nil"`, `"any"`.
     Primitive { name: String },
     /// `T?` shorthand for `T | nil`.
-    Optional { inner: Box<TypeNode> },
+    Optional { inner: Box<Self> },
     /// Heterogeneous union: `T | U`.
-    Union { items: Vec<TypeNode> },
+    Union { items: Vec<Self> },
     /// Literal-only union: `200 | 201 | 202`. Distinct from `Union` because
     /// the v2 narrowing checker treats this specially (fast-path
     /// exhaustiveness).
@@ -150,16 +150,16 @@ pub enum TypeNode {
     Record { fields: Vec<TypeField> },
     /// Map: `{ [K]: V }`.
     Map {
-        key: Box<TypeNode>,
-        value: Box<TypeNode>,
+        key: Box<Self>,
+        value: Box<Self>,
     },
     /// Array: `{T}`.
-    Array { inner: Box<TypeNode> },
+    Array { inner: Box<Self> },
     /// Function: `fun(P1, P2): R`. `generics` is reserved for inline generic
     /// declarations (`fun<T>(T): T`); v1 preproc may emit empty.
     Function {
-        params: Vec<TypeNode>,
-        returns: Box<TypeNode>,
+        params: Vec<Self>,
+        returns: Box<Self>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         generics: Vec<String>,
     },
@@ -167,7 +167,7 @@ pub enum TypeNode {
     Named {
         name: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        args: Vec<TypeNode>,
+        args: Vec<Self>,
     },
     /// `any` escape hatch.
     Any,
@@ -206,17 +206,17 @@ pub enum PatternNode {
     },
     /// Alternation: `100 | 101 | 102`. Or-pattern alternatives MUST bind the
     /// same set of names (producer enforces).
-    Or { items: Vec<PatternNode> },
+    Or { items: Vec<Self> },
     /// Table destructure: `{ code = c, msg = m }`.
     Table { fields: Vec<TableField> },
     /// Tuple destructure for multi-arg match: `(a, b)` in
     /// `match (x, y) with`. Lowered as multi-local destructure.
-    Tuple { items: Vec<PatternNode> },
+    Tuple { items: Vec<Self> },
     /// As-binding: `pat @ name`. Inner pattern matches AND the whole
     /// matched value gets bound to `name`.
     As {
         name: String,
-        inner: Box<PatternNode>,
+        inner: Box<Self>,
     },
     /// `_` wildcard. Matches anything, binds nothing.
     Wildcard,

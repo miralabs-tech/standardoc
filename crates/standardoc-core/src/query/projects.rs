@@ -19,7 +19,7 @@ pub fn upsert_project(
     root_path: &str,
     rel_path: &str,
 ) -> Result<u32, StorageError> {
-    let pool = handle.pool().map_err(StorageError::from)?;
+    let pool = handle.pool()?;
     let conn = pool.get().map_err(StorageError::from)?;
     projects::upsert_project(&conn, label, kind, root_path, rel_path)
 }
@@ -28,13 +28,13 @@ pub fn get_project(
     handle: &IndexHandle,
     project_id: u32,
 ) -> Result<Option<ProjectInfo>, StorageError> {
-    let pool = handle.pool().map_err(StorageError::from)?;
+    let pool = handle.pool()?;
     let conn = pool.get().map_err(StorageError::from)?;
     projects::get_project(&conn, project_id)
 }
 
 pub fn list_projects(handle: &IndexHandle) -> Result<Vec<ProjectInfo>, StorageError> {
-    let pool = handle.pool().map_err(StorageError::from)?;
+    let pool = handle.pool()?;
     let conn = pool.get().map_err(StorageError::from)?;
     projects::list_projects(&conn)
 }
@@ -44,13 +44,13 @@ pub fn project_for_file(
     handle: &IndexHandle,
     file_abs_path: &str,
 ) -> Result<Option<ProjectInfo>, StorageError> {
-    let pool = handle.pool().map_err(StorageError::from)?;
+    let pool = handle.pool()?;
     let conn = pool.get().map_err(StorageError::from)?;
     projects::find_for_file_path(&conn, file_abs_path)
 }
 
 pub fn delete_project(handle: &IndexHandle, project_id: u32) -> Result<(), StorageError> {
-    let pool = handle.pool().map_err(StorageError::from)?;
+    let pool = handle.pool()?;
     let conn = pool.get().map_err(StorageError::from)?;
     projects::delete_project(&conn, project_id)
 }

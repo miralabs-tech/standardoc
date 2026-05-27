@@ -11,7 +11,7 @@ pub enum AliasMutability {
 }
 
 impl AliasMutability {
-    pub fn as_slug(self) -> &'static str {
+    pub const fn as_slug(self) -> &'static str {
         match self {
             Self::Const => "via-alias",
             Self::Mutable => "via-alias-mutable",
@@ -71,7 +71,7 @@ pub enum Substrate {
 }
 
 impl Substrate {
-    pub fn native(language: Language) -> Self {
+    pub const fn native(language: Language) -> Self {
         Self::Native { language }
     }
 }
@@ -144,20 +144,20 @@ impl BuiltinTag {
     /// which provider produced the edge.
     pub fn slug(&self) -> String {
         match self {
-            BuiltinTag::Net => "net".into(),
-            BuiltinTag::Decode => "decode".into(),
-            BuiltinTag::Encode => "encode".into(),
-            BuiltinTag::Console => "console".into(),
-            BuiltinTag::FileSystem => "fs".into(),
-            BuiltinTag::Process => "process".into(),
-            BuiltinTag::Math => "math".into(),
-            BuiltinTag::Time => "time".into(),
-            BuiltinTag::Memory => "memory".into(),
-            BuiltinTag::Reflection => "reflection".into(),
-            BuiltinTag::Async => "async".into(),
-            BuiltinTag::Iter => "iter".into(),
-            BuiltinTag::Format => "format".into(),
-            BuiltinTag::Custom { tag } => tag.clone(),
+            Self::Net => "net".into(),
+            Self::Decode => "decode".into(),
+            Self::Encode => "encode".into(),
+            Self::Console => "console".into(),
+            Self::FileSystem => "fs".into(),
+            Self::Process => "process".into(),
+            Self::Math => "math".into(),
+            Self::Time => "time".into(),
+            Self::Memory => "memory".into(),
+            Self::Reflection => "reflection".into(),
+            Self::Async => "async".into(),
+            Self::Iter => "iter".into(),
+            Self::Format => "format".into(),
+            Self::Custom { tag } => tag.clone(),
         }
     }
 }
@@ -327,8 +327,7 @@ impl ModuleLookup {
 fn epoch_ms_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 #[cfg(test)]

@@ -51,7 +51,7 @@ use web_sys::HtmlCanvasElement;
 /// `unreachable executed` which is useless to debug.
 #[wasm_bindgen(start)]
 pub fn _wasm_start() {
-	console_error_panic_hook::set_once();
+    console_error_panic_hook::set_once();
 }
 
 /// Resize a host-owned canvas. The bitmap (backing store) is set to
@@ -63,9 +63,9 @@ pub fn _wasm_start() {
 /// `ResizeObserver` immediately observes — yielding a runaway loop
 /// where every resize tick makes the canvas a few pixels bigger.
 pub(crate) fn apply_canvas_size(canvas: &HtmlCanvasElement, width: u32, height: u32, dpr: f64) {
-	canvas.set_width((f64::from(width) * dpr) as u32);
-	canvas.set_height((f64::from(height) * dpr) as u32);
-	let style = canvas.style();
-	let _ = style.set_property("width", &format!("{width}px"));
-	let _ = style.set_property("height", &format!("{height}px"));
+    canvas.set_width((f64::from(width) * dpr) as u32);
+    canvas.set_height((f64::from(height) * dpr) as u32);
+    let style = canvas.style();
+    let _ = style.set_property("width", &format!("{width}px"));
+    let _ = style.set_property("height", &format!("{height}px"));
 }

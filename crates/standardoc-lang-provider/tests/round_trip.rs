@@ -55,8 +55,8 @@ fn helper() -> String {
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-            cross_workspace: None,
-        };
+        cross_workspace: None,
+    };
 
     let extracted = provider.extract(lib_rs, "src/lib.rs", &ctx).unwrap();
 
@@ -107,8 +107,8 @@ fn extracts_foo_rs_module_symbol_with_correct_fqdn() {
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-            cross_workspace: None,
-        };
+        cross_workspace: None,
+    };
     let extracted = provider.extract(foo_rs, "src/foo.rs", &ctx).unwrap();
 
     let module = &extracted.symbols[0];
@@ -136,8 +136,8 @@ fn unknown_extension_returns_unsupported_language() {
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-            cross_workspace: None,
-        };
+        cross_workspace: None,
+    };
     let err = provider
         .extract("# heading", "docs/notes.md", &ctx)
         .expect_err("md not dispatched to any provider");
@@ -167,8 +167,8 @@ fn concurrent_extracts_share_crate_name_cache_safely() {
         handles.push(thread::spawn(move || {
             let ctx = ExtractContext {
                 workspace_root: &root,
-            cross_workspace: None,
-        };
+                cross_workspace: None,
+            };
             let path = format!("src/m{i}.rs");
             let extracted = provider.extract("pub fn x() {}\n", &path, &ctx).unwrap();
             extracted.symbols[0].fqdn.clone()
@@ -192,8 +192,8 @@ fn content_hash_stable_across_provider_instances() {
     let p2 = RustProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-            cross_workspace: None,
-        };
+        cross_workspace: None,
+    };
 
     let r1 = p1.extract(body, "src/lib.rs", &ctx).unwrap();
     let r2 = p2.extract(body, "src/lib.rs", &ctx).unwrap();
@@ -237,8 +237,8 @@ export class UserService {
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-            cross_workspace: None,
-        };
+        cross_workspace: None,
+    };
     let extracted = provider.extract(src, "src/user/service.ts", &ctx).unwrap();
 
     let module = &extracted.symbols[0];
@@ -306,8 +306,8 @@ fn tsx_extracts_jsx_components_without_error() {
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-            cross_workspace: None,
-        };
+        cross_workspace: None,
+    };
     let extracted = provider.extract(src, "src/Hello.tsx", &ctx).unwrap();
 
     let hello = extracted
@@ -328,8 +328,8 @@ fn js_legacy_file_extracts_minimal_symbols() {
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-            cross_workspace: None,
-        };
+        cross_workspace: None,
+    };
     let extracted = provider.extract(src, "scripts/build.js", &ctx).unwrap();
 
     assert_eq!(extracted.language, standardoc_ir::Language::JavaScript);
@@ -365,8 +365,8 @@ fn concurrent_ts_extracts_share_package_name_cache_safely() {
         handles.push(thread::spawn(move || {
             let ctx = ExtractContext {
                 workspace_root: &root,
-            cross_workspace: None,
-        };
+                cross_workspace: None,
+            };
             let path = format!("src/m{i}.ts");
             let extracted = provider
                 .extract("export const x = 1;\n", &path, &ctx)
@@ -396,8 +396,8 @@ pub struct User { pub id: u32 }
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-            cross_workspace: None,
-        };
+        cross_workspace: None,
+    };
     let extracted = provider.extract(src, "src/lib.rs", &ctx).unwrap();
 
     assert_eq!(extracted.documents.len(), 2);
@@ -428,8 +428,8 @@ pub fn x() {}
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-            cross_workspace: None,
-        };
+        cross_workspace: None,
+    };
     let extracted = provider.extract(src, "src/foo.rs", &ctx).unwrap();
 
     let module_doc = extracted
@@ -462,8 +462,8 @@ export interface User { id: string }
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-            cross_workspace: None,
-        };
+        cross_workspace: None,
+    };
     let extracted = provider.extract(src, "src/index.ts", &ctx).unwrap();
 
     let make_user_doc = extracted
@@ -494,8 +494,8 @@ export const N = 1;
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-            cross_workspace: None,
-        };
+        cross_workspace: None,
+    };
     let extracted = provider.extract(src, "src/lib.ts", &ctx).unwrap();
 
     let module_doc = extracted
@@ -517,8 +517,8 @@ fn ts_content_hash_stable_across_provider_instances() {
     let p2 = TsProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
-            cross_workspace: None,
-        };
+        cross_workspace: None,
+    };
 
     let r1 = p1.extract(body, "src/index.ts", &ctx).unwrap();
     let r2 = p2.extract(body, "src/index.ts", &ctx).unwrap();

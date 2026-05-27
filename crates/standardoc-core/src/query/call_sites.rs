@@ -45,7 +45,7 @@ pub struct CallSiteFilters {
 
 impl CallSiteFilters {
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.from_fqdn.is_none() && self.callee_text.is_none() && self.callee_pattern.is_none()
     }
 }

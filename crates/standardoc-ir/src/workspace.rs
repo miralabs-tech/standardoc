@@ -78,15 +78,15 @@ impl WorkspaceKind {
             "nx" => Self::Nx,
             "turborepo" => Self::Turborepo,
             "mira" => Self::Mira,
-            other => other
-                .strip_prefix("custom:")
-                .map(|tag| Self::Custom(tag.to_string()))
-                .unwrap_or_else(|| Self::Custom(other.to_string())),
+            other => other.strip_prefix("custom:").map_or_else(
+                || Self::Custom(other.to_string()),
+                |tag| Self::Custom(tag.to_string()),
+            ),
         }
     }
 
     /// True for every named variant — `false` only for [`Self::Custom`].
-    pub fn is_builtin(&self) -> bool {
+    pub const fn is_builtin(&self) -> bool {
         !matches!(self, Self::Custom(_))
     }
 }
@@ -116,7 +116,7 @@ pub enum LinkDirection {
 }
 
 impl LinkDirection {
-    pub fn as_i64(self) -> i64 {
+    pub const fn as_i64(self) -> i64 {
         match self {
             Self::In => 0,
             Self::Out => 1,
@@ -124,7 +124,7 @@ impl LinkDirection {
         }
     }
 
-    pub fn from_i64(value: i64) -> Option<Self> {
+    pub const fn from_i64(value: i64) -> Option<Self> {
         match value {
             0 => Some(Self::In),
             1 => Some(Self::Out),
@@ -145,7 +145,7 @@ pub enum LinkedWorkspaceStatus {
 }
 
 impl LinkedWorkspaceStatus {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
             Self::Paused => "paused",
@@ -184,7 +184,7 @@ pub enum IndexingMode {
 }
 
 impl IndexingMode {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::BlobImport => "blob_import",
             Self::Extract => "extract",

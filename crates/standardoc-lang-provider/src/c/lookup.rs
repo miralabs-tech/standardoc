@@ -195,9 +195,7 @@ mod tests {
     }
 
     fn module_sym(module_fqdn: &str) -> RawSymbol {
-        let parent = module_fqdn
-            .rsplit_once("::")
-            .map(|(m, _)| m.to_string());
+        let parent = module_fqdn.rsplit_once("::").map(|(m, _)| m.to_string());
         RawSymbol {
             decl_kind: None,
             implements_trait: None,
@@ -418,13 +416,7 @@ mod tests {
     fn unknown_type_language_kind_falls_back_to_custom() {
         let symbols = vec![
             module_sym("pkg::a"),
-            sym(
-                "U",
-                "pkg::a::U",
-                Kind::Type,
-                "union",
-                Visibility::Public,
-            ),
+            sym("U", "pkg::a::U", Kind::Type, "union", Visibility::Public),
         ];
         let lookup = build_c_lookup(&symbols, &[], "pkg::a");
         let entry = &lookup.bindings.get("U").expect("binding")[0];

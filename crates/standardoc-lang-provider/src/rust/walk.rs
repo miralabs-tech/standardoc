@@ -258,18 +258,16 @@ impl WalkContext {
             return NameResolution::Drop;
         }
 
-        if segments.len() == 1 {
-            if let Some(res) = self.core.lookup.resolve_local(segments[0], scope_idx) {
-                if res.scope_idx != ModuleLookup::ROOT_SCOPE {
-                    if let (Some(alias_str), Some(m)) = (res.aliases_to.as_deref(), res.mutability)
-                    {
-                        return self.resolve_module_level(alias_str, current_module, Some(m));
-                    }
-                    return NameResolution::Local;
-                }
-                // ROOT_SCOPE — fall through to module-level resolution.
+        if segments.len() == 1
+            && let Some(res) = self.core.lookup.resolve_local(segments[0], scope_idx)
+            && res.scope_idx != ModuleLookup::ROOT_SCOPE
+        {
+            if let (Some(alias_str), Some(m)) = (res.aliases_to.as_deref(), res.mutability) {
+                return self.resolve_module_level(alias_str, current_module, Some(m));
             }
+            return NameResolution::Local;
         }
+        // ROOT_SCOPE — fall through to module-level resolution.
 
         self.resolve_module_level(path, current_module, None)
     }
@@ -422,7 +420,7 @@ fn flush_attribute_flags(ctx: &mut WalkContext) {
         sorted.sort();
         by_fqdn.insert(fqdn, sorted);
     }
-    for sym in ctx.core.symbols.iter_mut() {
+    for sym in &mut ctx.core.symbols {
         if let Some(extra) = by_fqdn.get(&sym.fqdn) {
             for f in extra {
                 if !sym.flags.contains(f) {
@@ -1653,7 +1651,10 @@ mod tests {
                     fqdn.starts_with("<builtin>::"),
                     "expected synthetic builtin fqdn, got {fqdn}"
                 );
-                assert!(fqdn.ends_with("::Error"), "expected ::Error tail, got {fqdn}");
+                assert!(
+                    fqdn.ends_with("::Error"),
+                    "expected ::Error tail, got {fqdn}"
+                );
             }
             other => panic!("expected resolved synthetic fqdn, got {other:?}"),
         }
@@ -1973,8 +1974,12 @@ mod tests {
         // must resolve through the file root where `struct IndexHandle`
         // lives. Without the ancestor walk, the path stays text-as-written.
         let mut ctx = WalkContext::new("src/handle.rs", "c", "c::handle".to_string());
-        ctx.core.defined_fqdns.insert("c::handle::IndexHandle".into());
-        ctx.core.defined_fqdns.insert("c::handle::IndexHandle::open".into());
+        ctx.core
+            .defined_fqdns
+            .insert("c::handle::IndexHandle".into());
+        ctx.core
+            .defined_fqdns
+            .insert("c::handle::IndexHandle::open".into());
         match ctx.resolve_path("IndexHandle::open", "c::handle::tests") {
             ResolvedOrUnresolved::Resolved { fqdn } => {
                 assert_eq!(fqdn, "c::handle::IndexHandle::open");
@@ -1991,7 +1996,9 @@ mod tests {
         // still a win — the pipeline edge-resolve step matches against
         // `symbols.fqdn` so the canonical can still tie to a real symbol_id.
         let mut ctx = WalkContext::new("src/handle.rs", "c", "c::handle".to_string());
-        ctx.core.defined_fqdns.insert("c::handle::IndexHandle".into());
+        ctx.core
+            .defined_fqdns
+            .insert("c::handle::IndexHandle".into());
         match ctx.resolve_path("IndexHandle::open", "c::handle::tests::nested::fn") {
             ResolvedOrUnresolved::Unresolved { name } => {
                 assert_eq!(name, "c::handle::IndexHandle::open");
@@ -2196,7 +2203,7 @@ mod tests {
                 _ => false,
             })
             .collect();
-        assert!(leaked.is_empty(), "struct-level T leaked: {leaked:?}",);
+        assert!(leaked.is_empty(), "struct-level T leaked: {leaked:?}");
     }
 
     #[test]
@@ -2640,7 +2647,8 @@ mod tests {
 
     #[test]
     fn implements_trait_and_receiver_type_set_on_trait_impl_method() {
-        let parsed = parse("trait Tr { fn run(&self); } struct F; impl Tr for F { fn run(&self) {} }");
+        let parsed =
+            parse("trait Tr { fn run(&self); } struct F; impl Tr for F { fn run(&self) {} }");
         let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
         let m = find_sym(&symbols, "c::F::run");
         assert_eq!(

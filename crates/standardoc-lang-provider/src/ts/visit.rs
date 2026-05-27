@@ -616,11 +616,11 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
     /// to wrap a sub-tree walk. We use a `set/restore` pair rather than
     /// a closure because `Visit`-trait calls take `&mut self` and need
     /// to compose with `node.visit_with(self)` cleanly.
-    fn set_type_context(&mut self, ctx: &'static str) -> Option<&'static str> {
-        std::mem::replace(&mut self.type_emission_context, Some(ctx))
+    const fn set_type_context(&mut self, ctx: &'static str) -> Option<&'static str> {
+        self.type_emission_context.replace(ctx)
     }
 
-    fn restore_type_context(&mut self, prev: Option<&'static str>) {
+    const fn restore_type_context(&mut self, prev: Option<&'static str>) {
         self.type_emission_context = prev;
     }
 
@@ -2261,7 +2261,7 @@ mod tests {
 
     // --- IR-4-c: call_sites emission (observational, separate from edges) ---
 
-    fn run_with_call_sites(source: &str) -> Vec<standardoc_ir::RawCallSite> {
+    fn run_with_call_sites(source: &str) -> Vec<RawCallSite> {
         let (cm, module, comments) = parse_ts(source);
         let (_, _, _, css) = super::super::walk::walk(
             &module,

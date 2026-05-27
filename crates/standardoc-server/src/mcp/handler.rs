@@ -200,10 +200,7 @@ impl StandardocMcp {
 
         match result {
             Some(ctx) => {
-                let response = GetContextResponse {
-                    ctx,
-                    routing_hint,
-                };
+                let response = GetContextResponse { ctx, routing_hint };
                 Ok(success_json(&response))
             }
             None => Ok(CallToolResult::success(vec![Content::text(
@@ -233,8 +230,7 @@ impl StandardocMcp {
         let handle = self.handle.clone();
         let raw_for_call = raw_fqdn.clone();
         let result = tokio::task::spawn_blocking(move || {
-            if let Some(ctx) =
-                query::context_for_symbol_with_neighbors(&handle, &raw_for_call, 1)?
+            if let Some(ctx) = query::context_for_symbol_with_neighbors(&handle, &raw_for_call, 1)?
             {
                 return Ok::<_, standardoc_core::StorageError>(Some(ctx));
             }
@@ -750,7 +746,7 @@ impl StandardocMcp {
             collapse_blank_lines: false,
         };
         let raw_for_call = raw_fqdn.clone();
-        let opts_clone = opts.clone();
+        let opts_clone = opts;
         let result = tokio::task::spawn_blocking(move || {
             if let Some(slice) = query::body_for_fqdn(&handle, &raw_for_call, &opts_clone)? {
                 return Ok::<_, standardoc_core::StorageError>(Some(slice));
@@ -808,7 +804,7 @@ impl StandardocMcp {
             collapse_blank_lines: true,
         };
         let raw_for_call = raw_fqdn.clone();
-        let opts_clone = opts.clone();
+        let opts_clone = opts;
         let result = tokio::task::spawn_blocking(move || {
             if let Some(slice) = query::body_for_fqdn(&handle, &raw_for_call, &opts_clone)? {
                 return Ok::<_, standardoc_core::StorageError>(Some(slice));
@@ -2356,10 +2352,7 @@ mod tests {
 
     #[test]
     fn relative_fqdn_passes_through_when_prefix_does_not_match() {
-        assert_eq!(
-            relative_fqdn("other::lib::x", "foo::bar"),
-            "other::lib::x",
-        );
+        assert_eq!(relative_fqdn("other::lib::x", "foo::bar"), "other::lib::x",);
     }
 
     #[test]
@@ -2493,7 +2486,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&text)
             .unwrap_or_else(|e| panic!("envelope must be valid JSON, got `{text}`: {e}"));
         assert!(
-            json.get("items").is_some_and(|v| v.is_array()),
+            json.get("items").is_some_and(serde_json::Value::is_array),
             "envelope must carry an `items` array, got `{text}`"
         );
         assert!(
@@ -3769,13 +3762,13 @@ mod tests {
         // call_text patterns the test queries below expect.
         std::fs::write(
             src_dir.join("lib.rs"),
-            r#"
+            r"
                 fn tauri_invoke() {}
                 fn foo() {}
                 fn caller_a() { tauri_invoke(); foo(); }
                 fn caller_b() { tauri_invoke(); }
                 fn caller_c() { M.api.create(); }
-            "#,
+            ",
         )
         .unwrap();
     }
@@ -3910,7 +3903,7 @@ mod tests {
         cold_start_workspace(&mcp, dir.path());
         let result = mcp
             .find_call_sites(Parameters(FindCallSitesParams {
-                from_fqdn: Some("".into()),
+                from_fqdn: Some(String::new()),
                 callee_text: Some("   ".into()),
                 callee_pattern: None,
                 limit: None,

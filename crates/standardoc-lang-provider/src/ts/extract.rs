@@ -147,8 +147,12 @@ fn extract_file_inner(
     }
 
     let mut symbols = vec![module_symbol];
-    let (ffi_symbols, ffi_bindings) =
-        super::ffi_tagger::extract_ffi_bindings(&module, &module_fqdn, workspace_relative_path, &cm);
+    let (ffi_symbols, ffi_bindings) = super::ffi_tagger::extract_ffi_bindings(
+        &module,
+        &module_fqdn,
+        workspace_relative_path,
+        &cm,
+    );
     symbols.extend(ffi_symbols);
     let (item_symbols, edges, item_documents, call_sites, lookup) = walk::walk_with_lookup(
         &module,

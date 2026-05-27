@@ -135,7 +135,7 @@ fn build_forward_client() -> reqwest::Client {
         .connect_timeout(Duration::from_millis(500))
         // Generous overall request timeout — daemon cold-start +
         // expensive tool calls can take several seconds.
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_mins(1))
         .build()
         .expect("reqwest client builds with vanilla config")
 }
@@ -165,13 +165,13 @@ fn spawn_endpoint_watcher(
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| ProxyError::Watcher("endpoint path has no parent dir".into()))?;
-    if !parent.exists() {
-        if let Err(e) = std::fs::create_dir_all(&parent) {
-            return Err(ProxyError::Watcher(format!(
-                "create {}: {e}",
-                parent.display()
-            )));
-        }
+    if !parent.exists()
+        && let Err(e) = std::fs::create_dir_all(&parent)
+    {
+        return Err(ProxyError::Watcher(format!(
+            "create {}: {e}",
+            parent.display()
+        )));
     }
     let (tx, mut rx) = mpsc::unbounded_channel::<DebounceEventResult>();
     let mut debouncer = new_debouncer(Duration::from_millis(200), None, move |res| {
@@ -182,7 +182,7 @@ fn spawn_endpoint_watcher(
         .watch(&parent, RecursiveMode::NonRecursive)
         .map_err(|e| ProxyError::Watcher(format!("watch {}: {e}", parent.display())))?;
 
-    let endpoint_clone = endpoint_path.clone();
+    let endpoint_clone = endpoint_path;
     tokio::spawn(async move {
         // Keep the debouncer alive for the lifetime of this task.
         let _keepalive = debouncer;
@@ -202,20 +202,17 @@ fn spawn_endpoint_watcher(
             if !interesting {
                 continue;
             }
-            match read_endpoint_file(&endpoint_clone) {
-                Some(new_url) => {
-                    let mut guard = upstream.write().await;
-                    if *guard != new_url {
-                        eprintln!("standardoc-mcp-proxy: upstream → {new_url}");
-                        *guard = new_url;
-                    }
+            if let Some(new_url) = read_endpoint_file(&endpoint_clone) {
+                let mut guard = upstream.write().await;
+                if *guard != new_url {
+                    eprintln!("standardoc-mcp-proxy: upstream → {new_url}");
+                    *guard = new_url;
                 }
-                None => {
-                    eprintln!(
-                        "standardoc-mcp-proxy: endpoint file gone — will pause forwarding until it reappears"
-                    );
-                    upstream.write().await.clear();
-                }
+            } else {
+                eprintln!(
+                    "standardoc-mcp-proxy: endpoint file gone — will pause forwarding until it reappears"
+                );
+                upstream.write().await.clear();
             }
         }
     });
@@ -326,8 +323,7 @@ async fn health(State(state): State<Arc<ProxyState>>) -> Response {
     let uptime_ms = SystemTime::now()
         .duration_since(state.started_at)
         .ok()
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis());
     let total = state.total_requests.load(Ordering::Relaxed);
     let ok = state.successful_requests.load(Ordering::Relaxed);
     let upstream_503 = state.upstream_503_responses.load(Ordering::Relaxed);
@@ -367,8 +363,7 @@ fn build_target_url(upstream: &str, incoming: &Uri) -> String {
         .unwrap_or(upstream);
     let path_and_query = incoming
         .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
+        .map_or("/", http::uri::PathAndQuery::as_str);
     format!("{prefix}{path_and_query}")
 }
 
@@ -386,7 +381,7 @@ enum ForwardErrorKind {
 }
 
 impl ForwardError {
-    fn is_retryable(&self) -> bool {
+    const fn is_retryable(&self) -> bool {
         matches!(self.kind, ForwardErrorKind::Connect)
     }
 
@@ -509,7 +504,7 @@ mod tests {
 
     #[test]
     fn read_endpoint_file_returns_none_when_missing() {
-        let missing = std::path::Path::new("/nope/definitely/not/there.endpoint");
+        let missing = Path::new("/nope/definitely/not/there.endpoint");
         assert!(read_endpoint_file(missing).is_none());
     }
 

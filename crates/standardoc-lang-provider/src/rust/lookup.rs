@@ -54,7 +54,7 @@ struct LookupBuilder<'a> {
     scope_stack: Vec<u32>,
 }
 
-impl<'a> LookupBuilder<'a> {
+impl LookupBuilder<'_> {
     fn current_scope(&self) -> u32 {
         *self.scope_stack.last().unwrap_or(&ModuleLookup::ROOT_SCOPE)
     }
@@ -262,8 +262,7 @@ impl<'a> LookupBuilder<'a> {
         // appending `::new` (in `cross_workspace_post`'s suffix-chain
         // walk) then composes the real method FQDN.
         let canonical = original.as_deref().unwrap_or(&local_name);
-        let absolute_module =
-            compose_absolute_module_path(&self.lookup.module_fqdn, &module_path);
+        let absolute_module = compose_absolute_module_path(&self.lookup.module_fqdn, &module_path);
         let resolved_fqdn = Some(if absolute_module.is_empty() {
             canonical.to_string()
         } else {
@@ -313,7 +312,7 @@ impl<'a> LookupBuilder<'a> {
         for param in &generics.params {
             match param {
                 GenericParam::Type(t) => {
-                    self.add_binding(t.ident.to_string(), BindingSource::TypeParam, vec![])
+                    self.add_binding(t.ident.to_string(), BindingSource::TypeParam, vec![]);
                 }
                 GenericParam::Const(c) => self.add_binding(
                     c.ident.to_string(),
@@ -346,21 +345,21 @@ impl<'a> LookupBuilder<'a> {
                 self.add_binding(ident.ident.to_string(), source, extra_attrs);
             }
             Pat::Tuple(t) => {
-                let mut attrs = extra_attrs.clone();
+                let mut attrs = extra_attrs;
                 attrs.push("unhandled-destructuring".into());
                 for elem in &t.elems {
                     self.bind_pat(elem, source.clone(), attrs.clone());
                 }
             }
             Pat::TupleStruct(ts) => {
-                let mut attrs = extra_attrs.clone();
+                let mut attrs = extra_attrs;
                 attrs.push("unhandled-destructuring".into());
                 for elem in &ts.elems {
                     self.bind_pat(elem, source.clone(), attrs.clone());
                 }
             }
             Pat::Struct(s) => {
-                let mut attrs = extra_attrs.clone();
+                let mut attrs = extra_attrs;
                 attrs.push("unhandled-destructuring".into());
                 for field in &s.fields {
                     self.bind_pat(&field.pat, source.clone(), attrs.clone());
@@ -472,24 +471,23 @@ impl<'ast> Visit<'ast> for LookupBuilder<'_> {
         // (optionally wrapped in Pat::Type for type-annotated bindings).
         // Non-Path RHS (call, literal, closure, …) falls through to the
         // plain `bind_pat` path — no alias, `x` becomes an opaque Local.
-        if let Some(init) = node.init.as_ref() {
-            if let Some(alias_str) = resolve_alias_rhs(&init.expr) {
-                if let Some(pat_ident) = unwrap_pat_ident(&node.pat) {
-                    let mutability = if pat_ident.mutability.is_some() {
-                        AliasMutability::Mutable
-                    } else {
-                        AliasMutability::Const
-                    };
-                    self.add_aliased_binding(
-                        pat_ident.ident.to_string(),
-                        LocalDeclKind::Let,
-                        mutability,
-                        alias_str,
-                    );
-                    syn::visit::visit_local(self, node);
-                    return;
-                }
-            }
+        if let Some(init) = node.init.as_ref()
+            && let Some(alias_str) = resolve_alias_rhs(&init.expr)
+            && let Some(pat_ident) = unwrap_pat_ident(&node.pat)
+        {
+            let mutability = if pat_ident.mutability.is_some() {
+                AliasMutability::Mutable
+            } else {
+                AliasMutability::Const
+            };
+            self.add_aliased_binding(
+                pat_ident.ident.to_string(),
+                LocalDeclKind::Let,
+                mutability,
+                alias_str,
+            );
+            syn::visit::visit_local(self, node);
+            return;
         }
         self.bind_pat(
             &node.pat,
@@ -566,10 +564,7 @@ pub(crate) fn compose_absolute_module_path(current_module: &str, relative: &str)
     if relative.is_empty() {
         return current_module.to_string();
     }
-    let crate_name = current_module
-        .split("::")
-        .next()
-        .unwrap_or(current_module);
+    let crate_name = current_module.split("::").next().unwrap_or(current_module);
     if let Some(rest) = relative.strip_prefix("crate::") {
         return format!("{crate_name}::{rest}");
     }
@@ -585,15 +580,13 @@ pub(crate) fn compose_absolute_module_path(current_module: &str, relative: &str)
     if let Some(rest) = relative.strip_prefix("super::") {
         let parent = current_module
             .rsplit_once("::")
-            .map(|(p, _)| p)
-            .unwrap_or(current_module);
+            .map_or(current_module, |(p, _)| p);
         return format!("{parent}::{rest}");
     }
     if relative == "super" {
         return current_module
             .rsplit_once("::")
-            .map(|(p, _)| p.to_string())
-            .unwrap_or_else(|| current_module.to_string());
+            .map_or_else(|| current_module.to_string(), |(p, _)| p.to_string());
     }
     format!("{current_module}::{relative}")
 }

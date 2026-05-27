@@ -128,7 +128,11 @@ pub fn symbol_by_fqdn(handle: &IndexHandle, fqdn: &str) -> Result<Option<RawSymb
     // Implicit primary-workspace scoping. Peer-workspace rows with the
     // same fqdn (`UNIQUE(workspace_id, fqdn)`) require the explicit
     // `symbol_by_fqdn_in_workspace` API.
-    symbol_by_fqdn_in_workspace(handle, fqdn, crate::storage::module_lookup::PRIMARY_WORKSPACE_ID)
+    symbol_by_fqdn_in_workspace(
+        handle,
+        fqdn,
+        crate::storage::module_lookup::PRIMARY_WORKSPACE_ID,
+    )
 }
 
 /// Stage 3b-7-b Layer 2: scope-aware variant of [`symbol_by_fqdn`].
@@ -1186,9 +1190,7 @@ fn strip_inline_comments_in_body(body: &str) -> String {
             St::RawString(hashes) => {
                 if b == b'"' {
                     let end = i + 1 + hashes;
-                    if end <= bytes.len()
-                        && bytes[i + 1..end].iter().all(|&c| c == b'#')
-                    {
+                    if end <= bytes.len() && bytes[i + 1..end].iter().all(|&c| c == b'#') {
                         state = St::Code;
                         i = end;
                         continue;

@@ -148,7 +148,7 @@ pub fn make_synthetic_fqdn(language: Language, canonical_name: &str) -> String {
     format!("<builtin>::{}::{}", language_slug(language), canonical_name)
 }
 
-fn language_slug(lang: Language) -> &'static str {
+const fn language_slug(lang: Language) -> &'static str {
     match lang {
         Language::Rust => "rust",
         Language::TypeScript => "ts",
@@ -187,8 +187,8 @@ mod tests {
         // user-defined symbol.
         let fqdn = make_synthetic_fqdn(Language::TypeScript, "Promise");
         assert!(fqdn.starts_with("<builtin>::"));
-        assert!(fqdn.contains("<"));
-        assert!(fqdn.contains(">"));
+        assert!(fqdn.contains('<'));
+        assert!(fqdn.contains('>'));
     }
 
     #[test]

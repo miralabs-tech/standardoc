@@ -39,14 +39,14 @@ pub enum LinkWorkspaceError {
 
 impl From<StorageError> for LinkWorkspaceError {
     fn from(e: StorageError) -> Self {
-        LinkWorkspaceError::Storage(e)
+        Self::Storage(e)
     }
 }
 
 impl std::fmt::Display for LinkWorkspaceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LinkWorkspaceError::PathNotFound { input, suggestions } => {
+            Self::PathNotFound { input, suggestions } => {
                 if suggestions.is_empty() {
                     write!(f, "path not found: {input}")
                 } else {
@@ -57,7 +57,7 @@ impl std::fmt::Display for LinkWorkspaceError {
                     )
                 }
             }
-            LinkWorkspaceError::Storage(e) => write!(f, "{e}"),
+            Self::Storage(e) => write!(f, "{e}"),
         }
     }
 }
@@ -98,7 +98,7 @@ pub fn path_did_you_mean(input: &Path) -> Vec<String> {
     };
     let mut scored: Vec<(String, f64)> = entries
         .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .map(|name| {
             let score = jaro_winkler(&needle, &name.to_lowercase());
@@ -144,7 +144,7 @@ pub fn link_workspace(
         suggestions: path_did_you_mean(raw),
     })?;
     let canon_str = canonical.to_string_lossy();
-    let pool = handle.pool().map_err(StorageError::from)?;
+    let pool = handle.pool()?;
     let conn = pool.get().map_err(StorageError::from)?;
     Ok(workspace_catalog::register_linked_workspace(
         &conn,
@@ -173,7 +173,7 @@ pub fn refresh_peer(
     workspace_id: &str,
 ) -> Result<PeerExtractStats, RefreshPeerError> {
     let peer = {
-        let pool = handle.pool().map_err(StorageError::from)?;
+        let pool = handle.pool()?;
         let conn = pool.get().map_err(StorageError::from)?;
         workspace_catalog::get_linked_workspace(&conn, workspace_id)?
             .ok_or_else(|| RefreshPeerError::NotFound(workspace_id.to_string()))?
@@ -230,7 +230,7 @@ pub fn set_link_direction(
     workspace_id: &str,
     new_direction: LinkDirection,
 ) -> Result<SetLinkDirectionOutcome, SetLinkDirectionError> {
-    let pool = handle.pool().map_err(StorageError::from)?;
+    let pool = handle.pool()?;
     let conn = pool.get().map_err(StorageError::from)?;
     let peer = workspace_catalog::get_linked_workspace(&conn, workspace_id)?
         .ok_or_else(|| SetLinkDirectionError::NotFound(workspace_id.to_string()))?;

@@ -59,9 +59,8 @@ fn apply_resolve_unresolved(handle: &IndexHandle) -> Result<ResolveReport, Stora
     // borrow across the resolver calls (which would re-borrow the
     // same pool).
     let unresolved: Vec<(i64, String)> = {
-        let mut stmt = conn.prepare(
-            "SELECT id, to_unresolved FROM edges WHERE to_unresolved IS NOT NULL",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, to_unresolved FROM edges WHERE to_unresolved IS NOT NULL")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -89,13 +88,12 @@ fn apply_resolve_unresolved(handle: &IndexHandle) -> Result<ResolveReport, Stora
             still_unresolved += 1;
             continue;
         };
-        let symbol_id = match fqdn_cache.get(&fqdn) {
-            Some(cached) => *cached,
-            None => {
-                let fetched = lookup_symbol_id(&conn, &fqdn)?;
-                fqdn_cache.insert(fqdn.clone(), fetched);
-                fetched
-            }
+        let symbol_id = if let Some(cached) = fqdn_cache.get(&fqdn) {
+            *cached
+        } else {
+            let fetched = lookup_symbol_id(&conn, &fqdn)?;
+            fqdn_cache.insert(fqdn.clone(), fetched);
+            fetched
         };
         match symbol_id {
             Some(sid) => id_to_symbol_id.push((edge_id, sid)),

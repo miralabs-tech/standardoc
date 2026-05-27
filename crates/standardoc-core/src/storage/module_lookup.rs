@@ -21,7 +21,7 @@ pub(crate) const PRIMARY_WORKSPACE_ID: &str = "primary";
 /// Canonical lowercase language slug stored in `module_lookups.language`.
 /// Matches the IR's `Language` `serde(rename_all = "lowercase")` shape so
 /// the DB string is always deserialisable back via serde.
-fn language_storage_slug(lang: Language) -> &'static str {
+const fn language_storage_slug(lang: Language) -> &'static str {
     match lang {
         Language::Rust => "rust",
         Language::TypeScript => "typescript",

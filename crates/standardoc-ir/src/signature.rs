@@ -140,7 +140,7 @@ pub struct SignatureMeta {
 }
 
 impl SignatureMeta {
-    fn is_default(&self) -> bool {
+    const fn is_default(&self) -> bool {
         self.exposed_via.is_empty()
     }
 }
@@ -271,8 +271,7 @@ mod tests {
 
     #[test]
     fn compact_rust_tokens_strips_spaces_around_angle_brackets_and_double_colon() {
-        let raw =
-            "& Arc < std :: sync :: Mutex < Option < standardoc_core :: WatcherHandle > > >";
+        let raw = "& Arc < std :: sync :: Mutex < Option < standardoc_core :: WatcherHandle > > >";
         assert_eq!(
             compact_rust_tokens(raw),
             "&Arc<std::sync::Mutex<Option<standardoc_core::WatcherHandle>>>"
@@ -281,10 +280,7 @@ mod tests {
 
     #[test]
     fn compact_rust_tokens_keeps_space_after_dyn_impl_mut() {
-        assert_eq!(
-            compact_rust_tokens("Arc < dyn Logger >"),
-            "Arc<dyn Logger>"
-        );
+        assert_eq!(compact_rust_tokens("Arc < dyn Logger >"), "Arc<dyn Logger>");
         assert_eq!(
             compact_rust_tokens("impl Trait + Send"),
             "impl Trait + Send"

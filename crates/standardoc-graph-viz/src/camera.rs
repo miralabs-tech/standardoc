@@ -199,7 +199,8 @@ impl Camera3D {
         let viewport_h = (viewport_h as f32).max(1.0);
         let world_per_pixel = self.distance * (self.fov_y * 0.5).tan() * 2.0 / viewport_h;
         let cp = self.pitch.cos();
-        let forward = Vec3::new(cp * self.yaw.sin(), self.pitch.sin(), cp * self.yaw.cos()).normalize_or_zero();
+        let forward = Vec3::new(cp * self.yaw.sin(), self.pitch.sin(), cp * self.yaw.cos())
+            .normalize_or_zero();
         let right = forward.cross(Vec3::NEG_Y).normalize_or_zero();
         let up = right.cross(forward).normalize_or_zero();
         // Grab semantics: target shifts OPPOSITE to the drag so the

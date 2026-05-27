@@ -9,8 +9,8 @@ use full_moon::tokenizer::{Position, TokenReference, TokenType};
 use standardoc_core::ExtractError;
 use standardoc_ir::{
     Blake3Hash, BuiltinTier, DeclKind, EdgeKind, ExtractedFile, Kind, Language, LanguageKind,
-    Modifiers, Param, RawCallArg, RawCallSite, RawEdge, RawSymbol, ResolvedOrUnresolved,
-    Signature, SignatureMeta, Site, SourceOrigin, SymbolLocation, TypeRef, Visibility,
+    Modifiers, Param, RawCallArg, RawCallSite, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature,
+    SignatureMeta, Site, SourceOrigin, SymbolLocation, TypeRef, Visibility,
 };
 
 use super::extract_doc;
@@ -102,7 +102,8 @@ pub(crate) fn extract_file(
     // strengthening can resolve peer-Lua imports. Mirrors the
     // c::lookup contract — root-scope bindings only, no scope-aware
     // visitor needed for the resolver to do its job.
-    let module_lookup = super::lookup::build_lua_lookup(&ctx.core.symbols, &ctx.core.edges, &module_fqdn);
+    let module_lookup =
+        super::lookup::build_lua_lookup(&ctx.core.symbols, &ctx.core.edges, &module_fqdn);
 
     Ok(ExtractedFile {
         file: workspace_relative_path.into(),
@@ -481,10 +482,7 @@ fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &Functi
     // `Unresolved`.
     let registry = global_builtin_registry();
     let entry_opt = registry.lookup(&call_name, Language::Lua).or_else(|| {
-        let leftmost = call_name
-            .split(|c: char| c == '.' || c == ':')
-            .next()
-            .unwrap_or("");
+        let leftmost = call_name.split(['.', ':']).next().unwrap_or("");
         if leftmost.is_empty() || leftmost == call_name {
             return None;
         }
@@ -752,7 +750,7 @@ fn args_from_function_call(fc: &FunctionCall) -> Vec<RawCallArg> {
         };
         match args {
             FunctionArgs::Parentheses { arguments, .. } => {
-                for expr in arguments.iter() {
+                for expr in arguments {
                     out.push(arg_from_expression(expr));
                 }
             }

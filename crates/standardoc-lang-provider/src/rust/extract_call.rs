@@ -200,11 +200,10 @@ impl CallVisitor<'_> {
         let substituted = self.substitute_self(path);
         let resolved_path = substituted.as_deref().unwrap_or(path);
         let (target, alias_mut, via_builtin) =
-            match self.ctx.resolve_name(
-                resolved_path,
-                self.current_scope_idx,
-                &self.current_module,
-            ) {
+            match self
+                .ctx
+                .resolve_name(resolved_path, self.current_scope_idx, &self.current_module)
+            {
                 NameResolution::Drop | NameResolution::Local => return,
                 NameResolution::Attribute(tag) => {
                     self.ctx.register_attribute_flag(&self.enclosing_fqdn, &tag);
@@ -251,11 +250,10 @@ impl CallVisitor<'_> {
         let substituted = self.substitute_self(path);
         let resolved_path = substituted.as_deref().unwrap_or(path);
         let (target, alias_mut, via_builtin) =
-            match self.ctx.resolve_name(
-                resolved_path,
-                self.current_scope_idx,
-                &self.current_module,
-            ) {
+            match self
+                .ctx
+                .resolve_name(resolved_path, self.current_scope_idx, &self.current_module)
+            {
                 NameResolution::Drop | NameResolution::Local => return,
                 NameResolution::Attribute(tag) => {
                     self.ctx.register_attribute_flag(&self.enclosing_fqdn, &tag);

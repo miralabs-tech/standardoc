@@ -71,8 +71,11 @@ pub(crate) fn extract_file(
     // (cross_workspace_post) has a peer-queryable bindings table. C
     // doesn't need scope-aware resolution like Rust/TS — root-scope
     // bindings are enough for the resolver.
-    let module_lookup =
-        super::lookup::build_c_lookup(&ctx.core.symbols, &ctx.core.edges, &ctx.core.file_module_fqdn);
+    let module_lookup = super::lookup::build_c_lookup(
+        &ctx.core.symbols,
+        &ctx.core.edges,
+        &ctx.core.file_module_fqdn,
+    );
 
     Ok(ExtractedFile {
         file: workspace_relative_path.into(),

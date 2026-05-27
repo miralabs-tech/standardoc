@@ -184,7 +184,7 @@ pub(crate) fn commit_outcomes(
     for outcome in outcomes {
         match outcome {
             Outcome::Upsert { extracted, .. } => {
-                apply_upsert_file(&tx, extracted, next_revision, PRIMARY_WORKSPACE_ID)?
+                apply_upsert_file(&tx, extracted, next_revision, PRIMARY_WORKSPACE_ID)?;
             }
             Outcome::ParseError {
                 rel,

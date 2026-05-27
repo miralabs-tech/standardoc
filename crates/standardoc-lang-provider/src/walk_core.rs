@@ -39,16 +39,13 @@ pub(crate) fn compute_module_path(
         package_relative
     };
     let stem = strip_extension(after_src, conventions.extensions);
-    let segments: Vec<&str> = stem
-        .split(|c: char| c == '/' || c == '\\')
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segments: Vec<&str> = stem.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
     if segments.is_empty() {
         return String::new();
     }
     let drop_last = segments
         .last()
-        .is_some_and(|s| conventions.root_aliases.iter().any(|a| *a == *s));
+        .is_some_and(|s| conventions.root_aliases.contains(s));
     let useful: &[&str] = if drop_last {
         &segments[..segments.len() - 1]
     } else {

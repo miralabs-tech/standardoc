@@ -525,8 +525,8 @@ function caller() {
             let provider = WorkspaceProvider::new();
             let ctx = ExtractContext {
                 workspace_root: root,
-            cross_workspace: None,
-        };
+                cross_workspace: None,
+            };
             let extracted = provider.extract(src, "src/App.vue", &ctx).unwrap();
             assert_eq!(extracted.language, standardoc_ir::Language::Vue);
             // Free-fn call_site preserved.
@@ -578,8 +578,8 @@ function handler() {
             let provider = WorkspaceProvider::new();
             let ctx = ExtractContext {
                 workspace_root: root,
-            cross_workspace: None,
-        };
+                cross_workspace: None,
+            };
             let extracted = provider.extract(src, "src/Counter.svelte", &ctx).unwrap();
             assert_eq!(extracted.language, standardoc_ir::Language::Svelte);
             let fetch_cs = extracted
@@ -615,8 +615,8 @@ onMount(() => { console.log("ready"); });
             let provider = WorkspaceProvider::new();
             let ctx = ExtractContext {
                 workspace_root: root,
-            cross_workspace: None,
-        };
+                cross_workspace: None,
+            };
             let extracted = provider.extract(src, "src/Mounted.vue", &ctx).unwrap();
             assert!(
                 extracted

@@ -138,25 +138,25 @@ impl<'a> TsWalkContext<'a> {
         // 'vscode'`). Route through the alias's target and replace remaining
         // `.` with `::` so the resolver sees `vscode::Disposable` instead of
         // the bogus module-local fallback `<current_module>::vscode.Disposable`.
-        if let Some((head, rest)) = name.split_once('.') {
-            if let Some(import) = self.import_aliases.get(head) {
-                let suffix = rest.replace('.', "::");
-                let combined = match &import.target {
-                    ResolvedOrUnresolved::Resolved { fqdn } => ResolvedOrUnresolved::Resolved {
-                        fqdn: format!("{fqdn}::{suffix}"),
-                    },
-                    ResolvedOrUnresolved::Unresolved { name } => ResolvedOrUnresolved::Unresolved {
+        if let Some((head, rest)) = name.split_once('.')
+            && let Some(import) = self.import_aliases.get(head)
+        {
+            let suffix = rest.replace('.', "::");
+            let combined = match &import.target {
+                ResolvedOrUnresolved::Resolved { fqdn } => ResolvedOrUnresolved::Resolved {
+                    fqdn: format!("{fqdn}::{suffix}"),
+                },
+                ResolvedOrUnresolved::Unresolved { name } => ResolvedOrUnresolved::Unresolved {
+                    name: format!("{name}::{suffix}"),
+                },
+                ResolvedOrUnresolved::UnresolvedBridge { bridge, name } => {
+                    ResolvedOrUnresolved::UnresolvedBridge {
+                        bridge: bridge.clone(),
                         name: format!("{name}::{suffix}"),
-                    },
-                    ResolvedOrUnresolved::UnresolvedBridge { bridge, name } => {
-                        ResolvedOrUnresolved::UnresolvedBridge {
-                            bridge: bridge.clone(),
-                            name: format!("{name}::{suffix}"),
-                        }
                     }
-                };
-                return ResolutionOutcome::Emit(CallTarget::plain(combined));
-            }
+                }
+            };
+            return ResolutionOutcome::Emit(CallTarget::plain(combined));
         }
         let local = format!("{current_module_fqdn}::{name}");
         if self.core.defined_fqdns.contains(&local) {
@@ -263,7 +263,7 @@ impl<'a> TsWalkContext<'a> {
                 sorted.sort();
                 by_fqdn.insert(fqdn, sorted);
             }
-            for sym in self.core.symbols.iter_mut() {
+            for sym in &mut self.core.symbols {
                 if let Some(extra) = by_fqdn.get(&sym.fqdn) {
                     for f in extra {
                         if !sym.flags.contains(f) {
@@ -323,7 +323,7 @@ pub(crate) struct CallTarget {
 impl CallTarget {
     /// Wrap a non-builtin resolution (import alias, defined local, or
     /// canonical-unresolved). `via_builtin` is `None`.
-    pub(crate) fn plain(to: ResolvedOrUnresolved) -> Self {
+    pub(crate) const fn plain(to: ResolvedOrUnresolved) -> Self {
         Self {
             to,
             via_builtin: None,
@@ -2064,9 +2064,8 @@ mod tests {
         // `import * as vscode from 'vscode'` must produce an IMPLEMENTS edge
         // targeting `vscode::Disposable`, not the bogus module-local
         // fallback `src::vscode.Disposable`.
-        let (_, edges, _, _) = run(
-            "import * as vscode from 'vscode';\nclass Foo implements vscode.Disposable {}",
-        );
+        let (_, edges, _, _) =
+            run("import * as vscode from 'vscode';\nclass Foo implements vscode.Disposable {}");
         let imp: Vec<_> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Implements)
@@ -2544,30 +2543,29 @@ mod tests {
 
     #[test]
     fn decl_kind_class_with_constructor_method_field() {
-        let (symbols, _, _, _) = run(
-            "export class C { \
+        let (symbols, _, _, _) = run("export class C { \
                x: number = 1; \
                constructor() {} \
                run() {} \
-             }",
-        );
+             }");
         assert_eq!(decl_kind_of(&symbols, "src::C"), Some(DeclKind::Class));
         assert_eq!(
             decl_kind_of(&symbols, "src::C::constructor"),
             Some(DeclKind::Constructor),
         );
-        assert_eq!(decl_kind_of(&symbols, "src::C::run"), Some(DeclKind::Method));
+        assert_eq!(
+            decl_kind_of(&symbols, "src::C::run"),
+            Some(DeclKind::Method)
+        );
         assert_eq!(decl_kind_of(&symbols, "src::C::x"), Some(DeclKind::Field));
     }
 
     #[test]
     fn decl_kind_class_getter_and_setter() {
-        let (symbols, _, _, _) = run(
-            "export class C { \
+        let (symbols, _, _, _) = run("export class C { \
                get value() { return 1; } \
                set value(v: number) {} \
-             }",
-        );
+             }");
         // Getter + setter share the FQDN; just check at least one Getter/Setter exists.
         let getters = symbols
             .iter()
@@ -2583,17 +2581,18 @@ mod tests {
 
     #[test]
     fn decl_kind_interface_with_members() {
-        let (symbols, _, _, _) = run(
-            "export interface I { \
+        let (symbols, _, _, _) = run("export interface I { \
                x: number; \
                run(): void; \
                get y(): number; \
                set y(v: number); \
-             }",
-        );
+             }");
         assert_eq!(decl_kind_of(&symbols, "src::I"), Some(DeclKind::Interface));
         assert_eq!(decl_kind_of(&symbols, "src::I::x"), Some(DeclKind::Field));
-        assert_eq!(decl_kind_of(&symbols, "src::I::run"), Some(DeclKind::Method));
+        assert_eq!(
+            decl_kind_of(&symbols, "src::I::run"),
+            Some(DeclKind::Method)
+        );
         let getters = symbols
             .iter()
             .filter(|s| s.decl_kind == Some(DeclKind::Getter))
@@ -2623,10 +2622,7 @@ mod tests {
     #[test]
     fn decl_kind_type_alias() {
         let (symbols, _, _, _) = run("export type Id = string;");
-        assert_eq!(
-            decl_kind_of(&symbols, "src::Id"),
-            Some(DeclKind::TypeAlias),
-        );
+        assert_eq!(decl_kind_of(&symbols, "src::Id"), Some(DeclKind::TypeAlias),);
     }
 
     #[test]
@@ -2676,7 +2672,10 @@ mod tests {
         // Guards against a future drift where the method path picks
         // up the helper and starts tagging class methods named main.
         let (symbols, _, _, _) = run("class Runner { main() {} }");
-        let m = symbols.iter().find(|s| s.fqdn == "src::Runner::main").unwrap();
+        let m = symbols
+            .iter()
+            .find(|s| s.fqdn == "src::Runner::main")
+            .unwrap();
         assert_eq!(m.entry_point, None);
     }
 }

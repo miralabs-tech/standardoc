@@ -135,7 +135,7 @@ fn import_record_from_edge(edge: &RawEdge, module_fqdn: &str) -> Option<ImportRe
             // Lua require paths can be `foo.bar.baz` (dot-separated)
             // or pre-normalised `foo::bar::baz` — handle both.
             let local = name
-                .rsplit(|c: char| c == '.' || c == ':' || c == '/')
+                .rsplit(['.', ':', '/'])
                 .next()
                 .filter(|s| !s.is_empty())?
                 .to_owned();
@@ -187,9 +187,7 @@ mod tests {
     }
 
     fn module_sym(module_fqdn: &str) -> RawSymbol {
-        let parent = module_fqdn
-            .rsplit_once("::")
-            .map(|(m, _)| m.to_string());
+        let parent = module_fqdn.rsplit_once("::").map(|(m, _)| m.to_string());
         RawSymbol {
             decl_kind: None,
             implements_trait: None,
@@ -294,12 +292,7 @@ mod tests {
     fn unknown_value_language_kind_falls_back_to_custom() {
         let symbols = vec![
             module_sym("pkg::a"),
-            sym(
-                "TAG",
-                "pkg::a::TAG",
-                Kind::Value,
-                "module-table-export",
-            ),
+            sym("TAG", "pkg::a::TAG", Kind::Value, "module-table-export"),
         ];
         let lookup = build_lua_lookup(&symbols, &[], "pkg::a");
         let entry = &lookup.bindings.get("TAG").expect("binding")[0];

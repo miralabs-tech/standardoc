@@ -58,7 +58,7 @@ impl FfiAbi {
     /// Short slug used in edge attributes (`ffi:c`, `ffi:lua`, …) and
     /// stored verbatim in the `symbol_ffi_binding.abi` column.
     #[must_use]
-    pub fn as_slug(&self) -> &str {
+    pub const fn as_slug(&self) -> &str {
         match self {
             Self::C => "c",
             Self::System => "system",

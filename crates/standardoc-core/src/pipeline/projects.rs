@@ -156,12 +156,14 @@ pub(crate) fn default_registry() -> DetectorRegistry {
 /// CMakeLists.txt` repo stays primarily Rust.
 pub(crate) struct CMakeSubdirDetector;
 
-const CMAKE_CONVENTIONAL_SUBDIRS: &[&str] = &["src", "source", "sources", "include", "lib", "tests", "test"];
+const CMAKE_CONVENTIONAL_SUBDIRS: &[&str] = &[
+    "src", "source", "sources", "include", "lib", "tests", "test",
+];
 const CPP_EXTS: &[&str] = &["cpp", "cc", "cxx", "C", "c++", "hpp", "hxx", "h++"];
 const C_EXTS: &[&str] = &["c", "h"];
 
 impl Detector for CMakeSubdirDetector {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "cmake-subdir"
     }
 
@@ -187,7 +189,10 @@ impl Detector for CMakeSubdirDetector {
             }
             if subtree_has_any_ext(&p, C_EXTS) {
                 has_c = true;
-                if !signals.iter().any(|s| s.starts_with(&format!("{sub}/<*.c"))) {
+                if !signals
+                    .iter()
+                    .any(|s| s.starts_with(&format!("{sub}/<*.c")))
+                {
                     signals.push(format!("{sub}/<*.c|h>"));
                 }
             }
@@ -224,7 +229,7 @@ fn subtree_has_any_ext(dir: &Path, exts: &[&str]) -> bool {
                 continue;
             }
             if let Some(ext) = path.extension().and_then(|e| e.to_str())
-                && exts.iter().any(|w| *w == ext)
+                && exts.contains(&ext)
             {
                 return true;
             }
@@ -560,20 +565,18 @@ mod tests {
     /// `standarbuild-detect` 0.3 docstrings (post-API rename: `kind()`
     /// became `name()`, `DetectMatch` became `DetectorHit::Project`).
     struct ShadersDetector;
-    impl standarbuild_detect::Detector for ShadersDetector {
-        fn name(&self) -> &str {
+    impl Detector for ShadersDetector {
+        fn name(&self) -> &'static str {
             "wgsl"
         }
         fn priority(&self) -> i32 {
             120 // beats every built-in (max is Rust=100)
         }
-        fn detect(&self, dir: &Path) -> Option<standarbuild_detect::DetectorHit> {
-            dir.join("shaders")
-                .is_dir()
-                .then(|| standarbuild_detect::DetectorHit::Project {
-                    kind: KindId::custom("wgsl"),
-                    signals: vec!["shaders/".into()],
-                })
+        fn detect(&self, dir: &Path) -> Option<DetectorHit> {
+            dir.join("shaders").is_dir().then(|| DetectorHit::Project {
+                kind: KindId::custom("wgsl"),
+                signals: vec!["shaders/".into()],
+            })
         }
     }
 
@@ -640,7 +643,11 @@ mod tests {
         let root = dir.path().join("engine");
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("CMakeLists.txt"), "project(engine CXX)").unwrap();
-        fs::write(root.join("src").join("renderer.cpp"), "int main(){return 0;}").unwrap();
+        fs::write(
+            root.join("src").join("renderer.cpp"),
+            "int main(){return 0;}",
+        )
+        .unwrap();
         fs::write(root.join("src").join("util.c"), "int x;").unwrap();
 
         let conn = fresh_db();

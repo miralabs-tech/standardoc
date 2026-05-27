@@ -185,7 +185,12 @@ pub fn fetch_graph(handle: &IndexHandle, req: GraphRequest) -> Result<GraphRespo
             req.max_nodes,
             req.include_external,
         ),
-        None => compose_bounded(handle, req.kinds.as_ref(), req.max_nodes, req.include_external),
+        None => compose_bounded(
+            handle,
+            req.kinds.as_ref(),
+            req.max_nodes,
+            req.include_external,
+        ),
     }
 }
 
@@ -344,11 +349,12 @@ fn kind_allowed(allow: Option<&HashSet<EdgeKind>>, kind: &EdgeKind) -> bool {
     allow.is_none_or(|set| set.contains(kind))
 }
 
-fn resolved_fqdn(target: &ResolvedOrUnresolved) -> Option<&str> {
+const fn resolved_fqdn(target: &ResolvedOrUnresolved) -> Option<&str> {
     match target {
         ResolvedOrUnresolved::Resolved { fqdn } => Some(fqdn.as_str()),
-        ResolvedOrUnresolved::Unresolved { .. }
-        | ResolvedOrUnresolved::UnresolvedBridge { .. } => None,
+        ResolvedOrUnresolved::Unresolved { .. } | ResolvedOrUnresolved::UnresolvedBridge { .. } => {
+            None
+        }
     }
 }
 
@@ -774,11 +780,9 @@ mod tests {
         // Insert an unresolved edge directly (no `to_symbol_id`).
         let conn = h.pool().unwrap().get().unwrap();
         let a_id: i64 = conn
-            .query_row(
-                "SELECT id FROM symbols WHERE fqdn = 'crate::a'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM symbols WHERE fqdn = 'crate::a'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         conn.execute(
             "INSERT INTO edges \

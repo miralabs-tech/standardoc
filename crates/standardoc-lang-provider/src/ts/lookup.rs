@@ -42,7 +42,7 @@ struct LookupBuilder<'a> {
     scope_stack: Vec<u32>,
 }
 
-impl<'a> LookupBuilder<'a> {
+impl LookupBuilder<'_> {
     fn current_scope(&self) -> u32 {
         *self.scope_stack.last().unwrap_or(&ModuleLookup::ROOT_SCOPE)
     }
@@ -224,22 +224,21 @@ impl<'a> LookupBuilder<'a> {
     fn bind_var_declarator(&mut self, declarator: &VarDeclarator, decl_kind: &LocalDeclKind) {
         // Alias detection: `const x = FOO` or `const x = obj.prop` captures
         // the leftmost base identifier as the aliased target.
-        if let Some(init) = declarator.init.as_deref() {
-            if let Some(base) = resolve_alias_rhs(init) {
-                if let Pat::Ident(ident) = &declarator.name {
-                    let mutability = match decl_kind {
-                        LocalDeclKind::Const => AliasMutability::Const,
-                        _ => AliasMutability::Mutable,
-                    };
-                    self.add_aliased_binding(
-                        ident.id.sym.to_string(),
-                        decl_kind.clone(),
-                        mutability,
-                        base,
-                    );
-                    return;
-                }
-            }
+        if let Some(init) = declarator.init.as_deref()
+            && let Some(base) = resolve_alias_rhs(init)
+            && let Pat::Ident(ident) = &declarator.name
+        {
+            let mutability = match decl_kind {
+                LocalDeclKind::Const => AliasMutability::Const,
+                _ => AliasMutability::Mutable,
+            };
+            self.add_aliased_binding(
+                ident.id.sym.to_string(),
+                decl_kind.clone(),
+                mutability,
+                base,
+            );
+            return;
         }
         self.bind_pat(
             &declarator.name,
@@ -256,14 +255,14 @@ impl<'a> LookupBuilder<'a> {
                 self.add_binding(ident.id.sym.to_string(), source, extra_attrs);
             }
             Pat::Array(array) => {
-                let mut attrs = extra_attrs.clone();
+                let mut attrs = extra_attrs;
                 attrs.push("unhandled-destructuring".into());
                 for elem in array.elems.iter().flatten() {
                     self.bind_pat(elem, source.clone(), attrs.clone());
                 }
             }
             Pat::Object(obj) => {
-                let mut attrs = extra_attrs.clone();
+                let mut attrs = extra_attrs;
                 attrs.push("unhandled-destructuring".into());
                 for prop in &obj.props {
                     match prop {
@@ -355,12 +354,10 @@ impl<'a> LookupBuilder<'a> {
                 };
                 let local_alias = named_spec
                     .exported
-                    .as_ref()
-                    .map(|m| match m {
+                    .as_ref().map_or_else(|| local_export_name.clone(), |m| match m {
                         ModuleExportName::Ident(i) => i.sym.to_string(),
                         ModuleExportName::Str(s) => s.value.to_string_lossy().into_owned(),
-                    })
-                    .unwrap_or_else(|| local_export_name.clone());
+                    });
                 let is_type_only = decl_type_only || named_spec.is_type_only;
                 self.add_binding(
                     local_alias.clone(),
@@ -388,7 +385,7 @@ impl<'a> LookupBuilder<'a> {
     }
 }
 
-impl<'a> Visit for LookupBuilder<'a> {
+impl Visit for LookupBuilder<'_> {
     fn visit_function(&mut self, node: &Function) {
         self.push_scope(ScopeKind::Function, node.span.lo, node.span.hi);
         bind_type_params_from_function(self, node);
@@ -566,7 +563,7 @@ fn bind_type_params_from_function(builder: &mut LookupBuilder<'_>, node: &Functi
     }
 }
 
-fn var_decl_kind_to_local(kind: VarDeclKind) -> LocalDeclKind {
+const fn var_decl_kind_to_local(kind: VarDeclKind) -> LocalDeclKind {
     match kind {
         VarDeclKind::Var => LocalDeclKind::Var,
         VarDeclKind::Let => LocalDeclKind::Let,

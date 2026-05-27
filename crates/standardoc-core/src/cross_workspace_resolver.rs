@@ -106,9 +106,7 @@ impl<'a> DbCrossWorkspaceResolver<'a> {
         // pass can stamp the typed `UnresolvedBridge` when a known
         // peer owns the module but doesn't export the symbol.
         match peer_workspace_for_module(&conn, origin_module) {
-            Ok(Some(workspace_id)) => {
-                CrossWorkspaceLookup::KnownPeerMissingSymbol { workspace_id }
-            }
+            Ok(Some(workspace_id)) => CrossWorkspaceLookup::KnownPeerMissingSymbol { workspace_id },
             _ => CrossWorkspaceLookup::Unknown,
         }
     }
@@ -138,10 +136,10 @@ fn normalize_crate_prefix_to_hyphen(module: &str) -> String {
 impl CrossWorkspaceResolver for DbCrossWorkspaceResolver<'_> {
     fn resolve(&self, origin_module: &str, origin_symbol: &str) -> CrossWorkspaceLookup {
         let key = (origin_module.to_string(), origin_symbol.to_string());
-        if let Ok(guard) = self.cache.lock() {
-            if let Some(cached) = guard.get(&key) {
-                return cached.clone();
-            }
+        if let Ok(guard) = self.cache.lock()
+            && let Some(cached) = guard.get(&key)
+        {
+            return cached.clone();
         }
         let computed = self.compute(origin_module, origin_symbol);
         if let Ok(mut guard) = self.cache.lock() {
@@ -155,15 +153,10 @@ impl CrossWorkspaceResolver for DbCrossWorkspaceResolver<'_> {
 mod tests {
     use super::*;
     use crate::storage::module_lookup::put_module_lookup;
-    use standardoc_ir::{
-        BindingSource, IdentResolution, Language, LocalDeclKind, ModuleLookup,
-    };
+    use standardoc_ir::{BindingSource, IdentResolution, Language, LocalDeclKind, ModuleLookup};
     use tempfile::tempdir;
 
-    fn lookup_with_top_level_symbol(
-        module_fqdn: &str,
-        symbol: &str,
-    ) -> ModuleLookup {
+    fn lookup_with_top_level_symbol(module_fqdn: &str, symbol: &str) -> ModuleLookup {
         let mut m = ModuleLookup::new(module_fqdn.into(), Language::Rust);
         m.push_binding(IdentResolution {
             name: symbol.into(),
@@ -309,7 +302,7 @@ mod tests {
         let conn = pool.get().unwrap();
         let lookup = lookup_with_top_level_symbol("standardoc-ir", "FfiAbi");
         // Note: put_module_lookup with no explicit workspace defaults to PRIMARY.
-        crate::storage::module_lookup::put_module_lookup(&conn, "primary", &lookup).unwrap();
+        put_module_lookup(&conn, "primary", &lookup).unwrap();
         drop(conn);
 
         let resolver = DbCrossWorkspaceResolver::new(&handle);
@@ -333,7 +326,7 @@ mod tests {
         let pool = handle.pool().unwrap();
         let conn = pool.get().unwrap();
         let lookup = lookup_with_top_level_symbol("standardoc-ir", "FfiAbi");
-        crate::storage::module_lookup::put_module_lookup(&conn, "primary", &lookup).unwrap();
+        put_module_lookup(&conn, "primary", &lookup).unwrap();
         drop(conn);
 
         let resolver = DbCrossWorkspaceResolver::new(&handle);

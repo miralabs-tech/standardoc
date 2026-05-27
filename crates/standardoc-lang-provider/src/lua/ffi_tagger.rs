@@ -239,7 +239,7 @@ impl FfiVisitor<'_> {
             return None;
         };
         let prefix_text = name.token().to_string();
-        if !self.aliases.iter().any(|a| *a == prefix_text) {
+        if !self.aliases.contains(&prefix_text) {
             return None;
         }
         let mut suffixes = fc.suffixes();
@@ -267,8 +267,8 @@ impl FfiVisitor<'_> {
 
     fn fc_location(&self, fc: &FunctionCall) -> SymbolLocation {
         let start = call_start_position(fc);
-        let line = start.map(|(l, _c)| l).unwrap_or(1);
-        let col = start.map(|(_l, c)| c).unwrap_or(0);
+        let line = start.map_or(1, |(l, _c)| l);
+        let col = start.map_or(0, |(_l, c)| c);
         SymbolLocation {
             file: self.file_path.to_owned(),
             start_line: line,

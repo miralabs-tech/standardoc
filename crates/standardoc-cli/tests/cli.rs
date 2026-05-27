@@ -290,4 +290,3 @@ fn purge_excluded_requires_yes_in_non_interactive_shell() {
         .failure()
         .stderr(predicate::str::contains("non-interactive"));
 }
-

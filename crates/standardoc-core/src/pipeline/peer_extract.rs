@@ -75,7 +75,7 @@ pub enum PeerExtractStatus {
 pub(crate) fn peer_path(workspace_id: &str, rel: &str) -> String {
     if workspace_id == PRIMARY_WORKSPACE_ID {
         rel.to_string()
-    } else {    
+    } else {
         format!("ws:{workspace_id}:{rel}")
     }
 }
@@ -306,9 +306,7 @@ mod tests {
                 language: standardoc_ir::Language::Rust,
                 source_origin: SourceOrigin::Workspace,
                 is_external: false,
-                content_hash: Blake3Hash::new(
-                    *blake3::hash(content.as_bytes()).as_bytes(),
-                ),
+                content_hash: Blake3Hash::new(*blake3::hash(content.as_bytes()).as_bytes()),
                 byte_size: content.len() as u64,
                 symbols: vec![symbol],
                 edges: vec![],
@@ -517,8 +515,8 @@ mod tests {
                     "src/lib.rs",
                     &ExtractContext {
                         workspace_root: primary_dir.path(),
-            cross_workspace: None,
-        },
+                        cross_workspace: None,
+                    },
                 )
                 .unwrap();
             let conn = handle.pool().unwrap().get().unwrap();

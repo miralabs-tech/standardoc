@@ -119,7 +119,7 @@ fn synthetic_module(lang: Language) -> String {
     format!("{}::{}", BUILTIN_FILE_PREFIX, lang_slug(lang))
 }
 
-fn lang_slug(lang: Language) -> &'static str {
+const fn lang_slug(lang: Language) -> &'static str {
     match lang {
         Language::Rust => "rust",
         Language::TypeScript => "ts",

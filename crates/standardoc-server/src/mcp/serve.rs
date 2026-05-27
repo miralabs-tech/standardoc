@@ -246,8 +246,7 @@ async fn maybe_reuse_previous_port(
 fn wants_ephemeral_port(bind_addr: &str) -> bool {
     bind_addr
         .parse::<std::net::SocketAddr>()
-        .map(|sa| sa.port() == 0)
-        .unwrap_or(false)
+        .is_ok_and(|sa| sa.port() == 0)
 }
 
 /// Parse the `port` out of `http://<host>:<port>/mcp` recorded in the
