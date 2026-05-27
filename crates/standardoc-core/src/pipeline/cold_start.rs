@@ -62,6 +62,12 @@ pub fn run(
     let edge_builtins = provider.edge_builtins();
     seed_builtins::seed_quietly(handle, &edge_builtins);
 
+    // Bug E-3 Phase 2: seed builtin method entries (e.g. Vec::push,
+    // Option::unwrap) so the receiver-type resolver can land its
+    // `<Type>::<method>` lookups on a real synthetic symbol id.
+    let edge_builtin_methods = provider.edge_builtin_methods();
+    seed_builtins::seed_methods_quietly(handle, &edge_builtin_methods);
+
     let candidates = collect_candidates(&workspace_root, filters)?;
     let total = u64_of(candidates.len());
 

@@ -130,6 +130,18 @@ impl LanguageProvider for WorkspaceProvider {
         );
         out
     }
+
+    /// Bug E-3 Phase 2: flatten every registered builtin method across
+    /// languages for the cold-start seeder. All methods are seeded
+    /// unconditionally (no tier) — the resolver decides when to consult
+    /// them via the `receiver_type` match.
+    fn edge_builtin_methods(&self) -> Vec<standardoc_ir::BuiltinMethodEntry> {
+        let reg = global_builtin_registry();
+        reg.methods_by_language
+            .values()
+            .flat_map(|methods| methods.iter().cloned())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

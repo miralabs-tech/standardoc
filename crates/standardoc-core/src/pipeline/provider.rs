@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use standardoc_ir::{BuiltinEntry, CrossWorkspaceResolver, ExtractedFile};
+use standardoc_ir::{BuiltinEntry, BuiltinMethodEntry, CrossWorkspaceResolver, ExtractedFile};
 
 pub trait LanguageProvider: Send + Sync {
     fn extract(
@@ -18,6 +18,15 @@ pub trait LanguageProvider: Send + Sync {
     /// entries. Drop / Attribute tiers do NOT seed: they never produce
     /// edges in the first place, so a DB row would be unreachable.
     fn edge_builtins(&self) -> Vec<BuiltinEntry> {
+        Vec::new()
+    }
+
+    /// Bug E-3 Phase 2: builtin method entries to seed alongside
+    /// `edge_builtins`. Always seeded (no tier filter) — the
+    /// receiver-type resolver only consults them when the extractor's
+    /// inferred `receiver_type` matches one of the registered parent
+    /// types, so unseeded methods can't produce ghost edges.
+    fn edge_builtin_methods(&self) -> Vec<BuiltinMethodEntry> {
         Vec::new()
     }
 }

@@ -77,6 +77,45 @@ pub struct SubstrateBridge {
     pub mappings: Vec<BridgeMapping>,
 }
 
+/// Bug E-3 Phase 2: a built-in *method* of a previously-registered
+/// builtin type (e.g. `Vec::push`, `Option::unwrap`, `Iterator::map`).
+/// Distinct from `BuiltinEntry` because methods always have a receiver
+/// type and never participate in the Drop/Attribute/Edge tier system —
+/// they're always seeded as synthetic symbols so the receiver-type
+/// resolver can land its `<Type>::<method>` lookups on a real
+/// `symbols.id`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BuiltinMethodEntry {
+    /// Nominal name of the receiver type, e.g. `"Vec"`, `"Option"`.
+    /// Matched against `edges.receiver_type` populated by the extractor.
+    pub parent_type: String,
+    /// Method ident as written at the call site, e.g. `"push"`.
+    pub method: String,
+    pub language: Language,
+    /// Synthetic symbol fqdn, e.g. `"<builtin>::rust::Vec::push"`.
+    pub synthetic_fqdn: String,
+}
+
+impl BuiltinMethodEntry {
+    #[must_use]
+    pub fn new(
+        parent_type: impl Into<String>,
+        method: impl Into<String>,
+        language: Language,
+    ) -> Self {
+        let parent_type = parent_type.into();
+        let method = method.into();
+        let qualified = format!("{parent_type}::{method}");
+        let synthetic_fqdn = make_synthetic_fqdn(language, &qualified);
+        Self {
+            parent_type,
+            method,
+            language,
+            synthetic_fqdn,
+        }
+    }
+}
+
 /// Aggregate of all known builtins, user extensions, and substrate
 /// bridges. Single source of truth for resolving identifiers that don't
 /// match any local binding or import in a `ModuleLookup`.
@@ -87,6 +126,11 @@ pub struct BuiltinRegistry {
     pub user_extensions: Vec<BuiltinEntry>,
     #[serde(default)]
     pub bridges: Vec<SubstrateBridge>,
+    /// Bug E-3 Phase 2: per-language method tables keyed by
+    /// `(parent_type, method)`. Always seeded as synthetic symbols at
+    /// cold-start so the resolver's `<Type>::<method>` lookup hits.
+    #[serde(default)]
+    pub methods_by_language: HashMap<Language, Vec<BuiltinMethodEntry>>,
 }
 
 impl BuiltinRegistry {
@@ -107,6 +151,35 @@ impl BuiltinRegistry {
 
     pub fn register_bridge(&mut self, bridge: SubstrateBridge) {
         self.bridges.push(bridge);
+    }
+
+    /// Bug E-3 Phase 2: register a builtin method (e.g. `Vec::push`).
+    /// Goes into the per-language method table — kept separate from
+    /// `by_language` because methods are looked up by
+    /// `(parent_type, method)` rather than the bare `name` shared with
+    /// type/macro builtins.
+    pub fn register_method(&mut self, entry: BuiltinMethodEntry) {
+        self.methods_by_language
+            .entry(entry.language)
+            .or_default()
+            .push(entry);
+    }
+
+    /// Bug E-3 Phase 2: resolve `<parent_type>.<method>(...)` against the
+    /// per-language method table. Returns the matching entry (whose
+    /// `synthetic_fqdn` is the seeded symbol FQDN) or `None`.
+    #[must_use]
+    pub fn lookup_method(
+        &self,
+        parent_type: &str,
+        method: &str,
+        language: Language,
+    ) -> Option<&BuiltinMethodEntry> {
+        self.methods_by_language.get(&language).and_then(|methods| {
+            methods
+                .iter()
+                .find(|m| m.parent_type == parent_type && m.method == method)
+        })
     }
 
     /// Find a builtin matching `name` in `language`. Checks the native

@@ -179,16 +179,16 @@ fn lookup_symbol_id(conn: &Connection, fqdn: &str) -> Result<Option<i64>, Storag
     Ok(row)
 }
 
-/// Bug E-3 Phase 1: resolve `<receiver_type>::<method>` against the
-/// `symbols` table. Two-tier lookup:
-///   * Exact FQDN match — covers `self.method` calls where
-///     `receiver_type` is the full impl-block FQDN (e.g. `crate::Foo`)
-///     and the candidate `crate::Foo::method` is a workspace symbol.
-///   * `LIKE '%::<receiver_type>::<method>'` — covers nominal short
-///     receivers (e.g. `Vec` inferred from `let v = Vec::new()`).
-///     Requires a unique suffix match to avoid arbitrarily picking
-///     between two same-named methods in different modules; ambiguous
-///     hits fall through to the legacy suffix-chain.
+/// Bug E-3 Phase 1+2: resolve `<receiver_type>::<method>` against the
+/// `symbols` table. Three-tier lookup (workspace wins over builtin):
+///   1. Exact FQDN match — covers `self.method` calls where
+///      `receiver_type` is the full impl-block FQDN (e.g. `crate::Foo`).
+///   2. Workspace suffix `LIKE '%::<receiver_type>::<method>'` excluding
+///      the `<builtin>::%` namespace — covers nominal short receivers
+///      that match a workspace symbol uniquely.
+///   3. Builtin direct lookup `<builtin>::rust::<receiver_type>::<method>`
+///      (Phase 2) — covers stdlib method calls (Vec::push, Option::unwrap,
+///      ...) seeded by `seed_methods_into` at cold-start.
 fn try_resolve_via_receiver_type(
     conn: &Connection,
     receiver_type: &str,
@@ -198,16 +198,28 @@ fn try_resolve_via_receiver_type(
     if let Some(sid) = lookup_symbol_id(conn, &candidate)? {
         return Ok(Some(sid));
     }
-    if receiver_type.contains("::") {
-        return Ok(None);
+    // FQDN-form receiver: no nominal-suffix fallback, but still try
+    // the builtin path below in case a workspace shadowed something.
+    if !receiver_type.contains("::") {
+        let pattern = format!("%::{candidate}");
+        let mut stmt = conn.prepare(
+            "SELECT id FROM symbols \
+             WHERE fqdn LIKE ?1 AND fqdn NOT LIKE '<builtin>::%' LIMIT 2",
+        )?;
+        let mut rows: Vec<i64> = stmt
+            .query_map([&pattern], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if rows.len() == 1 {
+            return Ok(rows.pop());
+        }
     }
-    let pattern = format!("%::{candidate}");
-    let mut stmt = conn.prepare("SELECT id FROM symbols WHERE fqdn LIKE ?1 LIMIT 2")?;
-    let mut rows: Vec<i64> = stmt
-        .query_map([&pattern], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    if rows.len() == 1 {
-        return Ok(rows.pop());
+    // Phase 2: stdlib method fallback. Receiver_type is purely nominal
+    // here (`Vec`, `Option`, `HashMap`, ...). Only Rust populates
+    // receiver_type today, so the `rust` slug is hardcoded; extend when
+    // other extractors gain Phase 1.
+    let builtin = format!("<builtin>::rust::{candidate}");
+    if let Some(sid) = lookup_symbol_id(conn, &builtin)? {
+        return Ok(Some(sid));
     }
     Ok(None)
 }
@@ -297,6 +309,61 @@ mod tests {
         seed_file(&conn, "src/lib.rs");
         let _ = insert_sym(&conn, "crate::other::Bar::run");
         let got = try_resolve_via_receiver_type(&conn, "Vec", "push").unwrap();
+        assert_eq!(got, None);
+    }
+
+    // --- Bug E-3 P2.4: builtin method fallback tests ---
+
+    #[test]
+    fn receiver_type_builtin_method_fallback_hits_when_seeded() {
+        // Phase 2 seeds <builtin>::rust::Vec::push as a synthetic symbol.
+        // Receiver_type = "Vec", method = "push", no workspace symbol
+        // matches → falls through to the builtin direct lookup.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let sid = insert_sym(&conn, "<builtin>::rust::Vec::push");
+        let got = try_resolve_via_receiver_type(&conn, "Vec", "push").unwrap();
+        assert_eq!(got, Some(sid));
+    }
+
+    #[test]
+    fn receiver_type_workspace_wins_over_builtin() {
+        // Both workspace and builtin Vec::push exist → workspace wins
+        // (Phase 2 builtin only fires when workspace suffix is empty
+        // or ambiguous-empty after the `NOT LIKE '<builtin>::%'`
+        // filter).
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let workspace_sid = insert_sym(&conn, "crate::my_collections::Vec::push");
+        let _builtin_sid = insert_sym(&conn, "<builtin>::rust::Vec::push");
+        let got = try_resolve_via_receiver_type(&conn, "Vec", "push").unwrap();
+        assert_eq!(got, Some(workspace_sid));
+    }
+
+    #[test]
+    fn receiver_type_ambiguous_workspace_falls_back_to_builtin() {
+        // Two ambiguous workspace matches AND a builtin → workspace
+        // suffix returns 2 rows (ambiguous), the function skips, then
+        // hits the builtin direct lookup. Tradeoff: the builtin is
+        // canonical, so resolving to it is the right call here.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let _ = insert_sym(&conn, "crate::a::Vec::push");
+        let _ = insert_sym(&conn, "crate::b::Vec::push");
+        let builtin_sid = insert_sym(&conn, "<builtin>::rust::Vec::push");
+        let got = try_resolve_via_receiver_type(&conn, "Vec", "push").unwrap();
+        assert_eq!(got, Some(builtin_sid));
+    }
+
+    #[test]
+    fn receiver_type_fqdn_with_builtin_seeded_returns_none_when_no_match() {
+        // FQDN-form receiver_type (`crate::Foo`) means the user has a
+        // workspace impl block; the builtin Vec::push synthetic must
+        // NOT match the unrelated `crate::Foo::push` lookup.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let _ = insert_sym(&conn, "<builtin>::rust::Vec::push");
+        let got = try_resolve_via_receiver_type(&conn, "crate::Foo", "push").unwrap();
         assert_eq!(got, None);
     }
 }

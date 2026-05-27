@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use rusqlite::Connection;
 use standardoc_ir::{
-    Blake3Hash, BuiltinEntry, Language, LanguageKind, RawSymbol, SourceOrigin, SymbolLocation,
-    Visibility,
+    Blake3Hash, BuiltinEntry, BuiltinMethodEntry, Kind, Language, LanguageKind, RawSymbol,
+    SourceOrigin, SymbolLocation, TypeRef, Visibility,
 };
 
 use crate::storage::error::StorageError;
@@ -37,6 +37,24 @@ pub(crate) fn seed_quietly(handle: &IndexHandle, entries: &[BuiltinEntry]) {
         Err(_) => return,
     };
     let _ = seed_into(&conn, entries);
+}
+
+/// Bug E-3 Phase 2 sibling of `seed_quietly` for method entries. Best-
+/// effort: failure leaves stdlib method edges unresolved, same as the
+/// pre-Phase-2 behaviour.
+pub(crate) fn seed_methods_quietly(handle: &IndexHandle, methods: &[BuiltinMethodEntry]) {
+    if methods.is_empty() {
+        return;
+    }
+    let pool = match handle.pool() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let _ = seed_methods_into(&conn, methods);
 }
 
 /// Persist `entries` into the SQLite store. Groups by language so we
@@ -80,6 +98,78 @@ pub(crate) fn seed_into(
                 kind: entry.kind,
                 language_kind: LanguageKind::from("builtin"),
                 module: Some(module.clone()),
+                visibility: Visibility::Public,
+                location: SymbolLocation {
+                    file: file_path.clone(),
+                    start_line: 0,
+                    end_line: 0,
+                    start_col: 0,
+                    end_col: 0,
+                },
+                signature: None,
+                body_hash: None,
+                attributes: vec![],
+                flags: vec![],
+            };
+            insert_symbol(
+                conn,
+                &sym,
+                SymbolInsertContext {
+                    file_path: &file_path,
+                    language: lang,
+                    is_external: true,
+                    source_origin: SourceOrigin::ManualExternal,
+                    revision: 0,
+                    workspace_id: crate::storage::module_lookup::PRIMARY_WORKSPACE_ID,
+                },
+            )?;
+            inserted += 1;
+        }
+    }
+    Ok(inserted)
+}
+
+/// Bug E-3 Phase 2: persist `methods` as synthetic `RawSymbol` rows so
+/// the resolver's `<receiver_type>::<method>` lookup lands on a real
+/// `symbols.id` for stdlib method calls. Each method's `module` is
+/// `<builtin>::<lang>::<parent_type>` so symbols stay grouped per type
+/// in any `module`-filtered query. Idempotent like `seed_into`.
+pub(crate) fn seed_methods_into(
+    conn: &Connection,
+    methods: &[BuiltinMethodEntry],
+) -> Result<usize, StorageError> {
+    let mut by_lang: HashMap<Language, Vec<&BuiltinMethodEntry>> = HashMap::new();
+    for method in methods {
+        by_lang.entry(method.language).or_default().push(method);
+    }
+    let mut inserted = 0_usize;
+    for (lang, lang_methods) in by_lang {
+        let file_path = synthetic_file_path(lang);
+        upsert_file(
+            conn,
+            &FileInput {
+                path: file_path.clone(),
+                content_hash: Blake3Hash::default(),
+                language: lang,
+                byte_size: 0,
+                last_scanned: 0,
+                last_scan_error: None,
+                is_external: true,
+            },
+        )?;
+        let lang_module = synthetic_module(lang);
+        for method in lang_methods {
+            let module = format!("{lang_module}::{}", method.parent_type);
+            let sym = RawSymbol {
+                decl_kind: None,
+                implements_trait: None,
+                receiver_type: Some(TypeRef::new(method.parent_type.clone())),
+                entry_point: None,
+                name: method.method.clone(),
+                fqdn: method.synthetic_fqdn.clone(),
+                kind: Kind::Callable,
+                language_kind: LanguageKind::from("builtin_method"),
+                module: Some(module),
                 visibility: Visibility::Public,
                 location: SymbolLocation {
                     file: file_path.clone(),
