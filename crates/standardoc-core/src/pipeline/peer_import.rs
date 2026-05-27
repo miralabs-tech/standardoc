@@ -22,7 +22,9 @@ use rusqlite::{Connection, OpenFlags, params};
 use standardoc_ir::LinkedWorkspaceStatus;
 
 use crate::storage::error::StorageError;
-use crate::storage::workspace_catalog::{LinkedWorkspace, list_linked_workspaces};
+use crate::storage::workspace_catalog::LinkedWorkspace;
+#[cfg(test)]
+use crate::storage::workspace_catalog::list_linked_workspaces;
 
 /// Outcome of attempting to import a single peer workspace's lookup data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,8 +243,7 @@ fn epoch_ms_now() -> i64 {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_millis()),
     )
     .unwrap_or(i64::MAX)
 }
