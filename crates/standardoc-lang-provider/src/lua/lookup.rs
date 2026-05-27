@@ -229,6 +229,7 @@ mod tests {
             }],
             attributes: vec![],
             confidence: EdgeConfidence::Extracted,
+            receiver_type: None,
         }
     }
 
@@ -347,6 +348,7 @@ mod tests {
             sites: vec![],
             attributes: vec![],
             confidence: EdgeConfidence::Extracted,
+            receiver_type: None,
         }];
         let lookup = build_lua_lookup(&symbols, &edges, "pkg::a");
         assert!(lookup.imports.is_empty());

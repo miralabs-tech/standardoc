@@ -17,7 +17,7 @@ CREATE TABLE schema_meta (
 );
 
 INSERT INTO schema_meta (key, value) VALUES
-  ('schema_version',              '4'),
+  ('schema_version',              '5'),
   ('workspace_root',              ''),
   ('created_at',                  ''),
   ('cold_start_progress',         ''),
@@ -107,15 +107,22 @@ CREATE TABLE edges (
   attributes      TEXT    NOT NULL DEFAULT '[]',
   confidence      TEXT    NOT NULL DEFAULT 'extracted' CHECK (confidence IN
                     ('extracted', 'inferred', 'ambiguous')),
+  -- Bug E-3 Phase 1: nominal type of the call receiver when inferable
+  -- (e.g. "Vec", "Foo", "self_type"). Populated by the Rust extractor's
+  -- LocalTypeEnv; consumed by apply_resolve_unresolved to disambiguate
+  -- bare-ident method calls before suffix-chain fallback. NULL when not
+  -- inferable or not applicable (path-form calls, non-Rust languages).
+  receiver_type   TEXT,
   CHECK (
     (to_symbol_id IS NOT NULL AND to_unresolved IS NULL) OR
     (to_symbol_id IS NULL     AND to_unresolved IS NOT NULL)
   )
 );
 
-CREATE INDEX idx_edges_from_kind  ON edges(from_symbol_id, kind);
-CREATE INDEX idx_edges_to_kind    ON edges(to_symbol_id, kind) WHERE to_symbol_id IS NOT NULL;
-CREATE INDEX idx_edges_unresolved ON edges(to_unresolved)      WHERE to_unresolved IS NOT NULL;
+CREATE INDEX idx_edges_from_kind     ON edges(from_symbol_id, kind);
+CREATE INDEX idx_edges_to_kind       ON edges(to_symbol_id, kind) WHERE to_symbol_id IS NOT NULL;
+CREATE INDEX idx_edges_unresolved    ON edges(to_unresolved)      WHERE to_unresolved IS NOT NULL;
+CREATE INDEX idx_edges_receiver_type ON edges(receiver_type)      WHERE receiver_type IS NOT NULL;
 
 CREATE TABLE edge_sites (
   edge_id   INTEGER NOT NULL REFERENCES edges(id) ON DELETE CASCADE,

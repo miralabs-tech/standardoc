@@ -357,6 +357,7 @@ fn push_heritage_edge(
         sites: vec![site],
         attributes,
         confidence,
+        receiver_type: None,
     });
 }
 
@@ -494,6 +495,7 @@ fn process_re_export_all(
         sites: vec![ctx.span_site(item.span)],
         attributes: vec!["re-export".to_string(), "wildcard".to_string()],
         confidence,
+        receiver_type: None,
     });
 }
 
@@ -528,6 +530,7 @@ fn process_re_export_named(
             sites: vec![ctx.span_site(span)],
             attributes: vec!["re-export".to_string()],
             confidence,
+            receiver_type: None,
         });
         return;
     }
@@ -557,6 +560,7 @@ fn process_re_export_named(
                     sites: vec![ctx.span_site(span)],
                     attributes: vec!["re-export".to_string(), "namespace".to_string()],
                     confidence,
+                    receiver_type: None,
                 });
                 continue;
             }
@@ -579,6 +583,7 @@ fn process_re_export_named(
             sites: vec![ctx.span_site(span)],
             attributes: vec!["re-export".to_string()],
             confidence,
+            receiver_type: None,
         });
     }
 }
@@ -869,6 +874,7 @@ fn process_import(ctx: &mut TsWalkContext<'_>, item: &ImportDecl, current_module
             sites: vec![ctx.span_site(span)],
             attributes: vec![],
             confidence,
+            receiver_type: None,
         });
     }
     if item.specifiers.is_empty() {
@@ -887,6 +893,7 @@ fn process_import(ctx: &mut TsWalkContext<'_>, item: &ImportDecl, current_module
             sites: vec![ctx.span_site(span)],
             attributes: vec![],
             confidence,
+            receiver_type: None,
         });
     }
 }

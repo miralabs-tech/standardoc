@@ -271,6 +271,7 @@ pub(crate) fn extract_local_assignment(
                 sites: vec![site_for(&ctx.core.file_path, pos)],
                 attributes: vec![],
                 confidence,
+                receiver_type: None,
             });
         }
 
@@ -397,6 +398,7 @@ fn record_calls_in_block(
                             sites: vec![site_for(&ctx.core.file_path, pos)],
                             attributes: vec![],
                             confidence,
+                            receiver_type: None,
                         });
                     }
                 }
@@ -413,6 +415,7 @@ fn record_calls_in_block(
                             sites: vec![],
                             attributes: vec![],
                             confidence,
+                            receiver_type: None,
                         });
                     }
                 }
@@ -448,6 +451,7 @@ fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &Functi
             sites: vec![site_for(&ctx.core.file_path, call_start(fc))],
             attributes: vec![],
             confidence,
+            receiver_type: None,
         });
         return;
     }
@@ -514,6 +518,7 @@ fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &Functi
         sites: vec![site_for(&ctx.core.file_path, call_start(fc))],
         attributes,
         confidence,
+        receiver_type: None,
     });
 }
 

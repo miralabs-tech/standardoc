@@ -424,6 +424,7 @@ fn edges_from_returns_resolved_and_unresolved_targets() {
                 sites: vec![],
                 attributes: vec![],
                 confidence: EdgeConfidence::default(),
+                receiver_type: None,
             },
             "primary",
         )
@@ -440,6 +441,7 @@ fn edges_from_returns_resolved_and_unresolved_targets() {
                 sites: vec![],
                 attributes: vec![],
                 confidence: EdgeConfidence::default(),
+                receiver_type: None,
             },
             "primary",
         )
@@ -484,6 +486,7 @@ fn edges_from_loads_sites_ordered() {
                 sites: vec![],
                 attributes: vec![],
                 confidence: EdgeConfidence::default(),
+                receiver_type: None,
             },
             "primary",
         )
@@ -534,6 +537,7 @@ fn edges_to_finds_resolved_inbound() {
                 sites: vec![],
                 attributes: vec![],
                 confidence: EdgeConfidence::default(),
+                receiver_type: None,
             },
             "primary",
         )
@@ -567,6 +571,7 @@ fn edges_to_finds_unresolved_inbound_for_unknown_fqdn() {
                 sites: vec![],
                 attributes: vec![],
                 confidence: EdgeConfidence::default(),
+                receiver_type: None,
             },
             "primary",
         )
@@ -1688,6 +1693,7 @@ fn seed_call_edge(conn: &Connection, from_id: i64, from_fqdn: &str, to: Resolved
             sites: vec![],
             attributes: vec![],
             confidence: EdgeConfidence::default(),
+            receiver_type: None,
         },
         "primary",
     )
@@ -1705,6 +1711,7 @@ fn seed_import_edge(conn: &Connection, from_id: i64, from_fqdn: &str, to: Resolv
             sites: vec![],
             attributes: vec![],
             confidence: EdgeConfidence::default(),
+            receiver_type: None,
         },
         "primary",
     )
@@ -1910,6 +1917,7 @@ fn context_with_neighbors_skips_other_edge_kinds() {
                 sites: vec![],
                 attributes: vec![],
                 confidence: EdgeConfidence::default(),
+                receiver_type: None,
             },
             "primary",
         )

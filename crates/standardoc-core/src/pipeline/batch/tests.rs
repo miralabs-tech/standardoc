@@ -118,6 +118,7 @@ fn upsert_file_modified_body_replaces_outgoing_edges() {
         }],
         attributes: vec![],
         confidence: EdgeConfidence::Ambiguous,
+        receiver_type: None,
     };
     let ef1 = extracted(
         "src/main.rs",
@@ -136,6 +137,7 @@ fn upsert_file_modified_body_replaces_outgoing_edges() {
         sites: vec![],
         attributes: vec![],
         confidence: EdgeConfidence::Ambiguous,
+        receiver_type: None,
     };
     let ef2 = extracted(
         "src/main.rs",
@@ -191,6 +193,7 @@ fn upsert_file_promote_unresolved_within_batch() {
         sites: vec![],
         attributes: vec![],
         confidence: EdgeConfidence::Extracted,
+        receiver_type: None,
     };
     let ef = extracted(
         "src/main.rs",
@@ -223,6 +226,7 @@ fn upsert_file_skips_edges_from_unchanged_symbols() {
         sites: vec![],
         attributes: vec![],
         confidence: EdgeConfidence::Ambiguous,
+        receiver_type: None,
     };
     let ef1 = extracted(
         "src/main.rs",
@@ -260,6 +264,7 @@ fn delete_file_removes_symbols_and_reverse_promotes_incoming_edges() {
             sites: vec![],
             attributes: vec![],
             confidence: EdgeConfidence::Extracted,
+            receiver_type: None,
         }],
     );
     let ef_target = extracted(
@@ -303,6 +308,7 @@ fn delete_file_cleans_stale_edge_sites_in_other_files() {
             }],
             attributes: vec![],
             confidence: EdgeConfidence::Extracted,
+            receiver_type: None,
         }],
     );
     apply_upsert_file(&conn, &ef_target, 0, PRIMARY_WORKSPACE_ID).unwrap();

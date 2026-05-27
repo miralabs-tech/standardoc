@@ -8,7 +8,7 @@ use crate::storage::init::run_init_schema;
 /// `init_v0.sql`. Bumping this constant requires either a forward
 /// migration script OR the destructive reset path in `ensure_schema`
 /// (today the latter; the index is a derived cache).
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 4;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 5;
 
 /// Idempotent schema bootstrap. Behaviour by initial DB state:
 ///   - empty DB                              → run `init_v0.sql`

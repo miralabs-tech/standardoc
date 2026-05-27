@@ -92,7 +92,7 @@ fn reset_handles_unknown_indexes_and_triggers() {
     )
     .unwrap();
     conn.execute(
-        "UPDATE schema_meta SET value = '5' WHERE key = 'schema_version'",
+        "UPDATE schema_meta SET value = '99' WHERE key = 'schema_version'",
         [],
     )
     .unwrap();

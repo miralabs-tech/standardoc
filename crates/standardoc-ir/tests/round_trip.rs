@@ -95,6 +95,7 @@ fn fixture() -> ExtractedFile {
         }],
         attributes: vec![],
         confidence: EdgeConfidence::Extracted,
+        receiver_type: None,
     };
 
     let unresolved_edge = RawEdge {
@@ -106,6 +107,7 @@ fn fixture() -> ExtractedFile {
         sites: vec![],
         attributes: vec![],
         confidence: EdgeConfidence::Ambiguous,
+        receiver_type: None,
     };
 
     let bridge_edge = RawEdge {
@@ -118,6 +120,7 @@ fn fixture() -> ExtractedFile {
         sites: vec![],
         attributes: vec![],
         confidence: EdgeConfidence::Inferred,
+        receiver_type: None,
     };
 
     let call_site = RawCallSite {

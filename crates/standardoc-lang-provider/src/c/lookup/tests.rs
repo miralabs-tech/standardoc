@@ -72,6 +72,7 @@ fn imports_edge(from: &str, target: ResolvedOrUnresolved) -> RawEdge {
         }],
         attributes: vec![],
         confidence: EdgeConfidence::Extracted,
+        receiver_type: None,
     }
 }
 
@@ -242,6 +243,7 @@ fn non_imports_edge_is_skipped_when_building_import_records() {
         sites: vec![],
         attributes: vec![],
         confidence: EdgeConfidence::Extracted,
+        receiver_type: None,
     }];
     let lookup = build_c_lookup(&symbols, &edges, "pkg::a");
     assert!(lookup.imports.is_empty());

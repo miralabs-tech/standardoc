@@ -110,6 +110,7 @@ fn run_pass(conn: &Connection) -> Result<FfiResolveReport, StorageError> {
                 sites: vec![],
                 attributes: vec![format!("ffi:{}", key.0)],
                 confidence: EdgeConfidence::Inferred,
+                receiver_type: None,
             };
             insert_edge(conn, importer.symbol_id, &edge, &importer.workspace_id)?;
             report.matched += 1;

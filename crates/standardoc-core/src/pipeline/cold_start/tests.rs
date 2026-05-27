@@ -265,6 +265,7 @@ fn run_cleanup_reverse_promotes_inbound_resolved_edges_before_cascade_delete() {
             sites: vec![],
             attributes: vec![],
             confidence: EdgeConfidence::Extracted,
+            receiver_type: None,
         }],
         call_sites: vec![],
         documents: vec![],

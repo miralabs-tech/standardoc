@@ -183,6 +183,7 @@ impl CallVisitor<'_> {
             }],
             attributes,
             confidence,
+            receiver_type: None,
         });
     }
 
@@ -293,6 +294,7 @@ impl CallVisitor<'_> {
             }],
             attributes,
             confidence,
+            receiver_type: None,
         });
     }
 }

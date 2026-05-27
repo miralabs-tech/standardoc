@@ -441,6 +441,7 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
             sites: vec![site],
             attributes,
             confidence,
+            receiver_type: None,
         });
     }
 
@@ -486,6 +487,7 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
             sites: vec![site],
             attributes,
             confidence,
+            receiver_type: None,
         });
     }
 
@@ -541,6 +543,7 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
             sites: vec![site],
             attributes,
             confidence,
+            receiver_type: None,
         });
     }
 
@@ -608,6 +611,7 @@ impl<'a, 'b> CallVisitor<'a, 'b> {
             sites: vec![site],
             attributes,
             confidence,
+            receiver_type: None,
         });
     }
 

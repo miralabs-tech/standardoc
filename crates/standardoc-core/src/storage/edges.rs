@@ -14,8 +14,8 @@ pub(crate) fn insert_edge(
     let attributes_json = serde_json::to_string(&edge.attributes)?;
     let id = conn
         .query_row(
-            "INSERT INTO edges (from_symbol_id, kind, to_symbol_id, to_unresolved, attributes, confidence) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+            "INSERT INTO edges (from_symbol_id, kind, to_symbol_id, to_unresolved, attributes, confidence, receiver_type) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
              RETURNING id",
             rusqlite::params![
                 from_symbol_id,
@@ -24,6 +24,7 @@ pub(crate) fn insert_edge(
                 to_unresolved,
                 attributes_json,
                 edge_confidence_to_sql_text(edge.confidence),
+                edge.receiver_type.as_deref(),
             ],
             |row| row.get::<_, i64>(0),
         )

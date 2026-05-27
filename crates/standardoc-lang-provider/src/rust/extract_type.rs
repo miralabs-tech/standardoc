@@ -289,6 +289,7 @@ fn emit_uses_type_path(
                     }],
                     attributes,
                     confidence,
+                    receiver_type: None,
                 });
                 return;
             }
@@ -321,5 +322,6 @@ fn emit_uses_type_path(
         }],
         attributes,
         confidence,
+        receiver_type: None,
     });
 }

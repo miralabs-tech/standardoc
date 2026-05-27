@@ -106,6 +106,7 @@ fn emit_import(
         }],
         attributes,
         confidence,
+        receiver_type: None,
     });
 
     // Phantom symbol so `query::symbol_by_fqdn("<current_module>::<alias>")`
@@ -171,6 +172,7 @@ fn emit_glob_import(
         }],
         attributes,
         confidence,
+        receiver_type: None,
     });
 }
 
@@ -209,6 +211,7 @@ pub(crate) fn process_extern_crate(ctx: &mut WalkContext, item: &syn::ItemExtern
         }],
         attributes: vec![],
         confidence,
+        receiver_type: None,
     });
 }
 

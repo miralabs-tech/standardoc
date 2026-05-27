@@ -205,7 +205,7 @@ pub fn edges_from(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Stor
         };
         let rows = collect_edge_rows(
             conn,
-            "SELECT id, kind, to_symbol_id, to_unresolved, attributes, confidence \
+            "SELECT id, kind, to_symbol_id, to_unresolved, attributes, confidence, receiver_type \
              FROM edges WHERE from_symbol_id = ?1 ORDER BY id ASC",
             rusqlite::params![id],
         )?;
@@ -223,7 +223,7 @@ pub fn edges_to(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Storag
         // N+1 of one `lookup_fqdn_by_id` per row.
         let mut stmt = conn.prepare(
             "SELECT e.id, e.kind, e.to_symbol_id, e.to_unresolved, \
-                    e.attributes, e.confidence, f.fqdn \
+                    e.attributes, e.confidence, e.receiver_type, f.fqdn \
              FROM edges e \
              JOIN symbols f ON f.id = e.from_symbol_id \
              WHERE (?1 IS NOT NULL AND e.to_symbol_id = ?1) \
@@ -232,7 +232,7 @@ pub fn edges_to(handle: &IndexHandle, fqdn: &str) -> Result<Vec<RawEdge>, Storag
         )?;
         let rows: Vec<(EdgeRowRaw, String)> = stmt
             .query_map(rusqlite::params![target_id, fqdn], |row| {
-                Ok((read_edge_row(row)?, row.get::<_, String>(6)?))
+                Ok((read_edge_row(row)?, row.get::<_, String>(7)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
@@ -1618,6 +1618,7 @@ struct EdgeRowRaw {
     to_unresolved: Option<String>,
     attributes_json: String,
     confidence_text: String,
+    receiver_type: Option<String>,
 }
 
 fn read_edge_row(row: &Row<'_>) -> rusqlite::Result<EdgeRowRaw> {
@@ -1628,6 +1629,7 @@ fn read_edge_row(row: &Row<'_>) -> rusqlite::Result<EdgeRowRaw> {
         to_unresolved: row.get(3)?,
         attributes_json: row.get(4)?,
         confidence_text: row.get(5)?,
+        receiver_type: row.get(6)?,
     })
 }
 
@@ -1681,6 +1683,7 @@ fn build_edge(
         sites,
         attributes,
         confidence,
+        receiver_type: raw.receiver_type,
     })
 }
 

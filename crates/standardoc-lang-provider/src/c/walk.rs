@@ -118,6 +118,7 @@ fn emit_include(node: Node, src: &str, ctx: &mut CWalkContext) {
         sites: vec![site],
         attributes: vec![],
         confidence,
+        receiver_type: None,
     });
 }
 

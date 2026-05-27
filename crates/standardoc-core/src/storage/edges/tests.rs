@@ -12,6 +12,7 @@ fn make_edge(kind: EdgeKind, to: ResolvedOrUnresolved) -> RawEdge {
         sites: vec![],
         attributes: vec![],
         confidence,
+        receiver_type: None,
     }
 }
 

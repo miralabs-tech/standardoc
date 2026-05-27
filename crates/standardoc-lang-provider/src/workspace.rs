@@ -321,6 +321,7 @@ fn template_ref_to_edge(r: TemplateRef, content: &str, path: &str, module_fqdn: 
         }],
         attributes: vec![template_attr_to_slug(r.attribute).to_string()],
         confidence,
+        receiver_type: None,
     }
 }
 

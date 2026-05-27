@@ -1078,6 +1078,7 @@ fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) 
                 }],
                 attributes: attrs,
                 confidence,
+                receiver_type: None,
             });
         }
     }
