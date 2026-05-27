@@ -9,7 +9,7 @@ license = "LicenseRef-FSL-1.1-MIT"
 repository = "https://github.com/miralabs-tech/standardoc"
 homepage = "https://standardoc.miralabs.tech"
 authors = ["miralabs.tech"]
-rust-version = "1.91"
+rust-version = "1.95"
 
 # External deps (blake3, notify, syn, swc_*, wasmtime, ...) get pinned here as
 # each subject starts consuming them — no spec deps day-1.
