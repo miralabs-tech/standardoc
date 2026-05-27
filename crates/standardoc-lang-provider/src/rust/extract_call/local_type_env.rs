@@ -18,7 +18,9 @@
 use std::collections::HashMap;
 
 use syn::punctuated::Punctuated;
-use syn::{Expr, FnArg, Local, Pat, Token, Type};
+use syn::{Expr, FnArg, Local, Pat, Token};
+
+use crate::rust::type_name::nominal_type;
 
 #[derive(Default, Debug)]
 pub(super) struct LocalTypeEnv {
@@ -69,19 +71,6 @@ impl LocalTypeEnv {
     #[allow(dead_code)]
     pub(super) fn lookup(&self, name: &str) -> Option<&str> {
         self.bindings.get(name).map(String::as_str)
-    }
-}
-
-/// Last path segment of a `syn::Type` when it's a `Path` (optionally
-/// behind references). Drops generic args. Returns `None` for tuples,
-/// closures, slices, impl-trait and other non-nominal shapes.
-fn nominal_type(ty: &Type) -> Option<String> {
-    match ty {
-        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
-        Type::Reference(r) => nominal_type(&r.elem),
-        Type::Paren(p) => nominal_type(&p.elem),
-        Type::Group(g) => nominal_type(&g.elem),
-        _ => None,
     }
 }
 

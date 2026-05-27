@@ -15,6 +15,8 @@ mod extract_use;
 mod ffi_tagger;
 mod lookup;
 mod module_path;
+mod struct_field_table;
+mod type_name;
 mod visibility;
 mod walk;
 

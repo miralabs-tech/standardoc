@@ -45,6 +45,11 @@ pub(crate) struct WalkContext {
     /// before `walk()` returns. Mirrors the TS-side `TsWalkContext`
     /// machinery.
     pub(crate) attribute_flags: HashMap<String, HashSet<String>>,
+    /// Bug E-3 Phase 1: per-file `struct_fqdn → {field → nominal type}`
+    /// table populated by `push_field` during struct extraction. Read
+    /// by `visit_expr_method_call` (P1.4) to resolve `self.field.method`
+    /// when the enclosing impl's `self_type` is known.
+    pub(crate) struct_fields: super::struct_field_table::StructFieldTable,
 }
 
 impl WalkContext {
@@ -54,6 +59,7 @@ impl WalkContext {
             crate_name: crate_name.to_string(),
             alias_table: HashMap::new(),
             attribute_flags: HashMap::new(),
+            struct_fields: super::struct_field_table::StructFieldTable::default(),
         }
     }
 
@@ -855,6 +861,15 @@ fn push_field(
 ) {
     let field_fqdn = format!("{parent_fqdn}::{name}");
     let ty_str = compact_rust_tokens(&field.ty.to_token_stream().to_string());
+
+    // Bug E-3 Phase 1: capture nominal type for named struct fields.
+    // Tuple fields go through this same path but use numeric names
+    // (`"0"`, `"1"`, ...) — Phase 1 doesn't resolve numeric receivers
+    // (`self.0.method`) so this is harmless noise; lookup never matches.
+    if language_kind == "field" {
+        ctx.struct_fields.record(parent_fqdn, name, &field.ty);
+    }
+
     let signature = Signature {
         params: vec![],
         returns: Some(TypeRef::new(ty_str)),

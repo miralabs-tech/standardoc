@@ -128,15 +128,3 @@ fn record_local_overwrites_on_reassignment_via_let() {
     env.record_local(&parse_local("let x = String::new();"));
     assert_eq!(env.lookup("x"), Some("String"));
 }
-
-#[test]
-fn nominal_type_drops_generics() {
-    let ty: Type = syn::parse_str("HashMap<String, Vec<u8>>").unwrap();
-    assert_eq!(nominal_type(&ty).as_deref(), Some("HashMap"));
-}
-
-#[test]
-fn nominal_type_strips_reference_chain() {
-    let ty: Type = syn::parse_str("&&mut Foo").unwrap();
-    assert_eq!(nominal_type(&ty).as_deref(), Some("Foo"));
-}
