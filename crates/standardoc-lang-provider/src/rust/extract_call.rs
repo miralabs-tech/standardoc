@@ -171,15 +171,12 @@ impl CallVisitor<'_> {
         });
     }
 
-    fn emit_call(&mut self, to: ResolvedOrUnresolved, span: Span) {
-        self.emit_call_with_attributes(to, span, vec![]);
-    }
-
     fn emit_call_with_attributes(
         &mut self,
         to: ResolvedOrUnresolved,
         span: Span,
         attributes: Vec<String>,
+        receiver_type: Option<String>,
     ) {
         let confidence = to.default_confidence();
         self.ctx.push_edge(RawEdge {
@@ -193,8 +190,35 @@ impl CallVisitor<'_> {
             }],
             attributes,
             confidence,
-            receiver_type: None,
+            receiver_type,
         });
+    }
+
+    /// Bug E-3 Phase 1: derive a nominal receiver type for an
+    /// `obj.method(...)` call from the dotted receiver chain. Rules:
+    ///
+    ///   * `chain = ["self"]` → `self_type` (full FQDN of impl block,
+    ///     e.g. `crate::Foo`); the resolver post-pass forms
+    ///     `<FQDN>::<method>` directly.
+    ///   * `chain = ["self", <field>]` → `struct_fields.lookup(self_type,
+    ///     field)` — nominal type of the field.
+    ///   * `chain = [<binding>]` → `local_env.lookup(binding)` — nominal
+    ///     type inferred from fn params + `let` initializers.
+    ///   * Anything deeper (`x.field.method`, chains with parens) →
+    ///     `None` (deferred to Phase 3).
+    fn compute_receiver_type(&self, chain: &[String]) -> Option<String> {
+        match chain {
+            [head] if head == "self" => self.self_type.clone(),
+            [head] => self.local_env.lookup(head).map(str::to_string),
+            [head, field] if head == "self" => {
+                let self_fqdn = self.self_type.as_deref()?;
+                self.ctx
+                    .struct_fields
+                    .lookup(self_fqdn, field)
+                    .map(str::to_string)
+            }
+            _ => None,
+        }
     }
 
     /// Stage 3e-2-ter — emit a `Calls` edge for a `path` in call
@@ -234,7 +258,7 @@ impl CallVisitor<'_> {
             attributes.push("via-builtin".to_string());
             attributes.push(format!("builtin-{}", tag.slug()));
         }
-        self.emit_call_with_attributes(target, span, attributes);
+        self.emit_call_with_attributes(target, span, attributes, None);
     }
 
     /// Stage 3e-2 — emit a `References` edge for a `path` read in value
@@ -408,6 +432,10 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
         // walking down through ExprField layers (final segment is the
         // receiver-text base, the method ident is NOT in the chain).
         let receiver_chain = receiver_chain_from(&node.receiver);
+        // Bug E-3 Phase 1: derive the receiver's nominal type from the
+        // chain + local_env + struct_fields. Consumed by the resolver
+        // post-pass to form `<receiver_type>::<method>`.
+        let receiver_type = self.compute_receiver_type(&receiver_chain);
         let callee_text = format!("{}.{}", receiver_chain.join("."), method);
         self.emit_call_site(
             callee_text,
@@ -415,7 +443,12 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
             receiver_chain,
             span,
         );
-        self.emit_call(ResolvedOrUnresolved::Unresolved { name: method }, span);
+        self.emit_call_with_attributes(
+            ResolvedOrUnresolved::Unresolved { name: method },
+            span,
+            vec![],
+            receiver_type,
+        );
         syn::visit::visit_expr_method_call(self, node);
     }
 
@@ -458,7 +491,7 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
             return;
         }
         let to = self.ctx.resolve_path(&path_str, &self.current_module);
-        self.emit_call_with_attributes(to, span, vec!["macro".to_string()]);
+        self.emit_call_with_attributes(to, span, vec!["macro".to_string()], None);
     }
 }
 

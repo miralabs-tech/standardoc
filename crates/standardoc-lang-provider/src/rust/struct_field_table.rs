@@ -39,7 +39,6 @@ impl StructFieldTable {
     /// Look up the nominal type of `<struct_fqdn>.<field_name>`. Returns
     /// `None` when the struct is unknown, the field isn't recorded, or
     /// the field had a non-nominal type at extract time.
-    #[allow(dead_code)]
     pub(crate) fn lookup(&self, struct_fqdn: &str, field_name: &str) -> Option<&str> {
         self.by_struct
             .get(struct_fqdn)?

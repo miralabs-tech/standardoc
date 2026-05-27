@@ -66,9 +66,6 @@ impl LocalTypeEnv {
         }
     }
 
-    // Used by tests + Bug E-3 P1.4 (visit_expr_method_call). The lib
-    // build alone has no caller until P1.4 lands; until then, allow.
-    #[allow(dead_code)]
     pub(super) fn lookup(&self, name: &str) -> Option<&str> {
         self.bindings.get(name).map(String::as_str)
     }

@@ -883,3 +883,128 @@ fn ir4b_empty_callee_path_still_falls_through_to_default() {
         "non-path call must still emit a non-empty call_site"
     );
 }
+
+// --- Bug E-3 Phase 1: receiver_type annotation on method-call edges ---
+
+fn method_calls(edges: &[standardoc_ir::RawEdge]) -> Vec<&standardoc_ir::RawEdge> {
+    // Method-call edges are the CALLS edges whose `to_unresolved` is a
+    // bare ident (no `::`, no `.`). They're what visit_expr_method_call
+    // emits — distinct from path-form calls (`Foo::bar()`) and macro calls.
+    calls(edges)
+        .into_iter()
+        .filter(|e| match &e.to {
+            ResolvedOrUnresolved::Unresolved { name } => {
+                !name.contains("::") && !name.contains('.')
+            }
+            _ => false,
+        })
+        .filter(|e| !e.attributes.iter().any(|a| a == "macro"))
+        .collect()
+}
+
+#[test]
+fn method_on_self_attaches_self_type_as_receiver_type() {
+    let parsed = parse("struct F; impl F { fn run(&self) { self.helper(); } fn helper(&self) {} }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    assert_eq!(mc.len(), 1, "exactly one self.helper() method call");
+    assert_eq!(mc[0].receiver_type.as_deref(), Some("c::F"));
+}
+
+#[test]
+fn method_on_self_field_attaches_field_nominal_type() {
+    let parsed = parse(
+        "struct Inner; impl Inner { fn ping(&self) {} } \
+         struct F { inner: Inner } \
+         impl F { fn run(&self) { self.inner.ping(); } }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    assert_eq!(mc.len(), 1);
+    assert_eq!(mc[0].receiver_type.as_deref(), Some("Inner"));
+}
+
+#[test]
+fn method_on_typed_param_attaches_param_type() {
+    let parsed = parse("fn caller(v: Vec<u8>) { v.iter(); }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    assert_eq!(mc.len(), 1);
+    assert_eq!(mc[0].receiver_type.as_deref(), Some("Vec"));
+}
+
+#[test]
+fn method_on_annotated_let_attaches_let_type() {
+    let parsed = parse("fn caller() { let s: String = String::new(); s.len(); }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    // s.len() is the only method call (String::new is a path call).
+    assert_eq!(mc.len(), 1);
+    assert_eq!(mc[0].receiver_type.as_deref(), Some("String"));
+}
+
+#[test]
+fn method_on_constructor_let_attaches_constructor_type() {
+    let parsed = parse("fn caller() { let v = Vec::new(); v.push(1); }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    // v.push(1) only — `Vec::new` is a path call (Drop tier, filtered).
+    assert_eq!(mc.len(), 1);
+    assert_eq!(mc[0].receiver_type.as_deref(), Some("Vec"));
+}
+
+#[test]
+fn method_on_reference_param_strips_reference() {
+    let parsed =
+        parse("fn caller(x: &mut Foo) { x.run(); } struct Foo; impl Foo { fn run(&mut self) {} }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    let on_x: Vec<_> = mc.iter().filter(|e| e.from_fqdn == "c::caller").collect();
+    assert_eq!(on_x.len(), 1);
+    assert_eq!(on_x[0].receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn method_on_unknown_binding_yields_none() {
+    let parsed = parse("fn caller(opaque: impl Trait) { opaque.do_it(); } trait Trait {}");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    assert_eq!(mc.len(), 1);
+    assert_eq!(mc[0].receiver_type, None);
+}
+
+#[test]
+fn deep_chain_yields_none() {
+    let parsed =
+        parse("fn caller() { let v = Vec::new(); v.iter().map(|x| x).collect::<Vec<_>>(); }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    // Three method calls: v.iter(), .map(...), .collect(...).
+    // Only the first (v.iter) has chain.len()==1 with known binding.
+    let with_rt: Vec<_> = mc.iter().filter(|e| e.receiver_type.is_some()).collect();
+    assert_eq!(with_rt.len(), 1);
+    assert_eq!(with_rt[0].receiver_type.as_deref(), Some("Vec"));
+}
+
+#[test]
+fn self_field_with_generic_field_type_keeps_nominal() {
+    let parsed =
+        parse("struct F { items: Vec<u8> } impl F { fn run(&self) { self.items.iter(); } }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    assert_eq!(mc.len(), 1);
+    assert_eq!(mc[0].receiver_type.as_deref(), Some("Vec"));
+}
+
+#[test]
+fn path_form_call_carries_no_receiver_type() {
+    // Path-form `Foo::bar()` is NOT a method call — receiver_type stays None.
+    let parsed = parse("fn caller() { String::new(); }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    for e in calls(&edges) {
+        assert_eq!(
+            e.receiver_type, None,
+            "path-form call must have no receiver_type"
+        );
+    }
+}
