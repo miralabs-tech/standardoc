@@ -110,6 +110,7 @@ fn apply_resolve_unresolved(handle: &IndexHandle) -> Result<ResolveReport, Stora
     let tx = conn.unchecked_transaction()?;
     #[allow(clippy::similar_names)]
     let mut resolved = 0usize;
+    #[allow(clippy::similar_names)]
     let mut duplicate_skipped = 0usize;
     {
         let mut stmt = tx.prepare(

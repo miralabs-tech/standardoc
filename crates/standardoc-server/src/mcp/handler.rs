@@ -142,7 +142,7 @@ impl StandardocMcp {
     )]
     async fn get_context(
         &self,
-        Parameters(mut params): Parameters<GetContextParams>,
+        Parameters(params): Parameters<GetContextParams>,
     ) -> Result<CallToolResult, ErrorData> {
         if !self.index_ready.load(Ordering::Acquire) {
             return Ok(CallToolResult::success(vec![Content::text(

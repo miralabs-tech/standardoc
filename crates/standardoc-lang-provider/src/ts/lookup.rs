@@ -542,15 +542,14 @@ impl Visit for LookupBuilder<'_> {
         // the enum's own scope so qualified refs `Color.Red` can resolve.
         self.push_scope(ScopeKind::TypeContainer, node.span.lo, node.span.hi);
         for member in &node.members {
-            if let Some(name) = ts_enum_member_id_name(&member.id) {
-                self.add_binding(
-                    name,
-                    BindingSource::LocalDecl {
-                        decl_kind: LocalDeclKind::Const,
-                    },
-                    vec!["enum-member".into()],
-                );
-            }
+            let name = ts_enum_member_id_name(&member.id);
+            self.add_binding(
+                name,
+                BindingSource::LocalDecl {
+                    decl_kind: LocalDeclKind::Const,
+                },
+                vec!["enum-member".into()],
+            );
         }
         node.visit_children_with(self);
         self.pop_scope();
@@ -571,10 +570,10 @@ const fn var_decl_kind_to_local(kind: VarDeclKind) -> LocalDeclKind {
     }
 }
 
-fn ts_enum_member_id_name(id: &swc_core::ecma::ast::TsEnumMemberId) -> Option<String> {
+fn ts_enum_member_id_name(id: &swc_core::ecma::ast::TsEnumMemberId) -> String {
     match id {
-        swc_core::ecma::ast::TsEnumMemberId::Ident(i) => Some(i.sym.to_string()),
-        swc_core::ecma::ast::TsEnumMemberId::Str(s) => Some(s.value.to_string_lossy().into_owned()),
+        swc_core::ecma::ast::TsEnumMemberId::Ident(i) => i.sym.to_string(),
+        swc_core::ecma::ast::TsEnumMemberId::Str(s) => s.value.to_string_lossy().into_owned(),
     }
 }
 

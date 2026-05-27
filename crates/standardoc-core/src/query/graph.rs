@@ -762,7 +762,7 @@ mod tests {
 
         let mut r = req(Some("crate::a"));
         r.depth = 1;
-        r.kinds = Some([EdgeKind::Calls].into_iter().collect());
+        r.kinds = Some(HashSet::from([EdgeKind::Calls]));
         let resp = fetch_graph(&h, r).unwrap();
 
         let fqdns: HashSet<&str> = resp.symbols.iter().map(|s| s.fqdn.as_str()).collect();
