@@ -1384,6 +1384,7 @@ fn clamp_col(n: usize) -> u32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::match_wildcard_for_single_variants)]
 mod tests {
     use super::*;
 

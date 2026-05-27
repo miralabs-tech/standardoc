@@ -1,3 +1,4 @@
+#![allow(clippy::match_wildcard_for_single_variants)]
 //! Stage 3b-6 — End-to-end dogfood of the cross-workspace import resolver.
 //!
 //! Builds two temp workspaces (`primary` + `peer`), registers the peer in

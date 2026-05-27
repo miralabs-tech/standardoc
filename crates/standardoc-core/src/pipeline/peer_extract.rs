@@ -89,17 +89,17 @@ pub(crate) fn scope_extracted_paths(extracted: &mut ExtractedFile, workspace_id:
         return;
     }
     let scoped = peer_path(workspace_id, &extracted.file);
-    extracted.file = scoped.clone();
+    extracted.file.clone_from(&scoped);
     for sym in &mut extracted.symbols {
-        sym.location.file = scoped.clone();
+        sym.location.file.clone_from(&scoped);
     }
     for edge in &mut extracted.edges {
         for site in &mut edge.sites {
-            site.file = scoped.clone();
+            site.file.clone_from(&scoped);
         }
     }
     for cs in &mut extracted.call_sites {
-        cs.site.file = scoped.clone();
+        cs.site.file.clone_from(&scoped);
     }
 }
 

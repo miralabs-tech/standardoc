@@ -748,6 +748,7 @@ pub fn fqdn_looks_like_test_only(fqdn: &str) -> bool {
     fqdn_looks_like_test(fqdn)
 }
 
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn fqdn_looks_like_test(fqdn: &str) -> bool {
     fqdn.contains("::tests::")
         || fqdn.contains("::test::")

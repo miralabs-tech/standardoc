@@ -1248,6 +1248,7 @@ fn args_from_swc(ctx: &TsWalkContext<'_>, args: &[ExprOrSpread]) -> Vec<RawCallA
 }
 
 #[cfg(test)]
+#[allow(clippy::match_wildcard_for_single_variants)]
 mod tests {
     use super::*;
     use std::path::PathBuf;

@@ -442,6 +442,7 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
 }
 
 #[cfg(test)]
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 mod tests {
     use super::super::walk::walk;
     use standardoc_ir::{EdgeKind, ResolvedOrUnresolved};
