@@ -554,7 +554,14 @@ fn process_item_p2(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
     match item {
         syn::Item::Fn(it) => {
             let fn_fqdn = format!("{current_module}::{}", it.sig.ident);
-            extract_call::visit_block(ctx, &it.block, current_module, &fn_fqdn, None);
+            extract_call::visit_block(
+                ctx,
+                &it.block,
+                current_module,
+                &fn_fqdn,
+                None,
+                &it.sig.inputs,
+            );
         }
         syn::Item::Impl(it) => {
             let Some(target_name) = self_ty_target_name(&it.self_ty) else {
@@ -573,6 +580,7 @@ fn process_item_p2(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
                         current_module,
                         &fn_fqdn,
                         Some(&target_fqdn),
+                        &item_fn.sig.inputs,
                     );
                 }
             }
@@ -588,7 +596,14 @@ fn process_item_p2(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
                     // implementing type (unknown at extract time), so
                     // we leave self_type = None and let `Self::method`
                     // remain unresolved as before.
-                    extract_call::visit_block(ctx, block, current_module, &fn_fqdn, None);
+                    extract_call::visit_block(
+                        ctx,
+                        block,
+                        current_module,
+                        &fn_fqdn,
+                        None,
+                        &item_fn.sig.inputs,
+                    );
                 }
             }
         }

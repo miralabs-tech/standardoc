@@ -4,6 +4,7 @@ use standardoc_ir::{
     BuiltinTier, EdgeKind, Kind, Language, RawCallArg, RawCallSite, RawEdge, ResolvedOrUnresolved,
     Site,
 };
+use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
@@ -12,6 +13,9 @@ use crate::builtins::global as global_builtin_registry;
 use super::walk::{
     NameResolution, WalkContext, col_from_span, line_from_span, lookup_scope_for, path_to_string,
 };
+
+mod local_type_env;
+use local_type_env::LocalTypeEnv;
 
 /// IR-4-b: classify a positional argument expression into a [`RawCallArg`].
 /// String literals get `is_string_literal = true` with their unwrapped
@@ -39,9 +43,7 @@ fn arg_from_expr(expr: &syn::Expr) -> RawCallArg {
     }
 }
 
-fn args_from_punctuated(
-    args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
-) -> Vec<RawCallArg> {
+fn args_from_punctuated(args: &Punctuated<syn::Expr, syn::token::Comma>) -> Vec<RawCallArg> {
     args.iter().map(arg_from_expr).collect()
 }
 
@@ -84,9 +86,11 @@ pub(crate) fn visit_block(
     current_module: &str,
     enclosing_fqdn: &str,
     self_type: Option<&str>,
+    fn_inputs: &Punctuated<syn::FnArg, syn::Token![,]>,
 ) {
     let file_path = ctx.core.file_path.clone();
     let initial_scope = lookup_scope_for(ctx, block.span());
+    let local_env = LocalTypeEnv::from_fn_params(fn_inputs);
     let mut visitor = CallVisitor {
         ctx,
         current_module: current_module.to_string(),
@@ -94,6 +98,7 @@ pub(crate) fn visit_block(
         self_type: self_type.map(str::to_string),
         file_path,
         current_scope_idx: initial_scope,
+        local_env,
     };
     visitor.visit_block(block);
 }
@@ -117,6 +122,11 @@ struct CallVisitor<'a> {
     /// works for scope-creation spans (exact HashMap match) — arbitrary
     /// expression spans inside a scope require this maintained value.
     current_scope_idx: u32,
+    /// Bug E-3 Phase 1: binding → nominal type table populated from fn
+    /// params (`from_fn_params`) and `let` bindings (`visit_local`). Read
+    /// by `visit_expr_method_call` (P1.4) to annotate emitted CALLS edges
+    /// with `receiver_type`. Flat per-fn-body — no nested-block scoping.
+    local_env: LocalTypeEnv,
 }
 
 impl CallVisitor<'_> {
@@ -379,6 +389,15 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
         self.current_scope_idx = lookup_scope_for(self.ctx, node.span());
         syn::visit::visit_expr_closure(self, node);
         self.current_scope_idx = saved;
+    }
+
+    /// Bug E-3 Phase 1: capture `let x [: T] [= init]` bindings into the
+    /// receiver-type env. Flat across nested blocks (no scoping) — Phase 1
+    /// accepts the false-positive risk of late shadowing; Phase 3 may
+    /// revisit if measured noise warrants it.
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        self.local_env.record_local(node);
+        syn::visit::visit_local(self, node);
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
