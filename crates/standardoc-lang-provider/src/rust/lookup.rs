@@ -254,7 +254,22 @@ impl<'a> LookupBuilder<'a> {
         original: Option<String>,
         is_re_export: bool,
     ) {
-        self.add_binding(
+        // Bug E-2 (write side) — compute the absolute canonical FQDN
+        // the import points at, so cross-workspace queries for
+        // `<this_module>::<local_name>` can follow re-exports to the
+        // real definition. For `pub use span::Span` in `lur-common`
+        // the binding `Span` resolves to `lur-common::span::Span` ;
+        // appending `::new` (in `cross_workspace_post`'s suffix-chain
+        // walk) then composes the real method FQDN.
+        let canonical = original.as_deref().unwrap_or(&local_name);
+        let absolute_module =
+            compose_absolute_module_path(&self.lookup.module_fqdn, &module_path);
+        let resolved_fqdn = Some(if absolute_module.is_empty() {
+            canonical.to_string()
+        } else {
+            format!("{absolute_module}::{canonical}")
+        });
+        self.add_binding_with_resolved(
             local_name.clone(),
             BindingSource::Import {
                 module_path: module_path.clone(),
@@ -263,6 +278,7 @@ impl<'a> LookupBuilder<'a> {
                 is_re_export,
             },
             vec![],
+            resolved_fqdn,
         );
         self.lookup.push_import(ImportRecord {
             local_name,
@@ -270,6 +286,26 @@ impl<'a> LookupBuilder<'a> {
             origin_symbol: original,
             is_type_only: false,
             is_re_export,
+        });
+    }
+
+    fn add_binding_with_resolved(
+        &mut self,
+        name: String,
+        source: BindingSource,
+        attributes: Vec<String>,
+        resolved_fqdn: Option<String>,
+    ) {
+        let scope_idx = self.current_scope();
+        self.lookup.push_binding(IdentResolution {
+            name,
+            source,
+            resolved_fqdn,
+            aliases_to: None,
+            mutability: None,
+            scope_idx,
+            attributes,
+            ir_kind: None,
         });
     }
 
@@ -510,6 +546,58 @@ fn unwrap_pat_ident(pat: &Pat) -> Option<&syn::PatIdent> {
     }
 }
 
+/// Compose an absolute module FQDN from the `use`-tree relative path
+/// recorded on an [`ImportRecord`]. Applies Rust 2018 path-resolution
+/// rules :
+///
+/// - `crate::xxx`  → `<crate_name>::xxx`
+/// - `self::xxx`   → `<current_module>::xxx`
+/// - `super::xxx`  → `<parent_module>::xxx`
+/// - bare `xxx::…` → `<current_module>::xxx::…` (sibling submodule)
+///
+/// The "bare" branch is a heuristic — at the AST level we can't
+/// disambiguate `mod xxx;` from an external crate `xxx`. For
+/// workspace re-exports (`pub use mysub::Foo`), sibling-submodule is
+/// the dominant reading ; for external imports (`use serde::Foo`) the
+/// composed `<current_module>::serde::Foo` is harmless because it
+/// doesn't resolve to any workspace symbol and the edge stays
+/// unresolved (same outcome as pre-fix).
+pub(crate) fn compose_absolute_module_path(current_module: &str, relative: &str) -> String {
+    if relative.is_empty() {
+        return current_module.to_string();
+    }
+    let crate_name = current_module
+        .split("::")
+        .next()
+        .unwrap_or(current_module);
+    if let Some(rest) = relative.strip_prefix("crate::") {
+        return format!("{crate_name}::{rest}");
+    }
+    if relative == "crate" {
+        return crate_name.to_string();
+    }
+    if let Some(rest) = relative.strip_prefix("self::") {
+        return format!("{current_module}::{rest}");
+    }
+    if relative == "self" {
+        return current_module.to_string();
+    }
+    if let Some(rest) = relative.strip_prefix("super::") {
+        let parent = current_module
+            .rsplit_once("::")
+            .map(|(p, _)| p)
+            .unwrap_or(current_module);
+        return format!("{parent}::{rest}");
+    }
+    if relative == "super" {
+        return current_module
+            .rsplit_once("::")
+            .map(|(p, _)| p.to_string())
+            .unwrap_or_else(|| current_module.to_string());
+    }
+    format!("{current_module}::{relative}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,6 +651,114 @@ mod tests {
             other => panic!("expected Import, got {other:?}"),
         }
         assert_eq!(lookup.imports.len(), 1);
+    }
+
+    #[test]
+    fn compose_absolute_module_path_handles_crate_self_super_and_bare() {
+        // `crate::xxx` → `<crate_name>::xxx`
+        assert_eq!(
+            compose_absolute_module_path("my-crate::sub", "crate::pipeline::provider"),
+            "my-crate::pipeline::provider"
+        );
+        assert_eq!(
+            compose_absolute_module_path("my-crate::sub", "crate"),
+            "my-crate"
+        );
+        // `self::xxx` → `<current_module>::xxx`
+        assert_eq!(
+            compose_absolute_module_path("my-crate::sub", "self::inner"),
+            "my-crate::sub::inner"
+        );
+        assert_eq!(
+            compose_absolute_module_path("my-crate::sub", "self"),
+            "my-crate::sub"
+        );
+        // `super::xxx` → `<parent>::xxx`
+        assert_eq!(
+            compose_absolute_module_path("my-crate::sub::inner", "super::sibling"),
+            "my-crate::sub::sibling"
+        );
+        assert_eq!(
+            compose_absolute_module_path("my-crate::sub::inner", "super"),
+            "my-crate::sub"
+        );
+        // bare `xxx` → `<current_module>::xxx` (sibling submodule)
+        assert_eq!(
+            compose_absolute_module_path("lur-common", "span"),
+            "lur-common::span"
+        );
+        // empty relative collapses to current module
+        assert_eq!(
+            compose_absolute_module_path("my-crate::sub", ""),
+            "my-crate::sub"
+        );
+    }
+
+    #[test]
+    fn pub_use_sibling_submodule_resolves_to_canonical_fqdn() {
+        // Bug E-2 (write side) — `pub use span::{Position, Span}` in
+        // `lur-common/src/lib.rs` must record `Span`'s binding with
+        // `resolved_fqdn = Some("lur-common::span::Span")` so the
+        // cross_workspace_post suffix-chain can compose the canonical
+        // method FQDN when a peer crate calls `Span::new()`.
+        let f = parse("pub use span::{Position, Span};\n");
+        let lookup = build_rust_lookup(&f, "lur-common");
+        let b = lookup
+            .bindings
+            .get("Span")
+            .and_then(|v| v.first())
+            .expect("Span binding");
+        assert_eq!(
+            b.resolved_fqdn.as_deref(),
+            Some("lur-common::span::Span"),
+            "Span re-export must point at the sibling-submodule canonical"
+        );
+        let p = lookup
+            .bindings
+            .get("Position")
+            .and_then(|v| v.first())
+            .expect("Position binding");
+        assert_eq!(
+            p.resolved_fqdn.as_deref(),
+            Some("lur-common::span::Position")
+        );
+    }
+
+    #[test]
+    fn pub_use_crate_path_resolves_through_crate_root() {
+        // `pub use crate::pipeline::provider::LanguageProvider` in
+        // `standardoc-core::lib` resolves to
+        // `standardoc-core::pipeline::provider::LanguageProvider`,
+        // not `standardoc-core::crate::pipeline::...`.
+        let f = parse("pub use crate::pipeline::provider::LanguageProvider;\n");
+        let lookup = build_rust_lookup(&f, "standardoc-core");
+        let b = lookup
+            .bindings
+            .get("LanguageProvider")
+            .and_then(|v| v.first())
+            .expect("LanguageProvider binding");
+        assert_eq!(
+            b.resolved_fqdn.as_deref(),
+            Some("standardoc-core::pipeline::provider::LanguageProvider")
+        );
+    }
+
+    #[test]
+    fn use_rename_resolves_to_original_canonical() {
+        // `pub use foo::OriginalName as Alias` records the alias as
+        // local binding but resolved_fqdn points at the original.
+        let f = parse("pub use sub::OriginalName as Alias;\n");
+        let lookup = build_rust_lookup(&f, "my-crate");
+        let b = lookup
+            .bindings
+            .get("Alias")
+            .and_then(|v| v.first())
+            .expect("Alias binding");
+        assert_eq!(
+            b.resolved_fqdn.as_deref(),
+            Some("my-crate::sub::OriginalName"),
+            "alias canonical must use original name, not alias name"
+        );
     }
 
     #[test]
