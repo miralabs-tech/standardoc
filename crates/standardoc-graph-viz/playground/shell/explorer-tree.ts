@@ -22,6 +22,39 @@ function emptyTrie(): PathTrieNode {
 }
 
 /**
+ * Disambiguate display labels when several projects share the same
+ * daemon-provided `label` (e.g. `Lurlang` root + `Lurlang` runtime,
+ * `Standardoc` crates + `Standardoc` ext/vscode). Collision-only:
+ * unique labels pass through untouched. Suffix uses the rel_path's
+ * last path segment, which is concise and matches what users would
+ * naturally type in a file picker (`runtime`, `crates`, `vscode`).
+ * The full rel_path remains on the node's `description` for hover.
+ */
+function disambiguateProjectLabels(
+  projects: ReadonlyArray<ProjectLike>,
+): Map<number, string> {
+  const byLabel = new Map<string, ProjectLike[]>();
+  for (const p of projects) {
+    const bucket = byLabel.get(p.label);
+    if (bucket === undefined) byLabel.set(p.label, [p]);
+    else bucket.push(p);
+  }
+  const out = new Map<number, string>();
+  for (const [label, group] of byLabel) {
+    if (group.length === 1) {
+      out.set(group[0]!.project_id, label);
+      continue;
+    }
+    for (const p of group) {
+      const segs = p.rel_path.replace(/\\/g, '/').split('/').filter(Boolean);
+      const tail = segs[segs.length - 1] ?? p.rel_path;
+      out.set(p.project_id, `${label} (${tail})`);
+    }
+  }
+  return out;
+}
+
+/**
  * IDE-style workspace tree. We project every project's rel_path onto
  * a path trie so siblings under shared directories nest properly:
  * `crates/standardoc-graph-viz/{lib,pkg,playground}` end up as
@@ -78,8 +111,12 @@ export function buildProjectsTreeFlat(
   out: TreeOut,
 ): ExplorerTreeNode {
   const modulesByProject = collectModulesByProject(allSymbols);
+  const displayLabels = disambiguateProjectLabels(projects);
   const children: ExplorerTreeNode[] = [];
-  const sorted = [...projects].sort((a, b) => a.label.localeCompare(b.label));
+  const sorted = [...projects].sort((a, b) =>
+    (displayLabels.get(a.project_id) ?? a.label)
+      .localeCompare(displayLabels.get(b.project_id) ?? b.label),
+  );
   for (const p of sorted) {
     const id = `proj/${p.project_id}`;
     out.projectByExplorerId.set(id, p);
@@ -94,7 +131,7 @@ export function buildProjectsTreeFlat(
     }));
     children.push({
       id,
-      label: p.label,
+      label: displayLabels.get(p.project_id) ?? p.label,
       kind: 'project',
       children: moduleNodes.length > 0 ? moduleNodes : undefined,
       fqdn: null,
@@ -141,7 +178,11 @@ export function buildModulesTree(
   out: TreeOut,
 ): ExplorerTreeNode {
   const byProject = collectModulesByProject(allSymbols);
-  const sortedProjects = [...projects].sort((a, b) => a.label.localeCompare(b.label));
+  const displayLabels = disambiguateProjectLabels(projects);
+  const sortedProjects = [...projects].sort((a, b) =>
+    (displayLabels.get(a.project_id) ?? a.label)
+      .localeCompare(displayLabels.get(b.project_id) ?? b.label),
+  );
   const children: ExplorerTreeNode[] = [];
   for (const p of sortedProjects) {
     const projId = `proj/${p.project_id}`;
@@ -150,7 +191,7 @@ export function buildModulesTree(
     const moduleNodes = modulesToTreeNodes(modules, projId);
     children.push({
       id: projId,
-      label: p.label,
+      label: displayLabels.get(p.project_id) ?? p.label,
       kind: 'project',
       children: moduleNodes.length > 0 ? moduleNodes : undefined,
       fqdn: null,
