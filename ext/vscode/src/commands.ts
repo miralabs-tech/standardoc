@@ -14,6 +14,7 @@ import {
 } from './init/prompt';
 import { resolveBinary } from './daemon/binary';
 import { installBinary, InstallError, UnsupportedPlatformError } from './daemon/binary-installer';
+import { openGraphViz } from './viz/open';
 
 export interface CommandContext {
   readonly context: vscode.ExtensionContext;
@@ -45,6 +46,9 @@ export function registerCommands(context: vscode.ExtensionContext, ctx: CommandC
     vscode.commands.registerCommand('Standardoc.purgeExcluded', () => commandPurgeExcluded(ctx)),
     vscode.commands.registerCommand('Standardoc.statusBarMenu', () => commandStatusBarMenu(ctx)),
     vscode.commands.registerCommand('Standardoc.downloadBinary', () => commandDownloadBinary(ctx)),
+    vscode.commands.registerCommand('Standardoc.viz.open', () =>
+      openGraphViz(ctx.workspaceRoot, ctx.output),
+    ),
   );
 }
 
