@@ -46,7 +46,6 @@ import classigo from 'classigo';
 
 import { focusStore, type FocusState } from '../../focus-store';
 import { viewPrefsStore } from '../../view-prefs-store';
-import type { EntryPointKind } from '../explorer/explorer.type';
 import type {
   SymbolDetail,
   SymbolDetailsAction,
@@ -58,217 +57,26 @@ import type {
   SymbolRelationKind,
   SymbolSubItem,
 } from './symbol-details.type';
-import s from './symbol-details.module.scss';
+import {
+  C,
+  DOC_COLLAPSED_CHARS,
+  RELATION_KIND_CLASS,
+  RELATION_TITLE,
+  STANDARDOC_SYMBOL_DETAILS_TAG,
+  TOP_PER_RELATION,
+  entryPointBadgeClass,
+} from './symbol-details.constants';
+import {
+  escapeHtml,
+  kindFamilyTagClass,
+  looksLikeTest,
+  shortFqdn,
+  visibilityTagClass,
+} from './symbol-details.utils';
+import { renderMarkdown } from './symbol-details.markdown';
+import { highlightSource } from './symbol-details.highlight';
 
-export const STANDARDOC_SYMBOL_DETAILS_TAG = 'standardoc-symbol-details';
-
-const C = {
-  details: s.details ?? '',
-  headerBar: s['details__header-bar'] ?? '',
-  head: s.details__head ?? '',
-  nameRow: s['details__name-row'] ?? '',
-  name: s.details__name ?? '',
-  iconBtn: s['details__icon-btn'] ?? '',
-  tags: s.details__tags ?? '',
-  tag: s.details__tag ?? '',
-  tagKindCallable: s['details__tag--kind-callable'] ?? '',
-  tagKindType: s['details__tag--kind-type'] ?? '',
-  tagKindValue: s['details__tag--kind-value'] ?? '',
-  tagKindModule: s['details__tag--kind-module'] ?? '',
-  tagKindMacro: s['details__tag--kind-macro'] ?? '',
-  tagVisPublic: s['details__tag--visibility-public'] ?? '',
-  tagVisPrivate: s['details__tag--visibility-private'] ?? '',
-  tagVisCrate: s['details__tag--visibility-crate'] ?? '',
-  tagVisProtected: s['details__tag--visibility-protected'] ?? '',
-  location: s.details__location ?? '',
-  locationPath: s['details__location-path'] ?? '',
-  tabs: s.details__tabs ?? '',
-  tab: s.details__tab ?? '',
-  tabActive: s['details__tab--active'] ?? '',
-  body: s.details__body ?? '',
-  empty: s.details__empty ?? '',
-  section: s.details__section ?? '',
-  sectionTitle: s['details__section-title'] ?? '',
-  sectionTitleDoc: s['details__section-title--doc'] ?? '',
-  sectionTitleRelations: s['details__section-title--relations'] ?? '',
-  sectionTitleEntry: s['details__section-title--entry'] ?? '',
-  sectionTitleFields: s['details__section-title--fields'] ?? '',
-  sectionTitleMethods: s['details__section-title--methods'] ?? '',
-  sectionTitleSource: s['details__section-title--source'] ?? '',
-  doc: s.details__doc ?? '',
-  docToggle: s['details__doc-toggle'] ?? '',
-  relation: s.details__relation ?? '',
-  relationHeader: s['details__relation-header'] ?? '',
-  relationTitle: s['details__relation-title'] ?? '',
-  relationCount: s['details__relation-count'] ?? '',
-  relationSpacer: s['details__relation-spacer'] ?? '',
-  seeAll: s['details__see-all'] ?? '',
-  relationList: s['details__relation-list'] ?? '',
-  relationItem: s['details__relation-item'] ?? '',
-  relationItemLabel: s['details__relation-item-label'] ?? '',
-  relationItemSignature: s['details__relation-item-signature'] ?? '',
-  relationItemKind: s['details__relation-item-kind'] ?? '',
-  entryPoint: s['details__entry-point'] ?? '',
-  entryPointBadge: s['details__entry-point-badge'] ?? '',
-  entryPointBadgeBinMain: s['details__entry-point-badge--binary-main'] ?? '',
-  entryPointBadgePublicApi: s['details__entry-point-badge--public-api'] ?? '',
-  entryPointBadgeFfiExport: s['details__entry-point-badge--ffi-export'] ?? '',
-  actions: s.details__actions ?? '',
-  action: s.details__action ?? '',
-  relationKindCalls: s['details__relation--kind-calls'] ?? '',
-  relationKindImports: s['details__relation--kind-imports'] ?? '',
-  relationKindUsesType: s['details__relation--kind-uses-type'] ?? '',
-  relationKindImplements: s['details__relation--kind-implements'] ?? '',
-  relationKindTests: s['details__relation--kind-tests'] ?? '',
-  relationKindUsedBy: s['details__relation--kind-used-by'] ?? '',
-  relationKindDefined: s['details__relation--kind-defined'] ?? '',
-  itemPopup: s['details__item-popup'] ?? '',
-  itemPopupName: s['details__item-popup-name'] ?? '',
-  itemPopupSignature: s['details__item-popup-signature'] ?? '',
-  itemPopupTags: s['details__item-popup-tags'] ?? '',
-  subItemChip: s['details__sub-item-chip'] ?? '',
-  subItemChipAsync: s['details__sub-item-chip--async'] ?? '',
-  subItemChipType: s['details__sub-item-chip--type'] ?? '',
-  headerToggle: s['details__header-toggle'] ?? '',
-  headerToggleActive: s['details__header-toggle--active'] ?? '',
-  markdown: s.details__markdown ?? '',
-} as const;
-
-/**
- * Coarse test-symbol detector mirroring the Rust
- * `query::symbol_looks_like_test` heuristic so the panel's "Hide tests"
- * toggle matches what the MCP `exclude_tests` flag does server-side.
- * Catches Rust `::tests::` / `::test::` modules, `_test` / `_tests`
- * suffixes, `tests/` directories, `*_test.rs`; TS `.test.ts` /
- * `.spec.ts` (+ `.tsx`, `.js`, `.jsx`), `__tests__/` dirs.
- */
-function looksLikeTest(fqdn: string, file?: string | null): boolean {
-  if (fqdn.includes('::tests::') || fqdn.includes('::test::')) return true;
-  if (fqdn.endsWith('::tests') || fqdn.endsWith('::test')) return true;
-  if (fqdn.endsWith('_test') || fqdn.endsWith('_tests')) return true;
-  if (fqdn.endsWith('.test') || fqdn.endsWith('.spec')) return true;
-  if (!file) return false;
-  const norm = file.replace(/\\/g, '/');
-  if (norm.includes('/tests/') || norm.includes('/test/') || norm.includes('/__tests__/')) return true;
-  if (/(?:_tests?\.rs|\.(?:test|spec)\.(?:tsx?|jsx?))$/.test(norm)) return true;
-  return false;
-}
-
-const RELATION_KIND_CLASS: Record<SymbolRelationKind, string> = {
-  calls: C.relationKindCalls,
-  usedBy: C.relationKindUsedBy,
-  imports: C.relationKindImports,
-  importedBy: C.relationKindImports,
-  usesTypes: C.relationKindUsesType,
-  implements: C.relationKindImplements,
-  extends: C.relationKindImplements,
-  testedBy: C.relationKindTests,
-  definedHere: C.relationKindDefined,
-};
-
-/**
- * Minimal markdown → HTML renderer for doc comments. Covers the
- * subset that shows up in real Rust/TS doc strings:
- *   - `# / ## / ###` headings
- *   - **bold**, *italic*, `inline code`
- *   - ```fenced code blocks```
- *   - bullet + numbered lists
- *   - [text](url) links (opens in new tab)
- *   - paragraphs separated by blank lines, single newlines as <br>
- *
- * All non-code text is HTML-escaped before substitution so a stray
- * `<script>` in a doc comment can't inject. Code blocks / inline
- * code escape their bodies too. The output is meant to be assigned
- * via `innerHTML` — the styling lives in `.details__markdown` SCSS.
- */
-function renderMarkdown(md: string): string {
-  const escape = (s: string): string =>
-    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  const codeBlocks: string[] = [];
-  const inlineCodes: string[] = [];
-  let text = md.replace(/```([\w-]*)\n?([\s\S]*?)```/g, (_, lang: string, body: string) => {
-    const cls = lang ? ` class="lang-${escape(lang)}"` : '';
-    codeBlocks.push(`<pre><code${cls}>${escape(body.replace(/\n$/, ''))}</code></pre>`);
-    return `CB${codeBlocks.length - 1}`;
-  });
-  text = text.replace(/`([^`\n]+)`/g, (_, body: string) => {
-    inlineCodes.push(`<code>${escape(body)}</code>`);
-    return `IC${inlineCodes.length - 1}`;
-  });
-  text = escape(text);
-  text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-  text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-  text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
-  text = text.replace(/(^|[^\w*])\*([^*\n]+)\*(?!\w)/g, '$1<em>$2</em>');
-  text = text.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_, t: string, u: string) =>
-    `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`);
-  text = text.replace(/^(\s*)[-*] (.+)$/gm, '$1<li>$2</li>');
-  text = text.replace(/^(\s*)\d+\. (.+)$/gm, '$1<li data-ord="1">$2</li>');
-  text = text.replace(/((?:^<li[^>]*>.*<\/li>\n?)+)/gm, m =>
-    m.includes('data-ord') ? `<ol>${m}</ol>` : `<ul>${m}</ul>`);
-  text = text.split(/\n{2,}/).map(p => {
-    const trimmed = p.trim();
-    if (!trimmed) return '';
-    if (/^<(h[1-6]|ul|ol|pre|CB)/.test(trimmed)) return trimmed;
-    return `<p>${trimmed.replace(/\n/g, '<br/>')}</p>`;
-  }).join('\n');
-  text = text.replace(/CB(\d+)/g, (_, i: string) => codeBlocks[Number(i)] ?? '');
-  text = text.replace(/IC(\d+)/g, (_, i: string) => inlineCodes[Number(i)] ?? '');
-  return text;
-}
-
-const RELATION_TITLE: Record<SymbolRelationKind, string> = {
-  usedBy: 'Used by',
-  usesTypes: 'Uses types',
-  calls: 'Calls',
-  imports: 'Imports',
-  importedBy: 'Imported by',
-  testedBy: 'Tested by',
-  implements: 'Implements',
-  extends: 'Extends',
-  definedHere: 'Defined here',
-};
-
-const TOP_PER_RELATION = 5;
-const DOC_COLLAPSED_CHARS = 180;
-
-const entryPointBadgeClass: Record<EntryPointKind, string> = {
-  binary_main: C.entryPointBadgeBinMain,
-  public_api: C.entryPointBadgePublicApi,
-  ffi_export: C.entryPointBadgeFfiExport,
-};
-
-function shortFqdn(fqdn: string): string {
-  const idx = fqdn.lastIndexOf('::');
-  return idx >= 0 ? fqdn.slice(idx + 2) : fqdn;
-}
-
-const KIND_CALLABLE = new Set(['function', 'fn', 'method', 'impl_fn', 'trait_fn', 'interface_method', 'getter', 'setter', 'constructor']);
-const KIND_TYPE = new Set(['struct', 'enum', 'class', 'interface', 'trait', 'type_alias', 'union']);
-const KIND_VALUE = new Set(['const', 'static', 'let', 'var', 'field', 'enum_variant', 'property', 'interface_property']);
-const KIND_MODULE = new Set(['module', 'namespace', 'package', 'crate']);
-const KIND_MACRO = new Set(['macro', 'macro_rules', 'proc_macro', 'decorator', 'declarativemacro', 'procmacro']);
-
-function kindFamilyTagClass(kindLabel: string): string {
-  const k = kindLabel.toLowerCase();
-  if (KIND_CALLABLE.has(k)) return C.tagKindCallable;
-  if (KIND_TYPE.has(k)) return C.tagKindType;
-  if (KIND_VALUE.has(k)) return C.tagKindValue;
-  if (KIND_MODULE.has(k)) return C.tagKindModule;
-  if (KIND_MACRO.has(k)) return C.tagKindMacro;
-  return '';
-}
-
-function visibilityTagClass(visibility: string): string {
-  switch (visibility.toLowerCase()) {
-    case 'public': return C.tagVisPublic;
-    case 'private': return C.tagVisPrivate;
-    case 'crate': return C.tagVisCrate;
-    case 'protected': return C.tagVisProtected;
-    default: return '';
-  }
-}
+export { STANDARDOC_SYMBOL_DETAILS_TAG };
 
 export class SymbolDetailsElement extends HTMLElement {
   #mounted = false;
@@ -887,90 +695,6 @@ export class SymbolDetailsElement extends HTMLElement {
       bubbles: true, composed: true,
     }));
   }
-}
-
-type HighlightLang = 'rust' | 'ts' | null;
-
-const RUST_KEYWORDS = new Set([
-  'fn', 'struct', 'enum', 'trait', 'impl', 'let', 'mut', 'const', 'static',
-  'pub', 'use', 'mod', 'return', 'if', 'else', 'for', 'while', 'loop', 'match',
-  'where', 'async', 'await', 'move', 'self', 'Self', 'true', 'false', 'as',
-  'in', 'ref', 'unsafe', 'extern', 'type', 'dyn', 'crate', 'super', 'break',
-  'continue', 'box', 'macro_rules',
-]);
-
-const TS_KEYWORDS = new Set([
-  'function', 'class', 'interface', 'type', 'enum', 'const', 'let', 'var',
-  'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default', 'break',
-  'continue', 'return', 'throw', 'try', 'catch', 'finally', 'new', 'this',
-  'super', 'extends', 'implements', 'export', 'import', 'from', 'as', 'in',
-  'of', 'async', 'await', 'yield', 'true', 'false', 'null', 'undefined',
-  'void', 'never', 'any', 'unknown', 'string', 'number', 'boolean', 'object',
-  'symbol', 'bigint', 'public', 'private', 'protected', 'readonly', 'static',
-  'abstract', 'override', 'declare',
-]);
-
-function detectLang(file: string): HighlightLang {
-  const f = file.toLowerCase();
-  if (f.endsWith('.rs')) return 'rust';
-  if (f.endsWith('.ts') || f.endsWith('.tsx') || f.endsWith('.js') || f.endsWith('.jsx') || f.endsWith('.mts') || f.endsWith('.cts')) return 'ts';
-  return null;
-}
-
-/**
- * Single-pass syntax highlighter producing an HTML string with `<span>`
- * wrappers around tokens. Comments / strings / numbers / keywords / types
- * each get a CSS variable hook from the existing kind palette so the
- * highlighting blends with the rest of the shell rather than introducing
- * a new colour scheme.
- *
- * Trade-offs (V0):
- *   - Regex tokeniser, not a real lexer — fine for read-only previews,
- *     would mis-tokenise pathological cases (nested template literals,
- *     escaped quotes spanning lines) but those rarely appear in symbol
- *     bodies.
- *   - Two languages only: Rust + TS family. Unknown extensions render
- *     as plain escaped text.
- */
-function highlightSource(code: string, file: string): string {
-  const lang = detectLang(file);
-  if (lang === null) return escapeHtml(code);
-  const keywords = lang === 'rust' ? RUST_KEYWORDS : TS_KEYWORDS;
-  // Order matters in the alternation: comments + strings must win
-  // over keywords/identifiers since e.g. `// fn foo` should stay all-
-  // comment, not partly-keyword.
-  const re = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`|\b\d+(?:\.\d+)?(?:[eE][-+]?\d+)?\b|\b[A-Z][a-zA-Z0-9_]*\b|\b[a-zA-Z_][a-zA-Z0-9_]*\b)/g;
-  let out = '';
-  let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(code)) !== null) {
-    const tok = m[0];
-    const start = m.index;
-    if (start > last) out += escapeHtml(code.slice(last, start));
-    const cls = classifyToken(tok, keywords);
-    if (cls === null) out += escapeHtml(tok);
-    else out += `<span style="color: var(${cls})">${escapeHtml(tok)}</span>`;
-    last = start + tok.length;
-  }
-  if (last < code.length) out += escapeHtml(code.slice(last));
-  return out;
-}
-
-function classifyToken(tok: string, keywords: Set<string>): string | null {
-  if (tok.startsWith('//') || tok.startsWith('/*')) return '--sd-fg-muted';
-  if (tok.startsWith('"') || tok.startsWith("'") || tok.startsWith('`')) return '--sd-status-ok';
-  if (/^\d/.test(tok)) return '--sd-kind-value';
-  if (keywords.has(tok)) return '--sd-kind-callable';
-  if (/^[A-Z]/.test(tok)) return '--sd-kind-type';
-  return null;
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
 
 if (typeof customElements !== 'undefined' && !customElements.get(STANDARDOC_SYMBOL_DETAILS_TAG)) {
