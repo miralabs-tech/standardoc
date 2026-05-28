@@ -1,4 +1,4 @@
-use super::count_leading_noise_lines;
+use super::body::count_leading_noise_lines;
 
 #[test]
 fn count_leading_noise_lines_returns_zero_when_first_line_is_code() {
@@ -64,7 +64,7 @@ fn count_leading_noise_lines_stops_at_first_non_noise_line() {
     assert_eq!(count_leading_noise_lines(&lines), 1);
 }
 
-use super::compact_body_indent;
+use super::body::compact_body_indent;
 
 #[test]
 fn compact_body_indent_dedents_common_4_space_prefix_and_converts_to_tabs() {

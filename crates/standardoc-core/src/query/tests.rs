@@ -1,3 +1,4 @@
+use super::body::strip_inline_comments_in_body;
 use super::*;
 use crate::commands::IngestCommand;
 
