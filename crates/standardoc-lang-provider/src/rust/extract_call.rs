@@ -368,6 +368,53 @@ impl CallVisitor<'_> {
         self.local_env.set_binding(name, ty);
     }
 
+    /// Bug E-3.4.1: build a binding frame from a `if let <pat> = <expr>`
+    /// (or `while let`) condition. The cond expression carries an
+    /// `Expr::Let` whose `pat` we match against the value's parametric
+    /// type to extract the bound ident's substituted type.
+    fn compute_let_pat_frame(&self, cond: &syn::Expr) -> Option<HashMap<String, String>> {
+        let syn::Expr::Let(let_expr) = cond else {
+            return None;
+        };
+        let value_type = self.type_of_expr(&let_expr.expr)?;
+        Self::compute_unwrap_pat_frame(&value_type, &let_expr.pat)
+    }
+
+    /// Bug E-3.4.1: extract a binding from a `Some(x)` / `Ok(x)` /
+    /// `Err(e)` pattern against the scrutinee's parametric type. Returns
+    /// `None` for tuple-variant patterns we don't track (wildcard,
+    /// nested destructure, custom enum variants).
+    fn compute_unwrap_pat_frame(
+        value_type: &str,
+        pat: &syn::Pat,
+    ) -> Option<HashMap<String, String>> {
+        let syn::Pat::TupleStruct(pts) = pat else {
+            return None;
+        };
+        if pts.elems.len() != 1 {
+            return None;
+        }
+        let inner = pts.elems.first()?;
+        let ident = ident_pat_name(inner)?;
+        let variant = pts.path.segments.last()?.ident.to_string();
+        let nominal = nominal_of(value_type);
+        let args = generic_args(value_type);
+        let arg_idx: usize = match variant.as_str() {
+            "Some" => 0,
+            "Ok" if nominal == "Result" => 0,
+            "Err" if nominal == "Result" => 1,
+            _ => return None,
+        };
+        let arg = args.get(arg_idx)?;
+        let stripped = strip_refs(arg).to_string();
+        if stripped.is_empty() || stripped == "_" {
+            return None;
+        }
+        let mut frame = HashMap::new();
+        frame.insert(ident, stripped);
+        Some(frame)
+    }
+
     /// Bug E-3.4: build a binding frame for a `for <pat> in <expr>` loop.
     /// Inspects the iterable's parametric type — only Vec / Option /
     /// Result / Iterator / HashSet / BTreeSet / VecDeque / LinkedList /
@@ -671,6 +718,74 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
         self.current_scope_idx = lookup_scope_for(self.ctx, node.span());
         syn::visit::visit_expr_closure(self, node);
         self.current_scope_idx = saved;
+    }
+
+    /// Bug E-3.4.1: capture `if let <pat> = <expr> { body }` bindings.
+    /// The bound ident is in scope only for the `then` branch — manual
+    /// traversal so the frame doesn't leak into the `else`-branch (or
+    /// `else if let` chains with the same ident name).
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        self.visit_expr(&node.cond);
+        let frame = self.compute_let_pat_frame(&node.cond);
+        let pushed = frame.is_some();
+        if let Some(f) = frame {
+            self.local_env.push_closure_scope(f);
+        }
+        self.visit_block(&node.then_branch);
+        if pushed {
+            self.local_env.pop_closure_scope();
+        }
+        if let Some((_, else_branch)) = &node.else_branch {
+            self.visit_expr(else_branch);
+        }
+    }
+
+    /// Bug E-3.4.1: capture `while let <pat> = <expr> { body }`
+    /// bindings — same pattern as `visit_expr_if`.
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        if let Some(label) = &node.label {
+            self.visit_label(label);
+        }
+        self.visit_expr(&node.cond);
+        let frame = self.compute_let_pat_frame(&node.cond);
+        let pushed = frame.is_some();
+        if let Some(f) = frame {
+            self.local_env.push_closure_scope(f);
+        }
+        self.visit_block(&node.body);
+        if pushed {
+            self.local_env.pop_closure_scope();
+        }
+    }
+
+    /// Bug E-3.4.1: per-arm binding for `match expr { Some(x) => ... }`.
+    /// Each arm gets its own frame computed from the scrutinee's type
+    /// and the arm pattern, pushed before the arm body and popped after.
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        self.visit_expr(&node.expr);
+        let recv_type = self.type_of_expr(&node.expr);
+        for arm in &node.arms {
+            let frame = recv_type
+                .as_deref()
+                .and_then(|t| Self::compute_unwrap_pat_frame(t, &arm.pat));
+            let pushed = frame.is_some();
+            if let Some(f) = frame {
+                self.local_env.push_closure_scope(f);
+            }
+            self.visit_arm(arm);
+            if pushed {
+                self.local_env.pop_closure_scope();
+            }
+        }
     }
 
     /// Bug E-3.4: bind the for-loop pattern ident to the iterable's

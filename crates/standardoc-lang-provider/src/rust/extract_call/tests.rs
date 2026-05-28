@@ -1201,6 +1201,100 @@ fn struct_field_parametric_unlocks_closure_through_field_chain() {
     assert_eq!(foo.receiver_type.as_deref(), Some("Foo"));
 }
 
+// --- Bug E-3.4.1: if-let / while-let / match-arm pattern binding ---
+
+#[test]
+fn if_let_some_binds_inner_for_then_branch() {
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ping(&self) {} } \
+         fn caller(opt: Option<Foo>) { if let Some(x) = opt { x.ping(); } }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn if_let_ok_binds_inner_t() {
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ping(&self) {} } \
+         fn caller(r: Result<Foo, ()>) { if let Ok(v) = r { v.ping(); } }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn if_let_err_binds_inner_e() {
+    let parsed = parse(
+        "struct ApiErr; impl ApiErr { fn log(&self) {} } \
+         fn caller(r: Result<(), ApiErr>) { if let Err(e) = r { e.log(); } }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let log = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "log"))
+        .expect("log edge");
+    assert_eq!(log.receiver_type.as_deref(), Some("ApiErr"));
+}
+
+#[test]
+fn while_let_some_binds_inner_for_body() {
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ping(&self) {} } \
+         fn caller(mut opt: Option<Foo>) { while let Some(x) = opt.take() { x.ping(); } }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn match_arm_some_binds_per_arm() {
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ping(&self) {} } \
+         fn caller(opt: Option<Foo>) { match opt { Some(x) => x.ping(), None => () } }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn match_arm_ok_err_bind_independently() {
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ping(&self) {} } \
+         struct ApiErr; impl ApiErr { fn log(&self) {} } \
+         fn caller(r: Result<Foo, ApiErr>) { \
+             match r { Ok(v) => v.ping(), Err(e) => e.log() } \
+         }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    let log = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "log"))
+        .expect("log edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Foo"));
+    assert_eq!(log.receiver_type.as_deref(), Some("ApiErr"));
+}
+
 // --- Bug E-3.4: for-loop pattern binding ---
 
 #[test]

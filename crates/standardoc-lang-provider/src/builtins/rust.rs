@@ -364,11 +364,17 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "unwrap_or_else",
             "unwrap_or_default",
             "expect",
-            "take",
-            "replace",
-            "cloned",
-            "copied",
         ],
+    );
+    // Bug E-3.4.1: take/replace/cloned/copied preserve the Option
+    // wrapping (they return `Option<T>` of the inner type), so propagate
+    // parametrically — `while let Some(x) = opt.take()` then binds
+    // `x: T` through the if-let / while-let / match-arm handlers.
+    add_returning(
+        reg,
+        "Option",
+        "Option<T>",
+        &["take", "replace", "cloned", "copied"],
     );
     add_returning(
         reg,
