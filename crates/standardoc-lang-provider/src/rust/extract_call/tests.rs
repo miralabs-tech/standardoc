@@ -1183,6 +1183,67 @@ fn nested_closure_inner_shadows_outer_binding() {
 }
 
 #[test]
+fn struct_field_parametric_unlocks_closure_through_field_chain() {
+    // Bug E-3 ext P-E3.2.1: `self.items.iter().map(|x| x.foo())` —
+    // struct_field_table now preserves `Vec<Foo>` parametrically so the
+    // closure binding sees `x: Foo`, enabling `x.foo()` to emit
+    // receiver_type = Foo (vs receiver_type = None pre-P-E3.2.1).
+    let parsed = parse(
+        "struct Foo; impl Foo { fn foo(&self) {} } \
+         struct Owner { items: Vec<Foo> } \
+         impl Owner { fn process(&self) { self.items.iter().map(|x| x.foo()); } }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let foo = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "foo"))
+        .expect("foo edge");
+    assert_eq!(foo.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn await_passes_through_for_chained_method_calls() {
+    // P-E3.2.1: `.await` collapses to its base type so async chains
+    // reach the subsequent method-call resolution path. Semantically
+    // wrong (Future<Output=Vec<T>>.await yields Vec<T>, not the
+    // Future), but the workspace return-type table for `async fn`
+    // already records the user-typed return — so propagation matches
+    // reality often enough.
+    let parsed = parse(
+        "struct Foo; impl Foo { fn run(&self) {} } \
+         fn caller(opt: Option<Foo>) { let _ = async { opt.map(|x| x.run()).unwrap() }; }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let run = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "run"))
+        .expect("run edge");
+    assert_eq!(run.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn try_operator_smart_unwraps_result_for_chained_method_calls() {
+    // P-E3.2.1: `expr?` smart-unwraps the Ok branch of `Result<T, _>`
+    // (and `Option<T>::Some`) so post-`?` chains reach the inner type's
+    // method-call resolution. `xs?.iter().map(|x| x.run())` for
+    // `xs: Result<Vec<Foo>, ()>` propagates Vec<Foo> through the `?`,
+    // then `.iter()` → Iterator<Foo>, then `.map(|x| ...)` binds
+    // `x: Foo` via the builtin registry closure_arg_type.
+    let parsed = parse(
+        "struct Foo; impl Foo { fn run(&self) {} } \
+         fn caller(xs: Result<Vec<Foo>, ()>) -> Result<(), ()> { \
+             xs?.iter().map(|x| x.run()); Ok(()) \
+         }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let run = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "run"))
+        .expect("run edge");
+    assert_eq!(run.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
 fn closure_arg_without_generic_args_does_not_panic() {
     // `let v = Vec::new();` records `v: Vec` (nominal-only, no generic
     // args) ; `.retain(|x| ...)` cannot substitute T → no closure scope

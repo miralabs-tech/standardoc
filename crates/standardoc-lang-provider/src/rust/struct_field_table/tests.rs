@@ -25,10 +25,15 @@ fn lookup_unknown_field_returns_none() {
 }
 
 #[test]
-fn record_drops_generics_via_nominal_type() {
+fn record_preserves_generics_parametric() {
+    // Bug E-3 ext P-E3.2.1: parametric form lets closure-arg
+    // substitution resolve `T` for `cache.map.iter().map(|(k, v)|...)`.
     let mut t = StructFieldTable::default();
     t.record("crate::Cache", "map", &ty("HashMap<String, Vec<u8>>"));
-    assert_eq!(t.lookup("crate::Cache", "map"), Some("HashMap"));
+    assert_eq!(
+        t.lookup("crate::Cache", "map"),
+        Some("HashMap<String, Vec<u8>>")
+    );
 }
 
 #[test]
@@ -49,8 +54,9 @@ fn record_skips_tuple_type() {
 fn record_skips_closure_type() {
     let mut t = StructFieldTable::default();
     t.record("crate::Hook", "cb", &ty("Box<dyn Fn(u8) -> u8>"));
-    // Box collapses to Box — the outer is nominal.
-    assert_eq!(t.lookup("crate::Hook", "cb"), Some("Box"));
+    // Bug E-3 ext P-E3.2.1: parametric form keeps Box's args slot but
+    // the inner `dyn Fn(u8) -> u8` is non-nominal so collapses to `_`.
+    assert_eq!(t.lookup("crate::Hook", "cb"), Some("Box<_>"));
 }
 
 #[test]

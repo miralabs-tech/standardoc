@@ -1,32 +1,26 @@
-//! Shared nominal-type extraction for Rust `syn::Type` nodes.
+//! Shared type extraction for Rust `syn::Type` nodes.
 //!
-//! Returns the last path segment (no generics) when the type is a
-//! `Path`, stripping through `&`, `&mut`, parens and groups. Returns
-//! `None` for tuples, closures, slices, impl-trait, never, and other
-//! non-nominal shapes.
+//! Returns the last path segment preserved with its parametric args
+//! (`Vec<Foo>`) when the type is a `Path`, stripping through `&`,
+//! `&mut`, parens and groups. Returns `None` for tuples, closures,
+//! slices, impl-trait, never, and other non-nominal shapes.
 //!
 //! Reused by:
 //!   - `extract_call::local_type_env` (Bug E-3 Phase 1: binding -> type)
 //!   - `struct_field_table` (Bug E-3 Phase 1: struct.field -> type)
-//!   - Future: Phase 3 chained-method receivers.
+//!   - `return_type_table` (Bug E-3 ext P-E3.1: fn-fqdn -> return type)
+//!   - `extract_call::CallVisitor::type_of_expr` (Bug E-3 Phase 3 + ext
+//!     P-E3.2: chained-method receivers via builtin returns and closure
+//!     substitution).
 
 use syn::Type;
 
-pub(crate) fn nominal_type(ty: &Type) -> Option<String> {
-    match ty {
-        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
-        Type::Reference(r) => nominal_type(&r.elem),
-        Type::Paren(p) => nominal_type(&p.elem),
-        Type::Group(g) => nominal_type(&g.elem),
-        _ => None,
-    }
-}
-
-/// Bug E-3 ext P-E3.2: like [`nominal_type`] but preserves the
+/// Bug E-3 ext P-E3.2: extract the last path segment preserving
 /// angle-bracketed generic args as printed in source. Used by closure-arg
 /// substitution to map e.g. `Vec<Foo>` → bind `T = Foo`. Generic args
 /// that can't be rendered (lifetimes, const generics, associated-type
-/// bindings) collapse to `_`.
+/// bindings) collapse to `_`. Callers needing only the nominal head
+/// slice via [`nominal_of`].
 pub(crate) fn parametric_type(ty: &Type) -> Option<String> {
     match ty {
         Type::Path(p) => p.path.segments.last().map(render_segment),

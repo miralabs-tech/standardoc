@@ -13,9 +13,11 @@ fn record_and_lookup_free_fn() {
 
 #[test]
 fn record_and_lookup_impl_method() {
+    // Bug E-3 ext P-E3.2.1: parametric storage preserves generics so
+    // workspace chains can propagate the inner type into closures.
     let mut t = ReturnTypeTable::default();
     t.record("crate::Repo::find_by_id", &ty("Option<User>"));
-    assert_eq!(t.lookup("crate::Repo::find_by_id"), Some("Option"));
+    assert_eq!(t.lookup("crate::Repo::find_by_id"), Some("Option<User>"));
 }
 
 #[test]
@@ -25,10 +27,15 @@ fn lookup_unknown_fqdn_returns_none() {
 }
 
 #[test]
-fn record_drops_generics_via_nominal_type() {
+fn record_preserves_generics_parametric() {
+    // Bug E-3 ext P-E3.2.1: keep the full parametric form for chains
+    // that need `T` substituted (e.g. `cache_get().iter().map(|x|...)`).
     let mut t = ReturnTypeTable::default();
     t.record("crate::cache_get", &ty("HashMap<String, Vec<u8>>"));
-    assert_eq!(t.lookup("crate::cache_get"), Some("HashMap"));
+    assert_eq!(
+        t.lookup("crate::cache_get"),
+        Some("HashMap<String, Vec<u8>>")
+    );
 }
 
 #[test]

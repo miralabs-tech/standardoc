@@ -239,10 +239,19 @@ impl CallVisitor<'_> {
     ///   * `self.<field>` (Phase 1)     → `struct_fields.lookup(self_type, field)`
     ///   * `<recv>.<method>()` (Phase 3) → registry `lookup_method.returns`
     ///   * `&<expr>` / `(<expr>)` / `{<expr>}` → recurse through
+    ///   * `<expr>.await` / `<expr>?` (P-E3.2.1) → propagate base type
+    ///     unchanged. This is *semantically wrong* (Future<Output=T>
+    ///     should unwrap to T, Result<T,E>? should unwrap to T) but
+    ///     covers the very common workspace pattern where the surface
+    ///     type the user typed already names the eventual value (e.g.
+    ///     `async fn f() -> Vec<Foo>` recorded as returning `"Vec<Foo>"`
+    ///     in the workspace return-type table). The wrong-but-passing
+    ///     propagation is required for chains like `f().await?.iter()`
+    ///     to reach the `.iter()` lookup; downstream lookups validate
+    ///     the type before emitting edges.
     ///
-    /// Out of scope: closure-arg type inference (`|i|` in
-    /// `.map(|i| ...)`), explicit turbofish (`collect::<Vec<_>>()`),
-    /// `?` unwrap, tuple/index access.
+    /// Out of scope: explicit turbofish (`collect::<Vec<_>>()`),
+    /// tuple/index access.
     fn type_of_expr(&self, expr: &syn::Expr) -> Option<String> {
         match expr {
             syn::Expr::Path(p) => self.type_of_path_expr(&p.path),
@@ -252,8 +261,25 @@ impl CallVisitor<'_> {
             syn::Expr::Reference(r) => self.type_of_expr(&r.expr),
             syn::Expr::Paren(p) => self.type_of_expr(&p.expr),
             syn::Expr::Group(g) => self.type_of_expr(&g.expr),
+            syn::Expr::Await(a) => self.type_of_expr(&a.base),
+            syn::Expr::Try(t) => self.type_of_try_expr(&t.expr),
             _ => None,
         }
+    }
+
+    /// Bug E-3 ext P-E3.2.1: smart `?`-unwrap for `Result<T, _>` /
+    /// `Option<T>`. Falls back to identity propagation when the base
+    /// isn't one of those (e.g. user `Try` traits) — best-effort.
+    fn type_of_try_expr(&self, base: &syn::Expr) -> Option<String> {
+        let base_type = self.type_of_expr(base)?;
+        let nominal = nominal_of(&base_type);
+        if matches!(nominal, "Result" | "Option") {
+            let args = generic_args(&base_type);
+            if let Some(ok) = args.first() {
+                return Some((*ok).to_string());
+            }
+        }
+        Some(base_type)
     }
 
     fn type_of_path_expr(&self, path: &syn::Path) -> Option<String> {
@@ -623,8 +649,7 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
         }
         for arg in &node.args {
             if let syn::Expr::Closure(c) = arg {
-                let frame =
-                    Self::compute_closure_frame(receiver_parametric.as_deref(), &method, c);
+                let frame = Self::compute_closure_frame(receiver_parametric.as_deref(), &method, c);
                 match frame {
                     Some(f) => {
                         self.local_env.push_closure_scope(f);
