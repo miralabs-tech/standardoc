@@ -213,6 +213,7 @@ impl CallVisitor<'_> {
             syn::Expr::Path(p) => self.type_of_path_expr(&p.path),
             syn::Expr::Field(f) => self.type_of_field_expr(f),
             syn::Expr::MethodCall(m) => self.type_of_method_call_expr(m),
+            syn::Expr::Call(c) => self.type_of_call_expr(c),
             syn::Expr::Reference(r) => self.type_of_expr(&r.expr),
             syn::Expr::Paren(p) => self.type_of_expr(&p.expr),
             syn::Expr::Group(g) => self.type_of_expr(&g.expr),
@@ -246,9 +247,47 @@ impl CallVisitor<'_> {
     fn type_of_method_call_expr(&self, m: &syn::ExprMethodCall) -> Option<String> {
         let recv_type = self.type_of_expr(&m.receiver)?;
         let method = m.method.to_string();
-        global_builtin_registry()
+        // Tier 1 — builtin registry (Phase 3 v1 chain propagation).
+        if let Some(ret) = global_builtin_registry()
             .lookup_method(&recv_type, &method, Language::Rust)
             .and_then(|e| e.returns.clone())
+        {
+            return Some(ret);
+        }
+        // Tier 2 — workspace return-type table (Bug E-3 ext P-E3.1).
+        // Catches chains where the receiver type's method is defined
+        // in the current file (e.g. `repo.find_by_id(id).field` when
+        // `Repo::find_by_id` was just extracted). Cross-file chains
+        // stay unresolved until a global return table is wired.
+        let workspace_fqdn = format!("{recv_type}::{method}");
+        self.ctx
+            .return_types
+            .lookup(&workspace_fqdn)
+            .map(str::to_string)
+    }
+
+    /// Bug E-3 ext P-E3.1: free-fn call return-type propagation.
+    /// Resolves the call's path to a workspace fqdn via the visitor's
+    /// scope chain, then looks up the recorded return type. Single-
+    /// segment paths resolve against the current module; multi-segment
+    /// paths go through `resolve_path` (which honours the alias table
+    /// + ancestor walk + verbatim-FQDN short-circuit). Non-path
+    /// callees (closures, dyn-dispatch via expression) yield `None`.
+    fn type_of_call_expr(&self, c: &syn::ExprCall) -> Option<String> {
+        let syn::Expr::Path(path_expr) = c.func.as_ref() else {
+            return None;
+        };
+        let raw_path = path_to_string(&path_expr.path);
+        let substituted = self.substitute_self(&raw_path);
+        let path_str = substituted.as_deref().unwrap_or(&raw_path);
+        let fqdn = match self.ctx.resolve_path(path_str, &self.current_module) {
+            ResolvedOrUnresolved::Resolved { fqdn } => fqdn,
+            ResolvedOrUnresolved::Unresolved { name } => name,
+            // Cross-workspace bridges (e.g. cargo registry symbols)
+            // aren't candidates for the per-file return table — skip.
+            ResolvedOrUnresolved::UnresolvedBridge { .. } => return None,
+        };
+        self.ctx.return_types.lookup(&fqdn).map(str::to_string)
     }
 
     /// Stage 3e-2-ter — emit a `Calls` edge for a `path` in call

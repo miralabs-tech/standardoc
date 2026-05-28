@@ -52,6 +52,11 @@ pub(crate) struct WalkContext {
     /// by `visit_expr_method_call` (P1.4) to resolve `self.field.method`
     /// when the enclosing impl's `self_type` is known.
     pub(crate) struct_fields: super::struct_field_table::StructFieldTable,
+    /// Bug E-3 extensions Phase E-3.1: per-file `fqdn → nominal return
+    /// type` for workspace fns and impl methods extracted in this walk.
+    /// Read by `type_of_expr` to propagate types through chains like
+    /// `get_thing().method()` where `get_thing` is workspace-defined.
+    pub(crate) return_types: super::return_type_table::ReturnTypeTable,
 }
 
 impl WalkContext {
@@ -62,6 +67,7 @@ impl WalkContext {
             alias_table: HashMap::new(),
             attribute_flags: HashMap::new(),
             struct_fields: super::struct_field_table::StructFieldTable::default(),
+            return_types: super::return_type_table::ReturnTypeTable::default(),
         }
     }
 
@@ -452,6 +458,14 @@ fn process_item_p1(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
         syn::Item::Fn(it) => {
             let path = ctx.core.file_path.clone();
             let fn_fqdn = format!("{current_module}::{}", it.sig.ident);
+            // Bug E-3 extensions P-E3.1: record the fn's nominal return
+            // type so `type_of_expr` can propagate it through chains
+            // like `get_user().name()` where `get_user` is workspace-
+            // defined. No-op when the return is non-nominal (`()`,
+            // tuples, closures, ...).
+            if let syn::ReturnType::Type(_, ty) = &it.sig.output {
+                ctx.return_types.record(&fn_fqdn, ty);
+            }
             ctx.push_symbol_with_doc(extract_fn(it, current_module, &path), &it.attrs);
             // Bug C-3: walk the signature for UsesType edges. Fn-level
             // Stage 3a-8c — fn-level + module-level generics are

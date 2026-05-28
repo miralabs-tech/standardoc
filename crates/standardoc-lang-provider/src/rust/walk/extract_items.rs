@@ -547,6 +547,13 @@ pub(super) fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_f
         if let syn::ImplItem::Fn(item_fn) = impl_item {
             let fn_name = item_fn.sig.ident.to_string();
             let fn_fqdn = format!("{target_fqdn}::{fn_name}");
+            // Bug E-3 extensions P-E3.1: record the method's nominal
+            // return type so `type_of_expr` can propagate chains like
+            // `repo.find_by_id(id).name` where `find_by_id` is workspace-
+            // defined. Mirror of the free-fn recording in `process_item_p1`.
+            if let syn::ReturnType::Type(_, ty) = &item_fn.sig.output {
+                ctx.return_types.record(&fn_fqdn, ty);
+            }
             let mut sig = extract_signature(&item_fn.sig);
             sig.modifiers.deprecated = extract_deprecated(&item_fn.attrs);
             ctx.push_symbol_with_doc(
