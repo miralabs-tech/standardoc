@@ -10,6 +10,7 @@ import { registerCommands } from './commands';
 import { maybePromptForInit, syncMcpConfigToUrl } from './init/prompt';
 import { registerStdignoreHover } from './stdignore/hover';
 import { registerSxdHover } from './sxd/hover';
+import { readSxdPort } from './sxd/config-port';
 
 const MCP_PROVIDER_ID = 'standardoc.mcp';
 const DEFAULT_MCP_HTTP_PORT = 7700;
@@ -24,10 +25,18 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('Standardoc');
   context.subscriptions.push(output);
 
-  const port = vscode.workspace
+  // Precedence: standardoc.sxd `mcp { port N }` > VSCode setting
+  // `standardoc.mcpHttpPort` > default 7700. Sxd wins as the
+  // workspace-authoritative source ; the setting stays as a per-user
+  // override surface for workspaces without an .sxd, and the default
+  // catches the fresh-install case.
+  const sxdPort = readSxdPort(workspaceRoot, 'mcp');
+  const settingPort = vscode.workspace
     .getConfiguration('standardoc')
     .get<number>('mcpHttpPort', DEFAULT_MCP_HTTP_PORT);
-  output.appendLine(`[mcp] http port from setting: ${port}`);
+  const port = sxdPort ?? settingPort;
+  const portSource = sxdPort !== null ? 'sxd' : 'setting';
+  output.appendLine(`[mcp] http port=${port} (source=${portSource})`);
 
   const lsp = new LspClient(workspaceRoot, output);
   const sxdLsp = new SxdLspClient(output);

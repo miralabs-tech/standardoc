@@ -2,10 +2,10 @@ import * as vscode from 'vscode';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as path from 'node:path';
+import { readSxdPort } from '../sxd/config-port';
 
 const VIZ_HOST = 'localhost';
-const VIZ_PORT = 3000;
-const VIZ_URL = `http://${VIZ_HOST}:${VIZ_PORT}/shell.html`;
+const DEFAULT_VIZ_PORT = 3000;
 const PROBE_TIMEOUT_MS = 500;
 const SERVER_BOOT_GRACE_MS = 2500;
 const TERMINAL_NAME = 'Standardoc Viz';
@@ -48,10 +48,16 @@ export async function openGraphViz(
     return;
   }
 
-  const alreadyUp = await isPortOpen(VIZ_HOST, VIZ_PORT, PROBE_TIMEOUT_MS);
+  // Precedence: standardoc.sxd `viz { port N }` > default 3000. No CLI
+  // flag layer here — the command palette has no arg surface.
+  const port = readSxdPort(workspaceRoot, 'viz') ?? DEFAULT_VIZ_PORT;
+  const vizUrl = `http://${VIZ_HOST}:${port}/shell.html`;
+  output.appendLine(`[viz] resolved port=${port} (source=${readSxdPort(workspaceRoot, 'viz') === null ? 'default' : 'sxd'})`);
+
+  const alreadyUp = await isPortOpen(VIZ_HOST, port, PROBE_TIMEOUT_MS);
   if (alreadyUp) {
-    output.appendLine(`[viz] dev server already listening on :${VIZ_PORT} — opening browser`);
-    await vscode.env.openExternal(vscode.Uri.parse(VIZ_URL));
+    output.appendLine(`[viz] dev server already listening on :${port} — opening browser`);
+    await vscode.env.openExternal(vscode.Uri.parse(vizUrl));
     return;
   }
 
@@ -68,8 +74,8 @@ export async function openGraphViz(
   // browser hits an empty page until the wasm is ready anyway — that
   // path stays user-visible.
   await delay(SERVER_BOOT_GRACE_MS);
-  await vscode.env.openExternal(vscode.Uri.parse(VIZ_URL));
-  output.appendLine(`[viz] browser opened at ${VIZ_URL}`);
+  await vscode.env.openExternal(vscode.Uri.parse(vizUrl));
+  output.appendLine(`[viz] browser opened at ${vizUrl}`);
 }
 
 function reuseOrCreateTerminal(name: string, cwd: string): vscode.Terminal {

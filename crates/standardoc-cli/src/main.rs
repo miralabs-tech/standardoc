@@ -77,14 +77,20 @@ enum Command {
     /// daemon's actual address and retries on upstream connection
     /// refused. Replaces the standalone `standardoc-mcp-proxy` binary —
     /// one binary now handles every transport role.
+    ///
+    /// Resolution precedence for the bind address (host:port):
+    ///   1. `--bind` CLI flag if passed (full `host:port` string)
+    ///   2. `proxy { bind "..." port N }` block in `standardoc.sxd`
+    ///   3. default `127.0.0.1:7700`
     Proxy {
-        /// Local bind address. Configure the MCP client to point at
-        /// `http://<bind>/mcp`.
-        #[arg(long, default_value = "127.0.0.1:7700")]
-        bind: String,
+        /// Explicit `host:port` bind override. When omitted the proxy
+        /// reads `proxy { bind "..." port N }` from the workspace's
+        /// `standardoc.sxd` and falls back to `127.0.0.1:7700` otherwise.
+        #[arg(long)]
+        bind: Option<String>,
 
-        /// Workspace root used to locate `.standardoc/mcp.endpoint`.
-        /// Defaults to the current working directory.
+        /// Workspace root used to locate `.standardoc/mcp.endpoint` AND
+        /// `standardoc.sxd`. Defaults to the current working directory.
         #[arg(long, value_name = "DIR")]
         workspace: Option<PathBuf>,
 
@@ -426,15 +432,16 @@ fn cmd_lsp_sxd() -> Result<(), ServerError> {
 }
 
 fn cmd_proxy(
-    bind: String,
+    bind: Option<String>,
     workspace: Option<PathBuf>,
     retry_window_secs: u64,
 ) -> Result<(), ServerError> {
     let workspace = workspace
         .map_or_else(std::env::current_dir, Ok)
         .map_err(ServerError::Io)?;
+    let bind_addr = resolve_proxy_bind(&workspace, bind);
     let cfg = standardoc_mcp_proxy::ProxyConfig {
-        bind_addr: bind,
+        bind_addr,
         workspace_root: workspace,
         upstream_retry_window: Duration::from_secs(retry_window_secs),
     };
@@ -449,6 +456,28 @@ fn cmd_proxy(
     runtime
         .block_on(standardoc_mcp_proxy::run(cfg))
         .map_err(|e| ServerError::Io(io::Error::other(format!("proxy: {e}"))))
+}
+
+/// Precedence: CLI `--bind` wins outright when passed, else compose
+/// from `proxy { bind "..." port N }` in the workspace's
+/// `standardoc.sxd`, else fall back to `127.0.0.1:7700`. A parse error
+/// on the sxd is treated as "absent" so a syntactically broken config
+/// can't keep the proxy from starting — the LSP surfaces those errors
+/// to the user separately.
+fn resolve_proxy_bind(workspace: &Path, cli_bind: Option<String>) -> String {
+    if let Some(b) = cli_bind {
+        return b;
+    }
+    let sxd_proxy = standardoc_core::config::load_workspace_config(workspace)
+        .ok()
+        .flatten()
+        .and_then(|cfg| cfg.proxy);
+    let host = sxd_proxy
+        .as_ref()
+        .and_then(|p| p.bind.clone())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = sxd_proxy.as_ref().and_then(|p| p.port).unwrap_or(7700);
+    format!("{host}:{port}")
 }
 
 fn cmd_mcp(path: &Path, readonly: bool, http: Option<u16>) -> Result<(), ServerError> {
