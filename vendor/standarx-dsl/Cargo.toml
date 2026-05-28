@@ -1,0 +1,15 @@
+[package]
+name = "standarx-dsl"
+version = "0.1.0"
+edition = "2021"
+authors = ["miralabs-tech"]
+license = "MIT"
+repository = "https://github.com/miralabs-tech/standarx-dsl"
+description = "Reusable DSL parser for the standar* ecosystem (lexer + parser + AST). Used by standarbuild for .sxb (tasks) and standardoc for .sxd (workspace config)."
+keywords = ["dsl", "parser", "lexer", "config", "standarx"]
+categories = ["parser-implementations", "config"]
+rust-version = "1.78"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
