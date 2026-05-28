@@ -249,6 +249,17 @@ pub(crate) fn discover_and_persist_projects_with(
     workspace_root: &Path,
     registry: &DetectorRegistry,
 ) -> Result<Vec<ProjectInfo>, StorageError> {
+    // Bug E-3 follow-up — when `standardoc.sxd` declares explicit
+    // `project` blocks, REPLACE the mechanical detection entirely. The
+    // declared paths become the authoritative project list ; mechanical
+    // workspace_kind sniffing is skipped (no manifest is implied).
+    if let Ok(Some(cfg)) = crate::config::load_workspace_config(workspace_root)
+        && !cfg.projects.is_empty()
+    {
+        let _ = schema_meta::delete_workspace_kind(conn);
+        return persist_sxd_projects(conn, workspace_root, &cfg.projects);
+    }
+
     let detected = discover_workspace_with(workspace_root, registry);
     // Stage 3e-3: sync the persisted `workspace_kind` row to the detected
     // state BEFORE returning so a partial early-exit (e.g. cold_start
@@ -267,6 +278,37 @@ pub(crate) fn discover_and_persist_projects_with(
         }
     }
     persist_projects(conn, detected.projects)
+}
+
+/// Bug E-3 follow-up — sxd-driven project persistence. One `projects`
+/// row per `(block, path)` pair ; `label` is shared across paths of
+/// the same block so downstream consumers (viz Overview) can collapse
+/// them by label. `kind` defaults to `Custom(slug)` since the user
+/// asserted these paths as projects regardless of inner detection.
+fn persist_sxd_projects(
+    conn: &Connection,
+    workspace_root: &Path,
+    blocks: &[crate::config::ProjectBlock],
+) -> Result<Vec<ProjectInfo>, StorageError> {
+    let mut out: Vec<ProjectInfo> = Vec::new();
+    for block in blocks {
+        let label = block.label.clone().unwrap_or_else(|| block.slug.clone());
+        let kind = ProjectKind::Custom(block.slug.clone());
+        for path in &block.paths {
+            let rel_path = normalise_rel_path(path);
+            let abs = workspace_root.join(&rel_path);
+            let root_path = abs.to_string_lossy().into_owned();
+            let project_id = projects::upsert_project(conn, &label, &kind, &root_path, &rel_path)?;
+            out.push(ProjectInfo {
+                project_id,
+                label: label.clone(),
+                kind: kind.clone(),
+                root_path,
+                rel_path,
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// Run `standarbuild_detect::discover` against `workspace_root` and return
@@ -724,5 +766,150 @@ mod tests {
             )
             .unwrap();
         assert!(post.is_none(), "stale project_id must be cleared");
+    }
+
+    // --- Bug E-3 follow-up : sxd-driven REPLACE semantics ---
+
+    fn write_sxd(root: &Path, body: &str) {
+        fs::write(root.join("standardoc.sxd"), body).unwrap();
+    }
+
+    #[test]
+    fn sxd_with_projects_short_circuits_mechanical_detection() {
+        let dir = tempdir().unwrap();
+        // Mechanical detection would pick up this Rust crate.
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"unwanted\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        // Sxd declares ONE custom project that doesn't match the cargo manifest.
+        write_sxd(
+            dir.path(),
+            r#"version "0.1.0"
+project "custom" {
+  label "Custom Bundle"
+  path "subdir"
+}
+"#,
+        );
+
+        let conn = fresh_db();
+        let projects = discover_and_persist_projects(&conn, dir.path()).unwrap();
+
+        assert_eq!(projects.len(), 1, "exactly one sxd-declared project");
+        let p = &projects[0];
+        assert_eq!(p.label, "Custom Bundle");
+        assert_eq!(p.rel_path, "subdir");
+        assert!(matches!(&p.kind, ProjectKind::Custom(slug) if slug == "custom"));
+        // Mechanical Rust kind absent — proves the bypass.
+        assert!(
+            !projects.iter().any(|p| matches!(p.kind, ProjectKind::Rust)),
+            "mechanical detection must NOT run when sxd has projects, got {projects:?}",
+        );
+    }
+
+    #[test]
+    fn sxd_multi_path_project_yields_one_row_per_path_shared_label() {
+        let dir = tempdir().unwrap();
+        write_sxd(
+            dir.path(),
+            r#"version "0.1.0"
+project "standardoc" {
+  label "Standardoc"
+  paths ["crates" "ext/vscode"]
+}
+"#,
+        );
+
+        let conn = fresh_db();
+        let projects = discover_and_persist_projects(&conn, dir.path()).unwrap();
+
+        assert_eq!(projects.len(), 2);
+        assert!(projects.iter().all(|p| p.label == "Standardoc"));
+        let mut paths: Vec<&str> = projects.iter().map(|p| p.rel_path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(paths, vec!["crates", "ext/vscode"]);
+    }
+
+    #[test]
+    fn sxd_label_fallback_to_slug_when_absent() {
+        let dir = tempdir().unwrap();
+        write_sxd(
+            dir.path(),
+            r#"version "0.1.0"
+project "naked" { path "x" }
+"#,
+        );
+
+        let conn = fresh_db();
+        let projects = discover_and_persist_projects(&conn, dir.path()).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].label, "naked");
+    }
+
+    #[test]
+    fn sxd_without_projects_falls_back_to_mechanical_detection() {
+        let dir = tempdir().unwrap();
+        // Cargo manifest present — mechanical detection should fire.
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        // Sxd with ONLY ignore block — no project blocks → no override.
+        write_sxd(
+            dir.path(),
+            r#"version "0.1.0"
+ignore { patterns ```
+.git/
+``` }
+"#,
+        );
+
+        let conn = fresh_db();
+        let projects = discover_and_persist_projects(&conn, dir.path()).unwrap();
+        assert!(
+            projects.iter().any(|p| matches!(p.kind, ProjectKind::Rust)),
+            "mechanical Rust detection must still fire, got {projects:?}",
+        );
+    }
+
+    #[test]
+    fn sxd_reconcile_files_attaches_to_sxd_project_id() {
+        let dir = tempdir().unwrap();
+        write_sxd(
+            dir.path(),
+            r#"version "0.1.0"
+project "standardoc" {
+  label "Standardoc"
+  paths ["crates" "ext/vscode"]
+}
+"#,
+        );
+        let conn = fresh_db();
+        let projects = discover_and_persist_projects(&conn, dir.path()).unwrap();
+        assert_eq!(projects.len(), 2);
+        seed_file(&conn, "crates/foo/src/lib.rs");
+        seed_file(&conn, "ext/vscode/src/extension.ts");
+        reconcile_files_project_id(&conn).unwrap();
+
+        let pid_for = |path: &str| -> Option<u32> {
+            conn.query_row(
+                "SELECT project_id FROM files WHERE path = ?1",
+                params![path],
+                |r| r.get::<_, Option<u32>>(0),
+            )
+            .unwrap()
+        };
+        let labels_pid: std::collections::HashMap<u32, String> = projects
+            .iter()
+            .map(|p| (p.project_id, p.label.clone()))
+            .collect();
+
+        let crates_pid = pid_for("crates/foo/src/lib.rs").expect("crates file linked");
+        let ext_pid = pid_for("ext/vscode/src/extension.ts").expect("ext file linked");
+        assert_eq!(labels_pid[&crates_pid], "Standardoc");
+        assert_eq!(labels_pid[&ext_pid], "Standardoc");
     }
 }
