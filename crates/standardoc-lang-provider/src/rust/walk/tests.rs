@@ -1,6 +1,7 @@
 #![allow(clippy::match_wildcard_for_single_variants)]
 
 use super::*;
+use standardoc_ir::{DeclKind, EdgeKind, Kind, Visibility};
 
 fn parse(src: &str) -> syn::File {
     syn::parse_file(src).expect("test source not parsable")
