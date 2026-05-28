@@ -327,14 +327,45 @@ impl CallVisitor<'_> {
         // Catches chains where the receiver type's method is defined
         // in the current file (e.g. `repo.find_by_id(id).field` when
         // `Repo::find_by_id` was just extracted). Cross-file chains
-        // stay unresolved until a global return table is wired. The
-        // workspace table keys on nominal FQDNs — no generic tracking
-        // there yet (deferred to E-3.3).
-        let workspace_fqdn = format!("{recv_nominal}::{method}");
+        // stay unresolved until a global return table is wired.
+        // Bug E-3 ext P-E3.2.3: resolve the nominal recv to its
+        // workspace FQDN before keying the table — `recv_nominal` may
+        // be a bare ident (`"Repo"`) while the table holds
+        // fully-qualified keys (`"c::Repo::find_by_id"`).
+        let recv_fqdn = match self.ctx.resolve_path(recv_nominal, &self.current_module) {
+            ResolvedOrUnresolved::Resolved { fqdn } => fqdn,
+            _ => recv_nominal.to_string(),
+        };
+        let workspace_fqdn = format!("{recv_fqdn}::{method}");
         self.ctx
             .return_types
             .lookup(&workspace_fqdn)
             .map(str::to_string)
+    }
+
+    /// Bug E-3 ext P-E3.2.3: after `record_local` runs, fall back to the
+    /// workspace return-type table for `let x = workspace_fn(...)` /
+    /// `let x = receiver.workspace_method(...)`. The constructor probe in
+    /// `record_local` only matches `<Type>::<ctor>(...)` shapes, so plain
+    /// fn / method calls return without binding `x`. This helper picks
+    /// up the slack by reusing `type_of_call_expr` /
+    /// `type_of_method_call_expr` (which already key into
+    /// `ReturnTypeTable`) when the binding ident has no entry yet and the
+    /// init looks like a recordable workspace call.
+    fn maybe_record_workspace_call_binding(&mut self, local: &syn::Local) {
+        let Some(name) = ident_pat_name(&local.pat) else {
+            return;
+        };
+        if self.local_env.lookup(&name).is_some() {
+            return;
+        }
+        let Some(init) = local.init.as_ref() else {
+            return;
+        };
+        let Some(ty) = self.type_of_expr(&init.expr) else {
+            return;
+        };
+        self.local_env.set_binding(name, ty);
     }
 
     /// Bug E-3 ext P-E3.2: build a closure-arg binding frame for a method
@@ -597,8 +628,15 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
     /// receiver-type env. Flat across nested blocks (no scoping) — Phase 1
     /// accepts the false-positive risk of late shadowing; Phase 3 may
     /// revisit if measured noise warrants it.
+    ///
+    /// Bug E-3 ext P-E3.2.3: after the constructor-pattern probe in
+    /// `record_local`, fall back to the workspace return-type table for
+    /// `let v = workspace_fn(...)` style bindings. Catches the dominant
+    /// `let extracted = walk(...); extracted.symbols.iter().map(...)`
+    /// pattern that the audit identified as the biggest remaining gap.
     fn visit_local(&mut self, node: &'ast syn::Local) {
         self.local_env.record_local(node);
+        self.maybe_record_workspace_call_binding(node);
         syn::visit::visit_local(self, node);
     }
 

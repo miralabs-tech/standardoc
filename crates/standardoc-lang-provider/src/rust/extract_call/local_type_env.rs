@@ -102,6 +102,15 @@ impl LocalTypeEnv {
     pub(super) fn pop_closure_scope(&mut self) {
         self.closure_scopes.pop();
     }
+
+    /// Bug E-3 ext P-E3.2.3: directly record a binding from an
+    /// out-of-band inference source (e.g. workspace return-type table
+    /// fallback for `let x = workspace_fn()`). Use when [`record_local`]
+    /// returns without binding because the init isn't a known
+    /// constructor shape.
+    pub(super) fn set_binding(&mut self, name: String, ty: String) {
+        self.bindings.insert(name, ty);
+    }
 }
 
 /// Infer the binding's nominal type from a constructor-shaped initializer.

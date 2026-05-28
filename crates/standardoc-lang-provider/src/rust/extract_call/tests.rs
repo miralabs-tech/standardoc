@@ -1202,6 +1202,44 @@ fn struct_field_parametric_unlocks_closure_through_field_chain() {
 }
 
 #[test]
+fn workspace_call_binding_unlocks_closure_chain() {
+    // Bug E-3 ext P-E3.2.3: `let extracted = walk(...)` now binds
+    // `extracted` to walk's recorded return type via the workspace
+    // return-type table fallback. The chain
+    // `extracted.symbols.iter().map(|s| s.name.as_str())` then
+    // resolves end-to-end.
+    let parsed = parse(
+        "struct Sym; impl Sym { fn ping(&self) {} } \
+         struct Out { items: Vec<Sym> } \
+         fn walk() -> Out { Out { items: Vec::new() } } \
+         fn caller() { let extracted = walk(); extracted.items.iter().map(|s| s.ping()); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Sym"));
+}
+
+#[test]
+fn workspace_method_call_binding_unlocks_chain() {
+    // Same as above but the init is a method call instead of a free fn.
+    let parsed = parse(
+        "struct Sym; impl Sym { fn ping(&self) {} } \
+         struct Out { items: Vec<Sym> } \
+         struct Repo; impl Repo { fn snapshot(&self) -> Out { Out { items: Vec::new() } } } \
+         fn caller(r: Repo) { let extracted = r.snapshot(); extracted.items.iter().map(|s| s.ping()); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Sym"));
+}
+
+#[test]
 fn struct_field_chain_via_nominal_owner_resolves_through_side_index() {
     // Bug E-3 ext P-E3.2.2: when the owner is a fn-param binding
     // (`fn process(owner: Owner)`), `owner.items` keys struct_fields
