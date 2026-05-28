@@ -1201,6 +1201,97 @@ fn struct_field_parametric_unlocks_closure_through_field_chain() {
     assert_eq!(foo.receiver_type.as_deref(), Some("Foo"));
 }
 
+// --- Bug E-3.4: for-loop pattern binding ---
+
+#[test]
+fn for_loop_over_vec_binds_pat_to_inner_t() {
+    // `for x in xs` where `xs: Vec<Foo>` should bind `x: Foo` for the
+    // duration of the body, so `x.ping()` carries receiver_type = Foo.
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ping(&self) {} } \
+         fn caller(xs: Vec<Foo>) { for x in xs { x.ping(); } }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn for_loop_over_ref_vec_strips_ref_in_binding() {
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ping(&self) {} } \
+         fn caller(xs: Vec<Foo>) { for x in &xs { x.ping(); } }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn for_loop_over_iterator_binds_pat() {
+    // `for x in xs.iter()` where xs: Vec<Foo> → xs.iter() returns
+    // Iterator<Foo> → x binds to Foo.
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ping(&self) {} } \
+         fn caller(xs: Vec<Foo>) { for x in xs.iter() { x.ping(); } }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn for_loop_over_struct_field_chain() {
+    // `for sym in &plan.inserts` — the audit-identified pattern from
+    // batch.rs. `plan.inserts: Vec<RawSymbol>` → `sym: RawSymbol` →
+    // `sym.fqdn.as_str()` resolves through struct_fields + builtins.
+    let parsed = parse(
+        "struct RawSymbol { fqdn: String } \
+         struct Plan { inserts: Vec<RawSymbol> } \
+         fn touched_fqdns(plan: &Plan) { for sym in &plan.inserts { sym.fqdn.as_str(); } }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let as_str = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "as_str"))
+        .expect("as_str edge");
+    assert_eq!(as_str.receiver_type.as_deref(), Some("String"));
+}
+
+#[test]
+fn for_loop_pat_does_not_leak_outside_body() {
+    // Outer `x: Outer`; for-loop introduces inner `x: Inner` shadowing.
+    // After the loop, `x.outer_method()` should re-see Outer.
+    let parsed = parse(
+        "struct Outer; impl Outer { fn outer_method(&self) {} } \
+         struct Inner; impl Inner { fn inner_method(&self) {} } \
+         fn caller(x: Outer, xs: Vec<Inner>) { \
+             for x in xs { x.inner_method(); } \
+             x.outer_method(); \
+         }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let inner = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "inner_method"))
+        .expect("inner_method edge");
+    let outer = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "outer_method"))
+        .expect("outer_method edge");
+    assert_eq!(inner.receiver_type.as_deref(), Some("Inner"));
+    assert_eq!(outer.receiver_type.as_deref(), Some("Outer"));
+}
+
 // --- Bug E-3.3: parametric unwrap (Option<T>::unwrap → T, etc.) ---
 
 #[test]

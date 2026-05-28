@@ -368,6 +368,50 @@ impl CallVisitor<'_> {
         self.local_env.set_binding(name, ty);
     }
 
+    /// Bug E-3.4: build a binding frame for a `for <pat> in <expr>` loop.
+    /// Inspects the iterable's parametric type — only Vec / Option /
+    /// Result / Iterator / HashSet / BTreeSet / VecDeque / LinkedList /
+    /// BinaryHeap iterate over a single Item type that we can substitute
+    /// with `T` via `substitute_template`. HashMap / BTreeMap yield
+    /// `(K, V)` tuples (V0 skip), and unknown nominals fall through to
+    /// `None`. The pattern must be a simple ident (peeling refs and
+    /// parens) — destructure forms are deferred.
+    fn compute_for_loop_frame(
+        &self,
+        iterable: &syn::Expr,
+        pat: &syn::Pat,
+    ) -> Option<HashMap<String, String>> {
+        let iter_type = self.type_of_expr(iterable)?;
+        let nominal = nominal_of(&iter_type);
+        if !matches!(
+            nominal,
+            "Vec"
+                | "Option"
+                | "Result"
+                | "Iterator"
+                | "HashSet"
+                | "BTreeSet"
+                | "VecDeque"
+                | "LinkedList"
+                | "BinaryHeap"
+        ) {
+            return None;
+        }
+        let args = generic_args(&iter_type);
+        if args.is_empty() {
+            return None;
+        }
+        let bound_type = substitute_template("T", nominal, &args);
+        let stripped = strip_refs(&bound_type).to_string();
+        if stripped.is_empty() || stripped == "_" {
+            return None;
+        }
+        let name = ident_pat_name(pat)?;
+        let mut frame = HashMap::new();
+        frame.insert(name, stripped);
+        Some(frame)
+    }
+
     /// Bug E-3 ext P-E3.2: build a closure-arg binding frame for a method
     /// call's closure argument. Resolves the receiver's parametric type +
     /// the builtin registry's `closure_arg_type` template, substitutes
@@ -627,6 +671,35 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
         self.current_scope_idx = lookup_scope_for(self.ctx, node.span());
         syn::visit::visit_expr_closure(self, node);
         self.current_scope_idx = saved;
+    }
+
+    /// Bug E-3.4: bind the for-loop pattern ident to the iterable's
+    /// inner type for the duration of the body. Audit showed thousands
+    /// of `for x in xs { x.method() }` patterns where `x` was previously
+    /// untracked, killing the chain at every method call inside the
+    /// loop. Reuses the `ClosureScope` push/pop machinery so the binding
+    /// is scoped exactly to the body and gets cleaned up automatically.
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        let frame = self.compute_for_loop_frame(&node.expr, &node.pat);
+        let pushed = frame.is_some();
+        if let Some(f) = frame {
+            self.local_env.push_closure_scope(f);
+        }
+        // Visit the iterable expression *before* the body so any nested
+        // method-call edges on it get emitted with the right receiver
+        // context.
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        self.visit_pat(&node.pat);
+        self.visit_expr(&node.expr);
+        self.visit_block(&node.body);
+        if let Some(label) = &node.label {
+            self.visit_label(label);
+        }
+        if pushed {
+            self.local_env.pop_closure_scope();
+        }
     }
 
     /// Bug E-3 Phase 1: capture `let x [: T] [= init]` bindings into the
