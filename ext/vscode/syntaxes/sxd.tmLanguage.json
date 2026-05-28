@@ -1,0 +1,118 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Standardoc Config",
+  "scopeName": "source.standardoc-sxd",
+  "fileTypes": ["sxd"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string-multiline" },
+    { "include": "#string-template" },
+    { "include": "#string-plain" },
+    { "include": "#number" },
+    { "include": "#constant" },
+    { "include": "#keyword-block" },
+    { "include": "#keyword-field" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.standardoc-sxd"
+    },
+    "string-multiline": {
+      "begin": "```",
+      "end": "```",
+      "name": "string.quoted.other.multiline.standardoc-sxd",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.standardoc-sxd" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.standardoc-sxd" }
+      },
+      "patterns": [
+        { "include": "#interpolation" }
+      ]
+    },
+    "string-template": {
+      "begin": "`",
+      "end": "`",
+      "name": "string.quoted.other.template.standardoc-sxd",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.standardoc-sxd" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.standardoc-sxd" }
+      },
+      "patterns": [
+        { "include": "#interpolation" },
+        { "include": "#string-escape" }
+      ]
+    },
+    "string-plain": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.standardoc-sxd",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.standardoc-sxd" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.standardoc-sxd" }
+      },
+      "patterns": [
+        { "include": "#string-escape" }
+      ]
+    },
+    "string-escape": {
+      "match": "\\\\([\"\\\\nrt0]|x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]+\\})",
+      "name": "constant.character.escape.standardoc-sxd"
+    },
+    "interpolation": {
+      "begin": "\\$\\{",
+      "end": "\\}",
+      "name": "meta.interpolation.standardoc-sxd",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.interpolation.begin.standardoc-sxd" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.interpolation.end.standardoc-sxd" }
+      },
+      "patterns": [
+        { "include": "#string-plain" },
+        { "include": "#number" },
+        { "include": "#constant" }
+      ]
+    },
+    "number": {
+      "patterns": [
+        {
+          "match": "-?\\b\\d+\\.\\d+\\b",
+          "name": "constant.numeric.float.standardoc-sxd"
+        },
+        {
+          "match": "-?\\b\\d+\\b",
+          "name": "constant.numeric.integer.standardoc-sxd"
+        }
+      ]
+    },
+    "constant": {
+      "match": "\\b(true|false|null)\\b",
+      "name": "constant.language.standardoc-sxd"
+    },
+    "keyword-block": {
+      "match": "\\b(version|ignore|project|group)\\b",
+      "name": "keyword.control.standardoc-sxd"
+    },
+    "keyword-field": {
+      "match": "\\b(patterns|label|path|paths|members)\\b",
+      "name": "variable.other.property.standardoc-sxd"
+    },
+    "punctuation": {
+      "patterns": [
+        { "match": "[\\{\\}]", "name": "punctuation.section.braces.standardoc-sxd" },
+        { "match": "[\\[\\]]", "name": "punctuation.section.brackets.standardoc-sxd" },
+        { "match": ",", "name": "punctuation.separator.comma.standardoc-sxd" },
+        { "match": "\\.", "name": "punctuation.separator.dot.standardoc-sxd" }
+      ]
+    }
+  }
+}

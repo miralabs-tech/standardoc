@@ -138,7 +138,7 @@
         "id": "standardoc-sxd",
         "aliases": ["Standardoc Config", "sxd"],
         "extensions": [".sxd"],
-        "configuration": "./language-configuration/stdignore.json"
+        "configuration": "./language-configuration/sxd.json"
       }
     ],
     "grammars": [
@@ -146,6 +146,11 @@
         "language": "stdignore",
         "scopeName": "source.stdignore",
         "path": "./syntaxes/stdignore.tmLanguage.json"
+      },
+      {
+        "language": "standardoc-sxd",
+        "scopeName": "source.standardoc-sxd",
+        "path": "./syntaxes/sxd.tmLanguage.json"
       }
     ]
   },
