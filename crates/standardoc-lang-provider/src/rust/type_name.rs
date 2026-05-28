@@ -152,6 +152,12 @@ fn substitute_tokens(s: &str, bindings: &[(&str, &str)]) -> String {
             let token = &s[start..i];
             if let Some((_, v)) = bindings.iter().find(|(k, _)| *k == token) {
                 out.push_str(v);
+            } else if matches!(token, "T" | "E" | "K" | "V") {
+                // Bug E-3.3: unbound substitution placeholders collapse
+                // to `_` so they don't leak as literal type-param names
+                // (`"T"`, `"E"`, …) into downstream `receiver_type`
+                // columns or closure bindings.
+                out.push('_');
             } else {
                 out.push_str(token);
             }

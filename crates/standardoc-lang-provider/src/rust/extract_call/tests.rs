@@ -1201,6 +1201,98 @@ fn struct_field_parametric_unlocks_closure_through_field_chain() {
     assert_eq!(foo.receiver_type.as_deref(), Some("Foo"));
 }
 
+// --- Bug E-3.3: parametric unwrap (Option<T>::unwrap → T, etc.) ---
+
+#[test]
+fn option_unwrap_returns_inner_t_for_chained_method_call() {
+    // `Option<Foo>::unwrap()` should propagate as `Foo` so the chained
+    // `.ping()` carries `receiver_type = Foo`.
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ping(&self) {} } \
+         fn caller(opt: Option<Foo>) { opt.unwrap().ping(); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn result_unwrap_returns_inner_t() {
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ping(&self) {} } \
+         fn caller(r: Result<Foo, ()>) { r.unwrap().ping(); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn result_unwrap_err_returns_inner_e() {
+    let parsed = parse(
+        "struct ApiErr; impl ApiErr { fn log(&self) {} } \
+         fn caller(r: Result<(), ApiErr>) { r.unwrap_err().log(); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let log = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "log"))
+        .expect("log edge");
+    assert_eq!(log.receiver_type.as_deref(), Some("ApiErr"));
+}
+
+#[test]
+fn vec_get_returns_option_t_then_unwrap_returns_t() {
+    // Full chain : `xs.get(0)` → `Option<T>`, `.unwrap()` → `T`,
+    // `.ping()` → receiver_type = `Foo`.
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ping(&self) {} } \
+         fn caller(xs: Vec<Foo>) { xs.get(0).unwrap().ping(); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn iterator_next_unwrap_chain() {
+    // `vec.iter().next().unwrap().ping()` — chain through
+    // `Iterator<T>::next` → `Option<T>` → `T`.
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ping(&self) {} } \
+         fn caller(xs: Vec<Foo>) { xs.iter().next().unwrap().ping(); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn hashmap_get_returns_option_v() {
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ping(&self) {} } \
+         fn caller(m: std::collections::HashMap<String, Foo>) { m.get(\"k\").unwrap().ping(); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let ping = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ping"))
+        .expect("ping edge");
+    assert_eq!(ping.receiver_type.as_deref(), Some("Foo"));
+}
+
 #[test]
 fn workspace_call_binding_unlocks_closure_chain() {
     // Bug E-3 ext P-E3.2.3: `let extracted = walk(...)` now binds
@@ -1302,19 +1394,16 @@ fn try_operator_smart_unwraps_result_for_chained_method_calls() {
 }
 
 #[test]
-fn closure_arg_without_generic_args_does_not_panic() {
-    // `let v = Vec::new();` records `v: Vec` (nominal-only, no generic
-    // args) ; `.retain(|x| ...)` cannot substitute T → no closure scope
-    // is pushed and `x.foo()` stays untyped (no spurious binding).
+fn closure_arg_without_generic_args_does_not_pollute_receiver_type() {
+    // `let v: Vec<_> = Vec::new();` substitutes `T = "_"` into the
+    // closure-arg template. Bug E-3.3 suppresses that info-less binding
+    // so `x.foo()` carries receiver_type = None instead of polluting the
+    // edge column with `"_"`.
     let parsed = parse("fn caller() { let v: Vec<_> = Vec::new(); v.retain(|x| x.foo()); }");
     let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
     let foo = method_calls(&edges)
         .into_iter()
         .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "foo"))
         .expect("foo edge");
-    // `Vec<_>` substitutes T = "_" which strip_refs leaves as "_" — a
-    // non-typed but non-empty binding. Acceptable for V0; this test
-    // pins the *current* behavior so any regression to a panic / empty
-    // is caught.
-    assert!(foo.receiver_type.is_some());
+    assert_eq!(foo.receiver_type, None);
 }

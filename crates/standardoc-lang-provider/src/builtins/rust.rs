@@ -306,7 +306,6 @@ fn register_methods(reg: &mut BuiltinRegistry) {
         "Vec",
         &[
             "push",
-            "pop",
             "len",
             "is_empty",
             "clear",
@@ -316,14 +315,8 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "sort",
             "sort_by",
             "sort_by_key",
-            "get",
-            "get_mut",
             "insert",
-            "remove",
-            "swap_remove",
             "truncate",
-            "first",
-            "last",
             "split_off",
             "with_capacity",
             "capacity",
@@ -341,21 +334,36 @@ fn register_methods(reg: &mut BuiltinRegistry) {
     );
     add_returning(reg, "Vec", "slice", &["as_slice", "as_mut_slice"]);
     add_with_closure(reg, "Vec", "T", &["retain"]);
+    // Bug E-3.3: index-style methods on `Vec<T>` return the inner type
+    // (either bare `T` for infallible variants or `Option<T>` for the
+    // bounds-checked ones).
+    add_returning(reg, "Vec", "T", &["swap_remove", "remove"]);
+    add_returning(
+        reg,
+        "Vec",
+        "Option<T>",
+        &["pop", "first", "last", "get", "get_mut"],
+    );
 
     add(
         reg,
         "Option",
+        &["is_some", "is_none", "is_some_and", "map_or", "map_or_else"],
+    );
+    // Bug E-3.3: unwrap / expect / fallback variants yield the inner
+    // type. Substitute via `T` against the receiver's generic args so
+    // `Option<Foo>::unwrap()` propagates as `Foo` for chained
+    // `.method()` resolution.
+    add_returning(
+        reg,
+        "Option",
+        "T",
         &[
             "unwrap",
             "unwrap_or",
             "unwrap_or_else",
             "unwrap_or_default",
             "expect",
-            "is_some",
-            "is_none",
-            "is_some_and",
-            "map_or",
-            "map_or_else",
             "take",
             "replace",
             "cloned",
@@ -390,13 +398,6 @@ fn register_methods(reg: &mut BuiltinRegistry) {
         reg,
         "Result",
         &[
-            "unwrap",
-            "unwrap_or",
-            "unwrap_or_else",
-            "unwrap_or_default",
-            "unwrap_err",
-            "expect",
-            "expect_err",
             "is_ok",
             "is_err",
             "is_ok_and",
@@ -405,6 +406,21 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "map_or_else",
         ],
     );
+    // Bug E-3.3: Ok-branch unwrappers return T.
+    add_returning(
+        reg,
+        "Result",
+        "T",
+        &[
+            "unwrap",
+            "unwrap_or",
+            "unwrap_or_else",
+            "unwrap_or_default",
+            "expect",
+        ],
+    );
+    // Bug E-3.3: Err-branch unwrappers return E.
+    add_returning(reg, "Result", "E", &["unwrap_err", "expect_err"]);
     add_returning(reg, "Result", "Result<T, E>", &["as_ref", "as_mut", "or"]);
     // Result::map transforms the Ok branch (Result<U, E>); drop T from
     // the parametric chain but preserve E so a follow-up `.map_err(|e|
@@ -420,7 +436,6 @@ fn register_methods(reg: &mut BuiltinRegistry) {
         reg,
         "Iterator",
         &[
-            "next",
             "collect",
             "count",
             "sum",
@@ -430,6 +445,10 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "size_hint",
         ],
     );
+    // Bug E-3.3: `next` yields `Option<Self::Item>`. With the receiver
+    // tracked as `Iterator<T>` (Bug E-3.2 chain), `T` substitutes to the
+    // Item type so `vec.iter().next().unwrap()` propagates `Foo`.
+    add_returning(reg, "Iterator", "Option<T>", &["next"]);
     // Bug E-3 ext P-E3.2: split Iterator adapters by whether they
     // preserve the Item type or substitute it via a closure.
     //   * preserve T → `Iterator<T>` so subsequent `.find(|x| ...)` etc.
@@ -608,9 +627,6 @@ fn register_methods(reg: &mut BuiltinRegistry) {
         "HashMap",
         &[
             "insert",
-            "get",
-            "get_mut",
-            "remove",
             "contains_key",
             "len",
             "is_empty",
@@ -632,15 +648,14 @@ fn register_methods(reg: &mut BuiltinRegistry) {
     );
     add_returning(reg, "HashMap", "Iterator<K>", &["keys"]);
     add_returning(reg, "HashMap", "Iterator<V>", &["values", "values_mut"]);
+    // Bug E-3.3: lookup-style methods on `HashMap<K, V>` return `Option<V>`.
+    add_returning(reg, "HashMap", "Option<V>", &["get", "get_mut", "remove"]);
 
     add(
         reg,
         "BTreeMap",
         &[
             "insert",
-            "get",
-            "get_mut",
-            "remove",
             "contains_key",
             "len",
             "is_empty",
@@ -658,6 +673,7 @@ fn register_methods(reg: &mut BuiltinRegistry) {
     );
     add_returning(reg, "BTreeMap", "Iterator<K>", &["keys"]);
     add_returning(reg, "BTreeMap", "Iterator<V>", &["values", "values_mut"]);
+    add_returning(reg, "BTreeMap", "Option<V>", &["get", "get_mut", "remove"]);
 
     add(
         reg,

@@ -394,7 +394,12 @@ impl CallVisitor<'_> {
         }
         let arg_type = substitute_template(template, recv_nominal, &args);
         let stripped = strip_refs(&arg_type).to_string();
-        if stripped.is_empty() {
+        // Bug E-3.3: when the receiver had no real generic args to feed
+        // the template, `substitute_template` collapses `T`/`E`/…
+        // placeholders to `_`. Avoid binding closure idents to that
+        // info-less `_` — it would just pollute downstream
+        // `receiver_type` lookups.
+        if stripped.is_empty() || stripped == "_" {
             return None;
         }
         let mut frame = HashMap::new();
