@@ -91,7 +91,7 @@ pub(super) const RECENT_DEPTH1_RETENTION_SECS: i64 = 1800;
 /// - `handle`: query / submit gateway into the index
 /// - `provider`: workspace `LanguageProvider`, shared with the watcher
 /// - `filters`: live `ScanFilters`, hot-swapped by the watcher when
-///   `.stdignore` changes (lock pause-exclude-22 §1.1 multi-matchers stack)
+///   `standardoc.sxd` changes (lock pause-exclude-22 §1.1 multi-matchers stack)
 /// - `index_ready`: flipped to `true` once cold start completes; tool
 ///   invocations observed before that return a friendly "indexing in progress"
 ///   tool result rather than an MCP error (Q5 graceful degradation).

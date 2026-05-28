@@ -270,10 +270,13 @@ fn watcher_hot_reload_excludes_new_subtree() {
     let provider: Arc<dyn standardoc_core::LanguageProvider> = Arc::new(WorkspaceProvider::new());
     let server = open_workspace(dir.path(), provider).unwrap();
 
-    let stdignore_path = dir.path().join(".stdignore");
-    let mut body = fs::read_to_string(&stdignore_path).unwrap();
-    body.push_str("excluded/\n");
-    fs::write(&stdignore_path, body).unwrap();
+    // Bug E-3 P2 — `.stdignore` was migrated into `standardoc.sxd` by
+    // the IndexHandle::open seed step. Extend the sxd ignore block to
+    // add the new exclusion.
+    let sxd_path = dir.path().join("standardoc.sxd");
+    let body = fs::read_to_string(&sxd_path).unwrap();
+    let new = body.replacen("```\n}", "excluded/\n```\n}", 1);
+    fs::write(&sxd_path, new).unwrap();
 
     // Allow the watcher to debounce + swap filters (default debounce 500 ms,
     // budget 1.5 s for the reload to land — see lock pause-exclude-22 §1.8).

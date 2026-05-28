@@ -26,7 +26,7 @@ pub use external_invalidation::{
 };
 pub use filters::{
     GitignoreStack, PATTERN_PREVIEW_WALK_CAP, PatternPreview, PatternPreviewError,
-    STDIGNORE_FILENAME, ScanFilters, ensure_stdignore_seed_at, preview_pattern_matches,
+    STDIGNORE_FILENAME, ScanFilters, preview_pattern_matches,
 };
 pub use provider::{ExtractContext, ExtractError, LanguageProvider};
 pub use watcher::{WatcherError, WatcherHandle, spawn_watcher};

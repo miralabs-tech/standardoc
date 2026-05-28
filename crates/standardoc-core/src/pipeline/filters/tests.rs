@@ -83,52 +83,9 @@ fn build_skips_descent_into_excluded_subtrees() {
     );
 }
 
-#[test]
-fn ensure_stdignore_seed_writes_when_absent() {
-    let dir = tempdir().unwrap();
-    ensure_stdignore_seed_at(dir.path()).unwrap();
-
-    let path = dir.path().join(STDIGNORE_FILENAME);
-    let body = fs::read_to_string(&path).unwrap();
-    assert!(body.contains(".git/"));
-    assert!(body.contains("target/"));
-    assert!(body.contains("node_modules/"));
-    assert!(body.contains("dist/"));
-    assert!(body.contains("build/"));
-    assert!(body.contains(".old/"));
-    assert!(body.contains("*-old/"));
-    assert!(body.contains("test-export/"));
-    assert!(
-        !body.contains(".standardoc/"),
-        "seed must not include .standardoc/ (user decision lock 21 Q3)"
-    );
-}
-
-#[test]
-fn ensure_stdignore_seed_preserves_existing_file() {
-    let dir = tempdir().unwrap();
-    let existing = "# my own exclusions\nfoo/\n";
-    write(dir.path(), STDIGNORE_FILENAME, existing);
-
-    ensure_stdignore_seed_at(dir.path()).unwrap();
-
-    let body = fs::read_to_string(dir.path().join(STDIGNORE_FILENAME)).unwrap();
-    assert_eq!(body, existing);
-}
-
-#[test]
-fn ensure_stdignore_seed_preserves_empty_file() {
-    let dir = tempdir().unwrap();
-    write(dir.path(), STDIGNORE_FILENAME, "");
-
-    ensure_stdignore_seed_at(dir.path()).unwrap();
-
-    let body = fs::read_to_string(dir.path().join(STDIGNORE_FILENAME)).unwrap();
-    assert!(
-        body.is_empty(),
-        "an existing empty .stdignore must stay empty"
-    );
-}
+// Bug E-3 follow-up P2 — legacy `ensure_stdignore_seed_at` tests are
+// gone ; the equivalent behaviour for `standardoc.sxd` lives in
+// `config::sxd::tests`. See `ensure_sxd_seed_*` test family there.
 
 #[test]
 fn scan_filters_load_constructs_from_workspace_root() {

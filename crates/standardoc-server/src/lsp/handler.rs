@@ -32,7 +32,7 @@ const WORKSPACE_SEARCH_LIMIT: usize = 100;
 /// - `handle`: query / submit gateway into the index
 /// - `provider`: workspace `LanguageProvider`, shared with the watcher
 /// - `filters`: live `ScanFilters`, hot-swapped by the watcher when
-///   `.stdignore` changes (lock pause-exclude-22 §1.1 multi-matchers stack)
+///   `standardoc.sxd` changes (lock pause-exclude-22 §1.1 multi-matchers stack)
 pub struct StandardocLsp {
     client: Client,
     handle: IndexHandle,

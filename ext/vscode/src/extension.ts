@@ -8,6 +8,7 @@ import { StatusBarController } from './statusBar';
 import { registerCommands } from './commands';
 import { maybePromptForInit, syncMcpConfigToUrl } from './init/prompt';
 import { registerStdignoreHover } from './stdignore/hover';
+import { registerSxdHover } from './sxd/hover';
 
 const MCP_PROVIDER_ID = 'standardoc.mcp';
 const DEFAULT_MCP_HTTP_PORT = 7700;
@@ -86,6 +87,7 @@ export function activate(context: vscode.ExtensionContext): void {
   registerMcpServerProvider(context, () => mcp.url(), output, supervisor);
 
   registerStdignoreHover(context, workspaceRoot, output);
+  registerSxdHover(context, workspaceRoot, output);
 
   output.appendLine('Standardoc extension activated.');
 

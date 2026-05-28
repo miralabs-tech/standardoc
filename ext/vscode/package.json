@@ -133,6 +133,12 @@
         "aliases": ["Standardoc Ignore", "stdignore"],
         "filenames": [".stdignore"],
         "configuration": "./language-configuration/stdignore.json"
+      },
+      {
+        "id": "standardoc-sxd",
+        "aliases": ["Standardoc Config", "sxd"],
+        "extensions": [".sxd"],
+        "configuration": "./language-configuration/stdignore.json"
       }
     ],
     "grammars": [

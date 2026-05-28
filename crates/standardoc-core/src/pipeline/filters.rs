@@ -12,29 +12,12 @@ use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use walkdir::WalkDir;
 
+/// Legacy `.stdignore` filename, kept so the nested-cascade behaviour
+/// (per-subfolder excludes) survives the migration to `standardoc.sxd`.
+/// The workspace-root `.stdignore` is no longer auto-seeded — see
+/// `config::ensure_sxd_seed_at` for the new path that migrates content
+/// into `standardoc.sxd` on first cold-start.
 pub const STDIGNORE_FILENAME: &str = ".stdignore";
-
-const STDIGNORE_SEED: &str = "\
-# standardoc indexing exclusions (gitignore syntax)
-# Edit freely. Lines added here exclude paths from the workspace index.
-# Paths removed here trigger an automatic re-index of the affected subtree.
-
-# VCS / package managers
-.git/
-node_modules/
-
-# Build outputs
-target/
-dist/
-build/
-
-# Legacy / archived code (avoids cross-folder fqdn collisions)
-.old/
-*-old/
-
-# Test fixtures / generated exports
-test-export/
-";
 
 /// Aggregated `.stdignore` files from the workspace root down to the deepest
 /// subdirectory that contained one. Each layer is a separate `Gitignore`
@@ -154,17 +137,6 @@ impl ScanFilters {
     pub fn is_skipped(&self, rel_path: &str) -> bool {
         self.stack.is_ignored(rel_path)
     }
-}
-
-/// Writes the seed `.stdignore` at the workspace root when absent. Existing
-/// files (even empty ones) are preserved verbatim — we never overwrite a user's
-/// authored exclusions. Idempotent.
-pub fn ensure_stdignore_seed_at(workspace_root: &Path) -> std::io::Result<()> {
-    let path = workspace_root.join(STDIGNORE_FILENAME);
-    if path.exists() {
-        return Ok(());
-    }
-    std::fs::write(path, STDIGNORE_SEED)
 }
 
 /// Hard cap on the number of filesystem entries scanned by

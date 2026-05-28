@@ -177,11 +177,9 @@ fn purge_excluded_yes_flag_purges_matching_rows() {
     // Index first (vendored/ has no exclusion yet → indexed).
     standardoc().arg("index").arg(dir.path()).assert().success();
 
-    // Now exclude vendored/ via .stdignore.
-    let stdignore_path = dir.path().join(".stdignore");
-    let mut body = fs::read_to_string(&stdignore_path).unwrap();
-    body.push_str("\nvendored/\n");
-    fs::write(&stdignore_path, body).unwrap();
+    // Now exclude vendored/ via the ignore block in standardoc.sxd
+    // (the .sxd is auto-seeded by `index`'s IndexHandle::open).
+    extend_sxd_ignore(dir.path(), "vendored/");
 
     standardoc()
         .arg("purge-excluded")
@@ -191,6 +189,23 @@ fn purge_excluded_yes_flag_purges_matching_rows() {
         .success()
         .stdout(predicate::str::contains("vendored/lib.rs"))
         .stdout(predicate::str::contains("purged 1 path"));
+}
+
+/// Append a single line to the `ignore { patterns ```...``` }` block of
+/// `standardoc.sxd`. Used by tests that need to extend exclusions
+/// post-seed without re-authoring the whole file.
+fn extend_sxd_ignore(root: &Path, line: &str) {
+    let sxd_path = root.join("standardoc.sxd");
+    let body = fs::read_to_string(&sxd_path).expect("seed sxd present");
+    // Closing ``` fence — insert above it.
+    let needle = "```\n}";
+    let injected = format!("{line}\n```\n}}");
+    let new = body.replacen(needle, &injected, 1);
+    assert_ne!(
+        body, new,
+        "sxd template must contain the ignore close fence"
+    );
+    fs::write(&sxd_path, new).unwrap();
 }
 
 fn write_mixed_workspace(root: &Path) {
@@ -278,10 +293,7 @@ fn purge_excluded_requires_yes_in_non_interactive_shell() {
 
     standardoc().arg("index").arg(dir.path()).assert().success();
 
-    let stdignore_path = dir.path().join(".stdignore");
-    let mut body = fs::read_to_string(&stdignore_path).unwrap();
-    body.push_str("\nvendored/\n");
-    fs::write(&stdignore_path, body).unwrap();
+    extend_sxd_ignore(dir.path(), "vendored/");
 
     standardoc()
         .arg("purge-excluded")

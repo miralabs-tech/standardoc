@@ -172,6 +172,84 @@ fn load_workspace_config_returns_some_when_present() {
 }
 
 #[test]
+fn ensure_sxd_seed_writes_template_when_neither_file_exists() {
+    use std::fs;
+    let dir = tempfile::tempdir().unwrap();
+    ensure_sxd_seed_at(dir.path()).unwrap();
+
+    let body = fs::read_to_string(dir.path().join(SXD_CONFIG_FILENAME)).unwrap();
+    assert!(body.contains("version \"0.1.0\""));
+    assert!(body.contains("ignore {"));
+    assert!(body.contains(".git/"));
+    assert!(body.contains("target/"));
+    // Default template stays project-less so mechanical detection remains active.
+    assert!(!body.contains("project \""));
+}
+
+#[test]
+fn ensure_sxd_seed_preserves_existing_sxd() {
+    use std::fs;
+    let dir = tempfile::tempdir().unwrap();
+    let existing = "version \"0.1.0\"\n# user-authored\n";
+    fs::write(dir.path().join(SXD_CONFIG_FILENAME), existing).unwrap();
+
+    ensure_sxd_seed_at(dir.path()).unwrap();
+
+    let body = fs::read_to_string(dir.path().join(SXD_CONFIG_FILENAME)).unwrap();
+    assert_eq!(body, existing, "user .sxd must not be overwritten");
+}
+
+#[test]
+fn ensure_sxd_seed_migrates_stdignore_to_ignore_block() {
+    use std::fs;
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = "# my excludes\nfoo/\nbar/\n";
+    fs::write(dir.path().join(".stdignore"), legacy).unwrap();
+
+    ensure_sxd_seed_at(dir.path()).unwrap();
+
+    let sxd = fs::read_to_string(dir.path().join(SXD_CONFIG_FILENAME)).unwrap();
+    assert!(sxd.contains("Auto-migrated from .stdignore"));
+    assert!(sxd.contains("foo/"));
+    assert!(sxd.contains("bar/"));
+    // Migrated .sxd must parse cleanly.
+    let cfg = parse_sxd_source(&sxd).expect("migrated .sxd parses");
+    let patterns = cfg.ignore.unwrap().patterns;
+    assert!(patterns.contains("foo/"));
+    assert!(patterns.contains("bar/"));
+
+    // Legacy file moved to .stdignore.bak.
+    assert!(!dir.path().join(".stdignore").exists());
+    assert!(dir.path().join(".stdignore.bak").exists());
+    let bak = fs::read_to_string(dir.path().join(".stdignore.bak")).unwrap();
+    assert_eq!(
+        bak, legacy,
+        "backup preserves the original content verbatim"
+    );
+}
+
+#[test]
+fn ensure_sxd_seed_idempotent_when_sxd_present_with_stdignore_alongside() {
+    // User may keep .stdignore around (for nested-cascade tooling). When .sxd
+    // already exists, the seeder must NOT migrate / move / touch anything.
+    use std::fs;
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join(SXD_CONFIG_FILENAME), "version \"0.1.0\"\n").unwrap();
+    fs::write(dir.path().join(".stdignore"), "leftover/\n").unwrap();
+
+    ensure_sxd_seed_at(dir.path()).unwrap();
+
+    assert!(
+        dir.path().join(".stdignore").exists(),
+        ".stdignore stays put"
+    );
+    assert!(
+        !dir.path().join(".stdignore.bak").exists(),
+        "no migration triggered when .sxd already exists",
+    );
+}
+
+#[test]
 fn parses_real_standardoc_workspace_template() {
     // Regression check : the template authored at the workspace root
     // (see standardoc.sxd) must parse cleanly with the production schema.

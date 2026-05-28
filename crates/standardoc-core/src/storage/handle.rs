@@ -10,7 +10,8 @@ use rusqlite::Connection;
 use tokio::sync::mpsc::{self, Sender, error::SendError, error::TrySendError};
 
 use crate::commands::IngestCommand;
-use crate::pipeline::{ScanFilters, WriterContext, ensure_stdignore_seed_at, writer_loop};
+use crate::config::ensure_sxd_seed_at;
+use crate::pipeline::{ScanFilters, WriterContext, writer_loop};
 use crate::storage::error::StorageError;
 use crate::storage::lock::WorkspaceLock;
 use crate::storage::migrate::ensure_schema;
@@ -110,7 +111,7 @@ impl IndexHandle {
             Ok::<_, StorageError>((lock, pool))
         })?;
 
-        ensure_stdignore_seed_at(&workspace_root)?;
+        ensure_sxd_seed_at(&workspace_root)?;
 
         Self::wire_handle(pool, workspace_root, Some(lock), "standardoc-writer")
     }

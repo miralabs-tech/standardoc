@@ -22,8 +22,38 @@ use standarx_dsl::ast::{Block, Expr, File, StmtNode, StringLit, StringPart};
 use standarx_dsl::diag::Spanned;
 use standarx_dsl::{Diag, Stmt};
 
-/// Filename of the workspace config (sibling of `.stdignore`, `Cargo.toml`).
+/// Filename of the workspace config (sibling of `Cargo.toml`).
 pub const SXD_CONFIG_FILENAME: &str = "standardoc.sxd";
+
+/// Legacy gitignore-syntax filename, kept for back-compat migration only.
+/// `ensure_sxd_seed_at` reads this and folds it into `standardoc.sxd`'s
+/// `ignore { patterns ... }` block.
+const LEGACY_STDIGNORE_FILENAME: &str = ".stdignore";
+
+/// Default `.sxd` content when seeding a fresh workspace. Carries the
+/// same defaults as the legacy `.stdignore` seed but inside an
+/// `ignore { patterns ```...``` }` block. No `project` blocks — by
+/// default standardoc keeps the mechanical detection.
+const SXD_SEED_TEMPLATE: &str = "\
+# Standardoc workspace config.
+# Edit freely — re-running standardoc won't overwrite without --force.
+# See https://standardoc.miralabs.tech/docs/sxd for the full schema.
+
+version \"0.1.0\"
+
+ignore {
+  patterns ```
+.git/
+node_modules/
+target/
+dist/
+build/
+.old/
+*-old/
+test-export/
+```
+}
+";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SxdConfigError {
@@ -85,8 +115,62 @@ pub struct GroupBlock {
     pub members: Vec<String>,
 }
 
+/// Bug E-3 follow-up P2 — replacement for the legacy
+/// `ensure_stdignore_seed_at`. Behaviour matrix:
+///
+///   * `standardoc.sxd` exists → no-op (user-authored config wins, even
+///     when `.stdignore` is also present — they may have kept it for
+///     other tooling).
+///   * `.stdignore` exists, no `.sxd` → migrate : read `.stdignore`,
+///     wrap its content in an `ignore { patterns ```...``` }` block,
+///     write `standardoc.sxd`, rename `.stdignore` → `.stdignore.bak`.
+///   * Neither exists → write the default `.sxd` seed template.
+///
+/// Idempotent: re-running on the same state produces no changes.
+pub fn ensure_sxd_seed_at(workspace_root: &Path) -> io::Result<()> {
+    let sxd_path = workspace_root.join(SXD_CONFIG_FILENAME);
+    if sxd_path.exists() {
+        return Ok(());
+    }
+    let stdignore_path = workspace_root.join(LEGACY_STDIGNORE_FILENAME);
+    if stdignore_path.is_file() {
+        let legacy = fs::read_to_string(&stdignore_path)?;
+        let sxd = render_sxd_from_stdignore(&legacy);
+        fs::write(&sxd_path, sxd)?;
+        let backup = workspace_root.join(".stdignore.bak");
+        // Best-effort backup: drop existing .bak so re-runs don't fail.
+        let _ = fs::remove_file(&backup);
+        fs::rename(&stdignore_path, &backup)?;
+        return Ok(());
+    }
+    fs::write(&sxd_path, SXD_SEED_TEMPLATE)
+}
+
+/// Build a `.sxd` source string from a legacy `.stdignore` content,
+/// preserving the user's patterns verbatim inside an `ignore { patterns
+/// ```...``` }` block. Adds a header noting the auto-migration so the
+/// user can trace where the content came from.
+fn render_sxd_from_stdignore(legacy: &str) -> String {
+    let trimmed = legacy.trim_end_matches('\n');
+    format!(
+        "\
+# Standardoc workspace config.
+# Auto-migrated from .stdignore on first cold-start (backup at .stdignore.bak).
+# Edit freely — re-running standardoc won't overwrite without --force.
+
+version \"0.1.0\"
+
+ignore {{
+  patterns ```
+{trimmed}
+```
+}}
+"
+    )
+}
+
 /// Load `standardoc.sxd` from a workspace root. Returns `Ok(None)` when
-/// the file is absent (caller falls back to `.stdignore` legacy path).
+/// the file is absent.
 pub fn load_workspace_config(workspace_root: &Path) -> Result<Option<SxdConfig>, SxdConfigError> {
     let path = workspace_root.join(SXD_CONFIG_FILENAME);
     if !path.exists() {

@@ -42,7 +42,7 @@ enum Command {
     /// Drop the existing index and re-build from scratch.
     Rescan { path: PathBuf },
 
-    /// Remove indexed paths that now match the workspace's `.stdignore`.
+    /// Remove indexed paths that now match the workspace's `standardoc.sxd` ignore block.
     PurgeExcluded {
         path: PathBuf,
 
@@ -95,13 +95,17 @@ enum Command {
     /// daemons.
     SchemaVersion { path: PathBuf },
 
-    /// Preview which workspace-relative paths a single `.stdignore`
+    /// Preview which workspace-relative paths a single gitignore-syntax
     /// pattern would match. Output is JSON on stdout
     /// (`{pattern, matches, total_count, truncated, walk_truncated}`).
-    /// Backs the VSCode extension's `.stdignore` hover provider — the
-    /// extension shells out to this sub-command so the preview uses
+    /// Backs the VSCode extension's `standardoc.sxd` hover provider —
+    /// the extension shells out to this sub-command so the preview uses
     /// the exact same `ignore` crate matcher as the daemon.
-    StdignorePreview {
+    ///
+    /// `stdignore-preview` (without the `sxd-` prefix) is kept as an
+    /// alias for back-compat with older callers.
+    #[command(alias = "stdignore-preview")]
+    SxdPreview {
         /// Workspace root to walk.
         path: PathBuf,
 
@@ -250,11 +254,11 @@ fn main_inner() -> Result<(), ServerError> {
             http,
         } => cmd_mcp(&path, readonly, http),
         Command::SchemaVersion { path } => cmd_schema_version(&path),
-        Command::StdignorePreview {
+        Command::SxdPreview {
             path,
             pattern,
             limit,
-        } => cmd_stdignore_preview(&path, &pattern, limit),
+        } => cmd_sxd_preview(&path, &pattern, limit),
         Command::Claude { action } => match action {
             ClaudeAction::PreToolHook { mode } => cmd_claude_pre_tool_hook(&mode),
         },
@@ -526,7 +530,7 @@ fn cmd_purge_excluded(path: &Path, yes_flag: bool) -> Result<(), ServerError> {
     }
 
     println!(
-        "found {} indexed path(s) matching `.stdignore`:",
+        "found {} indexed path(s) matching `standardoc.sxd` ignore block:",
         candidates.len()
     );
     for path in candidates.iter().take(PURGE_PREVIEW_LIMIT) {
@@ -546,9 +550,9 @@ fn cmd_purge_excluded(path: &Path, yes_flag: bool) -> Result<(), ServerError> {
     Ok(())
 }
 
-fn cmd_stdignore_preview(workspace: &Path, pattern: &str, limit: usize) -> Result<(), ServerError> {
+fn cmd_sxd_preview(workspace: &Path, pattern: &str, limit: usize) -> Result<(), ServerError> {
     let preview = standardoc_core::preview_pattern_matches(workspace, pattern, limit)
-        .map_err(|e| io::Error::other(format!("stdignore preview: {e}")))?;
+        .map_err(|e| io::Error::other(format!("sxd preview: {e}")))?;
     let json = serde_json::to_string(&preview)
         .map_err(|e| io::Error::other(format!("serialize preview: {e}")))?;
     println!("{json}");

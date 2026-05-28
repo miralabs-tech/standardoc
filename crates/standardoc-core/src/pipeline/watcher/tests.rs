@@ -70,6 +70,22 @@ fn wait_revision_at_least(handle: &IndexHandle, target: u64, timeout: Duration) 
     }
 }
 
+/// Append a single pattern line to the sxd ignore block. Mirrors the
+/// CLI test helper so watcher integration tests can mutate the live
+/// `.sxd` without re-authoring the whole file.
+fn extend_sxd_ignore(root: &Path, line: &str) {
+    let sxd_path = root.join("standardoc.sxd");
+    let body = std::fs::read_to_string(&sxd_path).expect("seed sxd present");
+    let needle = "```\n}";
+    let injected = format!("{line}\n```\n}}");
+    let new = body.replacen(needle, &injected, 1);
+    assert_ne!(
+        body, new,
+        "sxd template must contain the ignore close fence"
+    );
+    std::fs::write(&sxd_path, new).unwrap();
+}
+
 fn fresh_filters(handle: &IndexHandle) -> Arc<RwLock<ScanFilters>> {
     Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())))
 }
@@ -317,11 +333,8 @@ fn watcher_warns_when_pattern_added_marks_existing_rows() {
 
     let _watcher = spawn_watcher(handle.clone(), provider, filters).unwrap();
 
-    // Append a pattern that now excludes `vendored/`.
-    let stdignore_path = handle.workspace_root().join(".stdignore");
-    let mut body = std::fs::read_to_string(&stdignore_path).unwrap();
-    body.push_str("\nvendored/\n");
-    std::fs::write(&stdignore_path, body).unwrap();
+    // Append a pattern that now excludes `vendored/` via the sxd ignore block.
+    extend_sxd_ignore(handle.workspace_root(), "vendored/");
 
     // Wait for the swap to land.
     let start = Instant::now();
@@ -333,7 +346,7 @@ fn watcher_warns_when_pattern_added_marks_existing_rows() {
         drop(guard);
         assert!(
             start.elapsed() < Duration::from_secs(5),
-            "filters were never reloaded after .stdignore change"
+            "filters were never reloaded after standardoc.sxd change"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -530,9 +543,11 @@ fn watcher_routes_primary_and_peer_events_concurrently() {
 #[test]
 fn watcher_reindexes_subtree_when_pattern_removed() {
     let dir = tempdir().unwrap();
+    // Pre-author standardoc.sxd with `vendored/` in the ignore block —
+    // the IndexHandle::open seed step preserves it (no overwrite).
     std::fs::write(
-        dir.path().join(".stdignore"),
-        "target/\nvendored/\n.git/\nnode_modules/\n",
+        dir.path().join("standardoc.sxd"),
+        "version \"0.1.0\"\nignore {\n  patterns ```\ntarget/\nvendored/\n.git/\nnode_modules/\n```\n}\n",
     )
     .unwrap();
     let handle = IndexHandle::open(dir.path()).unwrap();
@@ -557,10 +572,10 @@ fn watcher_reindexes_subtree_when_pattern_removed() {
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(handle.revision(), 0);
 
-    // Remove the `vendored/` pattern.
+    // Remove the `vendored/` pattern from the sxd ignore block.
     std::fs::write(
-        handle.workspace_root().join(".stdignore"),
-        "target/\n.git/\nnode_modules/\n",
+        handle.workspace_root().join("standardoc.sxd"),
+        "version \"0.1.0\"\nignore {\n  patterns ```\ntarget/\n.git/\nnode_modules/\n```\n}\n",
     )
     .unwrap();
 

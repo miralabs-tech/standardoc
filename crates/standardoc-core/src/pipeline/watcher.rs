@@ -18,7 +18,7 @@ use walkdir::{DirEntry, WalkDir};
 
 use crate::commands::IngestCommand;
 use crate::pipeline::external_invalidation;
-use crate::pipeline::filters::{GitignoreStack, STDIGNORE_FILENAME, ScanFilters};
+use crate::pipeline::filters::ScanFilters;
 use crate::pipeline::manifest_invalidation;
 use crate::pipeline::paths::{guess_language, has_supported_extension, to_workspace_relative};
 use crate::pipeline::provider::{ExtractContext, ExtractError, LanguageProvider};
@@ -301,9 +301,14 @@ fn process_primary_path(
         return;
     };
 
-    if abs_path.file_name() == Some(OsStr::new(STDIGNORE_FILENAME)) {
-        if let Err(e) = handle_stdignore_change(handle, provider, workspace_root, filters) {
-            eprintln!("standardoc watcher: .stdignore reload failed: {e}");
+    // Bug E-3 follow-up P2 — `standardoc.sxd` is the new config source.
+    // Edits trigger a full re-load (ignore + projects + groups). The
+    // legacy `.stdignore` is no longer watched at the root ; nested
+    // `.stdignore` files in subdirectories still cascade (see
+    // `GitignoreStack::collect_layers`) for per-subfolder excludes.
+    if abs_path.file_name() == Some(OsStr::new(crate::config::SXD_CONFIG_FILENAME)) {
+        if let Err(e) = handle_sxd_change(handle, provider, workspace_root, filters) {
+            eprintln!("standardoc watcher: standardoc.sxd reload failed: {e}");
         }
         return;
     }
@@ -379,13 +384,16 @@ fn process_peer_path(
     }
 }
 
-fn handle_stdignore_change(
+fn handle_sxd_change(
     handle: &IndexHandle,
     provider: &dyn LanguageProvider,
     workspace_root: &Path,
     filters: &Arc<RwLock<ScanFilters>>,
 ) -> Result<(), WatcherError> {
-    let new_filters = ScanFilters::from_stack(GitignoreStack::build(workspace_root));
+    // `ScanFilters::load` consults `standardoc.sxd` first (ignore block
+    // wins) and falls back to nested `.stdignore` cascade. Reading
+    // `GitignoreStack::build` directly would miss the sxd block.
+    let new_filters = ScanFilters::load(workspace_root);
 
     let newly_excluded = collect_newly_excluded_db_paths(handle, filters, &new_filters)?;
     let newly_allowed =
@@ -400,7 +408,7 @@ fn handle_stdignore_change(
 
     if !newly_excluded.is_empty() {
         eprintln!(
-            "standardoc: {} indexed path{} now match `.stdignore` exclusions — \
+            "standardoc: {} indexed path{} now match `standardoc.sxd` ignore exclusions — \
              run `standardoc purge-excluded` to remove",
             newly_excluded.len(),
             if newly_excluded.len() == 1 { "" } else { "s" }

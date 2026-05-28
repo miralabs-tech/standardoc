@@ -330,32 +330,57 @@ fn drop_last_handle_joins_writer_thread() {
 }
 
 #[test]
-fn open_seeds_stdignore_when_absent() {
+fn open_seeds_sxd_when_absent() {
     let dir = tempdir().unwrap();
     let handle = IndexHandle::open(dir.path()).unwrap();
 
-    let stdignore = handle.workspace_root().join(".stdignore");
-    let body = std::fs::read_to_string(&stdignore).unwrap();
+    let sxd = handle.workspace_root().join("standardoc.sxd");
+    let body = std::fs::read_to_string(&sxd).unwrap();
+    assert!(body.contains("version \"0.1.0\""));
     assert!(body.contains(".git/"));
     assert!(body.contains("target/"));
     assert!(body.contains("node_modules/"));
     assert!(
         !body.contains(".standardoc/"),
-        ".stdignore seed must not include .standardoc/ (lock 21 Q3)"
+        ".sxd seed must not include .standardoc/ (lock 21 Q3)"
     );
 }
 
 #[test]
-fn open_preserves_existing_stdignore() {
+fn open_migrates_existing_stdignore_to_sxd() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join(".stdignore");
+    let stdignore = dir.path().join(".stdignore");
     let custom = "# user authored\nfoo/\n!foo/keep.rs\n";
-    std::fs::write(&path, custom).unwrap();
+    std::fs::write(&stdignore, custom).unwrap();
 
     let _handle = IndexHandle::open(dir.path()).unwrap();
 
-    let body = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(body, custom);
+    // .stdignore moved to .stdignore.bak (preserves verbatim).
+    assert!(
+        !stdignore.exists(),
+        "legacy .stdignore must be migrated away"
+    );
+    let bak = std::fs::read_to_string(dir.path().join(".stdignore.bak")).unwrap();
+    assert_eq!(bak, custom, "backup preserves the original verbatim");
+
+    // .sxd now carries the patterns inside an ignore block.
+    let sxd = std::fs::read_to_string(dir.path().join("standardoc.sxd")).unwrap();
+    assert!(sxd.contains("Auto-migrated from .stdignore"));
+    assert!(sxd.contains("foo/"));
+    assert!(sxd.contains("!foo/keep.rs"));
+}
+
+#[test]
+fn open_preserves_existing_sxd() {
+    let dir = tempdir().unwrap();
+    let sxd = dir.path().join("standardoc.sxd");
+    let custom = "version \"0.1.0\"\n# user authored\n";
+    std::fs::write(&sxd, custom).unwrap();
+
+    let _handle = IndexHandle::open(dir.path()).unwrap();
+
+    let body = std::fs::read_to_string(&sxd).unwrap();
+    assert_eq!(body, custom, "user .sxd must not be overwritten");
 }
 
 #[test]
