@@ -27,7 +27,7 @@ project "standardoc" {
 
 project "lur-workspace" {
   label "Lurlang"
-  path ".projects/lur-workspace"
+  paths [".projects/lur-workspace" ".projects/lur-workspace/runtime"]
 }
 
 project "matchigo-lua" {
