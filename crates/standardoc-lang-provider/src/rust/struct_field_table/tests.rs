@@ -76,3 +76,40 @@ fn record_overwrites_on_repeat() {
     t.record("crate::Foo", "x", &ty("String"));
     assert_eq!(t.lookup("crate::Foo", "x"), Some("String"));
 }
+
+#[test]
+fn lookup_via_nominal_short_name_resolves_when_unique() {
+    // Bug E-3 ext P-E3.2.2: a bare nominal short name lookup resolves
+    // via the nominal→FQDN side-index when only one struct owns the
+    // nominal.
+    let mut t = StructFieldTable::default();
+    t.record("standardoc-ir::symbol::RawSymbol", "name", &ty("String"));
+    assert_eq!(t.lookup("RawSymbol", "name"), Some("String"));
+    // FQDN path still works (covers `self.field` chains).
+    assert_eq!(
+        t.lookup("standardoc-ir::symbol::RawSymbol", "name"),
+        Some("String")
+    );
+}
+
+#[test]
+fn lookup_via_nominal_short_name_falls_through_when_ambiguous() {
+    // Two structs share the nominal `Foo` — the nominal lookup must
+    // refuse to guess.
+    let mut t = StructFieldTable::default();
+    t.record("crate::a::Foo", "x", &ty("u8"));
+    t.record("crate::b::Foo", "x", &ty("String"));
+    assert_eq!(t.lookup("Foo", "x"), None);
+    // FQDN lookups still hit the individual definitions.
+    assert_eq!(t.lookup("crate::a::Foo", "x"), Some("u8"));
+    assert_eq!(t.lookup("crate::b::Foo", "x"), Some("String"));
+}
+
+#[test]
+fn nominal_lookup_after_repeat_record_to_same_fqdn_stays_unambiguous() {
+    let mut t = StructFieldTable::default();
+    t.record("crate::Foo", "x", &ty("u8"));
+    t.record("crate::Foo", "y", &ty("String"));
+    assert_eq!(t.lookup("Foo", "x"), Some("u8"));
+    assert_eq!(t.lookup("Foo", "y"), Some("String"));
+}

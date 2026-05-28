@@ -1202,6 +1202,26 @@ fn struct_field_parametric_unlocks_closure_through_field_chain() {
 }
 
 #[test]
+fn struct_field_chain_via_nominal_owner_resolves_through_side_index() {
+    // Bug E-3 ext P-E3.2.2: when the owner is a fn-param binding
+    // (`fn process(owner: Owner)`), `owner.items` keys struct_fields
+    // with the *nominal* short name "Owner" — the side-index now
+    // resolves that to the recorded FQDN `c::Owner`, so closure-arg
+    // propagation reaches `x.foo()` with `receiver_type = Foo`.
+    let parsed = parse(
+        "struct Foo; impl Foo { fn foo(&self) {} } \
+         struct Owner { items: Vec<Foo> } \
+         fn process(owner: Owner) { owner.items.iter().map(|x| x.foo()); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let foo = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "foo"))
+        .expect("foo edge");
+    assert_eq!(foo.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
 fn await_passes_through_for_chained_method_calls() {
     // P-E3.2.1: `.await` collapses to its base type so async chains
     // reach the subsequent method-call resolution path. Semantically

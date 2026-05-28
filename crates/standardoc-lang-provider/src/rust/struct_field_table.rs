@@ -16,6 +16,10 @@
 //!     type Phase 1).
 //!   * `struct_fqdn` is whatever `push_field` is called with as
 //!     `parent_fqdn` (the fully-qualified struct path).
+//!   * Bug E-3 ext P-E3.2.2: a parallel nominal→FQDN side-index lets
+//!     `lookup` resolve bare nominal short names (`"RawSymbol"`) to
+//!     the recorded FQDN. Names that collide across two definitions
+//!     stay ambiguous (lookup falls through to `None`).
 
 use std::collections::HashMap;
 
@@ -26,6 +30,11 @@ use super::type_name::parametric_type;
 #[derive(Default, Debug)]
 pub(crate) struct StructFieldTable {
     by_struct: HashMap<String, HashMap<String, String>>,
+    /// Bug E-3 ext P-E3.2.2: nominal short name → recorded struct FQDN.
+    /// `Some(fqdn)` for unique nominals, `None` for collisions across
+    /// definitions (lookup then falls through). Populated alongside
+    /// `record`.
+    by_nominal: HashMap<String, Option<String>>,
 }
 
 impl StructFieldTable {
@@ -40,15 +49,34 @@ impl StructFieldTable {
             .entry(struct_fqdn.to_string())
             .or_default()
             .insert(field_name.to_string(), t);
+        // Bug E-3 ext P-E3.2.2: keep nominal→FQDN side-index in sync.
+        // First record for a given nominal wins; a subsequent record
+        // from a *different* FQDN flags the nominal ambiguous (`None`).
+        if let Some(nominal) = struct_fqdn.rsplit("::").next() {
+            self.by_nominal
+                .entry(nominal.to_string())
+                .and_modify(|cur| {
+                    if cur.as_deref() != Some(struct_fqdn) {
+                        *cur = None;
+                    }
+                })
+                .or_insert_with(|| Some(struct_fqdn.to_string()));
+        }
     }
 
-    /// Look up `<struct_fqdn>.<field_name>` and return its parametric
-    /// type string (`"Vec<Foo>"`). Returns `None` when the struct is
-    /// unknown, the field isn't recorded, or the field had a non-nominal
-    /// type at extract time.
-    pub(crate) fn lookup(&self, struct_fqdn: &str, field_name: &str) -> Option<&str> {
+    /// Look up `<struct_key>.<field_name>` and return its parametric type
+    /// string. `<struct_key>` may be either the full FQDN (matches
+    /// `by_struct` directly) or a nominal short name (resolves via the
+    /// `by_nominal` side-index, falling through if the nominal is
+    /// ambiguous across definitions). Returns `None` when nothing
+    /// matches.
+    pub(crate) fn lookup(&self, struct_key: &str, field_name: &str) -> Option<&str> {
+        if let Some(fields) = self.by_struct.get(struct_key) {
+            return fields.get(field_name).map(String::as_str);
+        }
+        let nominal_fqdn = self.by_nominal.get(struct_key)?.as_deref()?;
         self.by_struct
-            .get(struct_fqdn)?
+            .get(nominal_fqdn)?
             .get(field_name)
             .map(String::as_str)
     }
