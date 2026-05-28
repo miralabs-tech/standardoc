@@ -27,7 +27,7 @@
 
 import classigo from 'classigo';
 
-import { STANDARDOC_SELECT_TAG, type SelectChangeDetail, type SelectElement, type SelectOption } from '../select';
+import { STANDARDOC_SELECT_TAG, type SelectChangeDetail, type SelectElement } from '../select';
 import type {
   OverviewCanvasFacade,
   OverviewCanvasFactory,
@@ -37,203 +37,37 @@ import type {
   OverviewReadyDetail,
   OverviewScopeLabel,
 } from './overview.type';
-import s from './overview.module.scss';
+import {
+  C,
+  DEFAULT_LABEL_LIMIT,
+  DEFAULT_PRESET,
+  LABEL_LIMIT_OPTIONS,
+  PRESET_BUTTONS,
+  STANDARDOC_OVERVIEW_TAG,
+} from './overview.constants';
+import {
+  CROSS_EDGE_KINDS,
+  readPersistedCrossEdges,
+  writePersistedCrossEdges,
+} from './overview.cross-edges';
+import {
+  ORBIT_BALL_AXES,
+  ORBIT_BALL_CENTER,
+  ORBIT_BALL_RADIUS,
+  ORBIT_BALL_SIZE,
+  type OrbitAxisNodes,
+  SVG_NS,
+  projectOrbitAxis,
+} from './overview.orbit-ball';
+import {
+  DEFAULT_KEY_BINDINGS,
+  KEYBOARD_DOLLY_FACTOR,
+  KEYBOARD_ORBIT_SPEED,
+  KEYBOARD_PAN_SPEED,
+  type OverviewKeyBindings,
+} from './overview.key-bindings';
 
-export const STANDARDOC_OVERVIEW_TAG = 'standardoc-overview';
-
-const C = {
-  overview: s.overview ?? '',
-  grabbing: s['overview--grabbing'] ?? '',
-  canvas: s.overview__canvas ?? '',
-  breadcrumb: s.overview__breadcrumb ?? '',
-  breadcrumbBack: s['overview__breadcrumb-back'] ?? '',
-  breadcrumbSep: s['overview__breadcrumb-sep'] ?? '',
-  breadcrumbCurrent: s['overview__breadcrumb-current'] ?? '',
-  gizmo: s.overview__gizmo ?? '',
-  gizmoRow: s['overview__gizmo-row'] ?? '',
-  gizmoGroup: s['overview__gizmo-group'] ?? '',
-  gizmoSep: s['overview__gizmo-sep'] ?? '',
-  gizmoBtn: s['overview__gizmo-btn'] ?? '',
-  gizmoBtnActive: s['overview__gizmo-btn--active'] ?? '',
-  gizmoLabel: s['overview__gizmo-label'] ?? '',
-  gizmoSelect: s['overview__gizmo-select'] ?? '',
-  legend: s.overview__legend ?? '',
-  legendEmpty: s['overview__legend--empty'] ?? '',
-  legendItem: s['overview__legend-item'] ?? '',
-  legendSwatch: s['overview__legend-swatch'] ?? '',
-  legendSwatchDashed: s['overview__legend-swatch--dashed'] ?? '',
-  ball: s.overview__ball ?? '',
-  ballAxis: s['overview__ball-axis'] ?? '',
-  ballAxisBehind: s['overview__ball-axis--behind'] ?? '',
-  ballTip: s['overview__ball-tip'] ?? '',
-  ballLabel: s['overview__ball-label'] ?? '',
-} as const;
-
-/// Cross-edge kind palette — must stay in sync with `cross_edge_style`
-/// in `src/overview/mod.rs` and the global legend in `lib/components/legend`.
-/// Used to render the mini-legend chips and to map unknown kinds to a
-/// neutral gray (the `?? FALLBACK` at call sites).
-interface CrossEdgeKindSpec {
-  readonly kind: string;
-  readonly label: string;
-  readonly color: string;
-  readonly dashed: boolean;
-}
-const CROSS_EDGE_KINDS: ReadonlyArray<CrossEdgeKindSpec> = [
-  { kind: 'CALLS', label: 'Calls', color: '#3794ff', dashed: false },
-  { kind: 'IMPORTS', label: 'Imports', color: '#b180d7', dashed: false },
-  { kind: 'USES_TYPE', label: 'Uses type', color: '#cca700', dashed: false },
-  { kind: 'IMPLEMENTS', label: 'Implements', color: '#f48771', dashed: true },
-  { kind: 'EXTENDS', label: 'Extends', color: '#f48771', dashed: true },
-  { kind: 'REFERENCES', label: 'References', color: '#9d9d9d', dashed: false },
-];
-
-const SVG_NS = 'http://www.w3.org/2000/svg';
-
-/// Orbit-ball world axes. Each entry is the unit world-vector being
-/// projected onto the gizmo plus its render hints. The order matches
-/// the SVG paint order: lines first, then tip dots, then labels — so
-/// the labels always sit on top regardless of axis depth.
-const ORBIT_BALL_AXES: ReadonlyArray<{
-  readonly id: string;
-  readonly axis: readonly [number, number, number];
-  readonly color: string;
-  readonly letter: string;
-}> = [
-  { id: 'x', axis: [1, 0, 0], color: '#f48771', letter: 'X' }, // --sd-status-err
-  { id: 'y', axis: [0, 1, 0], color: '#89d185', letter: 'Y' }, // --sd-status-ok
-  { id: 'z', axis: [0, 0, 1], color: '#3794ff', letter: 'Z' }, // --sd-accent
-];
-
-const ORBIT_BALL_SIZE = 76;
-const ORBIT_BALL_RADIUS = 28;
-const ORBIT_BALL_CENTER = ORBIT_BALL_SIZE / 2;
-
-interface OrbitAxisNodes {
-  readonly id: string;
-  readonly line: SVGLineElement;
-  readonly tip: SVGCircleElement;
-  readonly label: SVGTextElement;
-}
-
-function projectOrbitAxis(
-  axis: readonly [number, number, number],
-  yaw: number,
-  pitch: number,
-): { sx: number; sy: number; depth: number } {
-  const cp = Math.cos(pitch);
-  const sp = Math.sin(pitch);
-  const sy = Math.sin(yaw);
-  const cy = Math.cos(yaw);
-  // Camera "forward" = -(eye - target).normalize() = -dir.
-  const fx = -cp * sy;
-  const fy = -sp;
-  const fz = -cp * cy;
-  // right = forward × (0,-1,0)
-  const rxr = fz;
-  const ryr = 0;
-  const rzr = -fx;
-  const rl = Math.hypot(rxr, ryr, rzr) || 1;
-  const rx = rxr / rl;
-  const ry = ryr / rl;
-  const rz = rzr / rl;
-  // up_cam = right × forward
-  const uxr = ry * fz - rz * fy;
-  const uyr = rz * fx - rx * fz;
-  const uzr = rx * fy - ry * fx;
-  const ul = Math.hypot(uxr, uyr, uzr) || 1;
-  const ux = uxr / ul;
-  const uy = uyr / ul;
-  const uz = uzr / ul;
-  const dR = axis[0] * rx + axis[1] * ry + axis[2] * rz;
-  const dU = axis[0] * ux + axis[1] * uy + axis[2] * uz;
-  const dF = axis[0] * fx + axis[1] * fy + axis[2] * fz;
-  // SVG y+ is down; up_cam projects to screen-up which is y-, so flip.
-  return { sx: dR, sy: -dU, depth: dF };
-}
-
-const PRESET_BUTTONS: ReadonlyArray<{ preset: string; label: string; title: string }> = [
-  { preset: 'orbit', label: 'orb', title: 'Orbit (3/4 view)' },
-  { preset: 'top', label: 'top', title: 'Top-down view' },
-  { preset: 'front', label: 'fr', title: 'Front view' },
-  { preset: 'side', label: 'side', title: 'Side view' },
-];
-
-const LABEL_LIMIT_OPTIONS: ReadonlyArray<SelectOption> = [
-  { value: 0, label: 'all' },
-  { value: 5, label: '5' },
-  { value: 10, label: '10' },
-  { value: 20, label: '20' },
-];
-
-const DEFAULT_PRESET = 'orbit';
-const DEFAULT_LABEL_LIMIT = 0;
-const DEFAULT_SHOW_CROSS_EDGES = false;
-const CROSS_EDGES_STORAGE_KEY = 'sd-overview-cross-edges';
-
-function readPersistedCrossEdges(): boolean {
-  try {
-    const raw = globalThis.localStorage?.getItem(CROSS_EDGES_STORAGE_KEY);
-    if (raw === null || raw === undefined) return DEFAULT_SHOW_CROSS_EDGES;
-    return raw === '1';
-  } catch {
-    return DEFAULT_SHOW_CROSS_EDGES;
-  }
-}
-
-function writePersistedCrossEdges(value: boolean): void {
-  try {
-    globalThis.localStorage?.setItem(CROSS_EDGES_STORAGE_KEY, value ? '1' : '0');
-  } catch {
-    /* localStorage unavailable (private mode, sandbox) — silently skip. */
-  }
-}
-
-/// Per-frame pan speed in screen pixels when a Q/D/A/E key is held.
-/// Tuned so a 1-second hold pans ~half a viewport at the default
-/// camera distance; the host can override the binding map but the
-/// speed stays a hardcoded internal constant (the magic number is a
-/// taste call, not a configuration surface).
-const KEYBOARD_PAN_SPEED = 8;
-/// Per-frame orbit speed in screen pixels when an arrow key is held.
-/// Matches `Camera3D::ORBIT_SPEED` × this value ≈ 1.4° / frame at 60Hz.
-const KEYBOARD_ORBIT_SPEED = 3;
-/// Per-frame multiplicative dolly factor when Z (forward) is held —
-/// the inverse `1 / factor` applies for S (backward). At 60Hz this
-/// gives ~150% zoom-in per second held.
-const KEYBOARD_DOLLY_FACTOR = 1.015;
-
-/// Default key bindings — `event.code` strings so each action tracks
-/// the PHYSICAL key position regardless of QWERTY / AZERTY layout.
-/// The mapping below is the AZERTY-natural ZQSD + AE layout the user
-/// asked for (and the QWERTY-equivalent WASD + QE):
-///   • forward    Z (AZERTY) / W (QWERTY)  → `KeyW`
-///   • backward   S                        → `KeyS`
-///   • strafeL    Q (AZERTY) / A (QWERTY)  → `KeyA`
-///   • strafeR    D                        → `KeyD`
-///   • riseUp     A (AZERTY) / Q (QWERTY)  → `KeyQ`
-///   • fallDown   E                        → `KeyE`
-///   • orbit      ↑ ↓ ← →                   → arrows
-/// Hosts can replace any subset via the `keyBindings` property setter.
-const DEFAULT_KEY_BINDINGS = {
-  forward: ['KeyW'],
-  backward: ['KeyS'],
-  strafeLeft: ['KeyA'],
-  strafeRight: ['KeyD'],
-  riseUp: ['KeyQ'],
-  fallDown: ['KeyE'],
-  orbitUp: ['ArrowUp'],
-  orbitDown: ['ArrowDown'],
-  orbitLeft: ['ArrowLeft'],
-  orbitRight: ['ArrowRight'],
-  /// Recenter / refit the camera on the current scope — same effect
-  /// as the Home button in the gizmo. Useful when the user has
-  /// dollied / panned far from the scene and wants to snap back.
-  reset: ['KeyR'],
-} as const;
-
-type OverviewKeyAction = keyof typeof DEFAULT_KEY_BINDINGS;
-type OverviewKeyBindings = Readonly<Record<OverviewKeyAction, ReadonlyArray<string>>>;
+export { STANDARDOC_OVERVIEW_TAG };
 
 export class OverviewElement extends HTMLElement {
   #mounted = false;
