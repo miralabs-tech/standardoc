@@ -7,12 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Tiny long-lived HTTP proxy between an MCP client (Claude Code, Copilot Chat, …) and the standardoc daemon. Survives daemon restarts / rebuilds so the client never sees a dead transport — file-watches `.standardoc/mcp.endpoint` to track the daemon's moving URL, retries on connection refused, never exits on its own."
-default-run = "standardoc-mcp-proxy"
-
-[[bin]]
-name = "standardoc-mcp-proxy"
-path = "src/main.rs"
+description = "Long-lived HTTP proxy library between an MCP client (Claude Code, Copilot Chat, …) and the standardoc daemon. Survives daemon restarts / rebuilds so the client never sees a dead transport — file-watches `.standardoc/mcp.endpoint` to track the daemon's moving URL, retries on connection refused. Consumed by `standardoc proxy` (subcommand of the main daemon binary)."
 
 [dependencies]
 axum       = { workspace = true }
@@ -23,8 +18,6 @@ tokio      = { workspace = true }
 tokio-util = { workspace = true }
 notify     = { workspace = true }
 notify-debouncer-full = { workspace = true }
-clap       = { workspace = true }
-ctrlc      = { workspace = true }
 thiserror  = { workspace = true }
 
 [dev-dependencies]

@@ -2899,6 +2899,7 @@ dependencies = [
  "standardoc-core",
  "standardoc-ir",
  "standardoc-lang-provider",
+ "standardoc-mcp-proxy",
  "standardoc-server",
  "standarx-dsl",
  "standarx-dsl-lsp",
@@ -2984,8 +2985,6 @@ version = "1.0.0-beta.2"
 dependencies = [
  "axum",
  "bytes",
- "clap",
- "ctrlc",
  "http",
  "notify",
  "notify-debouncer-full",

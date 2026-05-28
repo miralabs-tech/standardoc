@@ -26,6 +26,7 @@ standardoc-lang-provider = { version = "1.0.0-beta.2", path = "crates/standardoc
 standardoc-core          = { version = "1.0.0-beta.2", path = "crates/standardoc-core" }
 standardoc-server        = { version = "1.0.0-beta.2", path = "crates/standardoc-server" }
 standardoc-graph-viz     = { version = "1.0.0-beta.2", path = "crates/standardoc-graph-viz" }
+standardoc-mcp-proxy     = { version = "1.0.0-beta.2", path = "crates/standardoc-mcp-proxy" }
 # Versioned independently of the core workspace per SOURCEMAP_v1.md §8 —
 # protocol semver tracks the wire format, not the standardoc release train.
 standardoc-sourcemap     = { version = "1.0.0", path = "crates/standardoc-sourcemap" }

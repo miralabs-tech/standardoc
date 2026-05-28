@@ -70,6 +70,30 @@ enum Command {
     /// document validates independently.
     LspSxd,
 
+    /// Long-lived HTTP proxy in front of the daemon's MCP transport.
+    /// Keeps the MCP client (Claude Code, Copilot Chat, …) connected
+    /// to a stable URL across daemon restarts / rebuilds / migrations.
+    /// File-watches `<workspace>/.standardoc/mcp.endpoint` to track the
+    /// daemon's actual address and retries on upstream connection
+    /// refused. Replaces the standalone `standardoc-mcp-proxy` binary —
+    /// one binary now handles every transport role.
+    Proxy {
+        /// Local bind address. Configure the MCP client to point at
+        /// `http://<bind>/mcp`.
+        #[arg(long, default_value = "127.0.0.1:7700")]
+        bind: String,
+
+        /// Workspace root used to locate `.standardoc/mcp.endpoint`.
+        /// Defaults to the current working directory.
+        #[arg(long, value_name = "DIR")]
+        workspace: Option<PathBuf>,
+
+        /// How long (in seconds) to keep retrying a request when the
+        /// upstream daemon is unreachable before returning `503`.
+        #[arg(long, default_value_t = 30)]
+        retry_window_secs: u64,
+    },
+
     /// Run the MCP daemon. Default transport: stdio. Use `--http` to serve
     /// over HTTP/SSE (singleton shared by multiple chat clients).
     Mcp {
@@ -258,6 +282,11 @@ fn main_inner() -> Result<(), ServerError> {
         Command::PurgeExcluded { path, yes } => cmd_purge_excluded(&path, yes),
         Command::Lsp { path, stdio: _ } => cmd_lsp(&path),
         Command::LspSxd => cmd_lsp_sxd(),
+        Command::Proxy {
+            bind,
+            workspace,
+            retry_window_secs,
+        } => cmd_proxy(bind, workspace, retry_window_secs),
         Command::Mcp {
             path,
             readonly,
@@ -394,6 +423,32 @@ fn cmd_lsp_sxd() -> Result<(), ServerError> {
         standarx_dsl_lsp::run_stdio_with_schemas(vec![Box::new(sxd_schema::SxdSchema)]).await;
     });
     Ok(())
+}
+
+fn cmd_proxy(
+    bind: String,
+    workspace: Option<PathBuf>,
+    retry_window_secs: u64,
+) -> Result<(), ServerError> {
+    let workspace = workspace
+        .map_or_else(std::env::current_dir, Ok)
+        .map_err(ServerError::Io)?;
+    let cfg = standardoc_mcp_proxy::ProxyConfig {
+        bind_addr: bind,
+        workspace_root: workspace,
+        upstream_retry_window: Duration::from_secs(retry_window_secs),
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(ServerError::Io)?;
+    // ProxyError is a distinct error type from ServerError — we surface
+    // it as an Io error wrapping the formatted message so the existing
+    // CLI dispatch stays uniform without adding a ServerError variant
+    // just for this one subcommand.
+    runtime
+        .block_on(standardoc_mcp_proxy::run(cfg))
+        .map_err(|e| ServerError::Io(io::Error::other(format!("proxy: {e}"))))
 }
 
 fn cmd_mcp(path: &Path, readonly: bool, http: Option<u16>) -> Result<(), ServerError> {
