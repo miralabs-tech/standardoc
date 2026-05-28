@@ -2958,7 +2958,8 @@ dependencies = [
 
 [[package]]
 name = "standarx-dsl"
-version = "0.1.0"
+version = "1.0.0"
+source = "git+https://github.com/miralabs-tech/standarx-dsl?tag=v1.0.0#257bb2ffd7dffbf2977c42c2005b2c345982fd1a"
 dependencies = [
  "serde",
  "thiserror 1.0.69",

@@ -230,6 +230,15 @@ fn lower_stmt(stmt: &StmtNode, out: &mut SxdConfig) -> Result<(), SxdConfigError
                 ))),
             }
         }
+        // standarx-dsl marks `Stmt` `#[non_exhaustive]` since v1.0 so
+        // future variants don't break consumers at the type level. We
+        // reject anything we don't recognise — adding a variant here
+        // means widening the .sxd schema explicitly.
+        _ => Err(SxdConfigError::Schema(
+            "unsupported top-level statement variant from standarx-dsl \
+             (newer DSL feature than this standardoc.sxd schema supports)"
+                .into(),
+        )),
     }
 }
 
@@ -376,6 +385,13 @@ fn string_lit_to_plain(lit: &StringLit, context: &str) -> Result<String, SxdConf
                 return Err(SxdConfigError::Schema(format!(
                     "string interpolation (`${{...}}`) is not supported in `{context}` \
                      — standardoc.sxd v0.1 expects plain strings"
+                )));
+            }
+            // `StringPart` is `#[non_exhaustive]` since standarx-dsl v1.0
+            // — reject unknown parts rather than silently dropping them.
+            _ => {
+                return Err(SxdConfigError::Schema(format!(
+                    "unsupported string part variant from standarx-dsl in `{context}`"
                 )));
             }
         }

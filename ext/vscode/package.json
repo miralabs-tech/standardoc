@@ -149,7 +149,7 @@
       },
       {
         "language": "standardoc-sxd",
-        "scopeName": "source.standardoc-sxd",
+        "scopeName": "source.standarx",
         "path": "./syntaxes/sxd.tmLanguage.json"
       }
     ]
