@@ -250,6 +250,70 @@ fn ensure_sxd_seed_idempotent_when_sxd_present_with_stdignore_alongside() {
 }
 
 #[test]
+fn mcp_block_parses_port() {
+    let cfg = parse_sxd_source("mcp { port 7700 }").unwrap();
+    assert_eq!(cfg.mcp.unwrap().port, Some(7700));
+}
+
+#[test]
+fn viz_block_parses_port() {
+    let cfg = parse_sxd_source("viz { port 3001 }").unwrap();
+    assert_eq!(cfg.viz.unwrap().port, Some(3001));
+}
+
+#[test]
+fn proxy_block_parses_bind_and_port() {
+    let src = r#"proxy { bind "127.0.0.1" port 7701 }"#;
+    let cfg = parse_sxd_source(src).unwrap();
+    let p = cfg.proxy.unwrap();
+    assert_eq!(p.bind.as_deref(), Some("127.0.0.1"));
+    assert_eq!(p.port, Some(7701));
+}
+
+#[test]
+fn mcp_block_with_no_fields_yields_default() {
+    let cfg = parse_sxd_source("mcp { }").unwrap();
+    assert!(cfg.mcp.is_some());
+    assert_eq!(cfg.mcp.unwrap().port, None);
+}
+
+#[test]
+fn duplicate_mcp_block_rejected() {
+    let err = parse_sxd_source("mcp { port 7700 }\nmcp { port 7701 }").expect_err("must reject");
+    assert!(format!("{err}").contains("more than once"));
+}
+
+#[test]
+fn port_zero_rejected_as_out_of_range() {
+    let err = parse_sxd_source("mcp { port 0 }").expect_err("must reject port 0");
+    assert!(format!("{err}").contains("out of TCP port range"));
+}
+
+#[test]
+fn port_above_65535_rejected_as_out_of_range() {
+    let err = parse_sxd_source("mcp { port 70000 }").expect_err("must reject port > 65535");
+    assert!(format!("{err}").contains("out of TCP port range"));
+}
+
+#[test]
+fn port_with_string_value_rejected() {
+    let err = parse_sxd_source(r#"mcp { port "7700" }"#).expect_err("must reject string");
+    assert!(format!("{err}").contains("expected an integer port"));
+}
+
+#[test]
+fn mcp_with_unknown_field_rejected() {
+    let err = parse_sxd_source("mcp { foo 7700 }").expect_err("must reject unknown field");
+    assert!(format!("{err}").contains("unknown field `foo`"));
+}
+
+#[test]
+fn proxy_with_unknown_field_rejected() {
+    let err = parse_sxd_source(r#"proxy { foo "x" }"#).expect_err("must reject unknown field");
+    assert!(format!("{err}").contains("unknown field `foo`"));
+}
+
+#[test]
 fn parses_real_standardoc_workspace_template() {
     // Regression check : the template authored at the workspace root
     // (see standardoc.sxd) must parse cleanly with the production schema.

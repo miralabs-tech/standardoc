@@ -84,6 +84,9 @@ pub struct SxdConfig {
     pub ignore: Option<IgnoreBlock>,
     pub projects: Vec<ProjectBlock>,
     pub groups: Vec<GroupBlock>,
+    pub mcp: Option<McpBlock>,
+    pub viz: Option<VizBlock>,
+    pub proxy: Option<ProxyBlock>,
 }
 
 /// `ignore { patterns ```...``` }` block — multi-line gitignore-syntax
@@ -114,6 +117,36 @@ pub struct GroupBlock {
     pub slug: String,
     pub label: Option<String>,
     pub members: Vec<String>,
+}
+
+/// `mcp { port <u16> }` block — per-workspace override for the MCP
+/// daemon's HTTP listen port. Singleton (cannot repeat). Absent block
+/// or absent `port` falls back to the VSCode setting
+/// `standardoc.mcpHttpPort` (default 7700). Centralises what used to
+/// live across the daemon CLI flag + VSCode setting + env so a single
+/// `standardoc.sxd` declaration is the source of truth.
+#[derive(Debug, Clone, Default)]
+pub struct McpBlock {
+    pub port: Option<u16>,
+}
+
+/// `viz { port <u16> }` block — per-workspace override for the
+/// graph-viz playground dev server port. Used by the
+/// `Standardoc: Open Graph Viz` command in the VSCode extension when
+/// probing / opening the browser. Absent block defaults to 3000.
+#[derive(Debug, Clone, Default)]
+pub struct VizBlock {
+    pub port: Option<u16>,
+}
+
+/// `proxy { bind "<host>" port <u16> }` block — per-workspace
+/// override for the long-lived `standardoc proxy` subcommand's bind
+/// address. Both fields are optional; absent values fall back to the
+/// subcommand's CLI defaults (`bind = 127.0.0.1`, `port = 7700`).
+#[derive(Debug, Clone, Default)]
+pub struct ProxyBlock {
+    pub bind: Option<String>,
+    pub port: Option<u16>,
 }
 
 /// Bug E-3 follow-up P2 — replacement for the legacy
@@ -224,9 +257,36 @@ fn lower_stmt(stmt: &StmtNode, out: &mut SxdConfig) -> Result<(), SxdConfigError
                     out.groups.push(lower_group(b)?);
                     Ok(())
                 }
+                "mcp" => {
+                    if out.mcp.is_some() {
+                        return Err(SxdConfigError::Schema(
+                            "`mcp` block declared more than once".into(),
+                        ));
+                    }
+                    out.mcp = Some(lower_mcp(b)?);
+                    Ok(())
+                }
+                "viz" => {
+                    if out.viz.is_some() {
+                        return Err(SxdConfigError::Schema(
+                            "`viz` block declared more than once".into(),
+                        ));
+                    }
+                    out.viz = Some(lower_viz(b)?);
+                    Ok(())
+                }
+                "proxy" => {
+                    if out.proxy.is_some() {
+                        return Err(SxdConfigError::Schema(
+                            "`proxy` block declared more than once".into(),
+                        ));
+                    }
+                    out.proxy = Some(lower_proxy(b)?);
+                    Ok(())
+                }
                 _ => Err(SxdConfigError::Schema(format!(
                     "unknown top-level block `{kind}` \
-                     (expected `ignore`, `project`, or `group`)"
+                     (expected `ignore`, `project`, `group`, `mcp`, `viz`, or `proxy`)"
                 ))),
             }
         }
@@ -311,6 +371,72 @@ fn lower_project(b: &Block) -> Result<ProjectBlock, SxdConfigError> {
     Ok(ProjectBlock { slug, label, paths })
 }
 
+fn lower_mcp(b: &Block) -> Result<McpBlock, SxdConfigError> {
+    let mut port = None;
+    for stmt in &b.stmts {
+        let Stmt::Assign(a) = &stmt.node else {
+            return Err(SxdConfigError::Schema(
+                "`mcp` block only accepts assignments (`port`)".into(),
+            ));
+        };
+        let key = a.key.node.as_str();
+        match key {
+            "port" => port = Some(expect_port(&a.value, "mcp.port")?),
+            other => {
+                return Err(SxdConfigError::Schema(format!(
+                    "unknown field `{other}` inside `mcp` (only `port` accepted)"
+                )));
+            }
+        }
+    }
+    Ok(McpBlock { port })
+}
+
+fn lower_viz(b: &Block) -> Result<VizBlock, SxdConfigError> {
+    let mut port = None;
+    for stmt in &b.stmts {
+        let Stmt::Assign(a) = &stmt.node else {
+            return Err(SxdConfigError::Schema(
+                "`viz` block only accepts assignments (`port`)".into(),
+            ));
+        };
+        let key = a.key.node.as_str();
+        match key {
+            "port" => port = Some(expect_port(&a.value, "viz.port")?),
+            other => {
+                return Err(SxdConfigError::Schema(format!(
+                    "unknown field `{other}` inside `viz` (only `port` accepted)"
+                )));
+            }
+        }
+    }
+    Ok(VizBlock { port })
+}
+
+fn lower_proxy(b: &Block) -> Result<ProxyBlock, SxdConfigError> {
+    let mut bind = None;
+    let mut port = None;
+    for stmt in &b.stmts {
+        let Stmt::Assign(a) = &stmt.node else {
+            return Err(SxdConfigError::Schema(
+                "`proxy` block only accepts assignments (`bind`, `port`)".into(),
+            ));
+        };
+        let key = a.key.node.as_str();
+        match key {
+            "bind" => bind = Some(expect_string(&a.value, "proxy.bind")?),
+            "port" => port = Some(expect_port(&a.value, "proxy.port")?),
+            other => {
+                return Err(SxdConfigError::Schema(format!(
+                    "unknown field `{other}` inside `proxy` \
+                     (expected `bind` or `port`)"
+                )));
+            }
+        }
+    }
+    Ok(ProxyBlock { bind, port })
+}
+
 fn lower_group(b: &Block) -> Result<GroupBlock, SxdConfigError> {
     let slug = b.label.as_ref().map(|s| s.node.clone()).ok_or_else(|| {
         SxdConfigError::Schema(
@@ -352,6 +478,22 @@ fn expect_string(value: &Spanned<Expr>, context: &str) -> Result<String, SxdConf
         )));
     };
     string_lit_to_plain(lit, context)
+}
+
+/// Coerce a TCP port literal — must be an `Expr::Int` whose value
+/// fits in `u16` (1..=65535 ; 0 is rejected as a useless bind target).
+fn expect_port(value: &Spanned<Expr>, context: &str) -> Result<u16, SxdConfigError> {
+    let Expr::Int(n) = &value.node else {
+        return Err(SxdConfigError::Schema(format!(
+            "expected an integer port for `{context}`"
+        )));
+    };
+    if *n < 1 || *n > i64::from(u16::MAX) {
+        return Err(SxdConfigError::Schema(format!(
+            "`{context}` = {n} is out of TCP port range 1..=65535"
+        )));
+    }
+    Ok(u16::try_from(*n).expect("range-checked above"))
 }
 
 fn expect_string_list(value: &Spanned<Expr>, context: &str) -> Result<Vec<String>, SxdConfigError> {

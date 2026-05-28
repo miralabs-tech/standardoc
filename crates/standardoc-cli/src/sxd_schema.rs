@@ -55,11 +55,14 @@ fn validate_top_stmt(stmt: &StmtNode, diags: &mut Vec<Diag>) {
                 "ignore" => validate_ignore_block(b, diags),
                 "project" => validate_project_block(b, diags),
                 "group" => validate_group_block(b, diags),
+                "mcp" => validate_mcp_block(b, diags),
+                "viz" => validate_viz_block(b, diags),
+                "proxy" => validate_proxy_block(b, diags),
                 _ => diags.push(Diag::schema(
                     b.kind.span.clone(),
                     format!(
                         "unknown top-level block `{kind}` \
-                         (expected `ignore`, `project`, or `group`)"
+                         (expected `ignore`, `project`, `group`, `mcp`, `viz`, or `proxy`)"
                     ),
                 )),
             }
@@ -201,6 +204,92 @@ fn validate_group_block(b: &Block, diags: &mut Vec<Diag>) {
     }
 }
 
+fn validate_mcp_block(b: &Block, diags: &mut Vec<Diag>) {
+    for stmt in &b.stmts {
+        match &stmt.node {
+            Stmt::Assign(a) => {
+                let key = a.key.node.as_str();
+                match key {
+                    "port" => expect_port(&a.value, "mcp.port", diags),
+                    other => diags.push(Diag::schema(
+                        a.key.span.clone(),
+                        format!("unknown field `{other}` inside `mcp` (only `port` accepted)"),
+                    )),
+                }
+            }
+            Stmt::Block(inner) => diags.push(Diag::schema(
+                inner.kind.span.clone(),
+                "`mcp` block only accepts assignments (`port`)",
+            )),
+            _ => {}
+        }
+    }
+}
+
+fn validate_viz_block(b: &Block, diags: &mut Vec<Diag>) {
+    for stmt in &b.stmts {
+        match &stmt.node {
+            Stmt::Assign(a) => {
+                let key = a.key.node.as_str();
+                match key {
+                    "port" => expect_port(&a.value, "viz.port", diags),
+                    other => diags.push(Diag::schema(
+                        a.key.span.clone(),
+                        format!("unknown field `{other}` inside `viz` (only `port` accepted)"),
+                    )),
+                }
+            }
+            Stmt::Block(inner) => diags.push(Diag::schema(
+                inner.kind.span.clone(),
+                "`viz` block only accepts assignments (`port`)",
+            )),
+            _ => {}
+        }
+    }
+}
+
+fn validate_proxy_block(b: &Block, diags: &mut Vec<Diag>) {
+    for stmt in &b.stmts {
+        match &stmt.node {
+            Stmt::Assign(a) => {
+                let key = a.key.node.as_str();
+                match key {
+                    "bind" => expect_plain_string(&a.value, "proxy.bind", diags),
+                    "port" => expect_port(&a.value, "proxy.port", diags),
+                    other => diags.push(Diag::schema(
+                        a.key.span.clone(),
+                        format!(
+                            "unknown field `{other}` inside `proxy` \
+                             (expected `bind` or `port`)"
+                        ),
+                    )),
+                }
+            }
+            Stmt::Block(inner) => diags.push(Diag::schema(
+                inner.kind.span.clone(),
+                "`proxy` block only accepts assignments (`bind`, `port`)",
+            )),
+            _ => {}
+        }
+    }
+}
+
+fn expect_port(value: &standarx_dsl::diag::Spanned<Expr>, context: &str, diags: &mut Vec<Diag>) {
+    let Expr::Int(n) = &value.node else {
+        diags.push(Diag::schema(
+            value.span.clone(),
+            format!("expected an integer port for `{context}`"),
+        ));
+        return;
+    };
+    if *n < 1 || *n > i64::from(u16::MAX) {
+        diags.push(Diag::schema(
+            value.span.clone(),
+            format!("`{context}` = {n} is out of TCP port range 1..=65535"),
+        ));
+    }
+}
+
 fn expect_plain_string(
     value: &standarx_dsl::diag::Spanned<Expr>,
     context: &str,
@@ -323,6 +412,58 @@ ignore { patterns ```.git/``` }
         let diags = diags_for(src);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].kind.to_string().contains("unknown field `extra`"));
+    }
+
+    #[test]
+    fn mcp_block_valid_no_diags() {
+        assert!(diags_for("mcp { port 7700 }\n").is_empty());
+    }
+
+    #[test]
+    fn viz_block_valid_no_diags() {
+        assert!(diags_for("viz { port 3001 }\n").is_empty());
+    }
+
+    #[test]
+    fn proxy_block_valid_no_diags() {
+        assert!(diags_for(r#"proxy { bind "127.0.0.1" port 7701 }"#).is_empty());
+    }
+
+    #[test]
+    fn port_out_of_range_reports_span_on_value() {
+        let src = "mcp { port 70000 }\n";
+        let diags = diags_for(src);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].kind.to_string().contains("out of TCP port range"));
+    }
+
+    #[test]
+    fn port_with_string_value_reports_diag() {
+        let src = r#"viz { port "3000" }"#;
+        let diags = diags_for(src);
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0]
+                .kind
+                .to_string()
+                .contains("expected an integer port")
+        );
+    }
+
+    #[test]
+    fn unknown_field_in_mcp_block_reports_span_on_key() {
+        let src = "mcp { foo 7700 }\n";
+        let diags = diags_for(src);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].kind.to_string().contains("unknown field `foo`"));
+    }
+
+    #[test]
+    fn unknown_field_in_proxy_block_reports_span_on_key() {
+        let src = r#"proxy { foo "x" }"#;
+        let diags = diags_for(src);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].kind.to_string().contains("unknown field `foo`"));
     }
 
     #[test]
