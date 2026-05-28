@@ -13,14 +13,6 @@ use super::helpers::{
 };
 
 /// Per-file walker state for the C provider.
-///
-// TODO(viz-readiness-G4-c): no `build_c_lookup` AOT pass yet. C symbols
-// can't currently be the target of cross-workspace `ModuleLookup`
-// resolution from peer workspaces. FFI bindings remain the only
-// cross-language bridge for C. If C-side symbols need to be addressable
-// from peer workspaces via ModuleLookup (rather than only via FFI), add
-// a `c::lookup` module mirroring `rust::lookup` / `ts::lookup` and wire
-// it through `extract_file` so `ExtractedFile.module_lookup` is `Some`.
 pub(crate) struct CWalkContext {
     pub(crate) core: WalkContextCore,
     pub(crate) ffi_bindings: Vec<RawFfiBinding>,
