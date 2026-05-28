@@ -1,5 +1,6 @@
 #![allow(clippy::result_large_err)]
 
+mod sxd_schema;
 mod warn;
 
 use std::io::{self, IsTerminal, Write};
@@ -60,6 +61,14 @@ enum Command {
         #[arg(long, hide = true)]
         stdio: bool,
     },
+
+    /// Run the `.sxd` LSP backend over stdio. Drives `standarx-dsl-lsp`
+    /// with our [`SxdSchema`] plugged in so editors get both syntactic
+    /// (from the DSL parser) and schema-aware (from standardoc.sxd's
+    /// `ignore` / `project` / `group` rules) diagnostics live as the
+    /// user edits. Stateless and workspace-agnostic — every open .sxd
+    /// document validates independently.
+    LspSxd,
 
     /// Run the MCP daemon. Default transport: stdio. Use `--http` to serve
     /// over HTTP/SSE (singleton shared by multiple chat clients).
@@ -248,6 +257,7 @@ fn main_inner() -> Result<(), ServerError> {
         Command::Rescan { path } => cmd_rescan(&path),
         Command::PurgeExcluded { path, yes } => cmd_purge_excluded(&path, yes),
         Command::Lsp { path, stdio: _ } => cmd_lsp(&path),
+        Command::LspSxd => cmd_lsp_sxd(),
         Command::Mcp {
             path,
             readonly,
@@ -373,6 +383,17 @@ fn cmd_lsp(path: &Path) -> Result<(), ServerError> {
         .build()
         .map_err(ServerError::Io)?;
     runtime.block_on(standardoc_server::serve_lsp(handle, provider, filters))
+}
+
+fn cmd_lsp_sxd() -> Result<(), ServerError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(ServerError::Io)?;
+    runtime.block_on(async {
+        standarx_dsl_lsp::run_stdio_with_schemas(vec![Box::new(sxd_schema::SxdSchema)]).await;
+    });
+    Ok(())
 }
 
 fn cmd_mcp(path: &Path, readonly: bool, http: Option<u16>) -> Result<(), ServerError> {

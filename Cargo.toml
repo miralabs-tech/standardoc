@@ -71,6 +71,10 @@ standarbuild-detect = "0.3"
 # GitHub release until the crate lands on crates.io — pinned to the
 # v1.0.0 tag for downstream stability (semver-frozen public contract).
 standarx-dsl        = { git = "https://github.com/miralabs-tech/standarx-dsl", tag = "v1.0.0" }
+# LSP backend for the same DSL — exposed as a library so we can plug
+# our SxdSchema (semantic validation of `standardoc.sxd`) and ship a
+# single `standardoc lsp-sxd` subcommand from the daemon binary.
+standarx-dsl-lsp    = { git = "https://github.com/miralabs-tech/standarx-dsl", tag = "v1.0.0" }
 wasm-bindgen              = "0.2"
 wasm-bindgen-futures      = "0.4"
 js-sys                    = "0.3"

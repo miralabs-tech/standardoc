@@ -10,6 +10,7 @@ import {
   type DaemonState,
 } from './supervisor-state';
 import type { LspClient, LspState } from '../lsp/client';
+import type { SxdLspClient } from '../lsp/sxd-client';
 import type { McpClient } from '../mcp/client';
 
 export { describeState, type DaemonState } from './supervisor-state';
@@ -17,6 +18,12 @@ export { describeState, type DaemonState } from './supervisor-state';
 export interface SupervisorDeps {
   readonly lsp: LspClient;
   readonly mcp: McpClient;
+  /**
+   * Optional `.sxd` LSP backend. Failure to start it is non-fatal —
+   * losing schema-aware diagnostics on standardoc.sxd doesn't justify
+   * tearing down code intelligence for the workspace.
+   */
+  readonly sxdLsp?: SxdLspClient;
   /**
    * Override the schema-version pre-flight invocation. Useful for tests; if
    * omitted, the supervisor shells out to `<binary> schema-version <root>`.
@@ -111,7 +118,18 @@ export class DaemonSupervisor implements vscode.Disposable {
       this.deps.mcp.start(binaryPath),
     ]);
 
-    if (lspR.status === 'fulfilled' && mcpR.status === 'fulfilled') return;
+    if (lspR.status === 'fulfilled' && mcpR.status === 'fulfilled') {
+      // Best-effort start of the .sxd LSP — failure is logged but
+      // intentionally swallowed so the workspace daemon stays up.
+      if (this.deps.sxdLsp) {
+        try {
+          await this.deps.sxdLsp.start(binaryPath);
+        } catch (e) {
+          this.log(`sxd-lsp start failed (non-fatal): ${describeError(e)}`);
+        }
+      }
+      return;
+    }
 
     if (lspR.status === 'fulfilled') await this.safeStopLsp();
     if (mcpR.status === 'fulfilled') await this.safeStopMcp();
@@ -187,7 +205,7 @@ export class DaemonSupervisor implements vscode.Disposable {
   }
 
   private async safeStopAll(): Promise<void> {
-    await Promise.allSettled([this.safeStopLsp(), this.safeStopMcp()]);
+    await Promise.allSettled([this.safeStopLsp(), this.safeStopMcp(), this.safeStopSxdLsp()]);
   }
 
   private async safeStopLsp(): Promise<void> {
@@ -195,6 +213,15 @@ export class DaemonSupervisor implements vscode.Disposable {
       await this.deps.lsp.stop();
     } catch (e) {
       this.log(`lsp stop error: ${describeError(e)}`);
+    }
+  }
+
+  private async safeStopSxdLsp(): Promise<void> {
+    if (!this.deps.sxdLsp) return;
+    try {
+      await this.deps.sxdLsp.stop();
+    } catch (e) {
+      this.log(`sxd-lsp stop error: ${describeError(e)}`);
     }
   }
 

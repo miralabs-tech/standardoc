@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { describeFatalConfig } from './daemon/fatal-marker';
 import { DaemonSupervisor, type DaemonState } from './daemon/supervisor';
 import { LspClient } from './lsp/client';
+import { SxdLspClient } from './lsp/sxd-client';
 import { McpClient } from './mcp/client';
 import { StandardocMcpServerProvider } from './mcp/serverDefinitionProvider';
 import { StatusBarController } from './statusBar';
@@ -29,10 +30,16 @@ export function activate(context: vscode.ExtensionContext): void {
   output.appendLine(`[mcp] http port from setting: ${port}`);
 
   const lsp = new LspClient(workspaceRoot, output);
+  const sxdLsp = new SxdLspClient(output);
   const mcp = new McpClient(workspaceRoot, output, port);
-  const supervisor = new DaemonSupervisor(context, output, { lsp, mcp }, workspaceRoot);
+  const supervisor = new DaemonSupervisor(
+    context,
+    output,
+    { lsp, mcp, sxdLsp },
+    workspaceRoot,
+  );
 
-  context.subscriptions.push(lsp, mcp, supervisor);
+  context.subscriptions.push(lsp, sxdLsp, mcp, supervisor);
 
   const statusBar = new StatusBarController();
   context.subscriptions.push(statusBar);
