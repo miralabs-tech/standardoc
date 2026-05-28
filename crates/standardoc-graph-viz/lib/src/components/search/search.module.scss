@@ -76,16 +76,26 @@
 
 	&__item {
 		display: flex;
-		align-items: baseline;
+		align-items: center;
 		gap: var(--sd-space-2, 8px);
 		padding: 4px var(--sd-space-3, 12px);
 		cursor: pointer;
 		color: var(--sd-fg, #cccccc);
+		// Default left-edge bar — kind variants below override the color.
+		// Stays transparent for `unknown` so the row still aligns visually
+		// with kind-tagged peers without showing a fake bucket.
+		border-left: 3px solid transparent;
 
 		&:hover,
 		&--active {
 			background: var(--sd-hover, #2a2d2e);
 		}
+
+		&[data-kind='callable'] { border-left-color: var(--sd-kind-callable, #4d8cff); }
+		&[data-kind='type']     { border-left-color: var(--sd-kind-type, #d4b455); }
+		&[data-kind='value']    { border-left-color: var(--sd-kind-value, #7ed18a); }
+		&[data-kind='module']   { border-left-color: var(--sd-kind-module, #b888da); }
+		&[data-kind='macro']    { border-left-color: var(--sd-kind-macro, #ef8b6f); }
 	}
 
 	&__item-name {
@@ -97,9 +107,25 @@
 
 	&__item-kind {
 		flex: 0 0 auto;
-		font-size: var(--sd-text-xs, 10px);
-		color: var(--sd-fg-muted, #9d9d9d);
+		font-size: 9px;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
 		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		font-weight: 600;
+		padding: 1px 6px;
+		border-radius: var(--sd-radius-pill, 999px);
+		color: var(--sd-fg-muted, #9d9d9d);
+		background: var(--sd-bg-deep, #161616);
+		min-width: 56px;
+		text-align: center;
+		// Kind-tinted chip: same hue as the left bar, translucent fill so
+		// the row reads as a glance without screaming. Matches the chip
+		// pattern in symbol-details so the two components feel related.
+		.search__item[data-kind='callable'] & { color: var(--sd-kind-callable, #4d8cff); background: rgba(77, 140, 255, 0.12); }
+		.search__item[data-kind='type'] &     { color: var(--sd-kind-type, #d4b455);     background: rgba(212, 180, 85, 0.12); }
+		.search__item[data-kind='value'] &    { color: var(--sd-kind-value, #7ed18a);    background: rgba(126, 209, 138, 0.12); }
+		.search__item[data-kind='module'] &   { color: var(--sd-kind-module, #b888da);   background: rgba(184, 136, 218, 0.12); }
+		.search__item[data-kind='macro'] &    { color: var(--sd-kind-macro, #ef8b6f);    background: rgba(239, 139, 111, 0.12); }
 	}
 
 	&__item-fqdn {

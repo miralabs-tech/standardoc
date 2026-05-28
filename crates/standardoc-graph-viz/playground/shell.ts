@@ -360,6 +360,7 @@ async function boot(): Promise<void> {
     fqdn: s.fqdn,
     name: s.name,
     kindLabel: s.kind,
+    kind: s.kind,
     file: s.file,
     startLine: s.start_line,
   });
@@ -380,6 +381,7 @@ async function boot(): Promise<void> {
       fqdn: ep.fqdn,
       name: sym?.name ?? ep.label,
       kindLabel: ep.kind,
+      kind: sym?.kind,
       file: sym?.file,
       startLine: sym?.start_line,
     };
@@ -534,6 +536,7 @@ async function boot(): Promise<void> {
         fqdn: s.fqdn,
         name: s.name,
         kindLabel: s.kind,
+        kind: s.kind,
       }));
     } catch {
       searchEl.results = [];

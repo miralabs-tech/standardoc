@@ -279,7 +279,7 @@ export class SearchElement extends HTMLElement {
         this.#appendSectionTitle(n.dropdown, 'Did you mean…');
         this.#appendItemList(
           n.dropdown,
-          this.#suggestions.map(s => ({ fqdn: s.fqdn, name: s.name, kindLabel: s.kindLabel })),
+          this.#suggestions.map(s => ({ fqdn: s.fqdn, name: s.name, kindLabel: s.kindLabel, kind: s.kind })),
           0,
         );
       }
@@ -333,9 +333,10 @@ export class SearchElement extends HTMLElement {
       li.className = classigo(C.item, flatIdx === this.#activeIdx && C.itemActive);
       li.title = r.fqdn;
       li.setAttribute('role', 'option');
+      li.dataset['kind'] = bucketKind(r.kind);
       li.innerHTML = `
-				<span class="${C.itemName}">${escapeHtml(r.name)}</span>
 				<span class="${C.itemKind}">${escapeHtml(r.kindLabel)}</span>
+				<span class="${C.itemName}">${escapeHtml(r.name)}</span>
 				<span class="${C.itemFqdn}">${escapeHtml(r.fqdn)}</span>
 			`;
       // mousedown (not click) so it fires before the input's blur-close.
@@ -390,6 +391,47 @@ export class SearchElement extends HTMLElement {
       window.removeEventListener('keydown', this.#shortcutHandler);
       this.#shortcutHandler = null;
     }
+  }
+}
+
+/**
+ * Narrow the daemon's free-form kind string into one of the 5 IR
+ * buckets the SCSS variants colour. Anything unrecognised falls
+ * back to `unknown` so the chip still renders without a kind tint.
+ */
+function bucketKind(kind: string | undefined): string {
+  if (kind === undefined) return 'unknown';
+  switch (kind.toLowerCase()) {
+    case 'callable':
+    case 'function':
+    case 'method':
+      return 'callable';
+    case 'type':
+    case 'struct':
+    case 'class':
+    case 'interface':
+    case 'enum':
+    case 'trait':
+    case 'union':
+    case 'type_alias':
+    case 'typedef':
+      return 'type';
+    case 'value':
+    case 'field':
+    case 'property':
+    case 'variable':
+    case 'constant':
+    case 'enum_variant':
+    case 'interface_property':
+      return 'value';
+    case 'module':
+    case 'namespace':
+    case 'package':
+      return 'module';
+    case 'macro':
+      return 'macro';
+    default:
+      return 'unknown';
   }
 }
 

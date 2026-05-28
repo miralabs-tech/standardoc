@@ -179,6 +179,7 @@ export function toSymbolSearchResult(s: RawSymbol): SymbolSearchResult {
     fqdn: s.fqdn,
     name: s.name,
     kindLabel: s.decl_kind ?? s.language_kind ?? s.kind,
+    kind: s.kind,
     file: s.location.file,
     startLine: s.location.start_line,
   };

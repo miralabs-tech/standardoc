@@ -9,6 +9,11 @@ export interface SymbolSearchResult {
   readonly fqdn: string;
   readonly name: string;
   readonly kindLabel: string;
+  /** Canonical IR bucket — `callable | type | value | module | macro`.
+   *  Drives the colored kind chip + left border in the dropdown. The
+   *  free-text `kindLabel` stays for finer-grained display (e.g.
+   *  `interface` vs `struct`, both bucket = `type`). */
+  readonly kind?: string;
   /** Source file. Optional so suggestions / did_you_mean items (which
    *  only carry name + fqdn from the daemon) can reuse the same shape. */
   readonly file?: string;
@@ -26,6 +31,7 @@ export interface SymbolSearchSuggestion {
   readonly fqdn: string;
   readonly name: string;
   readonly kindLabel: string;
+  readonly kind?: string;
 }
 
 export interface SearchQueryDetail {
