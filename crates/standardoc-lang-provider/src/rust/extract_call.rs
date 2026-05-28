@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use proc_macro2::Span;
 use quote::ToTokens;
 use standardoc_ir::{
@@ -10,6 +12,7 @@ use syn::visit::Visit;
 
 use crate::builtins::global as global_builtin_registry;
 
+use super::type_name::{generic_args, nominal_of, substitute_template};
 use super::walk::{
     NameResolution, WalkContext, col_from_span, line_from_span, lookup_scope_for, path_to_string,
 };
@@ -45,6 +48,38 @@ fn arg_from_expr(expr: &syn::Expr) -> RawCallArg {
 
 fn args_from_punctuated(args: &Punctuated<syn::Expr, syn::token::Comma>) -> Vec<RawCallArg> {
     args.iter().map(arg_from_expr).collect()
+}
+
+/// Bug E-3 ext P-E3.2: strip leading `&` / `&mut` from a type string so
+/// closure-arg bindings expose the nominal head to downstream lookups
+/// (`lookup_method`, struct-field table, etc.) — `"&Foo"` → `"Foo"`,
+/// `"&mut Foo"` → `"Foo"`. Preserves the inner type verbatim, including
+/// any generic args.
+fn strip_refs(ty: &str) -> &str {
+    let mut s = ty.trim_start();
+    loop {
+        if let Some(rest) = s.strip_prefix("&mut ") {
+            s = rest.trim_start();
+        } else if let Some(rest) = s.strip_prefix('&') {
+            s = rest.trim_start();
+        } else {
+            return s;
+        }
+    }
+}
+
+/// Bug E-3 ext P-E3.2: extract the bound ident from a closure-input
+/// pattern. Returns `None` for tuple / struct / wildcard patterns —
+/// V0 only binds simple `|x|` / `|x: T|` / `|&x|` forms. Reference
+/// patterns are peeled so `|&x|` still produces `"x"`.
+fn ident_pat_name(pat: &syn::Pat) -> Option<String> {
+    match pat {
+        syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
+        syn::Pat::Type(pt) => ident_pat_name(&pt.pat),
+        syn::Pat::Reference(pr) => ident_pat_name(&pr.pat),
+        syn::Pat::Paren(pp) => ident_pat_name(&pp.pat),
+        _ => None,
+    }
 }
 
 /// IR-4-b: walk a method-call receiver expression and produce the dotted
@@ -238,32 +273,80 @@ impl CallVisitor<'_> {
             syn::Member::Named(i) => i.to_string(),
             syn::Member::Unnamed(_) => return None,
         };
+        // Bug E-3 ext P-E3.2: bindings may now carry parametric type
+        // strings (`"Vec<Foo>"`); the struct-field table keys on the
+        // nominal portion only.
         self.ctx
             .struct_fields
-            .lookup(&base_type, &field_name)
+            .lookup(nominal_of(&base_type), &field_name)
             .map(str::to_string)
     }
 
     fn type_of_method_call_expr(&self, m: &syn::ExprMethodCall) -> Option<String> {
         let recv_type = self.type_of_expr(&m.receiver)?;
         let method = m.method.to_string();
+        let recv_nominal = nominal_of(&recv_type);
         // Tier 1 — builtin registry (Phase 3 v1 chain propagation).
-        if let Some(ret) = global_builtin_registry()
-            .lookup_method(&recv_type, &method, Language::Rust)
+        // Bug E-3 ext P-E3.2: `returns` may be a parametric template
+        // (e.g. `"Iterator<T>"`); substitute against the receiver's
+        // generic args before propagating.
+        if let Some(template) = global_builtin_registry()
+            .lookup_method(recv_nominal, &method, Language::Rust)
             .and_then(|e| e.returns.clone())
         {
-            return Some(ret);
+            let args = generic_args(&recv_type);
+            return Some(substitute_template(&template, recv_nominal, &args));
         }
         // Tier 2 — workspace return-type table (Bug E-3 ext P-E3.1).
         // Catches chains where the receiver type's method is defined
         // in the current file (e.g. `repo.find_by_id(id).field` when
         // `Repo::find_by_id` was just extracted). Cross-file chains
-        // stay unresolved until a global return table is wired.
-        let workspace_fqdn = format!("{recv_type}::{method}");
+        // stay unresolved until a global return table is wired. The
+        // workspace table keys on nominal FQDNs — no generic tracking
+        // there yet (deferred to E-3.3).
+        let workspace_fqdn = format!("{recv_nominal}::{method}");
         self.ctx
             .return_types
             .lookup(&workspace_fqdn)
             .map(str::to_string)
+    }
+
+    /// Bug E-3 ext P-E3.2: build a closure-arg binding frame for a method
+    /// call's closure argument. Resolves the receiver's parametric type +
+    /// the builtin registry's `closure_arg_type` template, substitutes
+    /// against the receiver's generic args, and binds each closure-input
+    /// ident pat to the resulting type. Returns `None` when any link is
+    /// missing — receiver type unknown, method not in the registry,
+    /// `closure_arg_type` unset, receiver has no generic args, or no
+    /// closure input is a simple ident pat (V0 skips tuple/struct
+    /// destructure — that's E-3.3).
+    fn compute_closure_frame(
+        recv_parametric: Option<&str>,
+        method: &str,
+        closure: &syn::ExprClosure,
+    ) -> Option<HashMap<String, String>> {
+        let recv = recv_parametric?;
+        let recv_nominal = nominal_of(recv);
+        let template = global_builtin_registry()
+            .lookup_method(recv_nominal, method, Language::Rust)?
+            .closure_arg_type
+            .as_deref()?;
+        let args = generic_args(recv);
+        if args.is_empty() {
+            return None;
+        }
+        let arg_type = substitute_template(template, recv_nominal, &args);
+        let stripped = strip_refs(&arg_type).to_string();
+        if stripped.is_empty() {
+            return None;
+        }
+        let mut frame = HashMap::new();
+        for pat in &closure.inputs {
+            if let Some(ident) = ident_pat_name(pat) {
+                frame.insert(ident, stripped.clone());
+            }
+        }
+        if frame.is_empty() { None } else { Some(frame) }
     }
 
     /// Bug E-3 ext P-E3.1: free-fn call return-type propagation.
@@ -504,7 +587,13 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
         // Bug E-3 Phase 1-3: derive the receiver's nominal type via an
         // AST walk so chained calls (`x.iter().map(...).filter(...)`)
         // propagate through builtin method `returns` annotations.
-        let receiver_type = self.type_of_expr(&node.receiver);
+        // Bug E-3 ext P-E3.2: `type_of_expr` now returns the parametric
+        // form (`"Vec<Foo>"`); the edge column takes the nominal slice
+        // only — closure-arg substitution downstream uses the full form.
+        let receiver_parametric = self.type_of_expr(&node.receiver);
+        let receiver_type = receiver_parametric
+            .as_deref()
+            .map(|p| nominal_of(p).to_string());
         let callee_text = format!("{}.{}", receiver_chain.join("."), method);
         self.emit_call_site(
             callee_text,
@@ -513,12 +602,41 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
             span,
         );
         self.emit_call_with_attributes(
-            ResolvedOrUnresolved::Unresolved { name: method },
+            ResolvedOrUnresolved::Unresolved {
+                name: method.clone(),
+            },
             span,
             vec![],
             receiver_type,
         );
-        syn::visit::visit_expr_method_call(self, node);
+        // Bug E-3 ext P-E3.2: replicate the default
+        // `syn::visit::visit_expr_method_call` traversal but intercept
+        // closure args so each closure body sees a `ClosureScope` frame
+        // with closure-locals bound to the substituted arg type.
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        self.visit_expr(&node.receiver);
+        self.visit_ident(&node.method);
+        if let Some(turbofish) = &node.turbofish {
+            self.visit_angle_bracketed_generic_arguments(turbofish);
+        }
+        for arg in &node.args {
+            if let syn::Expr::Closure(c) = arg {
+                let frame =
+                    Self::compute_closure_frame(receiver_parametric.as_deref(), &method, c);
+                match frame {
+                    Some(f) => {
+                        self.local_env.push_closure_scope(f);
+                        self.visit_expr(arg);
+                        self.local_env.pop_closure_scope();
+                    }
+                    None => self.visit_expr(arg),
+                }
+            } else {
+                self.visit_expr(arg);
+            }
+        }
     }
 
     /// Walk into async block bodies (S3-N). The default visitor traverses

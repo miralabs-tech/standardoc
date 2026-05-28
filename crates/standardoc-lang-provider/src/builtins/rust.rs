@@ -260,6 +260,12 @@ fn register_methods(reg: &mut BuiltinRegistry) {
     // return type. Read by `compute_receiver_type` to walk chained calls
     // like `x.iter().map(...).filter(...)` — each step's return becomes
     // the next step's receiver.
+    //
+    // Bug E-3 ext P-E3.2: the `returns` string may be a parametric
+    // template (`"Iterator<T>"`) — substituted against the receiver's
+    // generic args at lookup time using rules per parent nominal
+    // (`T` = args[0]; `E` = args[1] for Result; `K` / `V` = args[0] /
+    // args[1] for maps).
     let add_returning =
         |reg: &mut BuiltinRegistry, parent_type: &str, returns: &str, methods: &[&str]| {
             for m in methods {
@@ -268,6 +274,32 @@ fn register_methods(reg: &mut BuiltinRegistry) {
                 );
             }
         };
+    // Bug E-3 ext P-E3.2: register methods that take a closure arg of a
+    // single template type — used by `visit_expr_method_call` to bind
+    // each closure-input ident pat to the substituted arg type. Use
+    // [`add_full`] when both `returns` and `closure_arg` apply.
+    let add_with_closure =
+        |reg: &mut BuiltinRegistry, parent_type: &str, closure_arg: &str, methods: &[&str]| {
+            for m in methods {
+                reg.register_method(
+                    BuiltinMethodEntry::new(parent_type, *m, Language::Rust)
+                        .with_closure_arg(closure_arg),
+                );
+            }
+        };
+    let add_full = |reg: &mut BuiltinRegistry,
+                    parent_type: &str,
+                    returns: &str,
+                    closure_arg: &str,
+                    methods: &[&str]| {
+        for m in methods {
+            reg.register_method(
+                BuiltinMethodEntry::new(parent_type, *m, Language::Rust)
+                    .with_returns(returns)
+                    .with_closure_arg(closure_arg),
+            );
+        }
+    };
 
     add(
         reg,
@@ -290,7 +322,6 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "remove",
             "swap_remove",
             "truncate",
-            "retain",
             "first",
             "last",
             "split_off",
@@ -305,10 +336,11 @@ fn register_methods(reg: &mut BuiltinRegistry) {
     add_returning(
         reg,
         "Vec",
-        "Iterator",
+        "Iterator<T>",
         &["iter", "iter_mut", "into_iter", "drain"],
     );
     add_returning(reg, "Vec", "slice", &["as_slice", "as_mut_slice"]);
+    add_with_closure(reg, "Vec", "T", &["retain"]);
 
     add(
         reg,
@@ -333,22 +365,26 @@ fn register_methods(reg: &mut BuiltinRegistry) {
     add_returning(
         reg,
         "Option",
-        "Option",
+        "Option<T>",
         &[
             "as_ref",
             "as_mut",
             "as_deref",
             "as_deref_mut",
-            "map",
-            "and",
-            "and_then",
             "or",
             "or_else",
-            "filter",
         ],
     );
+    // Option::map / and_then / and transform the inner type (Option<U>);
+    // we can't infer U here, so drop the generic in `returns` while still
+    // binding the closure-arg from the receiver's T.
+    add_returning(reg, "Option", "Option", &["and"]);
+    add_full(reg, "Option", "Option", "T", &["map", "and_then"]);
+    // Option::filter preserves T; closure receives `&T` (stripped by
+    // [`strip_refs`] before binding).
+    add_full(reg, "Option", "Option<T>", "T", &["filter"]);
     add_returning(reg, "Option", "Result", &["ok_or", "ok_or_else"]);
-    add_returning(reg, "Option", "Iterator", &["iter"]);
+    add_returning(reg, "Option", "Iterator<T>", &["iter"]);
 
     add(
         reg,
@@ -369,14 +405,15 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "map_or_else",
         ],
     );
-    add_returning(
-        reg,
-        "Result",
-        "Result",
-        &[
-            "as_ref", "as_mut", "map", "map_err", "and", "and_then", "or", "or_else",
-        ],
-    );
+    add_returning(reg, "Result", "Result<T, E>", &["as_ref", "as_mut", "or"]);
+    // Result::map transforms the Ok branch (Result<U, E>); drop T from
+    // the parametric chain but preserve E so a follow-up `.map_err(|e|
+    // ...)` can still type its closure arg.
+    add_full(reg, "Result", "Result<_, E>", "T", &["map", "and_then"]);
+    // Result::map_err transforms the Err branch (Result<T, F>); preserve
+    // T, drop E, bind closure-arg from E.
+    add_full(reg, "Result", "Result<T, _>", "E", &["map_err", "or_else"]);
+    add_returning(reg, "Result", "Result", &["and"]);
     add_returning(reg, "Result", "Option", &["ok", "err"]);
 
     add(
@@ -390,31 +427,25 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "product",
             "fold",
             "reduce",
-            "for_each",
-            "any",
-            "all",
             "size_hint",
         ],
     );
-    // Iterator adapters return `impl Iterator` — treated nominally as
-    // "Iterator" so the chain `x.iter().map(...).filter(...).collect()`
-    // keeps walking.
+    // Bug E-3 ext P-E3.2: split Iterator adapters by whether they
+    // preserve the Item type or substitute it via a closure.
+    //   * preserve T → `Iterator<T>` so subsequent `.find(|x| ...)` etc.
+    //     can still type the closure arg.
+    //   * transform T (map / filter_map / flat_map / scan) → drop to
+    //     bare `Iterator` because the new Item type is the closure's
+    //     return value (unknown without body inference).
+    //   * `for_each` / `any` / `all` carry no return but take a closure
+    //     over T.
     add_returning(
         reg,
         "Iterator",
-        "Iterator",
+        "Iterator<T>",
         &[
-            "map",
-            "filter",
-            "filter_map",
-            "flat_map",
-            "flatten",
-            "zip",
-            "chain",
             "take",
-            "take_while",
             "skip",
-            "skip_while",
             "enumerate",
             "peekable",
             "rev",
@@ -422,19 +453,32 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "copied",
             "cycle",
             "step_by",
-            "inspect",
             "by_ref",
-            "scan",
+            "flatten",
+            "zip",
+            "chain",
         ],
     );
+    add_full(
+        reg,
+        "Iterator",
+        "Iterator<T>",
+        "T",
+        &["filter", "take_while", "skip_while", "inspect"],
+    );
+    add_full(
+        reg,
+        "Iterator",
+        "Iterator",
+        "T",
+        &["map", "filter_map", "flat_map", "scan"],
+    );
+    add_with_closure(reg, "Iterator", "T", &["for_each", "any", "all"]);
     add_returning(
         reg,
         "Iterator",
-        "Option",
+        "Option<T>",
         &[
-            "find",
-            "find_map",
-            "position",
             "min",
             "max",
             "min_by",
@@ -445,6 +489,8 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "nth",
         ],
     );
+    add_full(reg, "Iterator", "Option<T>", "T", &["find"]);
+    add_full(reg, "Iterator", "Option", "T", &["find_map", "position"]);
 
     add(
         reg,
@@ -576,20 +622,16 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "retain",
         ],
     );
+    // iter / iter_mut / into_iter / drain yield `(&K, &V)` tuples —
+    // V0 cannot bind tuple destructure, so keep them bare `Iterator`.
     add_returning(
         reg,
         "HashMap",
         "Iterator",
-        &[
-            "iter",
-            "iter_mut",
-            "into_iter",
-            "keys",
-            "values",
-            "values_mut",
-            "drain",
-        ],
+        &["iter", "iter_mut", "into_iter", "drain"],
     );
+    add_returning(reg, "HashMap", "Iterator<K>", &["keys"]);
+    add_returning(reg, "HashMap", "Iterator<V>", &["values", "values_mut"]);
 
     add(
         reg,
@@ -612,17 +654,10 @@ fn register_methods(reg: &mut BuiltinRegistry) {
         reg,
         "BTreeMap",
         "Iterator",
-        &[
-            "iter",
-            "iter_mut",
-            "into_iter",
-            "keys",
-            "values",
-            "values_mut",
-            "range",
-            "range_mut",
-        ],
+        &["iter", "iter_mut", "into_iter", "range", "range_mut"],
     );
+    add_returning(reg, "BTreeMap", "Iterator<K>", &["keys"]);
+    add_returning(reg, "BTreeMap", "Iterator<V>", &["values", "values_mut"]);
 
     add(
         reg,
@@ -636,13 +671,12 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "clear",
             "with_capacity",
             "extend",
-            "retain",
         ],
     );
     add_returning(
         reg,
         "HashSet",
-        "Iterator",
+        "Iterator<T>",
         &[
             "iter",
             "into_iter",
@@ -653,6 +687,7 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "symmetric_difference",
         ],
     );
+    add_with_closure(reg, "HashSet", "T", &["retain"]);
 
     add(
         reg,
@@ -661,7 +696,12 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "insert", "remove", "contains", "len", "is_empty", "clear", "first", "last",
         ],
     );
-    add_returning(reg, "BTreeSet", "Iterator", &["iter", "into_iter", "range"]);
+    add_returning(
+        reg,
+        "BTreeSet",
+        "Iterator<T>",
+        &["iter", "into_iter", "range"],
+    );
 
     add(
         reg,

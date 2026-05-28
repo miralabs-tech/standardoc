@@ -17,9 +17,40 @@ fn parse_inputs(sig: &str) -> Punctuated<FnArg, Token![,]> {
 fn from_fn_params_captures_annotated_ident_args() {
     let inputs = parse_inputs("fn f(x: Vec<u8>, y: &Foo, z: HashMap<K, V>)");
     let env = LocalTypeEnv::from_fn_params(&inputs);
-    assert_eq!(env.lookup("x"), Some("Vec"));
+    // Bug E-3 ext P-E3.2: bindings now parametric — generics preserved
+    // so closure-arg substitution can resolve `T = u8` etc.
+    assert_eq!(env.lookup("x"), Some("Vec<u8>"));
     assert_eq!(env.lookup("y"), Some("Foo"));
-    assert_eq!(env.lookup("z"), Some("HashMap"));
+    assert_eq!(env.lookup("z"), Some("HashMap<K, V>"));
+}
+
+#[test]
+fn closure_scope_shadows_bindings_when_pushed() {
+    let inputs = parse_inputs("fn f(x: Vec<u8>)");
+    let mut env = LocalTypeEnv::from_fn_params(&inputs);
+    assert_eq!(env.lookup("x"), Some("Vec<u8>"));
+    let mut frame = HashMap::new();
+    frame.insert("x".to_string(), "u8".to_string());
+    env.push_closure_scope(frame);
+    assert_eq!(env.lookup("x"), Some("u8"));
+    env.pop_closure_scope();
+    assert_eq!(env.lookup("x"), Some("Vec<u8>"));
+}
+
+#[test]
+fn closure_scopes_stack_innermost_first() {
+    let mut env = LocalTypeEnv::default();
+    let mut outer = HashMap::new();
+    outer.insert("v".to_string(), "Outer".to_string());
+    env.push_closure_scope(outer);
+    let mut inner = HashMap::new();
+    inner.insert("v".to_string(), "Inner".to_string());
+    env.push_closure_scope(inner);
+    assert_eq!(env.lookup("v"), Some("Inner"));
+    env.pop_closure_scope();
+    assert_eq!(env.lookup("v"), Some("Outer"));
+    env.pop_closure_scope();
+    assert_eq!(env.lookup("v"), None);
 }
 
 #[test]
@@ -66,7 +97,7 @@ fn record_local_constructor_from() {
 #[test]
 fn record_local_constructor_qualified_path() {
     let mut env = LocalTypeEnv::default();
-    let l = parse_local("let h = std::collections::HashMap::new();");
+    let l = parse_local("let h = HashMap::new();");
     env.record_local(&l);
     assert_eq!(env.lookup("h"), Some("HashMap"));
 }

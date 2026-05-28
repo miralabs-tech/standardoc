@@ -101,8 +101,22 @@ pub struct BuiltinMethodEntry {
     /// `x.iter().map(...).filter(...)`. `None` for methods whose return
     /// depends on type parameters / inner types (e.g. `Iterator::collect`,
     /// `Option::unwrap`).
+    ///
+    /// Bug E-3 ext P-E3.2: may be a parametric template (`"Iterator<T>"`)
+    /// substituted from the receiver's generic args at lookup time. Token
+    /// rules per parent nominal: `T` = args[0]; `E` = args[1] for Result;
+    /// `K` / `V` = args[0] / args[1] for `HashMap` / `BTreeMap`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns: Option<String>,
+    /// Bug E-3 ext P-E3.2: template for the closure-argument type when
+    /// the method takes a closure. Substituted against the receiver's
+    /// generic args using the same token rules as `returns`. E.g.
+    /// `Option::map` → `"T"`, `Result::map_err` → `"E"`, `HashMap::retain`
+    /// → `"(&K, &mut V)"`. Read by `visit_expr_method_call` to bind the
+    /// closure's input ident pat into a per-closure `ClosureScope` frame
+    /// so calls inside the closure body emit `receiver_type` edges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure_arg_type: Option<String>,
 }
 
 impl BuiltinMethodEntry {
@@ -122,6 +136,7 @@ impl BuiltinMethodEntry {
             language,
             synthetic_fqdn,
             returns: None,
+            closure_arg_type: None,
         }
     }
 
@@ -130,6 +145,14 @@ impl BuiltinMethodEntry {
     #[must_use]
     pub fn with_returns(mut self, returns: impl Into<String>) -> Self {
         self.returns = Some(returns.into());
+        self
+    }
+
+    /// Bug E-3 ext P-E3.2: chainable setter for the closure-arg template.
+    /// `BuiltinMethodEntry::new("Option", "map", ...).with_closure_arg("T")`.
+    #[must_use]
+    pub fn with_closure_arg(mut self, closure_arg_type: impl Into<String>) -> Self {
+        self.closure_arg_type = Some(closure_arg_type.into());
         self
     }
 }

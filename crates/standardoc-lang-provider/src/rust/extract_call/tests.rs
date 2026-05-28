@@ -1103,3 +1103,99 @@ fn chain_break_on_unknown_step_falls_through() {
         .expect("another edge");
     assert_eq!(another.receiver_type, None);
 }
+
+// --- Bug E-3 ext P-E3.2: closure-arg type inference ---
+
+#[test]
+fn option_map_closure_arg_typed_from_receiver_generic() {
+    // `opt: Option<Foo>` ; inside `.map(|x| x.helper())`, the closure
+    // sees `x` bound to `Foo` via the builtin registry's `closure_arg_type
+    // = "T"` annotation on `Option::map`. Calls inside the closure body
+    // emit edges with `receiver_type = Some("Foo")`.
+    let parsed = parse(
+        "struct Foo; impl Foo { fn helper(&self) {} } \
+         fn caller(opt: Option<Foo>) { opt.map(|x| x.helper()); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let helper = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "helper"))
+        .expect("helper edge");
+    assert_eq!(helper.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn vec_retain_closure_arg_typed_with_ref_stripped() {
+    // `Vec::retain(|x| ...)` — closure_arg_type = "T" (refs stripped),
+    // so `x.field()` inside binds `receiver_type = Foo`.
+    let parsed = parse(
+        "struct Foo; impl Foo { fn check(&self) -> bool { true } } \
+         fn caller(xs: Vec<Foo>) { xs.retain(|x| x.check()); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let check = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "check"))
+        .expect("check edge");
+    assert_eq!(check.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn iterator_chain_propagates_generic_via_filter_then_find() {
+    // `Vec<Foo>::iter()` returns `Iterator<T>` substituted to
+    // `Iterator<Foo>` ; `.filter(|x| ...)` preserves T (still
+    // `Iterator<Foo>`) ; `.find(|y| y.matches())` binds `y: Foo`.
+    let parsed = parse(
+        "struct Foo; impl Foo { fn ok(&self) -> bool { true } fn matches(&self) -> bool { true } } \
+         fn caller(xs: Vec<Foo>) { xs.iter().filter(|x| x.ok()).find(|y| y.matches()); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    let ok = mc
+        .iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "ok"))
+        .expect("ok edge");
+    let matches_edge = mc
+        .iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "matches"))
+        .expect("matches edge");
+    assert_eq!(ok.receiver_type.as_deref(), Some("Foo"));
+    assert_eq!(matches_edge.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn nested_closure_inner_shadows_outer_binding() {
+    // `outer: Vec<Vec<Foo>>` ; `.iter().map(|inner| inner.iter().for_each(|x| x.run()))`
+    // — outer's `inner: Vec<Foo>`, inner's `x: Foo`. Closure scope
+    // push/pop stacks so the inner `x.run()` sees `Foo`.
+    let parsed = parse(
+        "struct Foo; impl Foo { fn run(&self) {} } \
+         fn caller(outer: Vec<Vec<Foo>>) { \
+             outer.iter().for_each(|inner| inner.iter().for_each(|x| x.run())); \
+         }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let run = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "run"))
+        .expect("run edge");
+    assert_eq!(run.receiver_type.as_deref(), Some("Foo"));
+}
+
+#[test]
+fn closure_arg_without_generic_args_does_not_panic() {
+    // `let v = Vec::new();` records `v: Vec` (nominal-only, no generic
+    // args) ; `.retain(|x| ...)` cannot substitute T → no closure scope
+    // is pushed and `x.foo()` stays untyped (no spurious binding).
+    let parsed = parse("fn caller() { let v: Vec<_> = Vec::new(); v.retain(|x| x.foo()); }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let foo = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "foo"))
+        .expect("foo edge");
+    // `Vec<_>` substitutes T = "_" which strip_refs leaves as "_" — a
+    // non-typed but non-empty binding. Acceptable for V0; this test
+    // pins the *current* behavior so any regression to a panic / empty
+    // is caught.
+    assert!(foo.receiver_type.is_some());
+}
