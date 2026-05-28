@@ -1618,22 +1618,93 @@ function scopeBreadcrumbLabel(scope: OverviewScope): string | null {
   }
 }
 
+type WorkspaceProject = { project_id: number; label: string; rel_path: string; kind: { kind: string } };
+
+interface CollapsedProject {
+  project_id: number;
+  label: string;
+  rel_path: string;
+  kind: { kind: string };
+}
+
+interface CollapseResult {
+  collapsed: ReadonlyArray<CollapsedProject>;
+  canonicalProjectId: Map<number, number>;
+}
+
+function longestCommonPathPrefix(paths: ReadonlyArray<string>): string {
+  if (paths.length === 0) return '';
+  const first = paths[0]!;
+  if (paths.length === 1) return first;
+  const segmented = paths.map(p => p.split('/').filter(s => s.length > 0));
+  const minLen = Math.min(...segmented.map(s => s.length));
+  const common: string[] = [];
+  for (let i = 0; i < minLen; i++) {
+    const seg = segmented[0]![i]!;
+    if (segmented.every(s => s[i] === seg)) common.push(seg);
+    else break;
+  }
+  return common.join('/');
+}
+
+function collapseProjectsByLabel(projects: ReadonlyArray<WorkspaceProject>): CollapseResult {
+  const groups = new Map<string, WorkspaceProject[]>();
+  for (const p of projects) {
+    const bucket = groups.get(p.label);
+    if (bucket === undefined) groups.set(p.label, [p]);
+    else bucket.push(p);
+  }
+  const canonicalProjectId = new Map<number, number>();
+  const collapsed: CollapsedProject[] = [];
+  for (const members of groups.values()) {
+    const sorted = members.slice().sort((a, b) => a.project_id - b.project_id);
+    const canonical = sorted[0]!;
+    for (const m of sorted) canonicalProjectId.set(m.project_id, canonical.project_id);
+    const relPaths = sorted.map(m => m.rel_path);
+    const first = relPaths[0]!;
+    let rel_path: string;
+    if (relPaths.length === 1) {
+      rel_path = first;
+    } else {
+      const lcp = longestCommonPathPrefix(relPaths);
+      const head = lcp.length > 0 ? lcp : first;
+      rel_path = `${head} (+${relPaths.length - 1} more)`;
+    }
+    collapsed.push({
+      project_id: canonical.project_id,
+      label: canonical.label,
+      rel_path,
+      kind: canonical.kind,
+    });
+  }
+  return { collapsed, canonicalProjectId };
+}
+
 /**
- * Workspace flat root view — one sphere per project at depth 0. Edges
- * aggregated by `(from_project, to_project, kind)` so each IR kind
- * keeps its swatch in the legend. Click target = drill-project so
- * the user lands on the scoped hierarchical view of that project.
+ * Workspace flat root view — one sphere per LABEL group at depth 0
+ * (projects sharing a `.sxd` label collapse into a single visual node;
+ * mechanical detection projects each have a unique label and stay
+ * 1-to-1). Edges aggregated by `(from_label, to_label, kind)` so each
+ * IR kind keeps its swatch in the legend. Click target = drill-project
+ * on the canonical (min) project_id of the group.
  */
 function buildWorkspacePackagesPayload(
-  projects: ReadonlyArray<{ project_id: number; label: string; rel_path: string; kind: { kind: string } }>,
+  projects: ReadonlyArray<WorkspaceProject>,
   symbols: ReadonlyArray<BrowseSymbol>,
   edges: ReadonlyArray<GraphEdge>,
   symbolByFqdn: Map<string, BrowseSymbol>,
 ): BuiltOverviewPayload {
+  const { collapsed, canonicalProjectId } = collapseProjectsByLabel(projects);
+  const canonical = (pid: number | null | undefined): number | undefined => {
+    if (pid === undefined || pid === null) return undefined;
+    return canonicalProjectId.get(pid) ?? pid;
+  };
+
   const counts = new Map<number, number>();
   for (const s of symbols) {
-    if (s.project_id === undefined || s.project_id === null) continue;
-    counts.set(s.project_id, (counts.get(s.project_id) ?? 0) + 1);
+    const pid = canonical(s.project_id);
+    if (pid === undefined) continue;
+    counts.set(pid, (counts.get(pid) ?? 0) + 1);
   }
   const idByProject = new Map<number, number>();
   const nodes: Array<{
@@ -1647,7 +1718,7 @@ function buildWorkspacePackagesPayload(
   }> = [];
   const targets = new Map<number, ClusterTarget>();
   let nextId = 0;
-  for (const p of projects) {
+  for (const p of collapsed) {
     const id = nextId++;
     idByProject.set(p.project_id, id);
     nodes.push({
@@ -1664,10 +1735,9 @@ function buildWorkspacePackagesPayload(
 
   const aggregated = new Map<string, { from: number; to: number; weight: number; kind: string }>();
   for (const e of edges) {
-    const fromProj = symbolByFqdn.get(e.from)?.project_id;
-    const toProj = symbolByFqdn.get(e.to)?.project_id;
-    if (fromProj === undefined || fromProj === null) continue;
-    if (toProj === undefined || toProj === null) continue;
+    const fromProj = canonical(symbolByFqdn.get(e.from)?.project_id);
+    const toProj = canonical(symbolByFqdn.get(e.to)?.project_id);
+    if (fromProj === undefined || toProj === undefined) continue;
     if (fromProj === toProj) continue;
     const fromId = idByProject.get(fromProj);
     const toId = idByProject.get(toProj);
