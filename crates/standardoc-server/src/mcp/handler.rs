@@ -30,6 +30,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use standardoc_core::{
     IndexHandle, LanguageProvider, ResolveOutcome, ResolverRegistry, ScanFilters, WatcherHandle,
+    config::load_workspace_config,
     query::{
         self, SymbolFilter,
         call_sites::{self as call_sites_query, CallSiteFilters, FIND_CALL_SITES_DEFAULT_LIMIT},
@@ -1312,6 +1313,24 @@ impl StandardocMcp {
             .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
             .map_err(|e| server_error_to_rmcp(&e.into()))?;
         Ok(success_json(&serde_json::json!({ "projects": rows })))
+    }
+
+    /// Enumerate the `group "<slug>" { ... }` blocks declared in
+    /// `standardoc.sxd`. Re-parses the config on each call (read-only,
+    /// low frequency) so no separate persistence/cache layer is needed.
+    /// Empty array when `.sxd` is absent or declares no `group` blocks.
+    #[tool(
+        description = "List the `group` blocks declared in standardoc.sxd. Each entry surfaces slug, label (optional), members (project slugs). Empty list = no .sxd config, or no `group` blocks. Drives the viz Overview project-cluster collapse."
+    )]
+    async fn list_groups(&self) -> Result<CallToolResult, ErrorData> {
+        let root = self.handle.workspace_root().to_path_buf();
+        let groups = tokio::task::spawn_blocking(move || {
+            load_workspace_config(&root).map(|opt| opt.map(|c| c.groups).unwrap_or_default())
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(|e| ErrorData::internal_error(format!("load_workspace_config: {e}"), None))?;
+        Ok(success_json(&serde_json::json!({ "groups": groups })))
     }
 
     /// Resolve the project owning a given absolute file path by walking

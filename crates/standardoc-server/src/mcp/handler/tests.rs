@@ -1419,6 +1419,39 @@ async fn list_projects_surfaces_detected_projects_after_cold_start() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn list_groups_returns_empty_array_when_no_sxd() {
+    let (_dir, mcp) = fixture();
+    let result = mcp.list_groups().await.expect("list_groups ok");
+    let body = body_text(&result);
+    assert!(body.contains("\"groups\": []"), "got `{body}`");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn list_groups_surfaces_declared_group_blocks() {
+    let (dir, mcp) = fixture();
+    std::fs::write(
+        dir.path().join("standardoc.sxd"),
+        "version \"0.1.0\"\n\
+         \n\
+         project \"core\" { path \"crates/core\" }\n\
+         project \"cli\" { path \"crates/cli\" }\n\
+         \n\
+         group \"platform\" {\n\
+           label \"Platform\"\n\
+           members [\"core\" \"cli\"]\n\
+         }\n",
+    )
+    .unwrap();
+
+    let result = mcp.list_groups().await.expect("list_groups ok");
+    let body = body_text(&result);
+    assert!(body.contains("\"slug\": \"platform\""), "got `{body}`");
+    assert!(body.contains("\"label\": \"Platform\""), "got `{body}`");
+    assert!(body.contains("\"core\""), "got `{body}`");
+    assert!(body.contains("\"cli\""), "got `{body}`");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn project_for_file_returns_null_when_path_unregistered() {
     let (_dir, mcp) = fixture();
     let result = mcp

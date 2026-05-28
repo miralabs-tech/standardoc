@@ -18,6 +18,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use serde::Serialize;
 use standarx_dsl::ast::{Block, Expr, File, StmtNode, StringLit, StringPart};
 use standarx_dsl::diag::Spanned;
 use standarx_dsl::{Diag, Stmt};
@@ -108,7 +109,7 @@ pub struct ProjectBlock {
 /// Optional layer ABOVE projects — bundles multiple projects under one
 /// label (e.g. one "platform" group with several projects inside).
 /// Members must reference declared project slugs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GroupBlock {
     pub slug: String,
     pub label: Option<String>,
