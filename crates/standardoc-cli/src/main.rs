@@ -464,12 +464,7 @@ fn cmd_proxy(
     } else {
         workspaces
     };
-    // Proxy bind resolution still keys off the FIRST workspace's sxd —
-    // the proxy itself is shared across all registered workspaces, so
-    // declaring `proxy { bind ... }` separately in every sxd would be
-    // redundant. Treat the first --workspace as the "primary" for
-    // bind-level config.
-    let bind_addr = resolve_proxy_bind(&workspaces[0], bind);
+    let bind_addr = resolve_proxy_bind(bind);
     let cfg = standardoc_mcp_proxy::ProxyConfig {
         bind_addr,
         workspaces,
@@ -494,20 +489,14 @@ fn cmd_workspace_id(path: &Path) -> Result<(), ServerError> {
     Ok(())
 }
 
-/// Resolve the proxy bind address. CLI `--bind` wins outright when
-/// passed, else fall back to `127.0.0.1:7700`.
-///
-/// **Per-workspace `proxy { ... }` blocks in `standardoc.sxd` are
-/// intentionally NOT read here** — the proxy is a per-machine
-/// singleton, and reading per-workspace overrides breaks the
-/// singleton dedup the moment two workspaces disagree on the port
-/// (each sibling probes a different bind addr, none finds the other,
-/// they all spawn their own proxy). The VSCode extension passes the
-/// per-user `standardoc.proxyBind` / `standardoc.proxyPort` setting
-/// via `--bind` ; standalone CLI users pass `--bind` directly or get
-/// the default. The sxd `proxy { ... }` block is kept parseable for
-/// back-compat, but the LSP surfaces a deprecation warning.
-fn resolve_proxy_bind(_workspace: &Path, cli_bind: Option<String>) -> String {
+/// Resolve the proxy bind address: CLI `--bind` if passed, else
+/// `127.0.0.1:7700`. The proxy is a per-machine singleton ; sibling
+/// VSCode windows must converge on the same address for the
+/// `probe → register → exit` dedup to work, so per-workspace
+/// configuration is intentionally absent. The VSCode extension reads
+/// `standardoc.proxyBind` / `standardoc.proxyPort` and passes them
+/// here via `--bind`.
+fn resolve_proxy_bind(cli_bind: Option<String>) -> String {
     cli_bind.unwrap_or_else(|| "127.0.0.1:7700".to_string())
 }
 

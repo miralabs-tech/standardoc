@@ -86,7 +86,6 @@ pub struct SxdConfig {
     pub groups: Vec<GroupBlock>,
     pub mcp: Option<McpBlock>,
     pub viz: Option<VizBlock>,
-    pub proxy: Option<ProxyBlock>,
 }
 
 /// `ignore { patterns ```...``` }` block — multi-line gitignore-syntax
@@ -136,16 +135,6 @@ pub struct McpBlock {
 /// probing / opening the browser. Absent block defaults to 3000.
 #[derive(Debug, Clone, Default)]
 pub struct VizBlock {
-    pub port: Option<u16>,
-}
-
-/// `proxy { bind "<host>" port <u16> }` block — per-workspace
-/// override for the long-lived `standardoc proxy` subcommand's bind
-/// address. Both fields are optional; absent values fall back to the
-/// subcommand's CLI defaults (`bind = 127.0.0.1`, `port = 7700`).
-#[derive(Debug, Clone, Default)]
-pub struct ProxyBlock {
-    pub bind: Option<String>,
     pub port: Option<u16>,
 }
 
@@ -275,18 +264,9 @@ fn lower_stmt(stmt: &StmtNode, out: &mut SxdConfig) -> Result<(), SxdConfigError
                     out.viz = Some(lower_viz(b)?);
                     Ok(())
                 }
-                "proxy" => {
-                    if out.proxy.is_some() {
-                        return Err(SxdConfigError::Schema(
-                            "`proxy` block declared more than once".into(),
-                        ));
-                    }
-                    out.proxy = Some(lower_proxy(b)?);
-                    Ok(())
-                }
                 _ => Err(SxdConfigError::Schema(format!(
                     "unknown top-level block `{kind}` \
-                     (expected `ignore`, `project`, `group`, `mcp`, `viz`, or `proxy`)"
+                     (expected `ignore`, `project`, `group`, `mcp`, or `viz`)"
                 ))),
             }
         }
@@ -411,30 +391,6 @@ fn lower_viz(b: &Block) -> Result<VizBlock, SxdConfigError> {
         }
     }
     Ok(VizBlock { port })
-}
-
-fn lower_proxy(b: &Block) -> Result<ProxyBlock, SxdConfigError> {
-    let mut bind = None;
-    let mut port = None;
-    for stmt in &b.stmts {
-        let Stmt::Assign(a) = &stmt.node else {
-            return Err(SxdConfigError::Schema(
-                "`proxy` block only accepts assignments (`bind`, `port`)".into(),
-            ));
-        };
-        let key = a.key.node.as_str();
-        match key {
-            "bind" => bind = Some(expect_string(&a.value, "proxy.bind")?),
-            "port" => port = Some(expect_port(&a.value, "proxy.port")?),
-            other => {
-                return Err(SxdConfigError::Schema(format!(
-                    "unknown field `{other}` inside `proxy` \
-                     (expected `bind` or `port`)"
-                )));
-            }
-        }
-    }
-    Ok(ProxyBlock { bind, port })
 }
 
 fn lower_group(b: &Block) -> Result<GroupBlock, SxdConfigError> {

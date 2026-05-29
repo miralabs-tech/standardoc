@@ -262,15 +262,6 @@ fn viz_block_parses_port() {
 }
 
 #[test]
-fn proxy_block_parses_bind_and_port() {
-    let src = r#"proxy { bind "127.0.0.1" port 7701 }"#;
-    let cfg = parse_sxd_source(src).unwrap();
-    let p = cfg.proxy.unwrap();
-    assert_eq!(p.bind.as_deref(), Some("127.0.0.1"));
-    assert_eq!(p.port, Some(7701));
-}
-
-#[test]
 fn mcp_block_with_no_fields_yields_default() {
     let cfg = parse_sxd_source("mcp { }").unwrap();
     assert!(cfg.mcp.is_some());
@@ -308,9 +299,14 @@ fn mcp_with_unknown_field_rejected() {
 }
 
 #[test]
-fn proxy_with_unknown_field_rejected() {
-    let err = parse_sxd_source(r#"proxy { foo "x" }"#).expect_err("must reject unknown field");
-    assert!(format!("{err}").contains("unknown field `foo`"));
+fn proxy_block_rejected_as_unknown_top_level_block() {
+    // The `proxy` block was removed from the .sxd schema — the proxy
+    // is a per-machine singleton, configured via VSCode settings.
+    // Existing configs with a `proxy { ... }` block now fail loudly so
+    // the user knows to migrate.
+    let err = parse_sxd_source(r#"proxy { bind "127.0.0.1" port 7700 }"#)
+        .expect_err("proxy block must be rejected");
+    assert!(format!("{err}").contains("unknown top-level block `proxy`"));
 }
 
 #[test]

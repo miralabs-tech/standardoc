@@ -75,29 +75,11 @@ fn validate_top_stmt(stmt: &StmtNode, diags: &mut Vec<Diag>) {
                 "group" => validate_group_block(b, diags),
                 "mcp" => validate_mcp_block(b, diags),
                 "viz" => validate_viz_block(b, diags),
-                "proxy" => {
-                    // Bug F: proxy is a per-machine singleton, configured via
-                    // the VSCode settings `standardoc.proxyBind` /
-                    // `standardoc.proxyPort`. Workspace-scoped sxd declaration
-                    // breaks the singleton dedup the moment two workspaces
-                    // disagree on the port. We keep the block parseable so
-                    // existing configs don't error, but emit a warning that
-                    // the values are ignored.
-                    diags.push(Diag::schema_warn(
-                        b.kind.span.clone(),
-                        "`proxy` in sxd is deprecated and ignored — \
-                         configure the proxy via VSCode settings \
-                         `standardoc.proxyBind` and `standardoc.proxyPort` \
-                         instead (the proxy is a per-machine singleton, \
-                         not a per-workspace resource).",
-                    ));
-                    validate_proxy_block(b, diags);
-                }
                 _ => diags.push(Diag::schema(
                     b.kind.span.clone(),
                     format!(
                         "unknown top-level block `{kind}` \
-                         (expected `ignore`, `project`, `group`, `mcp`, `viz`, or `proxy`)"
+                         (expected `ignore`, `project`, `group`, `mcp`, or `viz`)"
                     ),
                 )),
             }
@@ -277,32 +259,6 @@ fn validate_viz_block(b: &Block, diags: &mut Vec<Diag>) {
             Stmt::Block(inner) => diags.push(Diag::schema(
                 inner.kind.span.clone(),
                 "`viz` block only accepts assignments (`port`)",
-            )),
-            _ => {}
-        }
-    }
-}
-
-fn validate_proxy_block(b: &Block, diags: &mut Vec<Diag>) {
-    for stmt in &b.stmts {
-        match &stmt.node {
-            Stmt::Assign(a) => {
-                let key = a.key.node.as_str();
-                match key {
-                    "bind" => expect_plain_string(&a.value, "proxy.bind", diags),
-                    "port" => expect_port(&a.value, "proxy.port", diags),
-                    other => diags.push(Diag::schema(
-                        a.key.span.clone(),
-                        format!(
-                            "unknown field `{other}` inside `proxy` \
-                             (expected `bind` or `port`)"
-                        ),
-                    )),
-                }
-            }
-            Stmt::Block(inner) => diags.push(Diag::schema(
-                inner.kind.span.clone(),
-                "`proxy` block only accepts assignments (`bind`, `port`)",
             )),
             _ => {}
         }
@@ -491,15 +447,6 @@ fn block_kind_doc(kind: &str) -> String {
                   Read by the `Standardoc: Open Graph Viz` command to know which \
                   port to probe / open."
             .to_string(),
-        "proxy" => "**`proxy`** — _deprecated in sxd, ignored._\n\n\
-                    The proxy is a per-machine singleton ; configuring it \
-                    per-workspace breaks the singleton dedup the moment two \
-                    workspaces disagree on the port. Configure it via the \
-                    VSCode settings `standardoc.proxyBind` (default \
-                    `127.0.0.1`) and `standardoc.proxyPort` (default `7700`) \
-                    instead.\n\n\
-                    Remove this block from your `.sxd`."
-            .to_string(),
         other => format!("**`{other}`** — unknown block kind."),
     }
 }
@@ -532,14 +479,6 @@ fn field_key_doc(parent_kind: &str, key: &str) -> Option<String> {
              elsewhere in this file."
         }
         ("mcp" | "viz", "port") => "**`port <u16>`** — TCP port (1..=65535).",
-        ("proxy", "port") => {
-            "**`port <u16>`** — _deprecated in sxd, ignored._ Configure via \
-             VSCode setting `standardoc.proxyPort` instead."
-        }
-        ("proxy", "bind") => {
-            "**`bind \"<host>\"`** — _deprecated in sxd, ignored._ Configure \
-             via VSCode setting `standardoc.proxyBind` instead."
-        }
         _ => return None,
     };
     Some(doc.to_string())
@@ -548,7 +487,6 @@ fn field_key_doc(parent_kind: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use standarx_dsl::diag::Severity;
 
     fn diags_for(src: &str) -> Vec<Diag> {
         let file = standarx_dsl::parse(src).expect("parse ok");
@@ -649,35 +587,18 @@ ignore { patterns ```.git/``` }
     }
 
     #[test]
-    fn proxy_block_emits_deprecation_warning_but_validates_fields() {
-        // `proxy { ... }` is parse-valid (back-compat) but surfaces a
-        // deprecation warning pointing users at the VSCode settings.
-        let diags = diags_for(r#"proxy { bind "127.0.0.1" port 7701 }"#);
+    fn proxy_block_rejected_as_unknown_top_level() {
+        // `proxy { ... }` was removed from the schema in Bug F cleanup —
+        // it's a per-machine concern, not a workspace concern. Existing
+        // configs are rejected loudly so the user knows to migrate.
+        let src = r#"proxy { bind "127.0.0.1" port 7701 }"#;
+        let diags = diags_for(src);
         assert_eq!(diags.len(), 1, "got: {diags:?}");
         assert!(
-            diags[0].kind.to_string().contains("deprecated"),
-            "got: {diags:?}"
-        );
-        assert!(matches!(diags[0].severity, Severity::Warning));
-    }
-
-    #[test]
-    fn proxy_block_with_unknown_field_emits_deprecation_plus_unknown_field() {
-        // Deprecation warning AND the existing unknown-field error stack —
-        // users who keep the block AND mistype a field still get the
-        // mistyping flagged.
-        let src = r#"proxy { foo "x" }"#;
-        let diags = diags_for(src);
-        assert_eq!(diags.len(), 2, "got: {diags:?}");
-        assert!(
-            diags
-                .iter()
-                .any(|d| d.kind.to_string().contains("deprecated"))
-        );
-        assert!(
-            diags
-                .iter()
-                .any(|d| d.kind.to_string().contains("unknown field `foo`"))
+            diags[0]
+                .kind
+                .to_string()
+                .contains("unknown top-level block `proxy`")
         );
     }
 
@@ -709,10 +630,6 @@ ignore { patterns ```.git/``` }
         assert_eq!(diags.len(), 1);
         assert!(diags[0].kind.to_string().contains("unknown field `foo`"));
     }
-
-    // `unknown_field_in_proxy_block_reports_span_on_key` was replaced by
-    // `proxy_block_with_unknown_field_emits_deprecation_plus_unknown_field`
-    // after `proxy` was moved out of the workspace-scoped sxd schema (Bug F).
 
     #[test]
     fn collects_multiple_errors_in_one_pass() {
@@ -754,7 +671,6 @@ ignore { patterns ```.git/``` }
             ("group \"g\" { members [\"x\"] }\n", "group"),
             ("mcp { port 7700 }\n", "mcp"),
             ("viz { port 3000 }\n", "viz"),
-            ("proxy { port 7700 }\n", "proxy"),
         ] {
             let md = hover_at(src, marker).unwrap_or_else(|| panic!("no hover for `{marker}`"));
             assert!(
@@ -770,30 +686,6 @@ ignore { patterns ```.git/``` }
         let md = hover_at(src, "path").expect("hover");
         assert!(md.contains("single workspace-relative"), "got: {md}");
         assert!(md.contains("Mutually exclusive"), "got: {md}");
-    }
-
-    #[test]
-    fn hover_on_proxy_bind_surfaces_deprecation_with_setting_pointer() {
-        let src = "proxy { bind \"127.0.0.1\" port 7700 }\n";
-        let md = hover_at(src, "bind").expect("hover");
-        assert!(md.contains("deprecated"), "got: {md}");
-        assert!(md.contains("standardoc.proxyBind"), "got: {md}");
-    }
-
-    #[test]
-    fn hover_on_proxy_block_kind_surfaces_deprecation() {
-        let src = "proxy { bind \"127.0.0.1\" port 7700 }\n";
-        let md = hover_at(src, "proxy").expect("hover");
-        assert!(md.contains("deprecated"), "got: {md}");
-        assert!(md.contains("standardoc.proxyPort"), "got: {md}");
-    }
-
-    #[test]
-    fn hover_on_proxy_port_surfaces_deprecation() {
-        let src = "proxy { port 7700 }\n";
-        let md = hover_at(src, "port").expect("hover");
-        assert!(md.contains("deprecated"), "got: {md}");
-        assert!(md.contains("standardoc.proxyPort"), "got: {md}");
     }
 
     #[test]
