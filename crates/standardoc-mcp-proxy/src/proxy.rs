@@ -78,9 +78,21 @@ pub enum ProxyError {
 /// table, and block until shutdown. Does NOT exit on upstream failures
 /// — the whole point of the proxy is to outlive every daemon process
 /// it forwards to.
+///
+/// **Singleton behaviour**: before binding, probes `GET /health` on
+/// `bind_addr`. If a standardoc proxy is already listening there
+/// (response carries `default_workspace_id`), this invocation skips
+/// the bind, registers every requested workspace with that running
+/// proxy via `POST /admin/workspaces`, and returns Ok(()). Sibling
+/// VSCode windows therefore converge on a single shared proxy
+/// instance without coordination — the first one wins the port, the
+/// rest just register and exit cleanly.
 pub async fn run(cfg: ProxyConfig) -> Result<(), ProxyError> {
     if cfg.workspaces.is_empty() {
         return Err(ProxyError::NoWorkspaces);
+    }
+    if let Some(existing) = probe_existing_proxy(&cfg.bind_addr).await {
+        return register_with_existing(&existing, &cfg.workspaces).await;
     }
     let mut workspaces: HashMap<String, Arc<WorkspaceEntry>> = HashMap::new();
     let mut default_id: Option<String> = None;
@@ -210,6 +222,94 @@ struct ProxyState {
     /// Wall-clock timestamp of `run()`'s start. Used by `/health` to
     /// surface an uptime.
     started_at: SystemTime,
+}
+
+/// Probe `http://<bind_addr>/health` with a short timeout. Returns
+/// the canonical base URL (`http://<bind_addr>`) on a 200 whose body
+/// contains the `default_workspace_id` marker — anything else is
+/// treated as "no proxy here", letting the caller proceed with the
+/// normal bind path (which then surfaces the real error if the port
+/// is held by something unrelated).
+async fn probe_existing_proxy(bind_addr: &str) -> Option<String> {
+    let base = format!("http://{bind_addr}");
+    let url = format!("{base}/health");
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(300))
+        .timeout(Duration::from_millis(800))
+        .build()
+        .ok()?;
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = resp.text().await.ok()?;
+    // Cheap marker check — avoids dragging serde_json into the proxy
+    // just to confirm the responder is a standardoc proxy.
+    if body.contains("default_workspace_id") {
+        Some(base)
+    } else {
+        None
+    }
+}
+
+/// POST each workspace path to `<base>/admin/workspaces`. Logs each
+/// outcome to stderr and returns Ok(()) once every entry has been
+/// attempted — partial failures (already-registered, etc.) are
+/// considered non-fatal because admin register is idempotent on the
+/// server side. A wholly unreachable proxy mid-way through is
+/// surfaced as a `Watcher` error so the CLI fails visibly.
+async fn register_with_existing(base_url: &str, workspaces: &[PathBuf]) -> Result<(), ProxyError> {
+    eprintln!(
+        "standardoc-mcp-proxy: existing proxy detected at {base_url} — registering workspaces"
+    );
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| ProxyError::Watcher(format!("singleton client init: {e}")))?;
+    let mut any_error: Option<String> = None;
+    for root in workspaces {
+        let canonical = root
+            .canonicalize()
+            .unwrap_or_else(|_| root.clone())
+            .to_string_lossy()
+            .into_owned();
+        let body = format!(
+            r#"{{"path":"{}"}}"#,
+            canonical.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let url = format!("{base_url}/admin/workspaces");
+        match client
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                eprintln!(
+                    "standardoc-mcp-proxy: registered {} with existing proxy ({})",
+                    root.display(),
+                    resp.status()
+                );
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let txt = resp.text().await.unwrap_or_default();
+                let msg = format!("register {} failed: HTTP {status}: {txt}", root.display());
+                eprintln!("standardoc-mcp-proxy: {msg}");
+                any_error.get_or_insert(msg);
+            }
+            Err(e) => {
+                let msg = format!("register {} failed: {e}", root.display());
+                eprintln!("standardoc-mcp-proxy: {msg}");
+                any_error.get_or_insert(msg);
+            }
+        }
+    }
+    match any_error {
+        Some(msg) => Err(ProxyError::Watcher(msg)),
+        None => Ok(()),
+    }
 }
 
 fn build_forward_client() -> reqwest::Client {
