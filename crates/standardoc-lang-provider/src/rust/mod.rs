@@ -6,6 +6,7 @@ use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
 use standardoc_ir::ExtractedFile;
 
 mod body_hash;
+mod collect_globals;
 mod crate_root;
 mod extract;
 mod extract_call;
@@ -13,6 +14,7 @@ mod extract_doc;
 mod extract_type;
 mod extract_use;
 mod ffi_tagger;
+mod global_return_type_registry;
 mod lookup;
 mod module_path;
 mod return_type_table;
