@@ -126,7 +126,7 @@ fn boot_state(workspaces: Vec<(&str, &str)>) -> Arc<ProxyState> {
         );
     }
     Arc::new(ProxyState {
-        workspaces: map,
+        workspaces: RwLock::new(map),
         default_id: default_id.unwrap_or_default(),
         client: build_forward_client(),
         retry_window: Duration::from_secs(1),
@@ -136,6 +136,75 @@ fn boot_state(workspaces: Vec<(&str, &str)>) -> Arc<ProxyState> {
         last_request_at: RwLock::new(None),
         started_at: SystemTime::now(),
     })
+}
+
+#[test]
+fn parse_register_body_extracts_path() {
+    let p = parse_register_body(r#"{"path":"/abs/dir"}"#).unwrap();
+    assert_eq!(p, PathBuf::from("/abs/dir"));
+}
+
+#[test]
+fn parse_register_body_tolerates_whitespace() {
+    let p = parse_register_body("  { \"path\" : \"/abs/dir\" }  \n").unwrap();
+    assert_eq!(p, PathBuf::from("/abs/dir"));
+}
+
+#[test]
+fn parse_register_body_rejects_missing_path() {
+    let err = parse_register_body(r#"{"foo":"bar"}"#).unwrap_err();
+    assert!(err.contains("missing `path`"), "got {err}");
+}
+
+#[test]
+fn parse_register_body_rejects_empty_path() {
+    let err = parse_register_body(r#"{"path":""}"#).unwrap_err();
+    assert!(err.contains("must not be empty"), "got {err}");
+}
+
+#[test]
+fn parse_register_body_rejects_non_object() {
+    let err = parse_register_body(r#""/abs/dir""#).unwrap_err();
+    assert!(err.contains("JSON object"), "got {err}");
+}
+
+#[tokio::test]
+async fn admin_list_workspaces_renders_default_and_entries() {
+    let state = boot_state(vec![("ws00", "http://x:1/mcp"), ("ws01", "")]);
+    let resp = admin_list_workspaces(State(state)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let s = std::str::from_utf8(&body).unwrap();
+    assert!(s.contains("\"default_workspace_id\":\"ws00\""), "got {s}");
+    assert!(s.contains("\"id\":\"ws00\""), "got {s}");
+    assert!(s.contains("\"id\":\"ws01\""), "got {s}");
+}
+
+#[tokio::test]
+async fn admin_unregister_default_rejected_with_409() {
+    let state = boot_state(vec![("ws00", "http://x:1/mcp")]);
+    let resp = admin_unregister_workspace(State(state), AxPath("ws00".to_string())).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn admin_unregister_unknown_yields_404() {
+    let state = boot_state(vec![("ws00", "")]);
+    let resp = admin_unregister_workspace(State(state), AxPath("nope1234".to_string())).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn admin_unregister_non_default_returns_204_and_removes() {
+    let state = boot_state(vec![("ws00", "http://x:1/mcp"), ("ws01", "http://y:2/mcp")]);
+    let resp =
+        admin_unregister_workspace(State(Arc::clone(&state)), AxPath("ws01".to_string())).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    // ws01 must be gone from the routing table.
+    assert!(!state.workspaces.read().await.contains_key("ws01"));
+    assert!(state.workspaces.read().await.contains_key("ws00"));
 }
 
 #[tokio::test]

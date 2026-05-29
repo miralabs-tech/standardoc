@@ -101,7 +101,7 @@ pub async fn run(cfg: ProxyConfig) -> Result<(), ProxyError> {
     let client = build_forward_client();
     let started_at = SystemTime::now();
     let state = Arc::new(ProxyState {
-        workspaces,
+        workspaces: RwLock::new(workspaces),
         default_id,
         client,
         retry_window: cfg.upstream_retry_window,
@@ -119,7 +119,7 @@ pub async fn run(cfg: ProxyConfig) -> Result<(), ProxyError> {
         .local_addr()
         .map_err(|e| ProxyError::Bind(cfg.bind_addr.clone(), e))?;
     eprintln!("standardoc-mcp-proxy: listening on http://{local}/mcp (default ws)");
-    for entry in state.workspaces.values() {
+    for entry in state.workspaces.read().await.values() {
         eprintln!(
             "standardoc-mcp-proxy:   - http://{local}/ws/{}/mcp ← {}",
             entry.id,
@@ -127,9 +127,18 @@ pub async fn run(cfg: ProxyConfig) -> Result<(), ProxyError> {
         );
     }
     eprintln!("standardoc-mcp-proxy: health endpoint: http://{local}/health");
+    eprintln!("standardoc-mcp-proxy: admin: POST/GET/DELETE http://{local}/admin/workspaces");
 
     let app = Router::new()
         .route("/health", get(health))
+        .route(
+            "/admin/workspaces",
+            get(admin_list_workspaces).post(admin_register_workspace),
+        )
+        .route(
+            "/admin/workspaces/{id}",
+            axum::routing::delete(admin_unregister_workspace),
+        )
         .route("/ws/{id}/mcp", any(forward_ws))
         .route("/ws/{id}/{*path}", any(forward_ws))
         .route("/mcp", any(forward_default))
@@ -170,9 +179,15 @@ fn init_workspace(root: PathBuf) -> Result<WorkspaceEntry, ProxyError> {
 }
 
 struct ProxyState {
-    workspaces: HashMap<String, Arc<WorkspaceEntry>>,
-    /// First entry's id — what `/mcp` (no ws prefix) falls back to,
-    /// preserving single-workspace back-compat.
+    /// Mutable at runtime so the admin endpoints can register /
+    /// unregister workspaces without bouncing the proxy. Reads on the
+    /// hot forward path are short-lived (clone the Arc<WorkspaceEntry>
+    /// and release) so write-side admin churn doesn't stall traffic.
+    workspaces: RwLock<HashMap<String, Arc<WorkspaceEntry>>>,
+    /// First entry's id at boot — what `/mcp` (no ws prefix) falls
+    /// back to, preserving single-workspace back-compat. Immutable for
+    /// the lifetime of the proxy; refusing to delete it keeps the
+    /// fallback route stable.
     default_id: String,
     client: reqwest::Client,
     retry_window: Duration,
@@ -300,7 +315,7 @@ async fn forward_default(
     req: Request,
 ) -> Response {
     let default_id = state.default_id.clone();
-    let Some(ws) = state.workspaces.get(&default_id).cloned() else {
+    let Some(ws) = state.workspaces.read().await.get(&default_id).cloned() else {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "standardoc-mcp-proxy: default workspace missing (bug)".into(),
@@ -319,7 +334,7 @@ async fn forward_ws(
     AxPath(id): AxPath<String>,
     req: Request,
 ) -> Response {
-    let Some(ws) = state.workspaces.get(&id).cloned() else {
+    let Some(ws) = state.workspaces.read().await.get(&id).cloned() else {
         return error_response(
             StatusCode::NOT_FOUND,
             format!("standardoc-mcp-proxy: unknown workspace id `{id}`"),
@@ -445,18 +460,7 @@ async fn health(State(state): State<Arc<ProxyState>>) -> Response {
     let ok = state.successful_requests.load(Ordering::Relaxed);
     let upstream_503 = state.upstream_503_responses.load(Ordering::Relaxed);
 
-    let mut entries: Vec<String> = Vec::with_capacity(state.workspaces.len());
-    for ws in state.workspaces.values() {
-        let upstream = ws.upstream.read().await.clone();
-        entries.push(format!(
-            "{{\"id\":\"{id}\",\"root\":\"{root}\",\"upstream\":\"{upstream}\",\"upstream_known\":{known}}}",
-            id = ws.id,
-            root = escape_json(&ws.root.to_string_lossy()),
-            upstream = escape_json(&upstream),
-            known = !upstream.is_empty(),
-        ));
-    }
-    let workspaces_json = format!("[{}]", entries.join(","));
+    let workspaces_json = workspaces_to_json(&state.workspaces).await;
 
     let body = format!(
         "{{\"default_workspace_id\":\"{default}\",\"workspaces\":{workspaces_json},\
@@ -483,6 +487,189 @@ async fn health(State(state): State<Arc<ProxyState>>) -> Response {
 /// you have a TAB in a path you have bigger problems than `/health`.
 fn escape_json(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Render the current `workspaces` map as a JSON array — shared between
+/// `/health` and `GET /admin/workspaces` so the shape stays consistent.
+async fn workspaces_to_json(workspaces: &RwLock<HashMap<String, Arc<WorkspaceEntry>>>) -> String {
+    let map = workspaces.read().await;
+    let mut entries: Vec<String> = Vec::with_capacity(map.len());
+    for ws in map.values() {
+        let upstream = ws.upstream.read().await.clone();
+        entries.push(format!(
+            "{{\"id\":\"{id}\",\"root\":\"{root}\",\"upstream\":\"{upstream}\",\"upstream_known\":{known}}}",
+            id = ws.id,
+            root = escape_json(&ws.root.to_string_lossy()),
+            upstream = escape_json(&upstream),
+            known = !upstream.is_empty(),
+        ));
+    }
+    format!("[{}]", entries.join(","))
+}
+
+/// `GET /admin/workspaces` — list every registered workspace plus the
+/// id of the default (which `/mcp` routes to). Shape mirrors the
+/// `workspaces` array inside `/health` but stripped of traffic
+/// counters.
+async fn admin_list_workspaces(State(state): State<Arc<ProxyState>>) -> Response {
+    let workspaces_json = workspaces_to_json(&state.workspaces).await;
+    let body = format!(
+        "{{\"default_workspace_id\":\"{default}\",\"workspaces\":{workspaces_json}}}",
+        default = state.default_id,
+    );
+    let mut response = Response::new(Body::from(body));
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+/// `POST /admin/workspaces` — register a new workspace at runtime.
+/// Body: `{"path": "/abs/workspace"}`. Idempotent — re-registering
+/// the same canonical path returns the existing entry. Responds with
+/// `{"id":"...","root":"...","upstream":"...","upstream_known":bool,
+/// "default":bool}` so the caller can confirm both routing slot and
+/// whether the daemon has come up yet.
+async fn admin_register_workspace(State(state): State<Arc<ProxyState>>, body: String) -> Response {
+    let path = match parse_register_body(&body) {
+        Ok(p) => p,
+        Err(msg) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("standardoc-mcp-proxy: admin register: {msg}"),
+            );
+        }
+    };
+    let id = workspace_id_for(&path);
+    {
+        // Idempotent: same canonical path → same id, return existing.
+        let map = state.workspaces.read().await;
+        if let Some(ws) = map.get(&id) {
+            let upstream = ws.upstream.read().await.clone();
+            return admin_entry_response(StatusCode::OK, ws, &upstream, &state.default_id);
+        }
+    }
+    let entry = match init_workspace(path.clone()) {
+        Ok(e) => Arc::new(e),
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("standardoc-mcp-proxy: admin register: {e}"),
+            );
+        }
+    };
+    eprintln!(
+        "standardoc-mcp-proxy: admin: registered ws {} ← {}",
+        entry.id,
+        entry.root.display()
+    );
+    let upstream = entry.upstream.read().await.clone();
+    let ws_for_response = Arc::clone(&entry);
+    state
+        .workspaces
+        .write()
+        .await
+        .insert(entry.id.clone(), entry);
+    admin_entry_response(
+        StatusCode::CREATED,
+        &ws_for_response,
+        &upstream,
+        &state.default_id,
+    )
+}
+
+/// `DELETE /admin/workspaces/{id}` — unregister. The default
+/// workspace cannot be deleted (would orphan the `/mcp` back-compat
+/// route) — returns 409 in that case. The endpoint-file watcher for
+/// the removed entry keeps running silently until process exit; the
+/// associated RAM is bounded and small.
+async fn admin_unregister_workspace(
+    State(state): State<Arc<ProxyState>>,
+    AxPath(id): AxPath<String>,
+) -> Response {
+    if id == state.default_id {
+        return error_response(
+            StatusCode::CONFLICT,
+            format!(
+                "standardoc-mcp-proxy: admin unregister: ws `{id}` is the default workspace \
+                 and cannot be removed (would orphan /mcp back-compat route)"
+            ),
+        );
+    }
+    let removed = state.workspaces.write().await.remove(&id);
+    if removed.is_none() {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            format!("standardoc-mcp-proxy: admin unregister: unknown workspace id `{id}`"),
+        );
+    }
+    eprintln!("standardoc-mcp-proxy: admin: unregistered ws {id}");
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::NO_CONTENT;
+    response
+}
+
+/// Parse `{"path":"..."}` from the request body. Tolerant of
+/// whitespace and trailing newlines ; rejects empty paths, malformed
+/// JSON, and missing fields.
+fn parse_register_body(body: &str) -> Result<PathBuf, String> {
+    // Minimal hand-rolled parse to stay serde-free. The body shape is
+    // a tight contract (`{"path": "..."}`) so a regex-grade scan is
+    // enough — saves a serde_json dep + 1 transitive crate.
+    let trimmed = body.trim();
+    let stripped = trimmed
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .ok_or_else(|| "body must be a JSON object".to_string())?;
+    let mut path: Option<String> = None;
+    for entry in stripped.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (key, value) = entry
+            .split_once(':')
+            .ok_or_else(|| format!("malformed entry `{entry}` (expected `key:value`)"))?;
+        let key = key.trim().trim_matches('"');
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .ok_or_else(|| format!("value for `{key}` must be a quoted string"))?;
+        if key == "path" {
+            path = Some(value.replace("\\\\", "\\").replace("\\\"", "\""));
+        }
+    }
+    let path = path.ok_or_else(|| "missing `path` field".to_string())?;
+    if path.is_empty() {
+        return Err("`path` must not be empty".to_string());
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn admin_entry_response(
+    status: StatusCode,
+    ws: &WorkspaceEntry,
+    upstream: &str,
+    default_id: &str,
+) -> Response {
+    let body = format!(
+        "{{\"id\":\"{id}\",\"root\":\"{root}\",\"upstream\":\"{upstream}\",\
+         \"upstream_known\":{known},\"default\":{is_default}}}",
+        id = ws.id,
+        root = escape_json(&ws.root.to_string_lossy()),
+        upstream = escape_json(upstream),
+        known = !upstream.is_empty(),
+        is_default = ws.id == default_id,
+    );
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
 }
 
 /// Re-build the target URL by replacing the upstream's path with the
