@@ -59,7 +59,7 @@ blake3      = "1"
 syn         = { version = "2", features = ["full", "extra-traits", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote       = "1"
-swc_core    = { version = "65", features = ["ecma_parser", "ecma_ast", "ecma_visit", "common", "common_concurrent"] }
+swc_core    = { version = "68", features = ["ecma_parser", "ecma_ast", "ecma_visit", "common", "common_concurrent"] }
 full_moon   = { version = "2.2", features = ["luau", "luajit", "cfxlua"] }
 tree-sitter   = "0.26"
 tree-sitter-c = "0.24"
