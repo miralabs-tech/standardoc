@@ -4,6 +4,7 @@ import { DaemonSupervisor, type DaemonState } from './daemon/supervisor';
 import { LspClient } from './lsp/client';
 import { SxdLspClient } from './lsp/sxd-client';
 import { McpClient } from './mcp/client';
+import { ProxyClient } from './proxy/client';
 import { StandardocMcpServerProvider } from './mcp/serverDefinitionProvider';
 import { StatusBarController } from './statusBar';
 import { registerCommands } from './commands';
@@ -41,14 +42,15 @@ export function activate(context: vscode.ExtensionContext): void {
   const lsp = new LspClient(workspaceRoot, output);
   const sxdLsp = new SxdLspClient(output);
   const mcp = new McpClient(workspaceRoot, output, port);
+  const proxy = new ProxyClient(workspaceRoot, output);
   const supervisor = new DaemonSupervisor(
     context,
     output,
-    { lsp, mcp, sxdLsp },
+    { lsp, mcp, sxdLsp, proxy },
     workspaceRoot,
   );
 
-  context.subscriptions.push(lsp, sxdLsp, mcp, supervisor);
+  context.subscriptions.push(lsp, sxdLsp, mcp, proxy, supervisor);
 
   const statusBar = new StatusBarController();
   context.subscriptions.push(statusBar);

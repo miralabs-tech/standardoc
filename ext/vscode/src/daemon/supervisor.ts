@@ -12,6 +12,7 @@ import {
 import type { LspClient, LspState } from '../lsp/client';
 import type { SxdLspClient } from '../lsp/sxd-client';
 import type { McpClient } from '../mcp/client';
+import type { ProxyClient } from '../proxy/client';
 
 export { describeState, type DaemonState } from './supervisor-state';
 
@@ -24,6 +25,15 @@ export interface SupervisorDeps {
    * tearing down code intelligence for the workspace.
    */
   readonly sxdLsp?: SxdLspClient;
+  /**
+   * Optional standalone `standardoc proxy` sidecar. Failure to start
+   * it is non-fatal — the local LSP + MCP daemons keep working; only
+   * external MCP clients pointing at the stable proxy URL would
+   * notice. The proxy binary self-singletons via /health probe so
+   * spawning it from every open VSCode window converges on one
+   * shared instance.
+   */
+  readonly proxy?: ProxyClient;
   /**
    * Override the schema-version pre-flight invocation. Useful for tests; if
    * omitted, the supervisor shells out to `<binary> schema-version <root>`.
@@ -128,6 +138,14 @@ export class DaemonSupervisor implements vscode.Disposable {
           this.log(`sxd-lsp start failed (non-fatal): ${describeError(e)}`);
         }
       }
+      // Same best-effort policy for the proxy sidecar.
+      if (this.deps.proxy) {
+        try {
+          await this.deps.proxy.start(binaryPath);
+        } catch (e) {
+          this.log(`proxy start failed (non-fatal): ${describeError(e)}`);
+        }
+      }
       return;
     }
 
@@ -205,7 +223,21 @@ export class DaemonSupervisor implements vscode.Disposable {
   }
 
   private async safeStopAll(): Promise<void> {
-    await Promise.allSettled([this.safeStopLsp(), this.safeStopMcp(), this.safeStopSxdLsp()]);
+    await Promise.allSettled([
+      this.safeStopLsp(),
+      this.safeStopMcp(),
+      this.safeStopSxdLsp(),
+      this.safeStopProxy(),
+    ]);
+  }
+
+  private async safeStopProxy(): Promise<void> {
+    if (!this.deps.proxy) return;
+    try {
+      await this.deps.proxy.stop();
+    } catch (e) {
+      this.log(`proxy stop error: ${describeError(e)}`);
+    }
   }
 
   private async safeStopLsp(): Promise<void> {
