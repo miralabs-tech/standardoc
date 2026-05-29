@@ -858,14 +858,28 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
             receiver_chain,
             span,
         );
-        self.emit_call_with_attributes(
-            ResolvedOrUnresolved::Unresolved {
-                name: method.clone(),
-            },
-            span,
-            vec![],
-            receiver_type,
-        );
+        // Bug field-as-CALL: syn parses `obj.foo(args)` as ExprMethodCall
+        // whether `foo` is a trait/impl method OR a fn-pointer/closure
+        // field. When the receiver type resolves to a workspace struct
+        // and `method` matches one of its recorded fields, the call is
+        // really "read the field, invoke the value" — emitting an
+        // unresolved CALLS edge with `name = field` masquerades as a
+        // method target. Suppress the graph edge (the call-site row
+        // above still records the textual invocation for plugins).
+        let is_field_call = {
+            let stripped = receiver_type.as_deref().map(strip_refs);
+            stripped.is_some_and(|t| self.ctx.struct_fields.lookup(t, &method).is_some())
+        };
+        if !is_field_call {
+            self.emit_call_with_attributes(
+                ResolvedOrUnresolved::Unresolved {
+                    name: method.clone(),
+                },
+                span,
+                vec![],
+                receiver_type,
+            );
+        }
         // Bug E-3 ext P-E3.2: replicate the default
         // `syn::visit::visit_expr_method_call` traversal but intercept
         // closure args so each closure body sees a `ClosureScope` frame

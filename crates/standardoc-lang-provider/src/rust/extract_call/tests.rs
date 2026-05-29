@@ -1592,3 +1592,84 @@ fn closure_arg_without_generic_args_does_not_pollute_receiver_type() {
         .expect("foo edge");
     assert_eq!(foo.receiver_type, None);
 }
+
+#[test]
+fn field_as_call_on_workspace_struct_is_suppressed() {
+    // Bug field-as-CALL: `s.handler()` where `handler` is a nominal-
+    // typed field of workspace struct `S` (the typical real-world case:
+    // a closure / Box<dyn Fn> / Arc<F> stored as a field). syn parses
+    // this as ExprMethodCall, but semantically the call goes through
+    // the field value — not a method on `S`. The CALLS edge with
+    // `name = "handler"` should be suppressed.
+    //
+    // Note: `Type::BareFn` (`fn()`) fields aren't tracked by
+    // `StructFieldTable` (the table only records nominal types — see
+    // `parametric_type`). So `s.bare_ptr()` where `bare_ptr: fn()`
+    // still emits a CALLS edge — a known limitation orthogonal to the
+    // dominant audit signal (PathBuf / Span / Arc<dyn …> fields).
+    let parsed = parse(
+        "struct H; struct S { handler: H } fn caller(s: S) { s.handler(); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let handler_calls: Vec<_> = method_calls(&edges)
+        .into_iter()
+        .filter(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "handler"))
+        .collect();
+    assert!(
+        handler_calls.is_empty(),
+        "field-as-CALL must be suppressed, got: {handler_calls:#?}"
+    );
+}
+
+#[test]
+fn method_call_on_workspace_struct_without_matching_field_is_preserved() {
+    // Sanity: a real method call on a workspace struct (no field with
+    // the same name) still produces a CALLS edge — the suppression
+    // only kicks in when struct_fields.lookup() hits.
+    let parsed = parse(
+        "struct S { value: i32 } impl S { fn compute(&self) {} } \
+         fn caller(s: S) { s.compute(); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let compute = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "compute"))
+        .expect("compute method CALLS edge expected");
+    assert_eq!(compute.from_fqdn, "c::caller");
+}
+
+#[test]
+fn stdlib_method_call_is_preserved_even_with_field_like_name() {
+    // Stdlib types are not in struct_fields (workspace-only table), so
+    // a call like `path.exists()` where `exists` happens to be a method
+    // (not a field) must still emit a CALLS edge. Same for `.iter()`
+    // and other common idents that could collide with hypothetical
+    // workspace field names but aren't.
+    let parsed =
+        parse("fn caller(p: std::path::PathBuf) { p.exists(); }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let exists = method_calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "exists"))
+        .expect("stdlib .exists() CALLS edge must survive");
+    assert_eq!(exists.from_fqdn, "c::caller");
+}
+
+#[test]
+fn field_as_call_via_ref_receiver_is_suppressed() {
+    // The receiver type comes through as `&S` (or `&mut S`) via the
+    // local env. The guard must strip refs before the field lookup
+    // so `&S` matches struct `S` in the workspace table.
+    let parsed = parse(
+        "struct H; struct S { cb: H } fn caller(s: &S) { s.cb(); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let cb_calls: Vec<_> = method_calls(&edges)
+        .into_iter()
+        .filter(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "cb"))
+        .collect();
+    assert!(
+        cb_calls.is_empty(),
+        "field-as-CALL through &S must be suppressed, got: {cb_calls:#?}"
+    );
+}
