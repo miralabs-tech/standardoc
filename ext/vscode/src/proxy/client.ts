@@ -26,11 +26,15 @@ export class ProxyClient implements vscode.Disposable {
   constructor(
     private readonly workspaceRoot: string,
     private readonly output: vscode.OutputChannel,
+    private readonly bindAddr: string,
   ) {}
 
   async start(binaryPath: string): Promise<void> {
     if (this.child) return;
-    const args = ['proxy', '--workspace', this.workspaceRoot];
+    // `--bind` is always passed so the singleton dedup converges across
+    // VSCode windows: every sibling probes the same address. Workspace
+    // sxd `proxy { ... }` is ignored ; this is machine-scoped on purpose.
+    const args = ['proxy', '--bind', this.bindAddr, '--workspace', this.workspaceRoot];
     this.output.appendLine(`[proxy] spawning ${binaryPath} ${args.join(' ')}`);
     const child = spawn(binaryPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.child = child;

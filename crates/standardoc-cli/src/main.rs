@@ -494,26 +494,21 @@ fn cmd_workspace_id(path: &Path) -> Result<(), ServerError> {
     Ok(())
 }
 
-/// Precedence: CLI `--bind` wins outright when passed, else compose
-/// from `proxy { bind "..." port N }` in the workspace's
-/// `standardoc.sxd`, else fall back to `127.0.0.1:7700`. A parse error
-/// on the sxd is treated as "absent" so a syntactically broken config
-/// can't keep the proxy from starting — the LSP surfaces those errors
-/// to the user separately.
-fn resolve_proxy_bind(workspace: &Path, cli_bind: Option<String>) -> String {
-    if let Some(b) = cli_bind {
-        return b;
-    }
-    let sxd_proxy = standardoc_core::config::load_workspace_config(workspace)
-        .ok()
-        .flatten()
-        .and_then(|cfg| cfg.proxy);
-    let host = sxd_proxy
-        .as_ref()
-        .and_then(|p| p.bind.clone())
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let port = sxd_proxy.as_ref().and_then(|p| p.port).unwrap_or(7700);
-    format!("{host}:{port}")
+/// Resolve the proxy bind address. CLI `--bind` wins outright when
+/// passed, else fall back to `127.0.0.1:7700`.
+///
+/// **Per-workspace `proxy { ... }` blocks in `standardoc.sxd` are
+/// intentionally NOT read here** — the proxy is a per-machine
+/// singleton, and reading per-workspace overrides breaks the
+/// singleton dedup the moment two workspaces disagree on the port
+/// (each sibling probes a different bind addr, none finds the other,
+/// they all spawn their own proxy). The VSCode extension passes the
+/// per-user `standardoc.proxyBind` / `standardoc.proxyPort` setting
+/// via `--bind` ; standalone CLI users pass `--bind` directly or get
+/// the default. The sxd `proxy { ... }` block is kept parseable for
+/// back-compat, but the LSP surfaces a deprecation warning.
+fn resolve_proxy_bind(_workspace: &Path, cli_bind: Option<String>) -> String {
+    cli_bind.unwrap_or_else(|| "127.0.0.1:7700".to_string())
 }
 
 fn cmd_mcp(path: &Path, readonly: bool, http: Option<u16>) -> Result<(), ServerError> {

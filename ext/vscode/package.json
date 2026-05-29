@@ -123,6 +123,20 @@
           "maximum": 65535,
           "scope": "resource",
           "description": "TCP port on `127.0.0.1` where the Standardoc MCP daemon listens for streamable HTTP / SSE connections. Set to `0` to let the kernel pick a random ephemeral port (the resolved port is then written to `.standardoc/mcp.endpoint` for client discovery). When multiple Standardoc workspaces run in parallel, give each a distinct port here."
+        },
+        "standardoc.proxyBind": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "scope": "machine-overridable",
+          "description": "Bind address for the Standardoc MCP proxy — the per-machine singleton in front of every workspace's MCP daemon. All sibling VSCode windows MUST agree on this value for the singleton dedup to converge ; that's why this is machine-scoped, not workspace-scoped."
+        },
+        "standardoc.proxyPort": {
+          "type": "integer",
+          "default": 7700,
+          "minimum": 1,
+          "maximum": 65535,
+          "scope": "machine-overridable",
+          "description": "TCP port for the Standardoc MCP proxy singleton. MUST differ from any workspace's `standardoc.mcpHttpPort` or sxd `mcp { port }` — the proxy forwards INTO the mcp daemons, so they cannot share a port."
         }
       }
     },

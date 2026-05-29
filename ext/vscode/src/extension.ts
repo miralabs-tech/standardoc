@@ -15,6 +15,8 @@ import { readSxdPort } from './sxd/config-port';
 
 const MCP_PROVIDER_ID = 'standardoc.mcp';
 const DEFAULT_MCP_HTTP_PORT = 7700;
+const DEFAULT_PROXY_BIND = '127.0.0.1';
+const DEFAULT_PROXY_PORT = 7700;
 
 export function activate(context: vscode.ExtensionContext): void {
   const folder = vscode.workspace.workspaceFolders?.[0];
@@ -32,17 +34,26 @@ export function activate(context: vscode.ExtensionContext): void {
   // override surface for workspaces without an .sxd, and the default
   // catches the fresh-install case.
   const sxdPort = readSxdPort(workspaceRoot, 'mcp');
-  const settingPort = vscode.workspace
-    .getConfiguration('standardoc')
-    .get<number>('mcpHttpPort', DEFAULT_MCP_HTTP_PORT);
+  const config = vscode.workspace.getConfiguration('standardoc');
+  const settingPort = config.get<number>('mcpHttpPort', DEFAULT_MCP_HTTP_PORT);
   const port = sxdPort ?? settingPort;
   const portSource = sxdPort !== null ? 'sxd' : 'setting';
   output.appendLine(`[mcp] http port=${port} (source=${portSource})`);
 
+  // Proxy bind/port are machine-scoped settings, NOT workspace sxd:
+  // the proxy is a per-machine singleton and all sibling VSCode
+  // windows must converge on the same address for dedup to work.
+  // `proxy { ... }` in sxd is silently ignored (kept parseable for
+  // back-compat ; LSP surfaces a deprecation hint).
+  const proxyBind = config.get<string>('proxyBind', DEFAULT_PROXY_BIND);
+  const proxyPort = config.get<number>('proxyPort', DEFAULT_PROXY_PORT);
+  const proxyAddr = `${proxyBind}:${proxyPort}`;
+  output.appendLine(`[proxy] bind=${proxyAddr} (source=setting)`);
+
   const lsp = new LspClient(workspaceRoot, output);
   const sxdLsp = new SxdLspClient(output);
   const mcp = new McpClient(workspaceRoot, output, port);
-  const proxy = new ProxyClient(workspaceRoot, output);
+  const proxy = new ProxyClient(workspaceRoot, output, proxyAddr);
   const supervisor = new DaemonSupervisor(
     context,
     output,
