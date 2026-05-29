@@ -3,6 +3,7 @@
     clippy::significant_drop_in_scrutinee
 )]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,7 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{ConnectInfo, Path as AxPath, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
@@ -26,13 +27,16 @@ use tokio::sync::{RwLock, mpsc};
 /// Resolved proxy configuration. Built by the CLI layer from clap args
 /// then passed to [`run`].
 pub struct ProxyConfig {
-    /// Local bind address — typically `127.0.0.1:7700`. CC's MCP
-    /// server URL points at `http://<bind_addr>/mcp`.
+    /// Local bind address — typically `127.0.0.1:7700`. Clients connect
+    /// to `http://<bind_addr>/mcp` (default workspace, back-compat) or
+    /// `http://<bind_addr>/ws/<id>/mcp` (explicit workspace).
     pub bind_addr: String,
-    /// Workspace root used to locate `.standardoc/mcp.endpoint`. The
-    /// proxy file-watches that file so daemon port changes are picked
-    /// up without polling.
-    pub workspace_root: PathBuf,
+    /// One or more workspace roots to serve. Each one gets a
+    /// deterministic blake3-derived `id` and its own
+    /// `.standardoc/mcp.endpoint` watcher. The FIRST entry is the
+    /// default workspace surfaced at `/mcp` for back-compat with
+    /// single-workspace clients.
+    pub workspaces: Vec<PathBuf>,
     /// How long to keep retrying when the upstream daemon is
     /// unreachable (connection refused, hyper transport error). After
     /// this window the proxy returns `503 Service Unavailable`. Default
@@ -40,6 +44,22 @@ pub struct ProxyConfig {
     /// without making the MCP client wait forever on a permanent
     /// failure.
     pub upstream_retry_window: Duration,
+}
+
+/// Compute the stable short ID for a workspace path. blake3-then-hex,
+/// truncated to 8 chars. Deterministic per canonical absolute path so
+/// external clients can construct `/ws/<id>/mcp` URLs without a
+/// registration round-trip — `standardoc workspace-id <path>` exposes
+/// the same function for scripts.
+#[must_use]
+pub fn workspace_id_for(path: &Path) -> String {
+    let canonical = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    let hash = blake3::hash(canonical.as_bytes()).to_hex();
+    hash.as_str()[..8].to_string()
 }
 
 #[derive(Debug, Error)]
@@ -50,29 +70,39 @@ pub enum ProxyError {
     Serve(std::io::Error),
     #[error("watch `.standardoc/mcp.endpoint`: {0}")]
     Watcher(String),
+    #[error("no workspaces configured — pass --workspace at least once")]
+    NoWorkspaces,
 }
 
-/// Bind, attach the file watcher, register the catch-all forwarder, and
-/// block until shutdown. Does NOT exit on upstream failures — the whole
-/// point of the proxy is to outlive every daemon process it forwards to.
+/// Bind, attach a per-workspace file watcher, register the routing
+/// table, and block until shutdown. Does NOT exit on upstream failures
+/// — the whole point of the proxy is to outlive every daemon process
+/// it forwards to.
 pub async fn run(cfg: ProxyConfig) -> Result<(), ProxyError> {
-    let endpoint_path = cfg.workspace_root.join(".standardoc").join("mcp.endpoint");
-    let initial = read_endpoint_file(&endpoint_path).unwrap_or_default();
-    let upstream = Arc::new(RwLock::new(initial.clone()));
-    spawn_endpoint_watcher(endpoint_path.clone(), Arc::clone(&upstream))?;
-    if initial.is_empty() {
-        eprintln!(
-            "standardoc-mcp-proxy: no upstream endpoint yet at {} — will start forwarding once the daemon writes its URL",
-            endpoint_path.display()
-        );
-    } else {
-        eprintln!("standardoc-mcp-proxy: upstream = {initial}");
+    if cfg.workspaces.is_empty() {
+        return Err(ProxyError::NoWorkspaces);
     }
+    let mut workspaces: HashMap<String, Arc<WorkspaceEntry>> = HashMap::new();
+    let mut default_id: Option<String> = None;
+    for root in &cfg.workspaces {
+        let entry = init_workspace(root.clone())?;
+        if default_id.is_none() {
+            default_id = Some(entry.id.clone());
+        }
+        eprintln!(
+            "standardoc-mcp-proxy: registered ws {} ← {}",
+            entry.id,
+            entry.root.display()
+        );
+        workspaces.insert(entry.id.clone(), Arc::new(entry));
+    }
+    let default_id = default_id.expect("workspaces non-empty checked above");
 
     let client = build_forward_client();
     let started_at = SystemTime::now();
     let state = Arc::new(ProxyState {
-        upstream,
+        workspaces,
+        default_id,
         client,
         retry_window: cfg.upstream_retry_window,
         total_requests: AtomicU64::new(0),
@@ -88,13 +118,22 @@ pub async fn run(cfg: ProxyConfig) -> Result<(), ProxyError> {
     let local = listener
         .local_addr()
         .map_err(|e| ProxyError::Bind(cfg.bind_addr.clone(), e))?;
-    eprintln!("standardoc-mcp-proxy: listening on http://{local}/mcp");
+    eprintln!("standardoc-mcp-proxy: listening on http://{local}/mcp (default ws)");
+    for entry in state.workspaces.values() {
+        eprintln!(
+            "standardoc-mcp-proxy:   - http://{local}/ws/{}/mcp ← {}",
+            entry.id,
+            entry.root.display()
+        );
+    }
     eprintln!("standardoc-mcp-proxy: health endpoint: http://{local}/health");
 
     let app = Router::new()
         .route("/health", get(health))
-        .route("/mcp", any(forward))
-        .route("/{*path}", any(forward))
+        .route("/ws/{id}/mcp", any(forward_ws))
+        .route("/ws/{id}/{*path}", any(forward_ws))
+        .route("/mcp", any(forward_default))
+        .route("/{*path}", any(forward_default))
         .with_state(state);
 
     axum::serve(
@@ -105,8 +144,36 @@ pub async fn run(cfg: ProxyConfig) -> Result<(), ProxyError> {
     .map_err(ProxyError::Serve)
 }
 
+/// Per-workspace tracked state — id, root, and the live upstream URL
+/// (updated by the per-workspace endpoint-file watcher).
+pub(crate) struct WorkspaceEntry {
+    pub(crate) id: String,
+    pub(crate) root: PathBuf,
+    pub(crate) upstream: Arc<RwLock<String>>,
+}
+
+fn init_workspace(root: PathBuf) -> Result<WorkspaceEntry, ProxyError> {
+    let id = workspace_id_for(&root);
+    let endpoint_path = root.join(".standardoc").join("mcp.endpoint");
+    let initial = read_endpoint_file(&endpoint_path).unwrap_or_default();
+    let upstream = Arc::new(RwLock::new(initial.clone()));
+    spawn_endpoint_watcher(endpoint_path.clone(), Arc::clone(&upstream))?;
+    if initial.is_empty() {
+        eprintln!(
+            "standardoc-mcp-proxy: ws {id}: no endpoint yet at {} — will start forwarding once the daemon writes its URL",
+            endpoint_path.display()
+        );
+    } else {
+        eprintln!("standardoc-mcp-proxy: ws {id}: upstream = {initial}");
+    }
+    Ok(WorkspaceEntry { id, root, upstream })
+}
+
 struct ProxyState {
-    upstream: Arc<RwLock<String>>,
+    workspaces: HashMap<String, Arc<WorkspaceEntry>>,
+    /// First entry's id — what `/mcp` (no ws prefix) falls back to,
+    /// preserving single-workspace back-compat.
+    default_id: String,
     client: reqwest::Client,
     retry_window: Duration,
     /// Lifetime counter of HTTP requests landed on the proxy
@@ -224,18 +291,58 @@ fn spawn_endpoint_watcher(
     Ok(())
 }
 
-/// axum handler — receives every incoming HTTP request, forwards to the
-/// current upstream URL, retries with exponential backoff while the
-/// daemon is restarting, and streams the response back. Buffers the
-/// request body in memory so retries can replay it (MCP payloads are
-/// small JSON — at most a few KB). Logs each incoming call so users can
-/// confirm the MCP client (Claude Code, …) is actually talking to the
-/// proxy — silence here means the client side is misconfigured or
-/// itself disconnected.
-async fn forward(
+/// Back-compat handler — paths without a `/ws/<id>` prefix forward to
+/// the default workspace (first registered). Used by single-workspace
+/// clients that predate multi-workspace routing.
+async fn forward_default(
     State(state): State<Arc<ProxyState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
+) -> Response {
+    let default_id = state.default_id.clone();
+    let Some(ws) = state.workspaces.get(&default_id).cloned() else {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "standardoc-mcp-proxy: default workspace missing (bug)".into(),
+        );
+    };
+    forward_to(state, ws, peer, req, None).await
+}
+
+/// Multi-workspace handler — extracts the workspace id from the
+/// `/ws/{id}/...` path, strips that prefix before composing the
+/// upstream URL, and forwards. Returns 404 when the id isn't
+/// registered.
+async fn forward_ws(
+    State(state): State<Arc<ProxyState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    AxPath(id): AxPath<String>,
+    req: Request,
+) -> Response {
+    let Some(ws) = state.workspaces.get(&id).cloned() else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            format!("standardoc-mcp-proxy: unknown workspace id `{id}`"),
+        );
+    };
+    forward_to(state, ws, peer, req, Some(id)).await
+}
+
+/// Shared forward path — retries against `ws.upstream` while the
+/// daemon is restarting, streams the response back. Buffers the
+/// request body so retries can replay it (MCP payloads are small JSON
+/// — at most a few KB). Logs each incoming call so users can confirm
+/// the MCP client (Claude Code, …) is actually talking to the proxy.
+///
+/// `strip_ws_prefix` carries `Some(id)` for `/ws/{id}/...` requests so
+/// the target URL drops the `/ws/{id}` segment when re-composing; the
+/// daemon doesn't know its own routing prefix.
+async fn forward_to(
+    state: Arc<ProxyState>,
+    ws: Arc<WorkspaceEntry>,
+    peer: SocketAddr,
+    req: Request,
+    strip_ws_prefix: Option<String>,
 ) -> Response {
     let method = req.method().clone();
     let uri = req.uri().clone();
@@ -243,7 +350,8 @@ async fn forward(
     let seq = state.total_requests.fetch_add(1, Ordering::Relaxed) + 1;
     *state.last_request_at.write().await = Some(SystemTime::now());
     eprintln!(
-        "standardoc-mcp-proxy: incoming #{seq} {method} {} from {peer}",
+        "standardoc-mcp-proxy: incoming #{seq} ws={} {method} {} from {peer}",
+        ws.id,
         uri.path()
     );
     let body_bytes = match axum::body::to_bytes(req.into_body(), 8 * 1024 * 1024).await {
@@ -262,11 +370,14 @@ async fn forward(
     let mut last_error: Option<String> = None;
 
     loop {
-        let upstream_url = state.upstream.read().await.clone();
+        let upstream_url = ws.upstream.read().await.clone();
         if upstream_url.is_empty() {
-            last_error = Some("upstream endpoint not yet known (waiting for daemon)".into());
+            last_error = Some(format!(
+                "upstream endpoint not yet known for ws {} (waiting for daemon)",
+                ws.id
+            ));
         } else {
-            let target = build_target_url(&upstream_url, &uri);
+            let target = build_target_url(&upstream_url, &uri, strip_ws_prefix.as_deref());
             match forward_once(
                 &state.client,
                 &method,
@@ -296,7 +407,8 @@ async fn forward(
             state.upstream_503_responses.fetch_add(1, Ordering::Relaxed);
             let detail = last_error.unwrap_or_else(|| "upstream unreachable".into());
             eprintln!(
-                "standardoc-mcp-proxy: 503 for #{seq} — upstream unreachable after {}s: {detail}",
+                "standardoc-mcp-proxy: 503 for #{seq} ws={} — upstream unreachable after {}s: {detail}",
+                ws.id,
                 state.retry_window.as_secs()
             );
             return error_response(
@@ -312,12 +424,12 @@ async fn forward(
     }
 }
 
-/// `GET /health` — JSON snapshot of proxy state. Used by users / scripts
-/// to confirm the proxy is alive, the upstream is reachable, and the
-/// MCP client has been hitting the proxy. Counts forwarder hits only
-/// (this endpoint itself is excluded from the totals).
+/// `GET /health` — JSON snapshot of proxy state. Used by users /
+/// scripts to confirm the proxy is alive, every registered workspace
+/// has a known upstream, and the MCP client has been hitting the
+/// proxy. Counts forwarder hits only (this endpoint itself is
+/// excluded from the totals).
 async fn health(State(state): State<Arc<ProxyState>>) -> Response {
-    let upstream = state.upstream.read().await.clone();
     let last_request_age_ms = match *state.last_request_at.read().await {
         Some(ts) => SystemTime::now()
             .duration_since(ts)
@@ -332,11 +444,26 @@ async fn health(State(state): State<Arc<ProxyState>>) -> Response {
     let total = state.total_requests.load(Ordering::Relaxed);
     let ok = state.successful_requests.load(Ordering::Relaxed);
     let upstream_503 = state.upstream_503_responses.load(Ordering::Relaxed);
+
+    let mut entries: Vec<String> = Vec::with_capacity(state.workspaces.len());
+    for ws in state.workspaces.values() {
+        let upstream = ws.upstream.read().await.clone();
+        entries.push(format!(
+            "{{\"id\":\"{id}\",\"root\":\"{root}\",\"upstream\":\"{upstream}\",\"upstream_known\":{known}}}",
+            id = ws.id,
+            root = escape_json(&ws.root.to_string_lossy()),
+            upstream = escape_json(&upstream),
+            known = !upstream.is_empty(),
+        ));
+    }
+    let workspaces_json = format!("[{}]", entries.join(","));
+
     let body = format!(
-        "{{\"upstream\":\"{upstream}\",\"upstream_known\":{upstream_known},\"uptime_ms\":{uptime_ms},\
-         \"total_requests\":{total},\"successful_requests\":{ok},\"upstream_503_responses\":{upstream_503},\
+        "{{\"default_workspace_id\":\"{default}\",\"workspaces\":{workspaces_json},\
+         \"uptime_ms\":{uptime_ms},\"total_requests\":{total},\
+         \"successful_requests\":{ok},\"upstream_503_responses\":{upstream_503},\
          \"last_request_age_ms\":{age}}}",
-        upstream_known = !upstream.is_empty(),
+        default = state.default_id,
         age = match last_request_age_ms {
             Some(ms) => ms.to_string(),
             None => "null".into(),
@@ -350,11 +477,24 @@ async fn health(State(state): State<Arc<ProxyState>>) -> Response {
     response
 }
 
+/// Bare-minimum JSON string escaping for `"` and `\` only — workspace
+/// roots can contain backslashes on Windows and we don't want them to
+/// produce malformed JSON. Control characters get passed through; if
+/// you have a TAB in a path you have bigger problems than `/health`.
+fn escape_json(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Re-build the target URL by replacing the upstream's path with the
 /// incoming request's path + query. The upstream URL written by the
 /// daemon is `http://host:port/mcp`; clients hitting the proxy on
 /// `/anything` get forwarded preserving that suffix.
-fn build_target_url(upstream: &str, incoming: &Uri) -> String {
+///
+/// When `strip_ws_id` is `Some("abc123")`, the leading `/ws/abc123`
+/// segment is removed from the path before composing — the daemon
+/// listens at `/mcp`, not `/ws/<id>/mcp`, and doesn't know about the
+/// proxy's routing prefix.
+fn build_target_url(upstream: &str, incoming: &Uri, strip_ws_id: Option<&str>) -> String {
     // Find the scheme+authority part of `upstream`. Everything after
     // the third `/` (or end-of-string) is the upstream's own path —
     // we discard it and use the incoming request's path+query.
@@ -369,7 +509,16 @@ fn build_target_url(upstream: &str, incoming: &Uri) -> String {
     let path_and_query = incoming
         .path_and_query()
         .map_or("/", http::uri::PathAndQuery::as_str);
-    format!("{prefix}{path_and_query}")
+    let trimmed = match strip_ws_id {
+        Some(id) => {
+            let needle = format!("/ws/{id}");
+            path_and_query
+                .strip_prefix(&needle)
+                .map_or(path_and_query, |s| if s.is_empty() { "/" } else { s })
+        }
+        None => path_and_query,
+    };
+    format!("{prefix}{trimmed}")
 }
 
 #[derive(Debug)]

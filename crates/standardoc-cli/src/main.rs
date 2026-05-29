@@ -70,34 +70,51 @@ enum Command {
     /// document validates independently.
     LspSxd,
 
-    /// Long-lived HTTP proxy in front of the daemon's MCP transport.
-    /// Keeps the MCP client (Claude Code, Copilot Chat, …) connected
-    /// to a stable URL across daemon restarts / rebuilds / migrations.
-    /// File-watches `<workspace>/.standardoc/mcp.endpoint` to track the
-    /// daemon's actual address and retries on upstream connection
-    /// refused. Replaces the standalone `standardoc-mcp-proxy` binary —
-    /// one binary now handles every transport role.
+    /// Long-lived HTTP proxy in front of one or more daemons. Keeps
+    /// every MCP client (Claude Code, Copilot Chat, …) connected to a
+    /// stable URL across daemon restarts / rebuilds / migrations, and
+    /// can serve multiple workspaces from a single bind address:
     ///
-    /// Resolution precedence for the bind address (host:port):
-    ///   1. `--bind` CLI flag if passed (full `host:port` string)
-    ///   2. `proxy { bind "..." port N }` block in `standardoc.sxd`
-    ///   3. default `127.0.0.1:7700`
+    /// ```text
+    /// /mcp                  → default (first --workspace)  (back-compat)
+    /// /ws/<id>/mcp          → that workspace's daemon
+    /// /health               → JSON status of every registered workspace
+    /// ```
+    ///
+    /// `<id>` is a deterministic blake3 short hash of the workspace's
+    /// canonical abs path — print it via `standardoc workspace-id <dir>`.
+    ///
+    /// Bind precedence: `--bind` flag > `proxy { bind "..." port N }`
+    /// in the FIRST workspace's `standardoc.sxd` > `127.0.0.1:7700`.
     Proxy {
         /// Explicit `host:port` bind override. When omitted the proxy
-        /// reads `proxy { bind "..." port N }` from the workspace's
-        /// `standardoc.sxd` and falls back to `127.0.0.1:7700` otherwise.
+        /// reads `proxy { bind "..." port N }` from the first
+        /// workspace's `standardoc.sxd` and falls back to
+        /// `127.0.0.1:7700` otherwise.
         #[arg(long)]
         bind: Option<String>,
 
-        /// Workspace root used to locate `.standardoc/mcp.endpoint` AND
-        /// `standardoc.sxd`. Defaults to the current working directory.
-        #[arg(long, value_name = "DIR")]
-        workspace: Option<PathBuf>,
+        /// Workspace root to serve. Repeat the flag to register
+        /// multiple workspaces under one proxy instance — the first
+        /// entry becomes the default (`/mcp` path). Defaults to the
+        /// current working directory when omitted.
+        #[arg(long = "workspace", value_name = "DIR")]
+        workspaces: Vec<PathBuf>,
 
         /// How long (in seconds) to keep retrying a request when the
         /// upstream daemon is unreachable before returning `503`.
         #[arg(long, default_value_t = 30)]
         retry_window_secs: u64,
+    },
+
+    /// Print the deterministic workspace id used by the proxy's
+    /// `/ws/<id>/mcp` routing. blake3-derived from the canonical abs
+    /// path of `<dir>`, truncated to 8 hex chars. Exposed so external
+    /// scripts / chat clients can build the URL without round-tripping
+    /// through the proxy.
+    WorkspaceId {
+        #[arg(value_name = "DIR")]
+        path: PathBuf,
     },
 
     /// Run the MCP daemon. Default transport: stdio. Use `--http` to serve
@@ -290,9 +307,10 @@ fn main_inner() -> Result<(), ServerError> {
         Command::LspSxd => cmd_lsp_sxd(),
         Command::Proxy {
             bind,
-            workspace,
+            workspaces,
             retry_window_secs,
-        } => cmd_proxy(bind, workspace, retry_window_secs),
+        } => cmd_proxy(bind, workspaces, retry_window_secs),
+        Command::WorkspaceId { path } => cmd_workspace_id(&path),
         Command::Mcp {
             path,
             readonly,
@@ -433,16 +451,23 @@ fn cmd_lsp_sxd() -> Result<(), ServerError> {
 
 fn cmd_proxy(
     bind: Option<String>,
-    workspace: Option<PathBuf>,
+    workspaces: Vec<PathBuf>,
     retry_window_secs: u64,
 ) -> Result<(), ServerError> {
-    let workspace = workspace
-        .map_or_else(std::env::current_dir, Ok)
-        .map_err(ServerError::Io)?;
-    let bind_addr = resolve_proxy_bind(&workspace, bind);
+    let workspaces = if workspaces.is_empty() {
+        vec![std::env::current_dir().map_err(ServerError::Io)?]
+    } else {
+        workspaces
+    };
+    // Proxy bind resolution still keys off the FIRST workspace's sxd —
+    // the proxy itself is shared across all registered workspaces, so
+    // declaring `proxy { bind ... }` separately in every sxd would be
+    // redundant. Treat the first --workspace as the "primary" for
+    // bind-level config.
+    let bind_addr = resolve_proxy_bind(&workspaces[0], bind);
     let cfg = standardoc_mcp_proxy::ProxyConfig {
         bind_addr,
-        workspace_root: workspace,
+        workspaces,
         upstream_retry_window: Duration::from_secs(retry_window_secs),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -456,6 +481,12 @@ fn cmd_proxy(
     runtime
         .block_on(standardoc_mcp_proxy::run(cfg))
         .map_err(|e| ServerError::Io(io::Error::other(format!("proxy: {e}"))))
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_workspace_id(path: &Path) -> Result<(), ServerError> {
+    println!("{}", standardoc_mcp_proxy::workspace_id_for(path));
+    Ok(())
 }
 
 /// Precedence: CLI `--bind` wins outright when passed, else compose

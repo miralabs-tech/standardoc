@@ -2984,6 +2984,7 @@ name = "standardoc-mcp-proxy"
 version = "1.0.0-beta.2"
 dependencies = [
  "axum",
+ "blake3",
  "bytes",
  "http",
  "notify",

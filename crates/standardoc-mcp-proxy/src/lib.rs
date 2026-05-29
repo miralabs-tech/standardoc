@@ -13,4 +13,4 @@
 
 mod proxy;
 
-pub use proxy::{ProxyConfig, ProxyError, run};
+pub use proxy::{ProxyConfig, ProxyError, run, workspace_id_for};

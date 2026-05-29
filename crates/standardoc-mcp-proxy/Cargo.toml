@@ -19,6 +19,9 @@ tokio-util = { workspace = true }
 notify     = { workspace = true }
 notify-debouncer-full = { workspace = true }
 thiserror  = { workspace = true }
+# Deterministic short IDs per workspace abs path so external clients
+# can build /ws/<id>/mcp URLs without round-tripping for registration.
+blake3     = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
