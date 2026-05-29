@@ -69,6 +69,27 @@ pub(crate) fn reindex_paths(
         return Ok(());
     }
     let workspace_root = handle.workspace_root().to_path_buf();
+
+    // GRTR Phase 5.a — re-run `workspace_prepare` over the full
+    // workspace candidate list whenever a `.rs` file is in the change
+    // set. The Rust provider's `GlobalReturnTypeRegistry` is a
+    // workspace-wide table: a single file change can invalidate
+    // entries for any consumer that referenced its fns. The simplest
+    // correct strategy is a full re-Pass-0 on every relevant watcher
+    // event ; an incremental side-index (Phase 5.b) is deferred until
+    // measured perf warrants it.
+    if paths
+        .iter()
+        .any(|p| Path::new(p).extension().is_some_and(|e| e.eq_ignore_ascii_case("rs")))
+    {
+        let candidates = crate::pipeline::cold_start::collect_candidates(&workspace_root, filters)?;
+        let rel_candidates: Vec<String> = candidates
+            .iter()
+            .filter_map(|abs| to_workspace_relative(abs, &workspace_root))
+            .collect();
+        provider.workspace_prepare(&workspace_root, &rel_candidates);
+    }
+
     let mut outcomes = Vec::with_capacity(paths.len());
     for rel in paths {
         if filters.is_skipped(rel) {
