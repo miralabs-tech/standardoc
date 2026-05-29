@@ -33,11 +33,17 @@ standarx-dsl-lsp         = { workspace = true }
 # `lsp_types` types we use to construct hover payloads share the
 # same vtable as the trait the Schema impl satisfies.
 tower-lsp                = "0.20"
+# `self-update` subcommand pulls a release archive over HTTPS, verifies
+# its sha256, extracts via system tar, and atomically swaps the running
+# binary. Reqwest is already shared via standardoc-server's MCP proxy.
+reqwest                  = { workspace = true }
+sha2                     = "0.10"
+tempfile                 = { workspace = true }
+thiserror                = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
-tempfile   = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,5 +1,6 @@
 #![allow(clippy::result_large_err)]
 
+mod self_update;
 mod sxd_schema;
 mod warn;
 
@@ -89,13 +90,14 @@ enum Command {
     /// `<id>` is a deterministic blake3 short hash of the workspace's
     /// canonical abs path — print it via `standardoc workspace-id <dir>`.
     ///
-    /// Bind precedence: `--bind` flag > `proxy { bind "..." port N }`
-    /// in the FIRST workspace's `standardoc.sxd` > `127.0.0.1:7700`.
+    /// Bind precedence: `--bind` flag > `127.0.0.1:7700`. The VSCode
+    /// extension passes `--bind` from the per-user settings
+    /// `standardoc.proxyBind` / `standardoc.proxyPort` ; workspace
+    /// `standardoc.sxd` is NOT read here (proxy is a per-machine
+    /// singleton, not a per-workspace resource — see Bug F).
     Proxy {
-        /// Explicit `host:port` bind override. When omitted the proxy
-        /// reads `proxy { bind "..." port N }` from the first
-        /// workspace's `standardoc.sxd` and falls back to
-        /// `127.0.0.1:7700` otherwise.
+        /// Explicit `host:port` bind override. When omitted, defaults
+        /// to `127.0.0.1:7700`.
         #[arg(long)]
         bind: Option<String>,
 
@@ -190,6 +192,36 @@ enum Command {
     Claude {
         #[command(subcommand)]
         action: ClaudeAction,
+    },
+
+    /// Atomically upgrade the running `standardoc` binary to the latest
+    /// published release. Reads the same `version.json` manifest the
+    /// VSCode extension consumes ; downloads + sha256-verifies the
+    /// archive for the current platform ; extracts via the system
+    /// `tar` tool ; swaps the binary in place (Windows: rename
+    /// current to `<name>.exe.old`, copy new in ; Unix: atomic
+    /// `rename`).
+    ///
+    /// No-op when the binary is already on the latest version unless
+    /// `--force` is passed. `--dry-run` resolves and prints what
+    /// would happen without touching the filesystem.
+    SelfUpdate {
+        /// Resolve the latest version + asset URL and stop. Does not
+        /// download or swap the binary.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Re-install the latest version even when the binary already
+        /// reports it. Useful for recovering from a corrupted install
+        /// or after a force-pushed release tag.
+        #[arg(long)]
+        force: bool,
+
+        /// Pin the update to a specific release tag (e.g. `v1.0.0-beta.3`)
+        /// instead of following `releases/latest`. Mainly for
+        /// rollbacks ; CI normally omits this.
+        #[arg(long, value_name = "TAG")]
+        version: Option<String>,
     },
 }
 
@@ -330,7 +362,23 @@ fn main_inner() -> Result<(), ServerError> {
         Command::Claude { action } => match action {
             ClaudeAction::PreToolHook { mode } => cmd_claude_pre_tool_hook(&mode),
         },
+        Command::SelfUpdate {
+            dry_run,
+            force,
+            version,
+        } => cmd_self_update(dry_run, force, version),
     }
+}
+
+fn cmd_self_update(dry_run: bool, force: bool, version: Option<String>) -> Result<(), ServerError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(ServerError::Io)?;
+    runtime
+        .block_on(self_update::run(dry_run, force, version))
+        .map_err(|e| ServerError::Io(io::Error::other(format!("self-update: {e}"))))?;
+    Ok(())
 }
 
 /// File name (under `<cwd>/.standardoc/`) used to record that the agent has
