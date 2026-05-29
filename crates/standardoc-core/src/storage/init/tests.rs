@@ -47,7 +47,7 @@ fn init_creates_all_expected_tables() {
 }
 
 #[test]
-fn init_seeds_schema_version_at_v5() {
+fn init_seeds_schema_version_at_v6() {
     let conn = fresh_conn();
     run_init_schema(&conn).unwrap();
     let v: String = conn
@@ -57,7 +57,7 @@ fn init_seeds_schema_version_at_v5() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(v, "5");
+    assert_eq!(v, "6");
 }
 
 #[test]

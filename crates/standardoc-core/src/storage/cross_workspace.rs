@@ -36,9 +36,11 @@ pub struct CrossWorkspaceResolution {
 }
 
 fn decode_module_lookup(bytes: &[u8]) -> Result<ModuleLookup, StorageError> {
-    bincode::deserialize::<ModuleLookup>(bytes).map_err(|e| StorageError::InvalidStoredData {
-        detail: format!("ModuleLookup decode (cross-workspace): {e}"),
-    })
+    bincode::serde::decode_from_slice::<ModuleLookup, _>(bytes, bincode::config::standard())
+        .map(|(value, _)| value)
+        .map_err(|e| StorageError::InvalidStoredData {
+            detail: format!("ModuleLookup decode (cross-workspace): {e}"),
+        })
 }
 
 /// Resolve an import `<origin_module>::<origin_symbol>` against the

@@ -17,7 +17,7 @@ CREATE TABLE schema_meta (
 );
 
 INSERT INTO schema_meta (key, value) VALUES
-  ('schema_version',              '5'),
+  ('schema_version',              '6'),
   ('workspace_root',              ''),
   ('created_at',                  ''),
   ('cold_start_progress',         ''),

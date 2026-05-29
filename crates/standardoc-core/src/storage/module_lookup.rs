@@ -47,8 +47,8 @@ pub(crate) fn put_module_lookup(
     workspace_id: &str,
     lookup: &ModuleLookup,
 ) -> Result<(), StorageError> {
-    let payload =
-        bincode::serialize(lookup).map_err(|e| bincode_to_storage("ModuleLookup encode", e))?;
+    let payload = bincode::serde::encode_to_vec(lookup, bincode::config::standard())
+        .map_err(|e| bincode_to_storage("ModuleLookup encode", e))?;
     let language = language_storage_slug(lookup.language);
     let built_at = i64::try_from(lookup.built_at_epoch_ms).unwrap_or(i64::MAX);
 
@@ -121,7 +121,8 @@ pub(crate) fn get_module_lookup(
 
     payload
         .map(|bytes| {
-            bincode::deserialize::<ModuleLookup>(&bytes)
+            bincode::serde::decode_from_slice::<ModuleLookup, _>(&bytes, bincode::config::standard())
+                .map(|(value, _)| value)
                 .map_err(|e| bincode_to_storage("ModuleLookup decode", e))
         })
         .transpose()

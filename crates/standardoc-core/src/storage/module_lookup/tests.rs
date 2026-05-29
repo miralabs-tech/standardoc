@@ -67,8 +67,9 @@ fn put_then_get_roundtrips_exactly() {
     let lookup = sample_lookup("my_crate::module", Language::Rust);
 
     // Sanity: pure in-memory bincode roundtrip (no SQLite in the loop).
-    let bytes = bincode::serialize(&lookup).expect("encode");
-    let decoded: ModuleLookup = bincode::deserialize(&bytes).expect("decode");
+    let bytes = bincode::serde::encode_to_vec(&lookup, bincode::config::standard()).expect("encode");
+    let (decoded, _): (ModuleLookup, _) =
+        bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).expect("decode");
     assert_eq!(decoded, lookup, "in-memory roundtrip must work");
 
     put_module_lookup(&conn, PRIMARY_WORKSPACE_ID, &lookup).unwrap();
