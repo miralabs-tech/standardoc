@@ -68,7 +68,12 @@ enum Command {
     /// `ignore` / `project` / `group` rules) diagnostics live as the
     /// user edits. Stateless and workspace-agnostic — every open .sxd
     /// document validates independently.
-    LspSxd,
+    LspSxd {
+        /// Accepted for vscode-languageclient compatibility; stdio is the only
+        /// transport supported and is the default — this flag is ignored.
+        #[arg(long, hide = true)]
+        stdio: bool,
+    },
 
     /// Long-lived HTTP proxy in front of one or more daemons. Keeps
     /// every MCP client (Claude Code, Copilot Chat, …) connected to a
@@ -304,7 +309,7 @@ fn main_inner() -> Result<(), ServerError> {
         Command::Rescan { path } => cmd_rescan(&path),
         Command::PurgeExcluded { path, yes } => cmd_purge_excluded(&path, yes),
         Command::Lsp { path, stdio: _ } => cmd_lsp(&path),
-        Command::LspSxd => cmd_lsp_sxd(),
+        Command::LspSxd { stdio: _ } => cmd_lsp_sxd(),
         Command::Proxy {
             bind,
             workspaces,
