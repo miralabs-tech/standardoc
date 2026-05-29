@@ -1,15 +1,16 @@
 import * as vscode from 'vscode';
 import { spawn } from 'node:child_process';
 import { resolveBinary } from '../daemon/binary';
-import { renderHoverMarkdown, type PatternPreview } from '../stdignore/hover-render';
+import {
+  renderPreviewMarkdown,
+  type PatternPreview,
+} from '../stdignore/hover-render';
+import { detectHoverTarget } from './hover-detect';
 
 const LANGUAGE_ID = 'standardoc-sxd';
 const PREVIEW_LIMIT = 20;
 const PREVIEW_TIMEOUT_MS = 5_000;
 const HOVER_DEBOUNCE_MS = 250;
-
-const PATTERNS_OPEN_RE = /^\s*patterns\s+```/;
-const PATTERNS_CLOSE_RE = /^\s*```/;
 
 export function registerSxdHover(
   context: vscode.ExtensionContext,
@@ -19,16 +20,16 @@ export function registerSxdHover(
   const provider: vscode.HoverProvider = {
     async provideHover(document, position, token) {
       if (document.languageId !== LANGUAGE_ID) return null;
-      if (!isInsideIgnorePatternsBlock(document, position.line)) return null;
-      const lineText = document.lineAt(position.line).text;
-      const pattern = lineText.trim();
-      if (pattern.length === 0 || pattern.startsWith('#') || PATTERNS_CLOSE_RE.test(lineText)) {
-        return null;
-      }
+      const target = detectHoverTarget(document, position);
+      if (!target) return null;
       try {
-        const preview = await runPreview(context, workspaceRoot, pattern, output, token);
+        const preview = await runPreview(context, workspaceRoot, target.value, output, token);
         if (token.isCancellationRequested) return null;
-        const md = new vscode.MarkdownString(renderHoverMarkdown(preview), false);
+        const label = target.kind === 'pattern' ? 'Pattern' : 'Path';
+        const md = new vscode.MarkdownString(
+          renderPreviewMarkdown(preview, label),
+          false,
+        );
         md.isTrusted = false;
         return new vscode.Hover(md);
       } catch (e) {
@@ -40,35 +41,6 @@ export function registerSxdHover(
     },
   };
   context.subscriptions.push(vscode.languages.registerHoverProvider(LANGUAGE_ID, provider));
-}
-
-// Heuristic: walk back from `lineNumber` looking for `patterns ```` ; bail
-// if we hit a `}` (block close) or another `patterns ```` first. Symmetric
-// forward scan for the closing fence. The hover only fires inside that
-// range — anything outside (version, project blocks, ignore { ... } braces,
-// blank lines, comments above the block) is suppressed.
-function isInsideIgnorePatternsBlock(
-  document: vscode.TextDocument,
-  lineNumber: number,
-): boolean {
-  let opened = false;
-  for (let i = lineNumber - 1; i >= 0; i--) {
-    const text = document.lineAt(i).text;
-    if (PATTERNS_OPEN_RE.test(text)) {
-      opened = true;
-      break;
-    }
-    if (/^\s*\}/.test(text) || /^\s*[a-z]+\s*\{/.test(text)) {
-      return false;
-    }
-  }
-  if (!opened) return false;
-  for (let i = lineNumber + 1; i < document.lineCount; i++) {
-    const text = document.lineAt(i).text;
-    if (PATTERNS_CLOSE_RE.test(text)) return true;
-    if (PATTERNS_OPEN_RE.test(text)) return false;
-  }
-  return false;
 }
 
 async function runPreview(
@@ -129,5 +101,4 @@ export const __test_internals = {
   PREVIEW_LIMIT,
   PREVIEW_TIMEOUT_MS,
   LANGUAGE_ID,
-  isInsideIgnorePatternsBlock,
 };

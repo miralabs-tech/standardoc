@@ -39,3 +39,21 @@ project "standarx-dsl" {
   label "Standarx DSL"
   path ".projects/standarx-dsl"
 }
+
+# C.3 transport/runtime ports — declared explicitly so the schema
+# hover surfaces the relevant doc and overrides are visible at a glance.
+# These match the built-in defaults ; tweak only when you need to
+# avoid a local port collision.
+
+mcp {
+  port 7700
+}
+
+viz {
+  port 3000
+}
+
+proxy {
+  bind "127.0.0.1"
+  port 7700
+}

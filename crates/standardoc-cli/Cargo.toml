@@ -29,6 +29,10 @@ tokio                    = { workspace = true }
 # downstream SxdSchema plugged in for schema-aware diagnostics.
 standarx-dsl             = { workspace = true }
 standarx-dsl-lsp         = { workspace = true }
+# Pinned to match standarx-dsl-lsp's own tower-lsp version so the
+# `lsp_types` types we use to construct hover payloads share the
+# same vtable as the trait the Schema impl satisfies.
+tower-lsp                = "0.20"
 
 [dev-dependencies]
 assert_cmd = "2"

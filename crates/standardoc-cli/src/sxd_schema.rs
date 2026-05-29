@@ -17,9 +17,18 @@
 //! tower-lsp + tokio LSP runtime stays out of the core dependency
 //! graph — only the daemon binary needs it.
 
-use standarx_dsl::ast::{Block, Expr, Stmt, StmtNode};
+use standarx_dsl::ast::{Block, Expr, Stmt, StmtNode, StringPart};
+use standarx_dsl::diag::Span;
 use standarx_dsl::{Diag, File};
 use standarx_dsl_lsp::Schema;
+use standarx_dsl_lsp::conversion::span_to_range;
+use standarx_dsl_lsp::schema::Hover;
+use tower_lsp::lsp_types::{HoverContents, MarkupContent, MarkupKind};
+
+/// Schema version this build of standardoc accepts in `.sxd` files.
+/// Surfaced verbatim by the `version` hover so the editor can warn
+/// when a workspace pins a different version than the binary.
+pub(crate) const SUPPORTED_SXD_VERSION: &str = "0.1.0";
 
 pub(crate) struct SxdSchema;
 
@@ -30,6 +39,15 @@ impl Schema for SxdSchema {
             validate_top_stmt(stmt, &mut diags);
         }
         diags
+    }
+
+    fn hover(&self, file: &File, src: &str, offset: usize) -> Option<Hover> {
+        for stmt in &file.stmts {
+            if let Some(h) = hover_in_top_stmt(stmt, src, offset) {
+                return Some(h);
+            }
+        }
+        None
     }
 }
 
@@ -298,7 +316,7 @@ fn expect_plain_string(
     match &value.node {
         Expr::String(lit) => {
             for part in &lit.parts {
-                if let standarx_dsl::ast::StringPart::Interp(interp) = part {
+                if let StringPart::Interp(interp) = part {
                     diags.push(Diag::schema(
                         interp.span.clone(),
                         format!(
@@ -333,6 +351,175 @@ fn expect_string_list(
     }
 }
 
+// ---------- hover ----------
+
+fn hover_in_top_stmt(stmt: &StmtNode, src: &str, offset: usize) -> Option<Hover> {
+    match &stmt.node {
+        Stmt::Assign(a) => {
+            if !span_contains(&a.key.span, offset) {
+                return None;
+            }
+            if a.key.node.as_str() == "version" {
+                let declared = string_value(&a.value.node).unwrap_or("<unset>");
+                Some(markdown_hover(version_doc(declared), src, &a.key.span))
+            } else {
+                // Unknown top-level key — diagnostics already flag it,
+                // hover stays silent to avoid drowning the squiggle.
+                None
+            }
+        }
+        Stmt::Block(b) => {
+            if span_contains(&b.kind.span, offset) {
+                return Some(markdown_hover(
+                    block_kind_doc(b.kind.node.as_str()),
+                    src,
+                    &b.kind.span,
+                ));
+            }
+            for inner in &b.stmts {
+                if let Some(h) = hover_in_inner_stmt(inner, b.kind.node.as_str(), src, offset) {
+                    return Some(h);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn hover_in_inner_stmt(
+    stmt: &StmtNode,
+    parent_kind: &str,
+    src: &str,
+    offset: usize,
+) -> Option<Hover> {
+    let Stmt::Assign(a) = &stmt.node else {
+        return None;
+    };
+    if !span_contains(&a.key.span, offset) {
+        return None;
+    }
+    let doc = field_key_doc(parent_kind, a.key.node.as_str())?;
+    Some(markdown_hover(doc, src, &a.key.span))
+}
+
+const fn span_contains(span: &Span, offset: usize) -> bool {
+    // Inclusive on both ends — LSP can land the cursor right at the
+    // token boundary (e.g. after typing the last char) and the user
+    // still expects hover to fire on that token.
+    offset >= span.start && offset <= span.end
+}
+
+fn string_value(expr: &Expr) -> Option<&str> {
+    let Expr::String(lit) = expr else {
+        return None;
+    };
+    lit.parts.iter().find_map(|p| match p {
+        StringPart::Lit(s) => Some(s.as_str()),
+        // `StringPart` is `#[non_exhaustive]` (currently only `Lit`
+        // and `Interp`) — extra variants degrade to "no plain value"
+        // rather than crashing on a hover.
+        _ => None,
+    })
+}
+
+fn markdown_hover(value: String, src: &str, span: &Span) -> Hover {
+    Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        }),
+        range: Some(span_to_range(src, span)),
+    }
+}
+
+fn version_doc(declared: &str) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    s.push_str("**`version`** — schema version this `.sxd` file targets.\n\n");
+    let _ = writeln!(s, "- Supported by this build : `{SUPPORTED_SXD_VERSION}`");
+    let _ = writeln!(s, "- Declared in this file : `{declared}`");
+    if declared != SUPPORTED_SXD_VERSION && declared != "<unset>" {
+        s.push_str(
+            "\n_Version mismatch — the parser may accept it for forward-compat \
+             but some fields can be ignored._\n",
+        );
+    }
+    s
+}
+
+fn block_kind_doc(kind: &str) -> String {
+    match kind {
+        "ignore" => "**`ignore`** — path patterns excluded from indexing.\n\n\
+                     Single field : `patterns` (triple-backtick block of \
+                     gitignore-syntax lines, one per line)."
+            .to_string(),
+        "project" => "**`project \"<slug>\"`** — explicit project root.\n\n\
+                      When at least one `project` block is declared, mechanical \
+                      detection (cargo workspaces, npm packages, lua rockspecs) is \
+                      short-circuited and only these projects are indexed.\n\n\
+                      Fields : `label`, `path` *or* `paths`."
+            .to_string(),
+        "group" => "**`group \"<slug>\"`** — logical grouping of projects.\n\n\
+                    Used for cross-workspace views and roll-up displays in the viz.\n\n\
+                    Fields : `label`, `members`."
+            .to_string(),
+        "mcp" => "**`mcp`** — local MCP HTTP transport.\n\n\
+                  Field : `port` (default `7700`).\n\n\
+                  Read by the daemon when binding the MCP endpoint ; \
+                  overridable on the CLI."
+            .to_string(),
+        "viz" => "**`viz`** — graph viz playground.\n\n\
+                  Field : `port` (default `3000`).\n\n\
+                  Read by the `Standardoc: Open Graph Viz` command to know which \
+                  port to probe / open."
+            .to_string(),
+        "proxy" => "**`proxy`** — multi-workspace MCP proxy.\n\n\
+                    Fields : `bind` (default `127.0.0.1`), `port` (default `7700`).\n\n\
+                    The proxy is a singleton across all VSCode windows — siblings \
+                    auto-register their workspace and exit."
+            .to_string(),
+        other => format!("**`{other}`** — unknown block kind."),
+    }
+}
+
+fn field_key_doc(parent_kind: &str, key: &str) -> Option<String> {
+    let doc = match (parent_kind, key) {
+        ("ignore", "patterns") => {
+            "**`patterns`** — triple-backtick block of gitignore-syntax lines, \
+             one per line. Blank lines and `#` comments are accepted."
+        }
+        ("project", "label") => {
+            "**`label \"...\"`** — display name shown in trees, viz, and CLI \
+             listings. Optional ; defaults to the slug."
+        }
+        ("project", "path") => {
+            "**`path \"...\"`** — single workspace-relative directory to index for \
+             this project. Mutually exclusive with `paths`."
+        }
+        ("project", "paths") => {
+            "**`paths [ \"...\" ... ]`** — list of workspace-relative directories \
+             to index for this project. Mutually exclusive with `path`."
+        }
+        ("group", "label") => {
+            "**`label \"...\"`** — display name for this group. Optional ; defaults \
+             to the slug."
+        }
+        ("group", "members") => {
+            "**`members [ \"<project-slug>\" ... ]`** — project slugs that belong \
+             to this group. Each slug must match a `project` block declared \
+             elsewhere in this file."
+        }
+        ("mcp" | "viz" | "proxy", "port") => "**`port <u16>`** — TCP port (1..=65535).",
+        ("proxy", "bind") => {
+            "**`bind \"<host>\"`** — bind address for the proxy listener \
+             (e.g. `\"127.0.0.1\"`, `\"0.0.0.0\"`)."
+        }
+        _ => return None,
+    };
+    Some(doc.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +527,17 @@ mod tests {
     fn diags_for(src: &str) -> Vec<Diag> {
         let file = standarx_dsl::parse(src).expect("parse ok");
         SxdSchema.validate(&file, src)
+    }
+
+    fn hover_at(src: &str, needle: &str) -> Option<String> {
+        let file = standarx_dsl::parse(src).expect("parse ok");
+        let pos = src.find(needle).expect("needle present");
+        let offset = pos + needle.len() / 2;
+        let h = SxdSchema.hover(&file, src, offset)?;
+        match h.contents {
+            HoverContents::Markup(m) => Some(m.value),
+            _ => None,
+        }
     }
 
     #[test]
@@ -472,5 +670,104 @@ ignore { patterns ```.git/``` }
         let diags = diags_for(src);
         // 1 unknown block + 1 unknown field + 1 missing path = 3 diags
         assert!(diags.len() >= 2, "expected multiple diags, got: {diags:?}");
+    }
+
+    // ---------- hover ----------
+
+    #[test]
+    fn hover_on_version_key_shows_supported_and_declared() {
+        let src = "version \"0.1.0\"\n";
+        let md = hover_at(src, "version").expect("hover");
+        assert!(md.contains("Supported by this build"), "got: {md}");
+        assert!(md.contains("0.1.0"), "got: {md}");
+        assert!(!md.contains("Version mismatch"), "got: {md}");
+    }
+
+    #[test]
+    fn hover_on_version_key_flags_mismatch() {
+        let src = "version \"0.9.9\"\n";
+        let md = hover_at(src, "version").expect("hover");
+        assert!(md.contains("Version mismatch"), "got: {md}");
+    }
+
+    #[test]
+    fn hover_on_block_kind_returns_doc() {
+        let src = "project \"x\" { path \"foo\" }\n";
+        let md = hover_at(src, "project").expect("hover");
+        assert!(md.contains("explicit project root"), "got: {md}");
+    }
+
+    #[test]
+    fn hover_on_each_block_kind_has_distinct_doc() {
+        for (src, marker) in [
+            ("ignore { patterns ```a``` }\n", "ignore"),
+            ("group \"g\" { members [\"x\"] }\n", "group"),
+            ("mcp { port 7700 }\n", "mcp"),
+            ("viz { port 3000 }\n", "viz"),
+            ("proxy { port 7700 }\n", "proxy"),
+        ] {
+            let md = hover_at(src, marker).unwrap_or_else(|| panic!("no hover for `{marker}`"));
+            assert!(
+                md.to_lowercase().contains(marker),
+                "expected `{marker}` doc to mention itself, got: {md}"
+            );
+        }
+    }
+
+    #[test]
+    fn hover_on_field_key_scoped_by_parent_block() {
+        let src = "project \"x\" { path \"foo\" }\n";
+        let md = hover_at(src, "path").expect("hover");
+        assert!(md.contains("single workspace-relative"), "got: {md}");
+        assert!(md.contains("Mutually exclusive"), "got: {md}");
+    }
+
+    #[test]
+    fn hover_on_proxy_bind_returns_doc() {
+        let src = "proxy { bind \"127.0.0.1\" port 7700 }\n";
+        let md = hover_at(src, "bind").expect("hover");
+        assert!(md.contains("bind address"), "got: {md}");
+    }
+
+    #[test]
+    fn hover_on_port_inside_mcp_block() {
+        let src = "mcp { port 7700 }\n";
+        let md = hover_at(src, "port").expect("hover");
+        assert!(md.contains("TCP port"), "got: {md}");
+    }
+
+    #[test]
+    fn hover_outside_known_tokens_returns_none() {
+        let src = "project \"x\" { path \"foo\" }\n";
+        // cursor inside the value "foo" — TS hover handles this, LSP stays silent.
+        let h = {
+            let file = standarx_dsl::parse(src).unwrap();
+            let pos = src.find("foo").unwrap();
+            SxdSchema.hover(&file, src, pos + 1)
+        };
+        assert!(h.is_none(), "value hover should be TS-side, not LSP");
+    }
+
+    #[test]
+    fn hover_on_unknown_field_key_returns_none() {
+        let src = "project \"x\" { frobulate \"y\" path \"a\" }\n";
+        let h = {
+            let file = standarx_dsl::parse(src).unwrap();
+            let pos = src.find("frobulate").unwrap();
+            SxdSchema.hover(&file, src, pos)
+        };
+        assert!(h.is_none(), "unknown key has no doc");
+    }
+
+    #[test]
+    fn hover_carries_range_spanning_the_key_token() {
+        let src = "version \"0.1.0\"\n";
+        let file = standarx_dsl::parse(src).unwrap();
+        let pos = src.find("version").unwrap();
+        let h = SxdSchema.hover(&file, src, pos).expect("hover");
+        let range = h.range.expect("range present");
+        assert_eq!(range.start.line, 0);
+        assert_eq!(range.start.character, 0);
+        assert_eq!(range.end.character, u32::try_from("version".len()).unwrap());
     }
 }
