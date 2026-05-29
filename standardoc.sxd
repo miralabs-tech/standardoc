@@ -41,19 +41,15 @@ project "standarx-dsl" {
 }
 
 # C.3 transport/runtime ports — declared explicitly so the schema
-# hover surfaces the relevant doc and overrides are visible at a glance.
-# These match the built-in defaults ; tweak only when you need to
-# avoid a local port collision.
+# hover surfaces the relevant doc and the values used here are visible
+# at a glance. `proxy { ... }` is intentionally NOT declared: it's a
+# per-machine singleton (default 7700) and `proxy.port` MUST differ
+# from `mcp.port` (the proxy forwards INTO the mcp daemon).
 
 mcp {
-  port 7700
+  port 7701
 }
 
 viz {
   port 3000
-}
-
-proxy {
-  bind "127.0.0.1"
-  port 7700
 }
