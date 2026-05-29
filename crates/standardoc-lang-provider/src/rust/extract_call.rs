@@ -337,9 +337,17 @@ impl CallVisitor<'_> {
             _ => recv_nominal.to_string(),
         };
         let workspace_fqdn = format!("{recv_fqdn}::{method}");
+        if let Some(t) = self.ctx.return_types.lookup(&workspace_fqdn) {
+            return Some(t.to_string());
+        }
+        // GRTR Phase 4 — same cross-file fallback as
+        // `type_of_call_expr`: when the receiver type's method lives
+        // in a sibling file, the per-file `return_types` misses but
+        // the workspace-global registry holds the seed from Pass 0.
         self.ctx
-            .return_types
-            .lookup(&workspace_fqdn)
+            .global_return_types
+            .as_ref()
+            .and_then(|g| g.lookup(&workspace_fqdn))
             .map(str::to_string)
     }
 
@@ -523,7 +531,18 @@ impl CallVisitor<'_> {
             // aren't candidates for the per-file return table — skip.
             ResolvedOrUnresolved::UnresolvedBridge { .. } => return None,
         };
-        self.ctx.return_types.lookup(&fqdn).map(str::to_string)
+        if let Some(t) = self.ctx.return_types.lookup(&fqdn) {
+            return Some(t.to_string());
+        }
+        // GRTR Phase 4 — fall back to the workspace-global registry
+        // (populated by Pass 0). Catches cross-file chains like
+        // `let x = other_crate::get_user(id); x.name()` where the
+        // fn signature lives in a different file than the caller.
+        self.ctx
+            .global_return_types
+            .as_ref()
+            .and_then(|g| g.lookup(&fqdn))
+            .map(str::to_string)
     }
 
     /// Stage 3e-2-ter — emit a `Calls` edge for a `path` in call

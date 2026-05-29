@@ -71,6 +71,18 @@ pub fn run(
     let candidates = collect_candidates(&workspace_root, filters)?;
     let total = u64_of(candidates.len());
 
+    // GRTR Phase 3 — workspace pre-pass: hand the full candidate list
+    // (workspace-relative) to the provider so it can populate any
+    // workspace-global state (`GlobalReturnTypeRegistry` for the Rust
+    // provider, no-op default for the others) BEFORE the per-file
+    // extract loop. Cross-file fn-return-type chains rely on the
+    // registry being seeded for every file the loop will visit.
+    let rel_candidates: Vec<String> = candidates
+        .iter()
+        .filter_map(|abs| to_workspace_relative(abs, &workspace_root))
+        .collect();
+    provider.workspace_prepare(&workspace_root, &rel_candidates);
+
     set_progress(handle, 0, total)?;
 
     let mut seen: Vec<String> = Vec::with_capacity(candidates.len());

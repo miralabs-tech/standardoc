@@ -25,15 +25,10 @@ use super::global_return_type_registry::GlobalReturnTypeRegistry;
 use super::module_path;
 use super::type_name::parametric_type;
 
-// Phase 3 of the global return-type registry sprint plugs this
-// collector into `cold_start`. Until then only tests construct
-// `WorkspaceFile` and call `collect_global_returns`; the allow drops
-// when the pipeline wiring lands.
 /// Workspace file slot for Pass 0 — one entry per Rust file the
 /// collector should scan. Mirrors the params of
 /// `extract::extract_file` (minus the `path` which is unused at item
 /// scan).
-#[allow(dead_code)]
 pub(crate) struct WorkspaceFile<'a> {
     pub(crate) crate_name: &'a str,
     pub(crate) crate_rel: &'a str,
@@ -44,7 +39,6 @@ pub(crate) struct WorkspaceFile<'a> {
 /// files. Best-effort: files that fail to parse are silently skipped
 /// (the per-file Pass 1 will surface the parse error through its own
 /// path).
-#[allow(dead_code)]
 pub(crate) fn collect_global_returns(files: &[WorkspaceFile<'_>]) -> GlobalReturnTypeRegistry {
     let mut registry = GlobalReturnTypeRegistry::default();
     for f in files {

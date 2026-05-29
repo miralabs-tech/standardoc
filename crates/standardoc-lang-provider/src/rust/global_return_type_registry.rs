@@ -30,18 +30,11 @@ use syn::Type;
 
 use super::type_name::parametric_type;
 
-// Phase 3 of the global return-type registry sprint will wire this
-// type through `cold_start` → `WalkContext` → `type_of_expr`. Until
-// then the production lib only references the type via tests; the
-// allow drops out of the picture when the lookup chain consumer
-// lands.
-#[allow(dead_code)]
 #[derive(Default, Debug)]
 pub(crate) struct GlobalReturnTypeRegistry {
     by_fqdn: HashMap<String, String>,
 }
 
-#[allow(dead_code)]
 impl GlobalReturnTypeRegistry {
     /// Record `<fqdn> -> <ret_type>` when `<ret_type>` is nominal.
     /// Silently skips non-nominal return types (closures, tuples,

@@ -10,6 +10,17 @@ pub trait LanguageProvider: Send + Sync {
         ctx: &ExtractContext<'_>,
     ) -> Result<ExtractedFile, ExtractError>;
 
+    /// Workspace-level pre-pass invoked once by `cold_start` and once
+    /// per watcher debounce window before any per-file `extract` call.
+    /// Providers that need a workspace-global view (cross-file type
+    /// flow, symbol-table seeds, ...) populate their state here from
+    /// the same workspace-relative path list `extract` will later be
+    /// driven with.
+    ///
+    /// Default is no-op — providers that don't need workspace-wide
+    /// state see no behavioural change.
+    fn workspace_prepare(&self, _workspace_root: &Path, _rel_paths: &[String]) {}
+
     /// Stage 3e-1: builtin entries the pipeline should eagerly seed at
     /// cold-start so the synthetic FQDNs emitted by tier-aware resolvers
     /// (`<builtin>::ts::Math`, `<builtin>::lua::print`, …) resolve to a

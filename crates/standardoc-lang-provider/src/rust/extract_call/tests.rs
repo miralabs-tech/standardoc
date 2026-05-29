@@ -1673,3 +1673,65 @@ fn field_as_call_via_ref_receiver_is_suppressed() {
         "field-as-CALL through &S must be suppressed, got: {cb_calls:#?}"
     );
 }
+
+// --- GRTR Phase 4: workspace-global return-type lookup chain ---
+
+#[test]
+fn cross_file_workspace_call_resolves_receiver_type_via_global_registry() {
+    // Simulates Pass 0 having already walked `other_crate` and recorded
+    // `other_crate::get_user -> User`. The walked file lives in `c` and
+    // does `let u = other_crate::get_user(); u.name();`. Without GRTR
+    // the `u.name` edge carries `receiver_type = None`; with it the
+    // edge resolves to `receiver_type = "User"`.
+    use std::sync::Arc;
+    use syn::parse_quote;
+
+    use super::super::global_return_type_registry::GlobalReturnTypeRegistry;
+    use super::super::walk::walk_with_lookup;
+
+    let mut registry = GlobalReturnTypeRegistry::default();
+    let ret_ty: syn::Type = parse_quote!(User);
+    registry.record("other_crate::get_user", &ret_ty);
+    let registry = Arc::new(registry);
+
+    let parsed = parse(
+        "fn caller() { let u = other_crate::get_user(); u.name(); }",
+    );
+    let (_, edges, _, _, _) = walk_with_lookup(
+        &parsed,
+        "c",
+        "src/lib.rs",
+        "c",
+        Some(Arc::clone(&registry)),
+    );
+    let name_edge = calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "name"))
+        .expect("name() CALLS edge");
+    assert_eq!(
+        name_edge.receiver_type.as_deref(),
+        Some("User"),
+        "GRTR must propagate `User` to receiver_type for `u.name()` via Pass 0 seeded `other_crate::get_user` return"
+    );
+}
+
+#[test]
+fn cross_file_lookup_misses_when_registry_is_none() {
+    // Sanity: when GRTR isn't seeded (None) the per-file table alone
+    // can't resolve `other_crate::get_user` because the fn is not
+    // declared in this file. The `u.name()` edge stays
+    // receiver_type=None — matching the pre-GRTR behaviour.
+    use super::super::walk::walk_with_lookup;
+    let parsed = parse(
+        "fn caller() { let u = other_crate::get_user(); u.name(); }",
+    );
+    let (_, edges, _, _, _) = walk_with_lookup(&parsed, "c", "src/lib.rs", "c", None);
+    let name_edge = calls(&edges)
+        .into_iter()
+        .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "name"))
+        .expect("name() CALLS edge");
+    assert_eq!(
+        name_edge.receiver_type, None,
+        "without GRTR the cross-file fn return type stays unresolved"
+    );
+}

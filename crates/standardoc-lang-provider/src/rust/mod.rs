@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
 use standardoc_ir::ExtractedFile;
+
+use self::collect_globals::{collect_global_returns, WorkspaceFile};
+use self::global_return_type_registry::GlobalReturnTypeRegistry;
 
 mod body_hash;
 mod collect_globals;
@@ -39,6 +42,13 @@ pub(crate) use ffi_tagger::extract_ffi_bindings;
 #[derive(Debug, Default)]
 pub struct RustProvider {
     crate_name_cache: RwLock<HashMap<PathBuf, String>>,
+    /// Workspace-global return-type registry populated by
+    /// `workspace_prepare`. `None` until the first cold-start /
+    /// watcher pre-pass runs, OR for `RustProvider::new()` instances
+    /// used directly in tests that don't go through `cold_start`.
+    /// `Arc` so per-file `extract` calls hand a cheap clone to the
+    /// `WalkContext` without locking on each lookup.
+    global_return_types: RwLock<Option<Arc<GlobalReturnTypeRegistry>>>,
 }
 
 impl RustProvider {
@@ -115,8 +125,70 @@ impl LanguageProvider for RustProvider {
             |_| path.to_string(),
             |p| p.to_string_lossy().replace('\\', "/"),
         );
-        extract::extract_file(content, path, &crate_name, &crate_rel)
+        let global_returns = self
+            .global_return_types
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().cloned());
+        extract::extract_file(content, path, &crate_name, &crate_rel, global_returns)
     }
+
+    fn workspace_prepare(&self, workspace_root: &Path, rel_paths: &[String]) {
+        // Pass 0 — pre-pass over every `.rs` file in the workspace to
+        // populate `global_return_types`. Pure I/O + parse, no edge
+        // emission, no symbol push. The `cold_start` orchestrator (and
+        // the watcher on file-changes) calls this once before the
+        // per-file `extract` loop so cross-file fn-return-type lookups
+        // succeed during Pass 1.
+        let mut slots: Vec<RustWorkspaceSlot> = Vec::with_capacity(rel_paths.len());
+        for rel in rel_paths {
+            let is_rust = Path::new(rel)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"));
+            if !is_rust {
+                continue;
+            }
+            let abs = workspace_root.join(rel);
+            let Ok(content) = std::fs::read_to_string(&abs) else {
+                continue;
+            };
+            let Ok((crate_name, crate_root_abs)) = self.resolve_crate_info(&abs, rel) else {
+                continue;
+            };
+            let crate_rel = abs.strip_prefix(&crate_root_abs).map_or_else(
+                |_| rel.clone(),
+                |p| p.to_string_lossy().replace('\\', "/"),
+            );
+            slots.push(RustWorkspaceSlot {
+                crate_name,
+                crate_rel,
+                content,
+            });
+        }
+        let files: Vec<WorkspaceFile<'_>> = slots
+            .iter()
+            .map(|s| WorkspaceFile {
+                crate_name: &s.crate_name,
+                crate_rel: &s.crate_rel,
+                content: &s.content,
+            })
+            .collect();
+        let registry = collect_global_returns(&files);
+        if let Ok(mut guard) = self.global_return_types.write() {
+            *guard = Some(Arc::new(registry));
+        }
+    }
+}
+
+/// Owns the (crate_name, crate_rel, content) tuple for one file
+/// during `workspace_prepare`. The `WorkspaceFile` slice handed to
+/// `collect_global_returns` borrows from this, so we keep the owners
+/// alive in a parallel `Vec` and zip them through `&` references at
+/// the call site.
+struct RustWorkspaceSlot {
+    crate_name: String,
+    crate_rel: String,
+    content: String,
 }
 
 #[cfg(test)]

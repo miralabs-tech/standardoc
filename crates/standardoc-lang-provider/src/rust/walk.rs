@@ -57,6 +57,15 @@ pub(crate) struct WalkContext {
     /// Read by `type_of_expr` to propagate types through chains like
     /// `get_thing().method()` where `get_thing` is workspace-defined.
     pub(crate) return_types: super::return_type_table::ReturnTypeTable,
+    /// Workspace-global return-type registry populated by Pass 0
+    /// (`workspace_prepare`). `Some` during cold-start / watcher
+    /// driven extracts ; `None` when tests call `walk` directly
+    /// without the pre-pass. Read by `type_of_expr` as a fallback
+    /// after the per-file `return_types` miss — enables cross-file
+    /// chain propagation like `let x = other_crate::get_user();
+    /// x.name()`.
+    pub(crate) global_return_types:
+        Option<std::sync::Arc<super::global_return_type_registry::GlobalReturnTypeRegistry>>,
 }
 
 impl WalkContext {
@@ -68,6 +77,7 @@ impl WalkContext {
             attribute_flags: HashMap::new(),
             struct_fields: super::struct_field_table::StructFieldTable::default(),
             return_types: super::return_type_table::ReturnTypeTable::default(),
+            global_return_types: None,
         }
     }
 
@@ -386,7 +396,8 @@ pub(crate) fn walk(
     Vec<RawDocument>,
     Vec<RawCallSite>,
 ) {
-    let (s, e, d, c, _lookup) = walk_with_lookup(parsed, module_fqdn, file_path, crate_name);
+    let (s, e, d, c, _lookup) =
+        walk_with_lookup(parsed, module_fqdn, file_path, crate_name, None);
     (s, e, d, c)
 }
 
@@ -394,11 +405,20 @@ pub(crate) fn walk(
 /// [`ModuleLookup`] so callers (production `extract_file`) can stash it
 /// in [`ExtractedFile::module_lookup`] for pipeline persistence. Tests
 /// continue to use [`walk`] when they don't care about the lookup.
+///
+/// GRTR Phase 3 — `global_return_types` is the workspace-wide
+/// `GlobalReturnTypeRegistry` populated by Pass 0
+/// (`RustProvider::workspace_prepare`). `None` for tests that bypass
+/// the cold-start orchestrator ; cross-file fn-return lookups in
+/// `type_of_expr` fall back to the local `ReturnTypeTable` only.
 pub(crate) fn walk_with_lookup(
     parsed: &syn::File,
     module_fqdn: &str,
     file_path: &str,
     crate_name: &str,
+    global_return_types: Option<
+        std::sync::Arc<super::global_return_type_registry::GlobalReturnTypeRegistry>,
+    >,
 ) -> (
     Vec<RawSymbol>,
     Vec<RawEdge>,
@@ -408,6 +428,7 @@ pub(crate) fn walk_with_lookup(
 ) {
     let mut ctx = WalkContext::new(file_path, crate_name, module_fqdn.to_string());
     ctx.core.lookup = super::lookup::build_rust_lookup(parsed, module_fqdn);
+    ctx.global_return_types = global_return_types;
     walk_p1(&mut ctx, &parsed.items, module_fqdn);
     walk_p2(&mut ctx, &parsed.items, module_fqdn);
     flush_attribute_flags(&mut ctx);
