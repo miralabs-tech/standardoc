@@ -317,18 +317,48 @@ fn register_methods(reg: &mut BuiltinRegistry) {
     // lookups from `rust::derive_impls`-emitted IMPLEMENTS edges land on
     // a real builtin symbol row at resolve time. Parent type is the
     // trait name; synthetic fqdn becomes `<builtin>::rust::<Trait>::<method>`.
-    // Mirrors the stdlib trait method surface that gets derived in
-    // practice (Clone, Debug, Default, PartialEq, PartialOrd, Ord, Hash,
-    // Serialize, Deserialize).
-    add(reg, "Clone", &["clone", "clone_from"]);
-    add(reg, "Debug", &["fmt"]);
-    add(reg, "Default", &["default"]);
-    add(reg, "PartialEq", &["eq", "ne"]);
-    add(reg, "PartialOrd", &["partial_cmp", "lt", "le", "gt", "ge"]);
-    add(reg, "Ord", &["cmp", "max", "min", "clamp"]);
-    add(reg, "Hash", &["hash", "hash_slice"]);
-    add(reg, "Serialize", &["serialize"]);
-    add(reg, "Deserialize", &["deserialize"]);
+    // `.with_trait()` stamps the entry so `seed_methods_into` flags the
+    // synthetic symbol as a `trait_method`, exposing it to the resolver's
+    // builtin-trait-method dispatch fallback (`try_resolve_via_builtin_
+    // trait_method`).
+    let add_trait = |reg: &mut BuiltinRegistry, parent_type: &str, methods: &[&str]| {
+        for m in methods {
+            reg.register_method(
+                BuiltinMethodEntry::new(parent_type, *m, Language::Rust).with_trait(),
+            );
+        }
+    };
+    // Derive-able stdlib + serde traits (mirrors `rust::derive_impls`).
+    add_trait(reg, "Clone", &["clone", "clone_from"]);
+    add_trait(reg, "Debug", &["fmt"]);
+    add_trait(reg, "Default", &["default"]);
+    add_trait(reg, "PartialEq", &["eq", "ne"]);
+    add_trait(reg, "PartialOrd", &["partial_cmp", "lt", "le", "gt", "ge"]);
+    add_trait(reg, "Ord", &["cmp", "max", "min", "clamp"]);
+    add_trait(reg, "Hash", &["hash", "hash_slice"]);
+    add_trait(reg, "Serialize", &["serialize"]);
+    add_trait(reg, "Deserialize", &["deserialize"]);
+
+    // Non-derive trait dispatch widening (V1) — these traits are never
+    // `#[derive]`-d but their methods show up massively at call sites
+    // (`str.into()`, `peekable.next()`, `x.to_string()`). The resolver's
+    // builtin-trait-method fallback finds them via the `trait_method`
+    // flag. Scope V1 = unambiguous method names (skip Display::fmt
+    // / AsRef::as_ref which clash with Debug::fmt / Option::as_ref).
+    add_trait(reg, "Into", &["into"]);
+    add_trait(reg, "From", &["from"]);
+    add_trait(reg, "TryFrom", &["try_from"]);
+    add_trait(reg, "TryInto", &["try_into"]);
+    add_trait(reg, "FromStr", &["from_str"]);
+    add_trait(reg, "ToString", &["to_string"]);
+    add_trait(reg, "IntoIterator", &["into_iter"]);
+    // NOTE: Iterator methods are already comprehensively registered
+    // below (with `returns` / `closure_arg` annotations the chain
+    // propagation relies on). Adding them here would create duplicates
+    // that win the first-match `lookup_method` lookup and lose the
+    // existing return-type wiring. The `set_trait_flag` post-pass at
+    // the end of `register_methods` stamps `is_trait=true` on the
+    // already-seeded Iterator entries.
 
     add(
         reg,
@@ -828,4 +858,20 @@ fn register_methods(reg: &mut BuiltinRegistry) {
         "Result",
         &["canonicalize", "read_dir", "metadata", "strip_prefix"],
     );
+
+    // Trait dispatch widening — post-pass: stamp `is_trait=true` on
+    // every method whose `parent_type` is one of the comprehensively-
+    // registered builtin traits (Iterator/IntoIterator/...). Done as a
+    // sweep rather than per-call so the existing add/add_returning/
+    // add_full helpers stay slim and `with_returns`/`with_closure_arg`
+    // wiring is preserved. The flag travels into the seeded symbol's
+    // `trait_method` flag via `seed_methods_into`.
+    if let Some(methods) = reg.methods_by_language.get_mut(&Language::Rust) {
+        const TRAIT_PARENTS: &[&str] = &["Iterator"];
+        for m in methods.iter_mut() {
+            if TRAIT_PARENTS.contains(&m.parent_type.as_str()) {
+                m.is_trait = true;
+            }
+        }
+    }
 }

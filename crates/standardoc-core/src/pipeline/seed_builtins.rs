@@ -181,7 +181,15 @@ pub(crate) fn seed_methods_into(
                 signature: None,
                 body_hash: None,
                 attributes: vec![],
-                flags: vec![],
+                // Trait dispatch widening: stamp `trait_method` on the
+                // synthetic so `try_resolve_via_builtin_trait_method`
+                // can SELECT trait-method targets without distinguishing
+                // them from type methods at SQL time.
+                flags: if method.is_trait {
+                    vec!["trait_method".to_string()]
+                } else {
+                    vec![]
+                },
             };
             insert_symbol(
                 conn,

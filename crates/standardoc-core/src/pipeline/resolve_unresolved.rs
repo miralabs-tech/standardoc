@@ -39,6 +39,11 @@ pub(crate) struct ResolveReport {
     /// the `IMPLEMENTS`-walk fallback after a `receiver_type` miss.
     /// Covers derive-emitted edges (`#[derive(Clone)]` → builtin Clone).
     pub resolved_via_trait_dispatch: usize,
+    /// Non-derive trait widening: subset of `resolved` that came in
+    /// through the builtin-trait-method fallback (`<method>` matches a
+    /// seeded `trait_method`-flagged builtin like `Into::into`).
+    /// Fires after `try_resolve_via_trait_dispatch` misses.
+    pub resolved_via_builtin_trait_method: usize,
     pub still_unresolved: usize,
     pub duplicate_skipped: usize,
 }
@@ -48,10 +53,11 @@ pub(crate) fn apply_resolve_unresolved_quietly(handle: &IndexHandle) {
         Ok(report) => {
             if report.resolved > 0 || report.duplicate_skipped > 0 {
                 eprintln!(
-                    "standardoc unresolved-edge sweep: {} resolved ({} via receiver_type, {} via trait dispatch), {} dup-skipped, {} still unresolved",
+                    "standardoc unresolved-edge sweep: {} resolved ({} via receiver_type, {} via trait dispatch, {} via builtin trait method), {} dup-skipped, {} still unresolved",
                     report.resolved,
                     report.resolved_via_receiver_type,
                     report.resolved_via_trait_dispatch,
+                    report.resolved_via_builtin_trait_method,
                     report.duplicate_skipped,
                     report.still_unresolved,
                 );
@@ -94,6 +100,7 @@ fn apply_resolve_unresolved(handle: &IndexHandle) -> Result<ResolveReport, Stora
     let mut still_unresolved = 0usize;
     let mut resolved_via_receiver_type = 0usize;
     let mut resolved_via_trait_dispatch = 0usize;
+    let mut resolved_via_builtin_trait_method = 0usize;
     let mut fqdn_cache: HashMap<String, Option<i64>> = HashMap::new();
     for edge in unresolved {
         // Bug E-3 Phase 1: when the extractor attached a `receiver_type`
@@ -117,6 +124,17 @@ fn apply_resolve_unresolved(handle: &IndexHandle) -> Result<ResolveReport, Stora
             if let Some(sid) = try_resolve_via_trait_dispatch(&conn, rt, &edge.raw_name)? {
                 id_to_symbol_id.push((edge.edge_id, sid));
                 resolved_via_trait_dispatch += 1;
+                continue;
+            }
+            // Non-derive trait widening: if the method name matches a
+            // seeded builtin trait method (`Into::into`,
+            // `Iterator::next`, `ToString::to_string`, …), use that as
+            // a synthetic last-resort target. Fires only when both the
+            // inherent and IMPLEMENTS-walk paths missed — workspace
+            // and derive data always win.
+            if let Some(sid) = try_resolve_via_builtin_trait_method(&conn, &edge.raw_name)? {
+                id_to_symbol_id.push((edge.edge_id, sid));
+                resolved_via_builtin_trait_method += 1;
                 continue;
             }
         }
@@ -176,6 +194,7 @@ fn apply_resolve_unresolved(handle: &IndexHandle) -> Result<ResolveReport, Stora
         resolved,
         resolved_via_receiver_type,
         resolved_via_trait_dispatch,
+        resolved_via_builtin_trait_method,
         still_unresolved,
         duplicate_skipped,
     })
@@ -285,6 +304,36 @@ fn try_resolve_via_trait_dispatch(
         }
     }
     Ok(None)
+}
+
+/// Non-derive trait widening: when the workspace has no inherent
+/// `<receiver_type>::<method>` AND no IMPLEMENTS edge points the
+/// receiver at a workspace-known trait, fall back to "is this method
+/// name owned by a known builtin trait?".
+///
+/// Queries `symbols` for any synthetic whose fqdn ends in `::<method>`
+/// AND carries the `trait_method` flag set by `seed_methods_into` for
+/// `BuiltinMethodEntry` rows stamped `.with_trait()`. Multiple matches
+/// (e.g. `eq` is on both `PartialEq` and other reflection traits) are
+/// disambiguated alphabetically by fqdn — mirrors the policy chosen
+/// for `try_resolve_via_trait_dispatch`.
+fn try_resolve_via_builtin_trait_method(
+    conn: &Connection,
+    method: &str,
+) -> Result<Option<i64>, StorageError> {
+    let fqdn_pattern = format!("<builtin>::rust::%::{method}");
+    let mut stmt = conn.prepare(
+        "SELECT id FROM symbols \
+         WHERE fqdn LIKE ?1 \
+           AND name = ?2 \
+           AND flags LIKE '%\"trait_method\"%' \
+         ORDER BY fqdn ASC \
+         LIMIT 1",
+    )?;
+    let sid = stmt
+        .query_row([fqdn_pattern.as_str(), method], |row| row.get::<_, i64>(0))
+        .optional()?;
+    Ok(sid)
 }
 
 #[cfg(test)]
@@ -531,6 +580,113 @@ mod tests {
         insert_implements(&conn, vec_sid, clone_sid);
         let got = try_resolve_via_trait_dispatch(&conn, "<builtin>::rust::Vec", "clone").unwrap();
         assert_eq!(got, None);
+    }
+
+    // --- Non-derive trait widening tests ---
+
+    fn insert_trait_method_sym(conn: &Connection, fqdn: &str) -> i64 {
+        let name = fqdn.rsplit("::").next().unwrap_or(fqdn);
+        let mut sym = sample_symbol(name, fqdn);
+        sym.flags = vec!["trait_method".to_string()];
+        let ctx = symbol_ctx("src/lib.rs");
+        insert_symbol(conn, &sym, ctx).expect("insert trait method symbol")
+    }
+
+    #[test]
+    fn builtin_trait_method_resolves_when_method_is_unique_trait() {
+        // `Into::into` is the only trait-flagged builtin that owns
+        // `into`. Resolve picks it up.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let sid = insert_trait_method_sym(&conn, "<builtin>::rust::Into::into");
+        let got = try_resolve_via_builtin_trait_method(&conn, "into").unwrap();
+        assert_eq!(got, Some(sid));
+    }
+
+    #[test]
+    fn builtin_trait_method_returns_none_when_no_seeded_match() {
+        // The receiver is irrelevant — what matters is whether the method
+        // name matches any seeded trait method. Without a row, None.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let got = try_resolve_via_builtin_trait_method(&conn, "into").unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn builtin_trait_method_ignores_unflagged_type_methods() {
+        // `Vec::push` exists as a builtin method symbol but is NOT
+        // flagged `trait_method` (it's a type-method, not a trait
+        // dispatch). It must not bleed into this resolver step.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let _ = insert_sym(&conn, "<builtin>::rust::Vec::push");
+        let got = try_resolve_via_builtin_trait_method(&conn, "push").unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn builtin_trait_method_picks_alphabetical_first_on_collision() {
+        // `eq` exists on both `PartialEq` and a hypothetical `Reflexive`
+        // trait. ORDER BY fqdn ASC → PartialEq (alphabetically first)
+        // wins, matching the trait-dispatch ambiguity policy.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let partial_eq = insert_trait_method_sym(&conn, "<builtin>::rust::PartialEq::eq");
+        let _reflexive = insert_trait_method_sym(&conn, "<builtin>::rust::Reflexive::eq");
+        let got = try_resolve_via_builtin_trait_method(&conn, "eq").unwrap();
+        assert_eq!(got, Some(partial_eq));
+    }
+
+    #[test]
+    fn builtin_trait_method_filters_by_exact_name_not_just_fqdn_suffix() {
+        // A trait method `Into::into` and an unrelated symbol whose
+        // fqdn HAPPENS to end in `::into_something` would both match a
+        // naive `LIKE %::into` filter. The `name = ?` filter cuts that.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let into_sid = insert_trait_method_sym(&conn, "<builtin>::rust::Into::into");
+        let _decoy = insert_trait_method_sym(&conn, "<builtin>::rust::Foo::into_owned");
+        let got = try_resolve_via_builtin_trait_method(&conn, "into").unwrap();
+        assert_eq!(got, Some(into_sid));
+    }
+
+    #[test]
+    fn apply_resolve_unresolved_increments_builtin_trait_method_counter() {
+        // End-to-end: unresolved CALLS edge with receiver_type that
+        // doesn't match any workspace inherent or IMPLEMENTS edge.
+        // The new builtin-trait-method step must take it and bump
+        // the counter.
+        let (_dir, handle) = primary_handle();
+        let pool = handle.pool().unwrap();
+        let conn = pool.get().unwrap();
+        seed_file(&conn, "src/lib.rs");
+        let into_sid = insert_trait_method_sym(&conn, "<builtin>::rust::Into::into");
+        let caller_sid = insert_sym(&conn, "crate::main");
+        conn.execute(
+            "INSERT INTO edges (from_symbol_id, kind, to_unresolved, attributes, confidence, receiver_type) \
+             VALUES (?1, 'CALLS', 'into', '[]', 'extracted', 'str')",
+            rusqlite::params![caller_sid],
+        )
+        .unwrap();
+        drop(conn);
+
+        let report = apply_resolve_unresolved(&handle).unwrap();
+        assert_eq!(report.resolved, 1);
+        assert_eq!(report.resolved_via_builtin_trait_method, 1);
+        assert_eq!(report.resolved_via_trait_dispatch, 0);
+        assert_eq!(report.resolved_via_receiver_type, 0);
+
+        // Confirm the edge points at the Into::into symbol.
+        let conn2 = pool.get().unwrap();
+        let to_id: i64 = conn2
+            .query_row(
+                "SELECT to_symbol_id FROM edges WHERE to_unresolved IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(to_id, into_sid);
     }
 
     #[test]

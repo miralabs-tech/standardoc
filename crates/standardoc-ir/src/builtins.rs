@@ -117,6 +117,16 @@ pub struct BuiltinMethodEntry {
     /// so calls inside the closure body emit `receiver_type` edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closure_arg_type: Option<String>,
+    /// Trait dispatch widening: when `true`, `parent_type` is a builtin
+    /// trait name (`Clone`, `Into`, `Iterator`, …) rather than a concrete
+    /// receiver type. Methods stamped this way travel into the seeded
+    /// symbol as a `trait_method` flag, which the resolver's
+    /// `try_resolve_via_builtin_trait_method` step queries when both the
+    /// inherent lookup and the workspace-IMPLEMENTS trait dispatch missed.
+    /// Default `false` so existing type-method seeds (`Vec::push`, …)
+    /// keep their non-dispatch semantics.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_trait: bool,
 }
 
 impl BuiltinMethodEntry {
@@ -137,6 +147,7 @@ impl BuiltinMethodEntry {
             synthetic_fqdn,
             returns: None,
             closure_arg_type: None,
+            is_trait: false,
         }
     }
 
@@ -153,6 +164,15 @@ impl BuiltinMethodEntry {
     #[must_use]
     pub fn with_closure_arg(mut self, closure_arg_type: impl Into<String>) -> Self {
         self.closure_arg_type = Some(closure_arg_type.into());
+        self
+    }
+
+    /// Trait dispatch widening: mark `parent_type` as a builtin trait
+    /// name. Stamps a `trait_method` flag on the seeded symbol so the
+    /// resolver's builtin-trait-method fallback can find it.
+    #[must_use]
+    pub const fn with_trait(mut self) -> Self {
+        self.is_trait = true;
         self
     }
 }
