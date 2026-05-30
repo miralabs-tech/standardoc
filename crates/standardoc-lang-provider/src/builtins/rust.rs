@@ -2,6 +2,57 @@ use standardoc_ir::{
     BuiltinEntry, BuiltinMethodEntry, BuiltinRegistry, BuiltinTag, BuiltinTier, Kind, Language,
 };
 
+/// Every Rust primitive int type — used as the per-type sweep target
+/// when seeding the shared `saturating_` / `wrapping_` / `checked_` /
+/// `abs` / `pow` / `min` / `max` / `clamp` / bit-counting method
+/// surface in [`register_methods`].
+const INT_TYPES: &[&str] = &[
+    "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+];
+
+/// Method names shared by every primitive int type. Receivers at the
+/// call site carry the bare primitive name as `receiver_type`, so the
+/// 3-tier resolver lands on `<builtin>::rust::<int>::<method>` via the
+/// direct-builtin fallback.
+const INT_METHODS: &[&str] = &[
+    "saturating_add",
+    "saturating_sub",
+    "saturating_mul",
+    "saturating_div",
+    "saturating_pow",
+    "wrapping_add",
+    "wrapping_sub",
+    "wrapping_mul",
+    "wrapping_div",
+    "wrapping_neg",
+    "wrapping_pow",
+    "checked_add",
+    "checked_sub",
+    "checked_mul",
+    "checked_div",
+    "checked_rem",
+    "checked_neg",
+    "checked_pow",
+    "abs",
+    "pow",
+    "min",
+    "max",
+    "clamp",
+    "count_ones",
+    "count_zeros",
+    "leading_zeros",
+    "trailing_zeros",
+    "leading_ones",
+    "trailing_ones",
+    "rotate_left",
+    "rotate_right",
+    "swap_bytes",
+    "to_be",
+    "to_le",
+    "is_power_of_two",
+    "next_power_of_two",
+];
+
 pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
     register_types_and_macros(reg);
     register_methods(reg);
@@ -857,6 +908,55 @@ fn register_methods(reg: &mut BuiltinRegistry) {
         "Path",
         "Result",
         &["canonicalize", "read_dir", "metadata", "strip_prefix"],
+    );
+
+    // Primitive integer inherent methods — saturating / wrapping /
+    // checked arithmetic + abs / pow / min / max / clamp. Same surface
+    // across every signed and unsigned int type, so registered through
+    // a per-type sweep with one source-of-truth method list. Receiver
+    // type at the call site is the bare primitive name (e.g. `u16`),
+    // matching the `receiver_type` the extractor populates.
+    for ty in INT_TYPES {
+        add(reg, ty, INT_METHODS);
+    }
+
+    // `Peekable<I>` inherent — `peek` / `peek_mut` are NOT on Iterator
+    // (only `next` is, and that's covered via the builtin-trait-method
+    // dispatch step). Register the inherent surface separately so the
+    // receiver-type direct lookup (`<builtin>::rust::Peekable::peek`)
+    // hits.
+    add(reg, "Peekable", &["peek", "peek_mut", "next_if", "next_if_eq"]);
+
+    // `std::process::Command` builder — heavily used in tests and CLI
+    // glue. `output` / `status` / `spawn` return `Result`; the rest
+    // are mutators that return `&mut Self` (omitted from `returns` so
+    // chain propagation doesn't pretend to know the type).
+    add(
+        reg,
+        "Command",
+        &[
+            "new",
+            "arg",
+            "args",
+            "env",
+            "envs",
+            "env_remove",
+            "env_clear",
+            "current_dir",
+            "stdin",
+            "stdout",
+            "stderr",
+            "get_program",
+            "get_args",
+            "get_envs",
+            "get_current_dir",
+        ],
+    );
+    add_returning(
+        reg,
+        "Command",
+        "Result",
+        &["output", "status", "spawn"],
     );
 
     // Trait dispatch widening — post-pass: stamp `is_trait=true` on
