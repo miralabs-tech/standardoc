@@ -35,6 +35,10 @@ pub(crate) struct ResolveReport {
     /// `receiver_type`-prefixed lookup (instead of the legacy suffix-
     /// chain). Used to measure the Phase 1 gain in the eprintln log.
     pub resolved_via_receiver_type: usize,
+    /// Trait dispatch sprint: subset of `resolved` that came in through
+    /// the `IMPLEMENTS`-walk fallback after a `receiver_type` miss.
+    /// Covers derive-emitted edges (`#[derive(Clone)]` → builtin Clone).
+    pub resolved_via_trait_dispatch: usize,
     pub still_unresolved: usize,
     pub duplicate_skipped: usize,
 }
@@ -44,9 +48,10 @@ pub(crate) fn apply_resolve_unresolved_quietly(handle: &IndexHandle) {
         Ok(report) => {
             if report.resolved > 0 || report.duplicate_skipped > 0 {
                 eprintln!(
-                    "standardoc unresolved-edge sweep: {} resolved ({} via receiver_type), {} dup-skipped, {} still unresolved",
+                    "standardoc unresolved-edge sweep: {} resolved ({} via receiver_type, {} via trait dispatch), {} dup-skipped, {} still unresolved",
                     report.resolved,
                     report.resolved_via_receiver_type,
+                    report.resolved_via_trait_dispatch,
                     report.duplicate_skipped,
                     report.still_unresolved,
                 );
@@ -88,6 +93,7 @@ fn apply_resolve_unresolved(handle: &IndexHandle) -> Result<ResolveReport, Stora
     let mut id_to_symbol_id: Vec<(i64, i64)> = Vec::new();
     let mut still_unresolved = 0usize;
     let mut resolved_via_receiver_type = 0usize;
+    let mut resolved_via_trait_dispatch = 0usize;
     let mut fqdn_cache: HashMap<String, Option<i64>> = HashMap::new();
     for edge in unresolved {
         // Bug E-3 Phase 1: when the extractor attached a `receiver_type`
@@ -98,11 +104,21 @@ fn apply_resolve_unresolved(handle: &IndexHandle) -> Result<ResolveReport, Stora
         // fn params / let bindings.
         if edge.kind == "CALLS"
             && let Some(rt) = edge.receiver_type.as_deref()
-            && let Some(sid) = try_resolve_via_receiver_type(&conn, rt, &edge.raw_name)?
         {
-            id_to_symbol_id.push((edge.edge_id, sid));
-            resolved_via_receiver_type += 1;
-            continue;
+            if let Some(sid) = try_resolve_via_receiver_type(&conn, rt, &edge.raw_name)? {
+                id_to_symbol_id.push((edge.edge_id, sid));
+                resolved_via_receiver_type += 1;
+                continue;
+            }
+            // Trait dispatch fallback: walk IMPLEMENTS edges from the
+            // receiver_type and try `<trait_fqdn>::<method>`. Resolves
+            // derive-emitted method calls (`#[derive(Clone)]` →
+            // `x.clone()`) that the inherent lookup missed.
+            if let Some(sid) = try_resolve_via_trait_dispatch(&conn, rt, &edge.raw_name)? {
+                id_to_symbol_id.push((edge.edge_id, sid));
+                resolved_via_trait_dispatch += 1;
+                continue;
+            }
         }
 
         // Bug E-2: walk split points longest-module-first and append any
@@ -159,6 +175,7 @@ fn apply_resolve_unresolved(handle: &IndexHandle) -> Result<ResolveReport, Stora
     Ok(ResolveReport {
         resolved,
         resolved_via_receiver_type,
+        resolved_via_trait_dispatch,
         still_unresolved,
         duplicate_skipped,
     })
@@ -220,6 +237,52 @@ fn try_resolve_via_receiver_type(
     let builtin = format!("<builtin>::rust::{candidate}");
     if let Some(sid) = lookup_symbol_id(conn, &builtin)? {
         return Ok(Some(sid));
+    }
+    Ok(None)
+}
+
+/// Trait dispatch sprint: when `try_resolve_via_receiver_type` misses,
+/// walk every `IMPLEMENTS` edge whose source matches `receiver_type` and
+/// try `<trait_fqdn>::<method>` against `symbols`. Returns the first
+/// hit, with traits visited in alphabetical FQDN order (the inherent
+/// path already ran upstream, so this layer only fires for true
+/// trait-only calls — `<Type>::clone` derived from `#[derive(Clone)]`).
+///
+/// Builtin sources are excluded from the IMPLEMENTS source side because
+/// the resolver's job here is to convert workspace receiver types into
+/// builtin trait method targets, not the other way around.
+fn try_resolve_via_trait_dispatch(
+    conn: &Connection,
+    receiver_type: &str,
+    method: &str,
+) -> Result<Option<i64>, StorageError> {
+    let is_fqdn = receiver_type.contains("::");
+    let nominal_pattern = if is_fqdn {
+        String::new()
+    } else {
+        format!("%::{receiver_type}")
+    };
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT trait_sym.fqdn \
+         FROM edges e \
+         JOIN symbols src ON e.from_symbol_id = src.id \
+         JOIN symbols trait_sym ON e.to_symbol_id = trait_sym.id \
+         WHERE e.kind = 'IMPLEMENTS' \
+           AND e.to_symbol_id IS NOT NULL \
+           AND src.fqdn NOT LIKE '<builtin>::%' \
+           AND (src.fqdn = ?1 OR (?2 != '' AND src.fqdn LIKE ?2)) \
+         ORDER BY trait_sym.fqdn ASC",
+    )?;
+    let trait_fqdns: Vec<String> = stmt
+        .query_map([receiver_type, nominal_pattern.as_str()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for trait_fqdn in trait_fqdns {
+        let candidate = format!("{trait_fqdn}::{method}");
+        if let Some(sid) = lookup_symbol_id(conn, &candidate)? {
+            return Ok(Some(sid));
+        }
     }
     Ok(None)
 }
@@ -365,5 +428,137 @@ mod tests {
         let _ = insert_sym(&conn, "<builtin>::rust::Vec::push");
         let got = try_resolve_via_receiver_type(&conn, "crate::Foo", "push").unwrap();
         assert_eq!(got, None);
+    }
+
+    // --- Trait dispatch sprint tests ---
+
+    fn insert_implements(conn: &Connection, from_sid: i64, to_sid: i64) {
+        conn.execute(
+            "INSERT INTO edges (from_symbol_id, kind, to_symbol_id, attributes, confidence) \
+             VALUES (?1, 'IMPLEMENTS', ?2, '[\"derive\",\"via-builtin\"]', 'extracted')",
+            rusqlite::params![from_sid, to_sid],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn trait_dispatch_resolves_via_implements_walk_with_fqdn_receiver() {
+        // Workspace struct `crate::Foo` IMPLEMENTS the seeded builtin
+        // Clone trait; lookup `Foo::clone` misses inherent → trait
+        // dispatch finds `<builtin>::rust::Clone::clone`.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let foo_sid = insert_sym(&conn, "crate::Foo");
+        let clone_trait_sid = insert_sym(&conn, "<builtin>::rust::Clone");
+        let clone_method_sid = insert_sym(&conn, "<builtin>::rust::Clone::clone");
+        insert_implements(&conn, foo_sid, clone_trait_sid);
+        let got = try_resolve_via_trait_dispatch(&conn, "crate::Foo", "clone").unwrap();
+        assert_eq!(got, Some(clone_method_sid));
+    }
+
+    #[test]
+    fn trait_dispatch_resolves_via_nominal_receiver_suffix() {
+        // Receiver_type = "Foo" (short) finds `crate::a::Foo` via the
+        // `%::Foo` suffix match, then walks IMPLEMENTS to Clone.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let foo_sid = insert_sym(&conn, "crate::a::Foo");
+        let clone_trait_sid = insert_sym(&conn, "<builtin>::rust::Clone");
+        let clone_method_sid = insert_sym(&conn, "<builtin>::rust::Clone::clone");
+        insert_implements(&conn, foo_sid, clone_trait_sid);
+        let got = try_resolve_via_trait_dispatch(&conn, "Foo", "clone").unwrap();
+        assert_eq!(got, Some(clone_method_sid));
+    }
+
+    #[test]
+    fn trait_dispatch_returns_none_without_implements_edge() {
+        // No IMPLEMENTS edge from Foo → nothing to walk.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let _ = insert_sym(&conn, "crate::Foo");
+        let _ = insert_sym(&conn, "<builtin>::rust::Clone::clone");
+        let got = try_resolve_via_trait_dispatch(&conn, "crate::Foo", "clone").unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn trait_dispatch_picks_alphabetical_first_when_multiple_traits_match() {
+        // Foo IMPLEMENTS both Clone and Debug; both expose a synthetic
+        // method `dup`. ORDER BY trait_sym.fqdn ASC → Clone (< Debug)
+        // wins.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let foo_sid = insert_sym(&conn, "crate::Foo");
+        let clone_sid = insert_sym(&conn, "<builtin>::rust::Clone");
+        let debug_sid = insert_sym(&conn, "<builtin>::rust::Debug");
+        let clone_dup = insert_sym(&conn, "<builtin>::rust::Clone::dup");
+        let _debug_dup = insert_sym(&conn, "<builtin>::rust::Debug::dup");
+        insert_implements(&conn, foo_sid, clone_sid);
+        insert_implements(&conn, foo_sid, debug_sid);
+        let got = try_resolve_via_trait_dispatch(&conn, "crate::Foo", "dup").unwrap();
+        assert_eq!(got, Some(clone_dup));
+    }
+
+    #[test]
+    fn trait_dispatch_skips_implements_with_null_to_symbol_id() {
+        // Insert an IMPLEMENTS edge whose to_symbol_id is NULL (the
+        // trait target stayed unresolved). The walker must filter it
+        // out — otherwise the JOIN would NULL-fail and skip silently
+        // but the test cements the intent.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let foo_sid = insert_sym(&conn, "crate::Foo");
+        conn.execute(
+            "INSERT INTO edges (from_symbol_id, kind, to_unresolved, attributes, confidence) \
+             VALUES (?1, 'IMPLEMENTS', 'UnresolvedTrait', '[]', 'extracted')",
+            rusqlite::params![foo_sid],
+        )
+        .unwrap();
+        let got = try_resolve_via_trait_dispatch(&conn, "crate::Foo", "clone").unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn trait_dispatch_excludes_builtin_source_types() {
+        // An IMPLEMENTS edge whose source is itself a builtin must not
+        // be walked — the resolver's role here is to bridge workspace
+        // receivers to builtin methods.
+        let conn = fresh_conn();
+        seed_file(&conn, "src/lib.rs");
+        let vec_sid = insert_sym(&conn, "<builtin>::rust::Vec");
+        let clone_sid = insert_sym(&conn, "<builtin>::rust::Clone");
+        let _ = insert_sym(&conn, "<builtin>::rust::Clone::clone");
+        insert_implements(&conn, vec_sid, clone_sid);
+        let got = try_resolve_via_trait_dispatch(&conn, "<builtin>::rust::Vec", "clone").unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn apply_resolve_unresolved_increments_trait_dispatch_counter() {
+        // End-to-end: unresolved CALLS edge with receiver_type pointing
+        // at a workspace struct that IMPLEMENTS Clone. Sweep must
+        // resolve it via trait dispatch and bump the counter.
+        let (_dir, handle) = primary_handle();
+        let pool = handle.pool().unwrap();
+        let conn = pool.get().unwrap();
+        seed_file(&conn, "src/lib.rs");
+        let foo_sid = insert_sym(&conn, "crate::Foo");
+        let clone_trait_sid = insert_sym(&conn, "<builtin>::rust::Clone");
+        let _clone_method_sid = insert_sym(&conn, "<builtin>::rust::Clone::clone");
+        let caller_sid = insert_sym(&conn, "crate::main");
+        insert_implements(&conn, foo_sid, clone_trait_sid);
+        conn.execute(
+            "INSERT INTO edges (from_symbol_id, kind, to_unresolved, attributes, confidence, receiver_type) \
+             VALUES (?1, 'CALLS', 'clone', '[]', 'extracted', 'crate::Foo')",
+            rusqlite::params![caller_sid],
+        )
+        .unwrap();
+        drop(conn);
+
+        let report = apply_resolve_unresolved(&handle).unwrap();
+        assert_eq!(report.resolved, 1);
+        assert_eq!(report.resolved_via_trait_dispatch, 1);
+        assert_eq!(report.resolved_via_receiver_type, 0);
+        assert_eq!(report.still_unresolved, 0);
     }
 }

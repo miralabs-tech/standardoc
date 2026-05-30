@@ -66,6 +66,64 @@ mod tests {
     }
 
     #[test]
+    fn rust_derive_trait_targets_are_seeded() {
+        // `rust::derive_impls` emits `IMPLEMENTS → <builtin>::rust::<Trait>`
+        // edges for every recognised derive. Each target must resolve to
+        // a real seeded symbol row, otherwise the edge stays unresolved.
+        let reg = standard();
+        for trait_name in [
+            "Clone",
+            "Debug",
+            "Default",
+            "PartialEq",
+            "PartialOrd",
+            "Ord",
+            "Hash",
+            "Serialize",
+            "Deserialize",
+        ] {
+            let entry = reg.lookup(trait_name, Language::Rust).unwrap_or_else(|| {
+                panic!("{trait_name} must be seeded for derive-IMPLEMENTS targets")
+            });
+            assert_eq!(
+                entry.synthetic_fqdn,
+                format!("<builtin>::rust::{trait_name}"),
+                "synthetic fqdn for {trait_name} must match derive_impls map"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_derive_trait_methods_are_seeded() {
+        // Phase 5 resolver walks `<trait_fqdn>::<method>` after a derive
+        // IMPLEMENTS hit. Each (trait, method) pair must produce a
+        // BuiltinMethodEntry with the expected synthetic_fqdn so the
+        // resolver lands on a real symbol.
+        let reg = standard();
+        for (trait_name, method) in [
+            ("Clone", "clone"),
+            ("Debug", "fmt"),
+            ("Default", "default"),
+            ("PartialEq", "eq"),
+            ("PartialOrd", "partial_cmp"),
+            ("Ord", "cmp"),
+            ("Hash", "hash"),
+            ("Serialize", "serialize"),
+            ("Deserialize", "deserialize"),
+        ] {
+            let entry = reg
+                .lookup_method(trait_name, method, Language::Rust)
+                .unwrap_or_else(|| {
+                    panic!("{trait_name}::{method} must be seeded for trait dispatch")
+                });
+            assert_eq!(
+                entry.synthetic_fqdn,
+                format!("<builtin>::rust::{trait_name}::{method}")
+            );
+        }
+    }
+
+    #[test]
     fn synthetic_fqdns_use_short_language_slug() {
         let reg = standard();
         let json = reg

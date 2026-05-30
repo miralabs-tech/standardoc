@@ -19,8 +19,9 @@ use super::lookup as rust_lookup;
 mod extract_items;
 
 use extract_items::{
-    extract_const, extract_enum, extract_fn, extract_impl, extract_macro_def, extract_static,
-    extract_struct, extract_trait, extract_type_alias, extract_union,
+    emit_derive_implements, extract_const, extract_enum, extract_fn, extract_impl,
+    extract_macro_def, extract_static, extract_struct, extract_trait, extract_type_alias,
+    extract_union,
 };
 
 /// Recover the `ModuleLookup` scope_idx for the AST node spanning `span`.
@@ -505,6 +506,7 @@ fn process_item_p1(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
             let path = ctx.core.file_path.clone();
             let union_fqdn = format!("{current_module}::{}", it.ident);
             ctx.push_symbol_with_doc(extract_union(it, current_module, &path), &it.attrs);
+            emit_derive_implements(ctx, &union_fqdn, &it.attrs, &path);
             // Bug C-3: walk each union field's type for UsesType edges.
             let scope_idx = lookup_scope_for(ctx, it.span());
             for field in &it.fields.named {

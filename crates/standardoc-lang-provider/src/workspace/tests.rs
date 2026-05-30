@@ -296,3 +296,58 @@ onMount(() => { console.log("ready"); });
         );
     }
 }
+
+mod edge_builtins_seed {
+    use super::super::WorkspaceProvider;
+    use standardoc_core::LanguageProvider;
+    use standardoc_ir::Language;
+
+    #[test]
+    fn includes_drop_tier_reflection_traits_for_trait_dispatch() {
+        // Trait dispatch sprint: derive-emitted IMPLEMENTS edges target
+        // `<builtin>::rust::Clone` etc. — those trait symbols must be
+        // seeded at cold-start so `resolve_target` lands on a real
+        // symbol id. They live in the Drop tier (preserving the
+        // explicit `impl Trait for X` no-IMPLEMENTS policy) but
+        // Reflection-tagged, which `edge_builtins` now passes through.
+        let provider = WorkspaceProvider::new();
+        let entries = provider.edge_builtins();
+        let required = [
+            "Clone",
+            "Debug",
+            "Default",
+            "PartialEq",
+            "PartialOrd",
+            "Ord",
+            "Hash",
+            "Serialize",
+            "Deserialize",
+        ];
+        for name in required {
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.language == Language::Rust && e.name == name),
+                "{name} must be in edge_builtins() for derive-IMPLEMENTS targets to resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn excludes_drop_tier_macros() {
+        // The Drop-tier macros (println, panic, assert_eq, ...) carry
+        // `BuiltinTag::Custom { tag: "macro" }`, not Reflection. They
+        // must NOT bleed into edge_builtins — seeding them would
+        // pollute the symbols table without any downstream consumer.
+        let provider = WorkspaceProvider::new();
+        let entries = provider.edge_builtins();
+        for forbidden in ["println", "panic", "assert_eq", "vec", "dbg"] {
+            assert!(
+                !entries
+                    .iter()
+                    .any(|e| e.language == Language::Rust && e.name == forbidden),
+                "{forbidden} is a macro (Drop+Custom), must stay out of edge_builtins"
+            );
+        }
+    }
+}

@@ -325,6 +325,151 @@ fn trait_impl_with_use_alias_resolves_implements_target() {
 }
 
 #[test]
+fn derive_clone_on_struct_emits_resolved_implements_edge() {
+    let parsed = parse("#[derive(Clone)] struct Foo;");
+    let (_symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let imp: Vec<_> = edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Implements)
+        .collect();
+    assert_eq!(imp.len(), 1, "single derive must emit one IMPLEMENTS edge");
+    assert_eq!(imp[0].from_fqdn, "c::Foo");
+    match &imp[0].to {
+        ResolvedOrUnresolved::Resolved { fqdn } => {
+            assert_eq!(fqdn, "<builtin>::rust::Clone");
+        }
+        other => panic!("expected resolved synthetic fqdn, got {other:?}"),
+    }
+    assert!(imp[0].attributes.iter().any(|a| a == "derive"));
+    assert!(imp[0].attributes.iter().any(|a| a == "via-builtin"));
+}
+
+#[test]
+fn derive_multiple_traits_emits_one_edge_per_mapped_trait() {
+    let parsed = parse("#[derive(Clone, Debug, Default)] struct Foo;");
+    let (_symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mut targets: Vec<String> = edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Implements)
+        .map(|e| match &e.to {
+            ResolvedOrUnresolved::Resolved { fqdn } => fqdn.clone(),
+            other => panic!("expected resolved, got {other:?}"),
+        })
+        .collect();
+    targets.sort();
+    assert_eq!(
+        targets,
+        vec![
+            "<builtin>::rust::Clone".to_string(),
+            "<builtin>::rust::Debug".to_string(),
+            "<builtin>::rust::Default".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn derive_skips_marker_traits_copy_and_eq() {
+    let parsed = parse("#[derive(Copy, Clone, Eq, PartialEq)] struct Foo;");
+    let (_symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mut targets: Vec<String> = edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Implements)
+        .map(|e| match &e.to {
+            ResolvedOrUnresolved::Resolved { fqdn } => fqdn.clone(),
+            other => panic!("expected resolved, got {other:?}"),
+        })
+        .collect();
+    targets.sort();
+    assert_eq!(
+        targets,
+        vec![
+            "<builtin>::rust::Clone".to_string(),
+            "<builtin>::rust::PartialEq".to_string(),
+        ],
+        "Copy + Eq are non-callable marker traits and must be skipped"
+    );
+}
+
+#[test]
+fn derive_ignores_unknown_external_macros() {
+    let parsed = parse("#[derive(Builder, Display, Error)] struct Foo;");
+    let (_symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let imp_count = edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Implements)
+        .count();
+    assert_eq!(
+        imp_count, 0,
+        "external derive macros are out-of-scope V1 and must not emit IMPLEMENTS"
+    );
+}
+
+#[test]
+fn derive_on_enum_emits_implements_edge() {
+    let parsed = parse("#[derive(Debug)] enum Foo { A, B }");
+    let (_symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let imp: Vec<_> = edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Implements)
+        .collect();
+    assert_eq!(imp.len(), 1);
+    assert_eq!(imp[0].from_fqdn, "c::Foo");
+    match &imp[0].to {
+        ResolvedOrUnresolved::Resolved { fqdn } => assert_eq!(fqdn, "<builtin>::rust::Debug"),
+        other => panic!("expected resolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn derive_on_union_emits_implements_edge() {
+    let parsed = parse("#[derive(Clone, Copy)] union Foo { a: u32, b: f32 }");
+    let (_symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let imp: Vec<_> = edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Implements)
+        .collect();
+    assert_eq!(imp.len(), 1, "Copy is skipped, only Clone must emit");
+    assert_eq!(imp[0].from_fqdn, "c::Foo");
+    match &imp[0].to {
+        ResolvedOrUnresolved::Resolved { fqdn } => assert_eq!(fqdn, "<builtin>::rust::Clone"),
+        other => panic!("expected resolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn derive_qualified_path_matches_on_trailing_ident() {
+    let parsed = parse("#[derive(serde::Serialize, serde::Deserialize)] struct Foo;");
+    let (_symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mut targets: Vec<String> = edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Implements)
+        .map(|e| match &e.to {
+            ResolvedOrUnresolved::Resolved { fqdn } => fqdn.clone(),
+            other => panic!("expected resolved, got {other:?}"),
+        })
+        .collect();
+    targets.sort();
+    assert_eq!(
+        targets,
+        vec![
+            "<builtin>::rust::Deserialize".to_string(),
+            "<builtin>::rust::Serialize".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn struct_without_derive_emits_no_implements_edge() {
+    let parsed = parse("struct Foo { a: u32 }");
+    let (_symbols, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let imp_count = edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Implements)
+        .count();
+    assert_eq!(imp_count, 0);
+}
+
+#[test]
 fn const_emits_value_symbol() {
     let parsed = parse("const N: u32 = 0;");
     let (symbols, _, _, _) = walk(&parsed, "c", "src/lib.rs", "c");

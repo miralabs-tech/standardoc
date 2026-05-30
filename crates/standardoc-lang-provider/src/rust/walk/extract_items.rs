@@ -18,6 +18,7 @@ use standardoc_ir::{
 use syn::spanned::Spanned;
 
 use super::super::body_hash;
+use super::super::derive_impls::derive_trait_fqdn;
 use super::super::extract_type;
 use super::super::visibility;
 use super::{
@@ -105,6 +106,7 @@ pub(super) fn extract_struct(ctx: &mut WalkContext, item: &syn::ItemStruct, pare
         &item.attrs,
     );
     ctx.push_symbol_with_doc(parent_sym, &item.attrs);
+    emit_derive_implements(ctx, &struct_fqdn, &item.attrs, &path);
     // Bug C-3 / Stage 3a-8c — struct-level generics live at the
     // struct's lookup scope. resolve_local filters `T` in `<T: …>`
     // body refs naturally.
@@ -140,6 +142,7 @@ pub(super) fn extract_enum(ctx: &mut WalkContext, item: &syn::ItemEnum, parent_f
         &item.attrs,
     );
     ctx.push_symbol_with_doc(parent_sym, &item.attrs);
+    emit_derive_implements(ctx, &enum_fqdn, &item.attrs, &path);
     // Bug C-3 / Stage 3a-8c — enum-level generics live at the enum's
     // lookup scope.
     let scope_idx = lookup_scope_for(ctx, item.span());
@@ -735,6 +738,54 @@ fn extract_param(arg: &syn::FnArg) -> Param {
             ty: TypeRef::new(render_compact(pat_type.ty.as_ref())),
             default: None,
         },
+    }
+}
+
+/// Walks `attrs` for `#[derive(...)]` entries and pushes a synthetic
+/// IMPLEMENTS edge from `type_fqdn` to the canonical builtin trait FQDN
+/// for each recognised derive name. Unknown derives (external macros
+/// like `strum::Display`, `thiserror::Error`, …) are silently skipped —
+/// V1 covers stdlib + serde only. Multi-segment paths (`#[derive(
+/// serde::Serialize)]`) match on their trailing ident.
+pub(super) fn emit_derive_implements(
+    ctx: &mut WalkContext,
+    type_fqdn: &str,
+    attrs: &[syn::Attribute],
+    path: &str,
+) {
+    for attr in attrs {
+        if !attr.path().is_ident("derive") {
+            continue;
+        }
+        let mut derives: Vec<(String, Span)> = Vec::new();
+        let _ = attr.parse_nested_meta(|meta| {
+            if let Some(seg) = meta.path.segments.last() {
+                derives.push((seg.ident.to_string(), seg.ident.span()));
+            }
+            Ok(())
+        });
+        for (name, span) in derives {
+            let Some(trait_fqdn) = derive_trait_fqdn(&name) else {
+                continue;
+            };
+            let to = ResolvedOrUnresolved::Resolved {
+                fqdn: trait_fqdn.to_string(),
+            };
+            let confidence = to.default_confidence();
+            ctx.push_edge(RawEdge {
+                from_fqdn: type_fqdn.to_string(),
+                kind: EdgeKind::Implements,
+                to,
+                sites: vec![Site {
+                    file: path.to_string(),
+                    line: line_from_span(span),
+                    col: col_from_span(span),
+                }],
+                attributes: vec!["via-builtin".to_string(), "derive".to_string()],
+                confidence,
+                receiver_type: None,
+            });
+        }
     }
 }
 

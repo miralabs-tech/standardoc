@@ -175,6 +175,18 @@ fn register_types_and_macros(reg: &mut BuiltinRegistry) {
         BuiltinTag::Reflection,
         BuiltinTier::Drop,
     );
+    // Serde derive traits — external but ubiquitous. Seeded as builtins
+    // so derive-emitted `IMPLEMENTS → <builtin>::rust::Serialize` edges
+    // (see `rust::derive_impls`) land on a real `symbols.id` row. Same
+    // tier policy as stdlib reflection traits: explicit `impl Serialize
+    // for X` blocks don't emit an IMPLEMENTS edge of their own.
+    add(
+        reg,
+        &["Serialize", "Deserialize"],
+        Kind::Type,
+        BuiltinTag::Reflection,
+        BuiltinTier::Drop,
+    );
     // Callable trait family — closure-shape, structural.
     add(
         reg,
@@ -300,6 +312,23 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             );
         }
     };
+
+    // Trait-dispatch methods (V1) — seeded so `<receiver_type>::<method>`
+    // lookups from `rust::derive_impls`-emitted IMPLEMENTS edges land on
+    // a real builtin symbol row at resolve time. Parent type is the
+    // trait name; synthetic fqdn becomes `<builtin>::rust::<Trait>::<method>`.
+    // Mirrors the stdlib trait method surface that gets derived in
+    // practice (Clone, Debug, Default, PartialEq, PartialOrd, Ord, Hash,
+    // Serialize, Deserialize).
+    add(reg, "Clone", &["clone", "clone_from"]);
+    add(reg, "Debug", &["fmt"]);
+    add(reg, "Default", &["default"]);
+    add(reg, "PartialEq", &["eq", "ne"]);
+    add(reg, "PartialOrd", &["partial_cmp", "lt", "le", "gt", "ge"]);
+    add(reg, "Ord", &["cmp", "max", "min", "clamp"]);
+    add(reg, "Hash", &["hash", "hash_slice"]);
+    add(reg, "Serialize", &["serialize"]);
+    add(reg, "Deserialize", &["deserialize"]);
 
     add(
         reg,

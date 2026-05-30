@@ -2,8 +2,8 @@ use std::path::Path;
 
 use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
 use standardoc_ir::{
-    BuiltinEntry, BuiltinTier, EdgeKind, ExtractedFile, Language, RawEdge, ResolvedOrUnresolved,
-    Site,
+    BuiltinEntry, BuiltinTag, BuiltinTier, EdgeKind, ExtractedFile, Language, RawEdge,
+    ResolvedOrUnresolved, Site,
 };
 use swc_core::ecma::parser::{EsSyntax, Syntax, TsSyntax};
 
@@ -111,23 +111,26 @@ impl LanguageProvider for WorkspaceProvider {
     /// the cold-start seeder turns each into a synthetic `RawSymbol`
     /// row so resolver-emitted edges to `<builtin>::<lang>::<name>`
     /// land on a real `symbols.id` instead of unresolved canonicals.
+    ///
+    /// Trait dispatch sprint: also includes `Drop`-tier entries tagged
+    /// `Reflection` (the stdlib derive-able traits like `Clone`, `Debug`,
+    /// `Serialize`, …). They stay `Drop`-tier for the explicit
+    /// `impl Trait for X` emit policy (no IMPLEMENTS noise from manual
+    /// impls), but `rust::derive_impls` emits `IMPLEMENTS → <builtin>::
+    /// rust::<Trait>` for every `#[derive(...)]`, which needs the trait
+    /// symbol row to exist for `resolve_target` to convert the edge into
+    /// a `to_symbol_id` at insert time.
     fn edge_builtins(&self) -> Vec<BuiltinEntry> {
         let reg = global_builtin_registry();
+        let keep = |e: &&BuiltinEntry| {
+            e.tier == BuiltinTier::Edge
+                || (e.tier == BuiltinTier::Drop && matches!(e.tag, BuiltinTag::Reflection))
+        };
         let mut out: Vec<BuiltinEntry> = Vec::new();
         for entries in reg.by_language.values() {
-            out.extend(
-                entries
-                    .iter()
-                    .filter(|e| e.tier == BuiltinTier::Edge)
-                    .cloned(),
-            );
+            out.extend(entries.iter().filter(keep).cloned());
         }
-        out.extend(
-            reg.user_extensions
-                .iter()
-                .filter(|e| e.tier == BuiltinTier::Edge)
-                .cloned(),
-        );
+        out.extend(reg.user_extensions.iter().filter(keep).cloned());
         out
     }
 

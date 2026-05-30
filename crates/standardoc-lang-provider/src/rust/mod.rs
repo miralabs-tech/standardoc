@@ -11,6 +11,7 @@ use self::global_return_type_registry::GlobalReturnTypeRegistry;
 mod body_hash;
 mod collect_globals;
 mod crate_root;
+mod derive_impls;
 mod extract;
 mod extract_call;
 mod extract_doc;
