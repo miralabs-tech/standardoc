@@ -21,13 +21,14 @@
 //!     the recorded FQDN. Names that collide across two definitions
 //!     stay ambiguous (lookup falls through to `None`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use syn::Type;
 
 use super::type_name::parametric_type;
 
 #[derive(Default, Debug)]
+#[allow(clippy::struct_field_names)]
 pub(crate) struct StructFieldTable {
     by_struct: HashMap<String, HashMap<String, String>>,
     /// Bug E-3 ext P-E3.2.2: nominal short name → recorded struct FQDN.
@@ -35,6 +36,17 @@ pub(crate) struct StructFieldTable {
     /// definitions (lookup then falls through). Populated alongside
     /// `record`.
     by_nominal: HashMap<String, Option<String>>,
+    /// Bug field-as-CALL V2 (`fn()` extension): presence-only field-name
+    /// table populated unconditionally by `record_presence` regardless
+    /// of whether the field's type is nominal. The typed `by_struct`
+    /// table skips non-nominal types (closures, `fn()`, slices, tuples)
+    /// because their parametric form yields `None`, but the field-as-
+    /// CALL guard in `visit_expr_method_call` only needs to know
+    /// "does this struct have a field named X" — not the field's type.
+    /// Mirrors `by_struct`'s nominal-short side-index via
+    /// `by_presence_nominal` for the same disambiguated lookup.
+    by_struct_field_names: HashMap<String, HashSet<String>>,
+    by_presence_nominal: HashMap<String, Option<String>>,
 }
 
 impl StructFieldTable {
@@ -79,6 +91,47 @@ impl StructFieldTable {
             .get(nominal_fqdn)?
             .get(field_name)
             .map(String::as_str)
+    }
+
+    /// Bug field-as-CALL V2 (`fn()` extension): unconditionally record
+    /// that `<struct_fqdn>` has a field named `<field_name>`, regardless
+    /// of whether its type was nominal. Used by the
+    /// `visit_expr_method_call` guard so `s.bare_ptr()` where
+    /// `bare_ptr: fn()` (or `Box<dyn Fn>` / closure / tuple) is still
+    /// recognised as a field-call. Populated for every field — named or
+    /// tuple — alongside `record` in `push_field`.
+    pub(crate) fn record_presence(&mut self, struct_fqdn: &str, field_name: &str) {
+        self.by_struct_field_names
+            .entry(struct_fqdn.to_string())
+            .or_default()
+            .insert(field_name.to_string());
+        if let Some(nominal) = struct_fqdn.rsplit("::").next() {
+            self.by_presence_nominal
+                .entry(nominal.to_string())
+                .and_modify(|cur| {
+                    if cur.as_deref() != Some(struct_fqdn) {
+                        *cur = None;
+                    }
+                })
+                .or_insert_with(|| Some(struct_fqdn.to_string()));
+        }
+    }
+
+    /// Bug field-as-CALL V2: presence-only lookup. Returns `true` when
+    /// `<struct_key>` has a field named `<field_name>`, whatever its
+    /// type. Mirrors `lookup`'s nominal-short resolution via
+    /// `by_presence_nominal`.
+    pub(crate) fn has_field(&self, struct_key: &str, field_name: &str) -> bool {
+        if let Some(names) = self.by_struct_field_names.get(struct_key) {
+            return names.contains(field_name);
+        }
+        let Some(nominal_fqdn) = self.by_presence_nominal.get(struct_key).and_then(|o| o.as_deref())
+        else {
+            return false;
+        };
+        self.by_struct_field_names
+            .get(nominal_fqdn)
+            .is_some_and(|names| names.contains(field_name))
     }
 }
 

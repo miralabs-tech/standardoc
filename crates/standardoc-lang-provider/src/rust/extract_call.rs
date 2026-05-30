@@ -885,9 +885,16 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
         // unresolved CALLS edge with `name = field` masquerades as a
         // method target. Suppress the graph edge (the call-site row
         // above still records the textual invocation for plugins).
+        //
+        // V2 (`fn()` extension): use `has_field` (presence-only) rather
+        // than `lookup` so non-nominal field types — `fn()`, closures,
+        // `Box<dyn Fn>` boxes — are caught too. `record` filters
+        // non-nominals out of the typed table for legitimate reasons
+        // (GRTR / closure-arg inference need nominal heads), but the
+        // guard only needs to know "is X a field of this struct".
         let is_field_call = {
             let stripped = receiver_type.as_deref().map(strip_refs);
-            stripped.is_some_and(|t| self.ctx.struct_fields.lookup(t, &method).is_some())
+            stripped.is_some_and(|t| self.ctx.struct_fields.has_field(t, &method))
         };
         if !is_field_call {
             self.emit_call_with_attributes(

@@ -271,6 +271,11 @@ fn push_field(
     // (`self.0.method`) so this is harmless noise; lookup never matches.
     if language_kind == "field" {
         ctx.struct_fields.record(parent_fqdn, name, &field.ty);
+        // Bug field-as-CALL V2 (`fn()` extension): record presence
+        // unconditionally so the method-call guard catches
+        // `s.bare_ptr()` where `bare_ptr: fn()` (or any non-nominal
+        // type that `record` filters out via `parametric_type`).
+        ctx.struct_fields.record_presence(parent_fqdn, name);
     }
 
     let signature = Signature {

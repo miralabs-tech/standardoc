@@ -113,3 +113,51 @@ fn nominal_lookup_after_repeat_record_to_same_fqdn_stays_unambiguous() {
     assert_eq!(t.lookup("Foo", "x"), Some("u8"));
     assert_eq!(t.lookup("Foo", "y"), Some("String"));
 }
+
+// --- Bug field-as-CALL V2: presence-only tracking via record_presence ---
+
+#[test]
+fn record_presence_tracks_field_name_without_type() {
+    let mut t = StructFieldTable::default();
+    t.record_presence("crate::S", "handler");
+    assert!(t.has_field("crate::S", "handler"));
+    assert!(!t.has_field("crate::S", "missing"));
+}
+
+#[test]
+fn has_field_resolves_nominal_short_via_side_index() {
+    let mut t = StructFieldTable::default();
+    t.record_presence("crate::module::S", "cb");
+    assert!(t.has_field("S", "cb"));
+    assert!(t.has_field("crate::module::S", "cb"));
+}
+
+#[test]
+fn has_field_returns_false_when_presence_nominal_is_ambiguous() {
+    // Two distinct FQDNs colliding on the same nominal short name —
+    // the side-index records `None` (ambiguous) and `has_field` on
+    // the bare nominal falls through.
+    let mut t = StructFieldTable::default();
+    t.record_presence("crate::a::S", "x");
+    t.record_presence("crate::b::S", "y");
+    assert!(t.has_field("crate::a::S", "x"));
+    assert!(t.has_field("crate::b::S", "y"));
+    // bare "S" is ambiguous now
+    assert!(!t.has_field("S", "x"));
+    assert!(!t.has_field("S", "y"));
+}
+
+#[test]
+fn has_field_independent_of_record_typed_lookup() {
+    // V2 invariant: `record_presence` populates the presence table
+    // even when `record` would skip the type (non-nominal `fn()`).
+    // The typed `lookup` stays `None`, the presence `has_field`
+    // returns `true`.
+    let mut t = StructFieldTable::default();
+    // No `record` call — only presence (simulating extract_items
+    // calling `record_presence` for a `fn()` field where `record`
+    // bailed out via `parametric_type`).
+    t.record_presence("crate::S", "bare_ptr");
+    assert_eq!(t.lookup("crate::S", "bare_ptr"), None);
+    assert!(t.has_field("crate::S", "bare_ptr"));
+}

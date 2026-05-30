@@ -1602,11 +1602,9 @@ fn field_as_call_on_workspace_struct_is_suppressed() {
     // the field value — not a method on `S`. The CALLS edge with
     // `name = "handler"` should be suppressed.
     //
-    // Note: `Type::BareFn` (`fn()`) fields aren't tracked by
-    // `StructFieldTable` (the table only records nominal types — see
-    // `parametric_type`). So `s.bare_ptr()` where `bare_ptr: fn()`
-    // still emits a CALLS edge — a known limitation orthogonal to the
-    // dominant audit signal (PathBuf / Span / Arc<dyn …> fields).
+    // V2 (`fn()` extension) extends this guard to non-nominal field
+    // types via `has_field` — see
+    // `field_as_call_on_bare_fn_field_is_suppressed_v2`.
     let parsed = parse(
         "struct H; struct S { handler: H } fn caller(s: S) { s.handler(); }",
     );
@@ -1653,6 +1651,47 @@ fn stdlib_method_call_is_preserved_even_with_field_like_name() {
         .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "exists"))
         .expect("stdlib .exists() CALLS edge must survive");
     assert_eq!(exists.from_fqdn, "c::caller");
+}
+
+#[test]
+fn field_as_call_on_bare_fn_field_is_suppressed_v2() {
+    // V2: `Type::BareFn` (`fn()`) fields are tracked via
+    // `StructFieldTable::record_presence` even though `parametric_type`
+    // skips them for the typed table. The guard uses `has_field`
+    // (presence-only) so `s.bare()` where `bare: fn()` no longer
+    // emits a phantom CALLS edge with `name = "bare"`.
+    let parsed = parse(
+        "struct S { bare: fn() } fn caller(s: S) { s.bare(); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let bare_calls: Vec<_> = method_calls(&edges)
+        .into_iter()
+        .filter(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "bare"))
+        .collect();
+    assert!(
+        bare_calls.is_empty(),
+        "V2 must suppress bare-fn field-as-CALL, got: {bare_calls:#?}"
+    );
+}
+
+#[test]
+fn field_as_call_on_closure_field_is_suppressed_v2() {
+    // V2: closure-typed fields (`Box<dyn Fn(...)>` etc.) are also
+    // tracked by `record_presence`. The Box wrapper IS nominal so
+    // `record` would catch this too, but the test makes the
+    // closure-call intent explicit.
+    let parsed = parse(
+        "struct S { cb: Box<dyn Fn(u32) -> bool> } fn caller(s: &S) { s.cb(0); }",
+    );
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let cb_calls: Vec<_> = method_calls(&edges)
+        .into_iter()
+        .filter(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "cb"))
+        .collect();
+    assert!(
+        cb_calls.is_empty(),
+        "V2 must suppress Box<dyn Fn> field-as-CALL, got: {cb_calls:#?}"
+    );
 }
 
 #[test]
