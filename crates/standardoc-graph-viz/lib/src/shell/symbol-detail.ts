@@ -1,15 +1,15 @@
-import type { McpBrowse } from '@standarx/standardoc-viz/mcp-client';
+import type { McpBrowse } from '../mcp-client';
 import type {
   GetContextResponse,
   RawSymbol,
-} from '@standarx/standardoc-viz/mcp-client';
+} from '../mcp-client';
 import type {
   EntryPointKind,
   SymbolDetail,
   SymbolRelationBucket,
   SymbolRelationKind,
   SymbolSubItem,
-} from '@standarx/standardoc-viz';
+} from '../index';
 
 import type { FileEntry } from './types';
 import { formatSignature, shortFqdn } from './symbols';

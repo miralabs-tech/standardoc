@@ -1,7 +1,7 @@
 import type {
   BrowseSymbol,
   GetContextResponse,
-} from '@standarx/standardoc-viz/mcp-client';
+} from '../mcp-client';
 
 export function buildFocusPayload(
   fqdn: string,

@@ -1,4 +1,4 @@
-import type { BrowseSymbol } from '@standarx/standardoc-viz/mcp-client';
+import type { BrowseSymbol } from '../mcp-client';
 
 /**
  * Overview navigation state. The default `workspace` mode paints

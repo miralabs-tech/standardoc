@@ -1,0 +1,197 @@
+// Shell chrome + design tokens. Single source of truth for the
+// multi-panel shell's look — consumed by BOTH the playground
+// (bundled via the dev server's scss plugin) and the VSCode webview
+// (bundled at extension build time). Previously these tokens lived
+// inlined in the playground's `shell.html`; promoting them here lets
+// every host render an identical shell without duplicating the block.
+//
+// Component-scoped styles stay in each component's own `.module.scss`;
+// this file only owns the shell's outer chrome (toolbar, toggles,
+// panel placeholders, the root surface) plus the `:root` token block
+// the components read through `var(--sd-*, fallback)`.
+
+:root {
+  --sd-bg-deep: #0b0e14;
+  --sd-bg: #11151c;
+  --sd-bg-elevated: #181d27;
+  --sd-fg-strong: #f5f7fa;
+  --sd-fg: #c9cfd9;
+  --sd-fg-muted: #8b94a3;
+  --sd-fg-dim: #5a6275;
+  --sd-border: #2a3140;
+  --sd-border-subtle: #1c2230;
+  --sd-border-strong: #3a4256;
+  --sd-accent: #4d8cff;
+  --sd-accent-strong: #6ba1ff;
+  --sd-accent-dim: rgba(77, 140, 255, 0.18);
+  --sd-hover: rgba(77, 140, 255, 0.08);
+  --sd-selection: rgba(77, 140, 255, 0.22);
+  --sd-status-ok: #7ed18a;
+  --sd-status-warn: #d4b455;
+  --sd-status-err: #ef8b6f;
+  --sd-kind-module: #b888da;
+  --sd-kind-type: #d4b455;
+  --sd-kind-callable: #4d8cff;
+  --sd-kind-value: #7ed18a;
+  --sd-kind-macro: #ef8b6f;
+  --sd-kind-unknown: #8b94a3;
+  --sd-ep-binary-main: #5fa3ff;
+  --sd-ep-public-api: #f0bc55;
+  --sd-ep-ffi-export: #ff9560;
+  --sd-vis-public: #7ed18a;
+  --sd-vis-private: #8b94a3;
+  --sd-vis-crate: #d4b455;
+  --sd-vis-protected: #b888da;
+  --sd-section-doc: #5cd1c2;
+  --sd-section-relations: #f0bc55;
+  --sd-section-entry: #5fa3ff;
+  --sd-section-fields: #b888da;
+  --sd-section-methods: #4d8cff;
+  --sd-radius-sm: 4px;
+  --sd-radius-md: 8px;
+  --sd-radius-lg: 12px;
+  --sd-radius-pill: 999px;
+  --sd-space-1: 4px;
+  --sd-space-2: 8px;
+  --sd-space-3: 12px;
+  --sd-space-4: 16px;
+  --sd-space-5: 24px;
+  --sd-space-6: 32px;
+  --sd-text-xs: 10px;
+  --sd-text-sm: 11px;
+  --sd-text-md: 13px;
+  --sd-text-lg: 15px;
+  --sd-text-xl: 18px;
+  --sd-font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+  --sd-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto, sans-serif;
+  --sd-shell-grid-cols: 260px 1fr 360px;
+  --sd-shell-grid-rows: 48px 1fr 1fr;
+  --sd-shell-panel-min-h: 180px;
+  --sd-shell-gap: var(--sd-space-2);
+  --sd-panel-bg: linear-gradient(180deg, #161b25 0%, #11151c 100%);
+  --sd-panel-header-h: 36px;
+  --sd-panel-header-bg: linear-gradient(180deg, #1c222e 0%, #161b25 100%);
+  --sd-panel-padding: var(--sd-space-3);
+  --sd-panel-border: 1px solid var(--sd-border-subtle);
+  --sd-panel-shadow: 0 2px 12px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  --sd-panel-host-h: 240px;
+}
+
+// The shell container is flex-column (set by mountShell): the main
+// panel grid grows to fill, the compare/drawer host sits below and
+// collapses to 0 when empty. `min-height: 0` lets the grid actually
+// shrink-to-fit inside the flex parent instead of overflowing.
+[data-shell-root] {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+[data-shell-panels] {
+  flex: 0 0 auto;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100vh;
+  background:
+    radial-gradient(ellipse at 50% 30%, #141a26 0%, #0b0e14 70%),
+    #0b0e14;
+  color: var(--sd-fg, #c9cfd9);
+  font-family: var(--sd-font-sans);
+  overflow: hidden;
+}
+
+.sd-shell-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  background: var(--sd-panel-header-bg);
+  border: var(--sd-panel-border);
+  border-radius: var(--sd-radius-md);
+  box-shadow: var(--sd-panel-shadow);
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.sd-shell-toolbar__brand {
+  color: var(--sd-accent);
+  font-family: var(--sd-font-mono);
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.sd-shell-toolbar__spacer {
+  flex: 1;
+}
+
+.sd-shell-toolbar standardoc-search {
+  flex: 0 1 380px;
+  max-width: 380px;
+}
+
+.sd-shell-toggle {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--sd-border-subtle, #2d2d2d);
+  border-radius: var(--sd-radius-sm, 3px);
+  color: var(--sd-fg-muted, #9d9d9d);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  padding: 3px 7px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sd-shell-toggle:hover {
+  background: var(--sd-hover, #2a2d2e);
+  color: var(--sd-fg, #cccccc);
+}
+
+.sd-shell-toggle[aria-pressed='true'] {
+  background: var(--sd-selection, #094771);
+  color: var(--sd-fg-strong, #ffffff);
+  border-color: var(--sd-accent, #3794ff);
+}
+
+.sd-shell-toggles {
+  display: flex;
+  gap: 4px;
+}
+
+.sd-shell-status {
+  font-size: 11px;
+  color: var(--sd-fg-muted, #9d9d9d);
+}
+
+.sd-shell-panel-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  background: var(--sd-panel-bg);
+  border: var(--sd-panel-border);
+  border-radius: var(--sd-radius-md);
+  box-shadow: var(--sd-panel-shadow);
+  color: var(--sd-fg-muted);
+  font-style: italic;
+  padding: 16px;
+  text-align: center;
+}
+
+standardoc-graph {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--sd-panel-bg);
+  border: var(--sd-panel-border);
+  border-radius: var(--sd-radius-md);
+  box-shadow: var(--sd-panel-shadow);
+  overflow: hidden;
+}

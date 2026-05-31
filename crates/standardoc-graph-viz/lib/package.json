@@ -5,7 +5,8 @@
   "description": "Embeddable graph-viz UI components for the standardoc workspace index.",
   "type": "module",
   "sideEffects": [
-    "./src/components/**/*.element.ts"
+    "./src/components/**/*.element.ts",
+    "./src/shell/shell.scss"
   ],
   "exports": {
     ".": "./src/index.ts",
@@ -26,8 +27,13 @@
     "./focus-store": "./src/focus-store/index.ts",
     "./view-prefs-store": "./src/view-prefs-store/index.ts",
     "./panel-manager": "./src/panel-manager/index.ts",
+    "./shell": "./src/shell/index.ts",
     "./styles/tokens": "./src/styles/_tokens.scss",
     "./styles/mixins": "./src/styles/_mixins.scss"
+  },
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:e2e:update": "playwright test --update-snapshots"
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": "^1",
@@ -35,6 +41,11 @@
     "matchigo": "^1"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1",
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.0.0",
+    "classigo": "^2",
+    "matchigo": "^1",
     "sass": "^1.83.0",
     "typescript": "^5.6.0"
   }

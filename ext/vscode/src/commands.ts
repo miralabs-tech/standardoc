@@ -47,7 +47,7 @@ export function registerCommands(context: vscode.ExtensionContext, ctx: CommandC
     vscode.commands.registerCommand('Standardoc.statusBarMenu', () => commandStatusBarMenu(ctx)),
     vscode.commands.registerCommand('Standardoc.downloadBinary', () => commandDownloadBinary(ctx)),
     vscode.commands.registerCommand('Standardoc.viz.open', () =>
-      openGraphViz(ctx.workspaceRoot, ctx.output),
+      openGraphViz(ctx.context, ctx.mcp, ctx.output),
     ),
   );
 }

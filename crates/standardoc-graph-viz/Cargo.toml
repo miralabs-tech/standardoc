@@ -12,6 +12,14 @@ description = "WASM graph viewer for the standardoc semantic IR. 2D canvas rende
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# The wasm-opt (binaryen) that wasm-pack auto-downloads is too old to
+# validate the bulk-memory ops (memory.copy) rustc now emits by default,
+# so it aborts the build post-codegen. Disable it — the unoptimised wasm
+# is fully functional; reinstate with a recent binaryen on PATH if
+# release-size optimisation is needed later.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 [dependencies]
 standardoc-ir = { workspace = true }
 serde         = { workspace = true }

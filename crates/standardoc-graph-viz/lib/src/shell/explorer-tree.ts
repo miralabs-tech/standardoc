@@ -1,8 +1,8 @@
-import type { BrowseSymbol } from '@standarx/standardoc-viz/mcp-client';
+import type { BrowseSymbol } from '../mcp-client';
 import type {
   EntryPointKind,
   ExplorerTreeNode,
-} from '@standarx/standardoc-viz';
+} from '../index';
 
 import type {
   DirNode,

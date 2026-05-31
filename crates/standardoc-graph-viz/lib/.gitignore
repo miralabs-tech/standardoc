@@ -1,2 +1,8 @@
 node_modules/
 dist/
+
+# Playwright transient run artefacts — the snapshot baseline under
+# tests/shell/*-snapshots/ IS committed; these are not.
+test-results/
+playwright-report/
+.playwright/

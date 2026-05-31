@@ -174,9 +174,9 @@
     ]
   },
   "scripts": {
-    "build": "bun build ./src/extension.ts --format=cjs --target=node --external=vscode --outdir=./dist --sourcemap=external",
-    "build:prod": "bun build ./src/extension.ts --format=cjs --target=node --external=vscode --outdir=./dist --minify --sourcemap=external",
-    "watch": "bun build ./src/extension.ts --format=cjs --target=node --external=vscode --outdir=./dist --watch --sourcemap=external",
+    "build": "bun build.ts",
+    "build:prod": "bun build.ts --production",
+    "watch": "bun build.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "package": "bun run build:prod && vsce package",
@@ -188,6 +188,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "classigo": "^2.0.0",
     "matchigo": "^1.0.2",
     "vscode-languageclient": "^9.0.1"
   },
@@ -196,6 +197,7 @@
     "@types/vscode": "^1.105.0",
     "@vscode/vsce": "^3.0.0",
     "bun-types": "^1.1.0",
+    "sass": "^1.83.0",
     "typescript": "^5.6.0"
   }
 }

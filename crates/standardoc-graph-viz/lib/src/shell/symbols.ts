@@ -1,14 +1,14 @@
-import type { McpBrowse } from '@standarx/standardoc-viz/mcp-client';
+import type { McpBrowse } from '../mcp-client';
 import type {
   BrowseSymbol,
   RawSymbol,
-} from '@standarx/standardoc-viz/mcp-client';
+} from '../mcp-client';
 import type {
   EntryPointKind,
   ExplorerEntryPoint,
   ExplorerNodeKind,
   SymbolSearchResult,
-} from '@standarx/standardoc-viz';
+} from '../index';
 
 import type { ProjectLike } from './types';
 
