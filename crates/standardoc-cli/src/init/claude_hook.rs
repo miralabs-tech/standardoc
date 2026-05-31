@@ -1,4 +1,4 @@
-//! Idempotent merge of Standardoc's five `.claude/settings.json` hooks.
+//! Idempotent merge of Standardoc's four `.claude/settings.json` hooks.
 //!
 //! Mirrors `ext/vscode/src/init/claude-hook.ts` — the command strings and
 //! grep-stable markers are byte-identical so a workspace initialised by
@@ -10,15 +10,11 @@
 //! - `PreToolUse` (`mcp__standardoc__.*`): marks the MCP-first sentinel.
 //! - `PreToolUse` (`Bash|Read|Grep|Glob`): denies when the sentinel is absent.
 //! - `SessionStart`: resets the sentinel so each chat starts strict.
-//! - `PostToolUse` (`Write|Edit|MultiEdit`): syncs the harness memory dir.
 
 use serde_json::{Map, Value, json};
 
 const HOOK_MARKER: &str = "STANDARDOC_MCP_NUDGE";
 const HOOK_MESSAGE: &str = "Standardoc live AST index is available via MCP tools (find_symbol, get_context, list_symbols, find_symbols_by_pattern, find_similar_symbols, current_revision, check_stale). Use them BEFORE Read/Grep/Glob for any code task.";
-
-const SESSION_SYNC_MARKER: &str = "standardoc session hook";
-const SESSION_SYNC_COMMAND: &str = "standardoc session hook";
 
 const MCP_FIRST_MARK_MARKER: &str = "pre-tool-hook --mode mark";
 const MCP_FIRST_MARK_COMMAND: &str = "standardoc claude pre-tool-hook --mode mark";
@@ -85,9 +81,6 @@ pub(crate) fn merge_claude_hook(raw: Option<&str>) -> MergeOutcome {
     });
     changed |= ensure_hook(&mut hooks, "SessionStart", MCP_FIRST_RESET_MARKER, || {
         hook_group("", MCP_FIRST_RESET_COMMAND)
-    });
-    changed |= ensure_hook(&mut hooks, "PostToolUse", SESSION_SYNC_MARKER, || {
-        hook_group("Write|Edit|MultiEdit", SESSION_SYNC_COMMAND)
     });
 
     if !changed {
@@ -157,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_all_five_hooks_when_absent() {
+    fn creates_all_four_hooks_when_absent() {
         let out = merge_claude_hook(None);
         assert!(matches!(out, MergeOutcome::Created(_)));
         let s = rendered(&out);
@@ -166,7 +159,6 @@ mod tests {
             MCP_FIRST_MARK_MARKER,
             MCP_FIRST_CHECK_MARKER,
             MCP_FIRST_RESET_MARKER,
-            SESSION_SYNC_MARKER,
         ] {
             assert!(s.contains(marker), "missing {marker}");
         }
@@ -197,7 +189,6 @@ mod tests {
             MCP_FIRST_MARK_MARKER,
             MCP_FIRST_CHECK_MARKER,
             MCP_FIRST_RESET_MARKER,
-            SESSION_SYNC_MARKER,
         ] {
             assert!(s.contains(marker), "missing {marker}");
         }

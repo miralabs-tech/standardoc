@@ -611,6 +611,20 @@ fn sanitize_fts5_query_empty_for_only_special_chars() {
 }
 
 #[test]
+fn or_fallback_expr_none_for_single_token() {
+    assert_eq!(or_fallback_expr("merge_mcp_config"), None);
+    assert_eq!(or_fallback_expr(""), None);
+}
+
+#[test]
+fn or_fallback_expr_quotes_and_or_joins_multiple_tokens() {
+    assert_eq!(
+        or_fallback_expr("register_with_existing probe_existing_proxy").as_deref(),
+        Some(r#""register_with_existing" OR "probe_existing_proxy""#),
+    );
+}
+
+#[test]
 fn search_text_matches_hyphenated_query() {
     let (_dir, handle) = open_handle();
     {

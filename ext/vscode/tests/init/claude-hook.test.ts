@@ -8,13 +8,10 @@ import {
   STANDARDOC_MCP_FIRST_MARK_MARKER,
   STANDARDOC_MCP_FIRST_RESET_COMMAND,
   STANDARDOC_MCP_FIRST_RESET_MARKER,
-  STANDARDOC_SESSION_SYNC_COMMAND,
-  STANDARDOC_SESSION_SYNC_MARKER,
   buildStandardocHookGroup,
   buildStandardocMcpFirstCheckHookGroup,
   buildStandardocMcpFirstMarkHookGroup,
   buildStandardocMcpFirstResetHookGroup,
-  buildStandardocSessionSyncHookGroup,
   mergeClaudeHook,
   parseClaudeSettings,
   serializeClaudeSettings,
@@ -46,7 +43,7 @@ describe('parseClaudeSettings', () => {
 });
 
 describe('mergeClaudeHook', () => {
-  test('absent file → create with all five hooks', () => {
+  test('absent file → create with all four hooks', () => {
     const action = mergeClaudeHook({ kind: 'absent' });
     expect(action.kind).toBe('create');
     if (action.kind === 'create') {
@@ -61,23 +58,18 @@ describe('mergeClaudeHook', () => {
       expect(preTool[1]?.matcher).toBe('Bash|Read|Grep|Glob');
       expect(preTool[1]?.hooks[0]?.command).toBe(STANDARDOC_MCP_FIRST_CHECK_COMMAND);
 
-      const postTool = action.result.hooks?.PostToolUse ?? [];
-      expect(postTool.length).toBe(1);
-      expect(postTool[0]?.hooks[0]?.command).toContain(STANDARDOC_SESSION_SYNC_MARKER);
-
       const sessionStart = action.result.hooks?.SessionStart ?? [];
       expect(sessionStart.length).toBe(1);
       expect(sessionStart[0]?.hooks[0]?.command).toBe(STANDARDOC_MCP_FIRST_RESET_COMMAND);
     }
   });
 
-  test('existing settings without our hooks → append all five', () => {
+  test('existing settings without our hooks → append all four', () => {
     const result = mergeClaudeHook({ kind: 'parsed', value: { hooks: {} } });
     expect(result.kind).toBe('append');
     if (result.kind === 'append') {
       expect((result.result.hooks?.UserPromptSubmit ?? []).length).toBe(1);
       expect((result.result.hooks?.PreToolUse ?? []).length).toBe(2);
-      expect((result.result.hooks?.PostToolUse ?? []).length).toBe(1);
       expect((result.result.hooks?.SessionStart ?? []).length).toBe(1);
     }
   });
@@ -119,7 +111,7 @@ describe('mergeClaudeHook', () => {
     }
   });
 
-  test('existing PostToolUse groups → preserve and append ours last', () => {
+  test('existing PostToolUse groups → preserved untouched (we install no PostToolUse hook)', () => {
     const userGroup = {
       matcher: 'Bash',
       hooks: [{ type: 'command' as const, command: 'echo "user post-tool hook"' }],
@@ -131,9 +123,8 @@ describe('mergeClaudeHook', () => {
     expect(action.kind).toBe('append');
     if (action.kind === 'append') {
       const groups = action.result.hooks?.PostToolUse ?? [];
-      expect(groups.length).toBe(2);
+      expect(groups.length).toBe(1);
       expect(groups[0]).toEqual(userGroup);
-      expect(groups[1]?.hooks[0]?.command).toContain(STANDARDOC_SESSION_SYNC_MARKER);
     }
   });
 
@@ -155,7 +146,7 @@ describe('mergeClaudeHook', () => {
     }
   });
 
-  test('idempotent when ALL five markers already exist', () => {
+  test('idempotent when ALL four markers already exist', () => {
     const action = mergeClaudeHook({
       kind: 'parsed',
       value: {
@@ -165,7 +156,6 @@ describe('mergeClaudeHook', () => {
             buildStandardocMcpFirstMarkHookGroup(),
             buildStandardocMcpFirstCheckHookGroup(),
           ],
-          PostToolUse: [buildStandardocSessionSyncHookGroup()],
           SessionStart: [buildStandardocMcpFirstResetHookGroup()],
         },
       },
@@ -194,12 +184,6 @@ describe('mergeClaudeHook', () => {
               hooks: [{ type: 'command' as const, command: STANDARDOC_MCP_FIRST_CHECK_COMMAND }],
             },
           ],
-          PostToolUse: [
-            {
-              matcher: 'Write',
-              hooks: [{ type: 'command' as const, command: STANDARDOC_SESSION_SYNC_COMMAND }],
-            },
-          ],
           SessionStart: [
             {
               matcher: 'whatever',
@@ -212,7 +196,7 @@ describe('mergeClaudeHook', () => {
     expect(action).toEqual({ kind: 'no-op' });
   });
 
-  test('partial install: only nudge present → adds the four missing hooks', () => {
+  test('partial install: only nudge present → adds the three missing hooks', () => {
     const action = mergeClaudeHook({
       kind: 'parsed',
       value: { hooks: { UserPromptSubmit: [buildStandardocHookGroup()] } },
@@ -221,12 +205,11 @@ describe('mergeClaudeHook', () => {
     if (action.kind === 'append') {
       expect((action.result.hooks?.UserPromptSubmit ?? []).length).toBe(1);
       expect((action.result.hooks?.PreToolUse ?? []).length).toBe(2);
-      expect((action.result.hooks?.PostToolUse ?? []).length).toBe(1);
       expect((action.result.hooks?.SessionStart ?? []).length).toBe(1);
     }
   });
 
-  test('partial install: only the mark hook present → adds the missing check + reset + nudge + sync', () => {
+  test('partial install: only the mark hook present → adds the missing check + reset + nudge', () => {
     const action = mergeClaudeHook({
       kind: 'parsed',
       value: {
@@ -299,17 +282,6 @@ describe('serializeClaudeSettings', () => {
     const out = serializeClaudeSettings({ hooks: { UserPromptSubmit: [] } });
     expect(out.endsWith('\n')).toBe(true);
     expect(out).toContain('  "hooks"');
-  });
-});
-
-describe('session-sync hook contract', () => {
-  test('marker is grep-stable inside the command', () => {
-    expect(STANDARDOC_SESSION_SYNC_COMMAND).toContain(STANDARDOC_SESSION_SYNC_MARKER);
-  });
-
-  test('PostToolUse group matches Write/Edit/MultiEdit', () => {
-    const group = buildStandardocSessionSyncHookGroup();
-    expect(group.matcher).toBe('Write|Edit|MultiEdit');
   });
 });
 

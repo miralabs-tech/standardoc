@@ -56,7 +56,7 @@ fn write_skill(workspace_root: &Path) -> Result<(), ServerError> {
     Ok(())
 }
 
-/// Merge the five MCP-first / session-sync hooks into `.claude/settings.json`,
+/// Merge the four MCP-first hooks into `.claude/settings.json`,
 /// preserving any user-authored content. Idempotent across re-runs. A
 /// settings file we cannot parse is reported and left untouched rather than
 /// clobbered.

@@ -321,22 +321,52 @@ pub fn search_text(
              ORDER BY rank \
              LIMIT ?7",
         )?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![
-                    sanitized,
-                    kind_text,
-                    vis_text,
-                    module,
-                    include_external,
-                    workspace_id,
-                    limit_i64
-                ],
-                read_symbol_row,
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.into_iter().map(build_symbol).collect()
+        let mut fetch = |match_expr: &str| -> Result<Vec<RawSymbol>, StorageError> {
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![
+                        match_expr,
+                        kind_text,
+                        vis_text,
+                        module,
+                        include_external,
+                        workspace_id,
+                        limit_i64
+                    ],
+                    read_symbol_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter().map(build_symbol).collect()
+        };
+        // Primary pass: FTS5 space-separated tokens AND implicitly. When a
+        // multi-fragment probe finds nothing that way, broaden to OR so the
+        // caller gets symbols matching ANY fragment rather than an empty set.
+        let primary = fetch(&sanitized)?;
+        if primary.is_empty()
+            && let Some(or_expr) = or_fallback_expr(&sanitized)
+        {
+            return fetch(&or_expr);
+        }
+        Ok(primary)
     })
+}
+
+/// Broaden a multi-token sanitized query to FTS5 OR semantics. Returns `None`
+/// for single-token queries (nothing to broaden). Each token is phrase-quoted
+/// so an accidental `OR`/`AND`/`NOT` fragment can't be read as an operator;
+/// `sanitize_fts5_query` already guarantees the tokens hold no quote chars.
+fn or_fallback_expr(sanitized: &str) -> Option<String> {
+    let tokens: Vec<&str> = sanitized.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return None;
+    }
+    Some(
+        tokens
+            .iter()
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(" OR "),
+    )
 }
 
 /// Strips FTS5 syntactic chars (`-` NOT prefix, `"` phrase quoting,

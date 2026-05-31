@@ -84,6 +84,60 @@ fn check_emits_pretooluse_hook_event_name() {
 }
 
 #[test]
+fn check_allows_read_outside_workspace_even_without_sentinel() {
+    // Reading harness memory under ~/.claude (outside the project) must not
+    // be gated, even when the MCP-first sentinel is absent.
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp); // absent
+    let cwd = std::env::temp_dir().join("ws-root");
+    let outside = std::env::temp_dir().join("other-place").join("notes.md");
+    let payload = serde_json::json!({
+        "cwd": cwd.to_string_lossy(),
+        "tool_name": "Read",
+        "tool_input": { "file_path": outside.to_string_lossy() },
+    })
+    .to_string();
+    let out = pre_tool_hook_decide("check", &payload, &sentinel);
+    assert_eq!(out, "{}", "outside-workspace read must be allowed");
+}
+
+#[test]
+fn check_still_denies_read_inside_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp); // absent
+    let cwd = std::env::temp_dir().join("ws-root");
+    let inside = cwd.join("src").join("main.rs");
+    let payload = serde_json::json!({
+        "cwd": cwd.to_string_lossy(),
+        "tool_name": "Read",
+        "tool_input": { "file_path": inside.to_string_lossy() },
+    })
+    .to_string();
+    let out = pre_tool_hook_decide("check", &payload, &sentinel);
+    assert!(out.contains(r#""permissionDecision":"deny""#), "out={out}");
+}
+
+#[test]
+fn check_gates_relative_path_reads() {
+    // A relative target resolves under cwd → still gated.
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    let payload = r#"{"cwd":"/proj","tool_name":"Read","tool_input":{"file_path":"src/main.rs"}}"#;
+    let out = pre_tool_hook_decide("check", payload, &sentinel);
+    assert!(out.contains(r#""permissionDecision":"deny""#), "out={out}");
+}
+
+#[test]
+fn check_gates_bash_regardless_of_path() {
+    // Bash has no single target path → keep gating (cannot prove it's outside).
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    let payload = r#"{"cwd":"/proj","tool_name":"Bash","tool_input":{"command":"cat ~/.bashrc"}}"#;
+    let out = pre_tool_hook_decide("check", payload, &sentinel);
+    assert!(out.contains(r#""permissionDecision":"deny""#), "out={out}");
+}
+
+#[test]
 fn reset_removes_sentinel() {
     let tmp = TempDir::new().unwrap();
     let sentinel = sentinel_in(&tmp);

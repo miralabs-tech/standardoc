@@ -742,7 +742,7 @@ impl StandardocMcp {
     /// `stripped_lines` and `signature_only` so the caller can audit what was
     /// returned vs. the verbatim slice.
     #[tool(
-        description = "Returns the raw source text of a symbol identified by FQDN, sliced from the file at its declared start_line..end_line. Pair with `get_context` (graph relations) when you need to actually read the function body. Optional knobs: `max_lines` caps total output (`truncated=true` flag), `strip_attrs=true` drops leading doc comments / `#[…]` attribute blocks (`stripped_lines` count), `signature_only=true` truncates after the first `{` (returns just the multi-line signature), `strip_inline_comments=true` removes inline `// …` and `/* … */` comments from the body (string-literal safe — `\"…\"`, raw strings, TS templates passed through verbatim). Returns `null` when no symbol matches the FQDN — call `find_symbol` first if you only have a name fragment."
+        description = "Returns the raw source text of a symbol identified by FQDN, sliced from the file at its declared start_line..end_line. Pair with `get_context` (graph relations) when you need to actually read the function body. Optional knobs: `max_lines` caps total output (`truncated=true` flag), `strip_attrs=true` drops leading doc comments / `#[…]` attribute blocks (`stripped_lines` count), `signature_only=true` truncates after the first `{` (returns just the multi-line signature), `strip_inline_comments=true` removes inline `// …` and `/* … */` comments from the body (string-literal safe — `\"…\"`, raw strings, TS templates passed through verbatim). Returns `null` when no symbol matches the FQDN — call `find_symbol` first if you only have a name fragment. NOTE: leading indentation is normalized to the reported `indent_unit`, so the body is not byte-faithful to the file's actual whitespace — re-read the raw file before making indentation-sensitive edits."
     )]
     async fn get_body(
         &self,
@@ -799,7 +799,7 @@ impl StandardocMcp {
     /// already captured via `RawDocument` / `enrichment_description` —
     /// duplicating them in the body is wasted context.
     #[tool(
-        description = "Like `get_body` but returns pure code by default — leading doc comments / `#[…]` attribute blocks and inline `// …` / `/* … */` comments are stripped. The verbatim slice is still available via `get_body`; the leading description lives separately in `get_context.context.document_description`. Useful when you want to read the actual implementation without dilution. Pass `strip_attrs=false` or `strip_inline_comments=false` to disable individual strips. Other knobs (`max_lines`, `signature_only`) behave the same as `get_body`. Returns `null` when no symbol matches the FQDN."
+        description = "Like `get_body` but returns pure code by default — leading doc comments / `#[…]` attribute blocks and inline `// …` / `/* … */` comments are stripped. The verbatim slice is still available via `get_body`; the leading description lives separately in `get_context.context.document_description`. Useful when you want to read the actual implementation without dilution. Pass `strip_attrs=false` or `strip_inline_comments=false` to disable individual strips. Other knobs (`max_lines`, `signature_only`) behave the same as `get_body`. Returns `null` when no symbol matches the FQDN. NOTE: indentation is normalized to the reported `indent_unit` (not byte-faithful to the file) — re-read the raw file before indentation-sensitive edits."
     )]
     async fn get_code(
         &self,

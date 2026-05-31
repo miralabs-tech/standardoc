@@ -467,6 +467,13 @@ fn pre_tool_hook_decide(mode: &str, raw_payload: &str, sentinel: &Path) -> Strin
             }
         }
         "check" => {
+            // Scope the guardrail to the workspace: a Read/Grep/Glob aimed at
+            // an absolute path OUTSIDE the project (e.g. `~/.claude` memory,
+            // a sibling repo) is not code exploration of THIS workspace, so
+            // never gate it behind an MCP call.
+            if targets_outside_workspace(&payload) {
+                return "{}".to_string();
+            }
             if sentinel.exists() {
                 "{}".to_string()
             } else {
@@ -489,6 +496,43 @@ fn pre_tool_hook_decide(mode: &str, raw_payload: &str, sentinel: &Path) -> Strin
         }
         _ => r#"{"ok":false,"reason":"unknown_mode"}"#.to_string(),
     }
+}
+
+/// True when the inbound tool is a path-based read (`Read`/`Grep`/`Glob`)
+/// aimed at an **absolute** path that is not under the payload `cwd`. Such a
+/// read targets something outside the workspace (harness memory under
+/// `~/.claude`, a sibling repo, …) and has nothing to do with THIS project's
+/// index, so the MCP-first guardrail must not gate it.
+///
+/// Conservative by construction: any ambiguity (missing `cwd`, relative
+/// target, `Bash`, unparseable path) returns `false` so the guardrail still
+/// fires — we only bypass when we are confident the target is outside.
+fn targets_outside_workspace(payload: &serde_json::Value) -> bool {
+    let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let tool = payload
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let input = payload.get("tool_input");
+    let target = match tool {
+        "Read" => input
+            .and_then(|i| i.get("file_path"))
+            .and_then(|v| v.as_str()),
+        // Grep/Glob default to cwd when `path` is omitted → that's inside.
+        "Grep" | "Glob" => input.and_then(|i| i.get("path")).and_then(|v| v.as_str()),
+        _ => None,
+    };
+    let Some(target) = target else { return false };
+    if !Path::new(target).is_absolute() {
+        return false;
+    }
+    // Case- and separator-insensitive prefix check. Erring toward a false
+    // "inside" (→ keep gating) is the safe direction.
+    let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    let cwd_n = norm(cwd);
+    !cwd_n.is_empty() && !norm(target).starts_with(&cwd_n)
 }
 
 fn cmd_schema_version(path: &Path) -> Result<(), ServerError> {

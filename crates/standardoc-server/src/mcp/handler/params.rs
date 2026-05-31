@@ -54,8 +54,11 @@ pub(crate) struct GetContextSummaryParams {
 /// `limit` defaults to `20` and is capped at `100` server-side.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct FindSymbolParams {
-    /// Free-text FTS5 query against symbol `name` and `fqdn` columns.
-    /// Tokenization handles snake_case and camelCase.
+    /// Free-text query against symbol `name` and `fqdn` columns. Accepts the
+    /// `name` key as an alias (a common intuition for "find a symbol by
+    /// name"). Tokenization handles snake_case and camelCase; multiple
+    /// fragments match ANY token when no symbol matches all of them.
+    #[serde(alias = "name")]
     pub query: String,
     /// Maximum results to return. Defaults to 20, capped at 100.
     pub limit: Option<u8>,
@@ -92,7 +95,9 @@ pub(crate) struct FindSymbolParams {
 /// kind, no RawSymbol).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct FindSymbolFqdnsParams {
-    /// Free-text FTS5 query against symbol `name` and `fqdn` columns.
+    /// Free-text query against symbol `name` and `fqdn` columns. Accepts the
+    /// `name` key as an alias (same as `find_symbol`).
+    #[serde(alias = "name")]
     pub query: String,
     /// Maximum results to return. Defaults to 20, capped at 100.
     pub limit: Option<u8>,
@@ -616,4 +621,24 @@ pub(crate) struct LinkWorkspaceJson {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct ProjectForFileParams {
     pub path: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_symbol_accepts_name_alias_for_query() {
+        let p: FindSymbolParams = serde_json::from_str(r#"{"name":"merge_mcp_config"}"#).unwrap();
+        assert_eq!(p.query, "merge_mcp_config");
+        // The canonical `query` key still works.
+        let p2: FindSymbolParams = serde_json::from_str(r#"{"query":"foo"}"#).unwrap();
+        assert_eq!(p2.query, "foo");
+    }
+
+    #[test]
+    fn find_symbol_fqdns_accepts_name_alias_for_query() {
+        let p: FindSymbolFqdnsParams = serde_json::from_str(r#"{"name":"foo"}"#).unwrap();
+        assert_eq!(p.query, "foo");
+    }
 }
