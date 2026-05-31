@@ -1,5 +1,6 @@
 #![allow(clippy::result_large_err)]
 
+mod init;
 mod self_update;
 mod sxd_schema;
 mod warn;
@@ -194,6 +195,16 @@ enum Command {
         action: ClaudeAction,
     },
 
+    /// Initialise this workspace for an AI agent: write the Standardoc
+    /// skill (`.claude/skills/standardoc/SKILL.md`) so a Claude Code (or
+    /// other SKILL.md-aware) agent picks up the live index. Idempotent — a
+    /// skill that already matches is left untouched.
+    Init {
+        /// Workspace root to initialise. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+
     /// Atomically upgrade the running `standardoc` binary to the latest
     /// published release. Reads the same `version.json` manifest the
     /// VSCode extension consumes ; downloads + sha256-verifies the
@@ -362,6 +373,7 @@ fn main_inner() -> Result<(), ServerError> {
         Command::Claude { action } => match action {
             ClaudeAction::PreToolHook { mode } => cmd_claude_pre_tool_hook(&mode),
         },
+        Command::Init { path } => init::run(&path),
         Command::SelfUpdate {
             dry_run,
             force,
