@@ -73,15 +73,13 @@ Open a project (Rust / TypeScript / JavaScript / React (JSX & TSX) / Vue
 
 Click **Initialize**. The extension:
 
-1. Creates `.standardoc/` — SQLite index + RAG + metadata
-2. Creates `.standardoc-sessions/` — cross-session agent memos
-3. Writes `.mcp.json` at the root (cross-client merge, preserves
+1. Creates `.standardoc/` — SQLite index + metadata
+2. Writes `.mcp.json` at the root (cross-client merge, preserves
    existing user fields)
-4. Generates `.claude/skills/standardoc/SKILL.md` (~480 lines —
-   teaches MCP-first, the 3-phase protocol, edge kinds, 9 recommended
-   workflows)
-5. Spawns the LSP daemon (primary writer) + the MCP HTTP/SSE daemon
-6. Cold-start indexes your workspace (5–15s depending on size, progress
+3. Generates `.claude/skills/standardoc/SKILL.md` (teaches MCP-first,
+   the 3-phase protocol, edge kinds, recommended workflows)
+4. Spawns the LSP daemon (primary writer) + the MCP HTTP/SSE daemon, then
+   cold-start indexes your workspace (5–15s depending on size, progress
    visible via `$/progress` on the LSP side)
 
 The watcher keeps the index live after the cold start. Every
@@ -113,33 +111,17 @@ after) instead of grep. **~100 tokens per question instead of 30k.**
 
 ### Claude Code hooks installed automatically
 
-The opt-in init flow injects **two mechanisms** into the workspace's
-`.claude/settings.json`:
-
-**1. MCP-first guardrail** — stops the agent from degenerating into a
-grep loop. Three coordinated hooks:
+The opt-in init flow installs the **MCP-first guardrail** into the
+workspace's `.claude/settings.json` — it stops the agent from
+degenerating into a grep loop. Three coordinated hooks:
 
 - `SessionStart` *(reset)* — wipes the sentinel on every new chat to
   stay strict
 - `PreToolUse` *(mark)* — places the sentinel as soon as a Standardoc
   tool is called
-- `PreToolUse` *(check)* — blocks `Bash` / `Read` / `Grep` / `Glob` if
-  the sentinel is absent
-
-**2. Auto-sync sessions** *(`PostToolUse`)* — when the agent writes a
-memo into its **Claude native memory folder**
-(`~/.claude/projects/<hash>/memory/*.md`), the content is auto-imported
-into `.standardoc-sessions/sessions.db`.
-
-> **Important: the hook fires only on those writes.** Not on `Write` /
-> `Edit` / `MultiEdit` of source code or project files — only files
-> whose path matches `/.claude/projects/` AND `/memory/` (the
-> `MEMORY_PATH_MARKER` + `MEMORY_PATH_TAIL` constants on the
-> `standardoc-cli` side).
-
-**An automatic bridge between Claude Code's native memory and
-Standardoc's sessions DB** — the agent capitalizes its memos without
-having to re-write them via `session_save` every time.
+- `PreToolUse` *(check)* — blocks `Bash` / `Read` / `Grep` / `Glob` when
+  the sentinel is absent (only when the call targets a path inside the
+  workspace — reads outside it, e.g. `~/.claude`, are never gated)
 
 If you use another MCP-aware client, configure your own equivalent
 hooks:
@@ -148,51 +130,6 @@ hooks:
 standardoc claude pre-tool-hook --mode mark   # place the sentinel
 standardoc claude pre-tool-hook --mode check  # block Bash/Grep/...
 standardoc claude pre-tool-hook --mode reset  # wipe on SessionStart
-standardoc session hook                        # auto-import memo (PostToolUse)
-```
-
-### Persistent sessions (cross-chat memory)
-
-`.standardoc-sessions/sessions.db` is **created automatically on the
-first call to a `session_*` tool** by the agent — no human action is
-required to init the DB. The DB is deliberately separate from
-`.standardoc/` so that a graph reset (or a `Standardoc: Rebuild RAG
-index`) doesn't wipe the memos.
-
-**Initiating the convention stays the operator's job.** The agent
-doesn't spontaneously create memos — it knows how to because the
-auto-generated skill documents the workflow, but it waits to be told.
-You have to **brief the agent on the first chat**:
-
-> *"Organize yourself in sessions. Save a memo `session_save(slug,
-> body_md)` at the end of each work item or locked decision. At the
-> start of the next chat, do `session_get()` to recover where we
-> were."*
-
-Once the convention is established in the first chats, the agent
-maintains it on its own via:
-
-- **End of session** (locks decisions or ships work):
-  `session_save(slug, body_md, supersedes?)` to persist a memo. The
-  `supersedes` chains memos when a refactor invalidates a previous
-  lock.
-- **Start of the next session**: `session_get()` (no slug) returns the
-  most recent active memo as the entry point.
-- `session_list({active_only: true})` to scan recent memos.
-
-Four distinct kinds via the frontmatter `type` field: `session`
-(default handoff), `feedback` (behavioral rules), `profile` (stable
-user facts), `lock` (locked decisions — **ADR equivalent** in memo
-format).
-
-**Manual migration of an external `.md` folder**:
-
-```sh
-# Import a .md folder → sessions.db
-standardoc session sync-in /path/workspace /path/memos-folder
-
-# Export sessions.db → .md folder (full frontmatter)
-standardoc session sync-out /path/workspace /path/export-folder
 ```
 
 ### The status bar menu (click bottom-right)
@@ -203,19 +140,6 @@ common actions**:
 - **▶ Start daemon** / **■ Stop daemon** / **↻ Restart daemon**
 - **🗑 Purge excluded paths** — purges the symbols whose source file
   now matches `.stdignore`
-- **Enable / Disable RAG** *(dynamic toggle based on state)*
-- **Switch RAG embedder…** — choice between:
-  - **Mock**: deterministic, zero network (for dev / tests)
-  - **Candle (BGE-small)**: local 384-dim BERT. First run: ~130 MB
-    download (cache `~/.cache/standardoc/models/`, override via the
-    `STANDARDOC_MODELS_DIR` env variable)
-- **Rebuild RAG index** — stops the daemon, deletes
-  `.standardoc/rag.db` (+ `-wal` / `-shm`), restarts. The chunks are
-  re-embedded at cold start. Confirmation modal before execution.
-- **Show token savings** — displays the `bytes_out / baseline_bytes`
-  ratio (what Standardoc returned vs. what the agent would have read
-  raw) per period (today / day / week / all)
-- **Reset token savings…** — baselines a clean measurement
 
 ### VSCode command palette (`Ctrl+Shift+P`)
 
@@ -240,9 +164,9 @@ All status-bar menu actions are reachable from the palette via
 
 On the MCP client side (Copilot Chat / Claude Code in VSCode, Cursor,
 etc.), each client has its own UI to list connected MCP servers and
-their available tools. Standardoc must appear there with its **16
-tools** (`find_symbol`, `get_context`, `get_body`, `fetch_chunks`,
-`session_save`, etc.).
+their available tools. Standardoc must appear there with its tool set
+(`find_symbol`, `get_context`, `get_body`, `get_code`, `find_call_sites`,
+`fetch_graph`, `current_revision`, etc.).
 
 If the agent says Standardoc isn't available:
 
@@ -252,7 +176,7 @@ If the agent says Standardoc isn't available:
    moved, binary updated)? Run `Standardoc: Refresh .mcp.json paths`.
 3. **The `Standardoc` output channel** displays the daemon and
    supervisor logs — that's where you see startup errors,
-   `STDOC_FATAL` markers, embedder DLs, etc.
+   `STDOC_FATAL` markers, etc.
 
 ---
 
@@ -320,24 +244,24 @@ the primary writer.
 ## 6. Useful sub-commands
 
 ```sh
+standardoc init <ws>                   # install skill + hooks + AGENTS.md + .mcp.json
 standardoc lsp <ws>                    # primary writer daemon
+standardoc mcp <ws> --connect          # stdio↔http bridge (what init wires into .mcp.json)
 standardoc mcp <ws> --readonly         # readonly MCP daemon (stdio)
-standardoc mcp <ws> --http <port>      # readonly MCP daemon (HTTP/SSE)
+standardoc mcp <ws> --http <port>      # MCP daemon (HTTP/SSE)
 standardoc index <ws>                  # one-shot index
 standardoc watch <ws>                  # watcher only
 standardoc rescan <ws>                 # rebuild from scratch
 standardoc query <ws> ...              # CLI query (find / context / body)
 standardoc purge-excluded <ws>         # cleanup post-.stdignore edit
-standardoc reset-usage --period <p>    # reset usage_stats (today/day/week/all)
 standardoc schema-version <ws>         # print schema version
-standardoc session sync-in <ws> <dir>  # bridge .md memos → sessions.db
-standardoc session sync-out <ws> <dir> # bridge sessions.db → .md memos
 standardoc stdignore-preview <ws> <pattern>  # preview .stdignore matches
 ```
 
-The MCP surface exposed by the daemon (**16 tools**: `find_symbol`,
-`get_context`, `get_body`, `fetch_chunks`, `session_save`,
-`current_revision`, `check_stale`, `usage_stats`, etc.) is documented in
+The MCP surface exposed by the daemon (`find_symbol`, `get_context`,
+`get_body`, `get_code`, `find_call_sites`, `module_lookup`, `fetch_graph`,
+`current_revision`, `check_stale`, plus the cross-workspace
+`link_workspace` / `resolve_cross_workspace` family) is documented in
 detail in the auto-generated `SKILL.md` at workspace init — that's what
 the agent reads to know how to use Standardoc. No need to memorize it on
 the human side.
@@ -357,16 +281,6 @@ Default template: `.git/`, `node_modules/`, `target/`, `dist/`,
 - **Additions** → exclude paths (automatic purge of matching symbols
   via `standardoc purge-excluded`)
 - **Removals** → automatic re-index of the affected sub-tree
-
-### RAG over the adjacent prose
-
-`docs/`, `notes/`, and the `*.md` at the root + at sub-package roots are
-chunked and reachable via the `chunk_refs` of `get_context`, or
-directly via `fetch_chunks(uri)`.
-
-The default embedder is **Candle BGE-small** (~130 MB, lazy download on
-first RAG use). **Runs locally, no cloud.** The chunks live in
-`.standardoc/rag.db`, linked to the graph by FQDN.
 
 ---
 

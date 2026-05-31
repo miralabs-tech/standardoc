@@ -10,7 +10,7 @@
 
 Pas encore, et pas au sens TypeDoc / JSDoc. Aujourd'hui Standardoc est
 un **indexeur sémantique** — un graphe de code vivant exposé via
-MCP / LSP / RAG. La doc *rendue* (sites statiques, composants
+MCP / LSP. La doc *rendue* (sites statiques, composants
 `<Doc id>`) est une couche de consommation prévue en **beta.3** :
 `@standardoc/core` (query API framework-agnostic) + `@standardoc/react`
 (premier renderer, adapters Next / Nextra / Astro / Docusaurus). Le
@@ -24,7 +24,7 @@ surfaces de consommation, mais sous le capot c'est un graphe global
 cross-langage, pas un serveur per-langage. `rust-analyzer` / `tsserver`
 gardent la résolution per-langage profonde (inférence de type complexe,
 expansion macro, completion contextuelle) ; Standardoc apporte le
-graphe transverse + la surface MCP + le RAG. Utilise les deux.
+graphe transverse + la surface MCP. Utilise les deux.
 Post-1.0, un bridge optionnel vers `rust-analyzer` / `tsserver` est même
 envisagé pour fusionner les deux vues via une seule interface MCP — cf.
 [vision long terme](storytelling/vision-long-terme.md).
@@ -101,12 +101,12 @@ n'importe quel client MCP-aware (Cursor, Continue, Copilot Chat,
 Aider, Goose, Cody, Claude Desktop, Claude Code…). **Mais** la
 calibration de référence est faite sur **Claude Code en mode Opus**,
 fenêtre 1M tokens. Les autres agents fonctionnent, avec des écarts :
-certains shortcut vers grep dès que la tâche se complique, ignorent le
-`routing_hint` correctif, ou n'exploitent pas les sessions DB. La
-calibration est **tripartite** — infrastructure + agent + opérateur.
+certains shortcut vers grep dès que la tâche se complique, ou ignorent
+le `routing_hint` correctif. La calibration est **tripartite** —
+infrastructure + agent + opérateur.
 Les hooks MCP-first (côté Claude Code) forcent la discipline ; pour un
 autre client tu peux wirer des hooks équivalents (`standardoc claude
-pre-tool-hook`, `standardoc session hook`). Détails dans
+pre-tool-hook`). Détails dans
 [retours de tests](storytelling/retours-tests.md).
 
 ## Comment installer ?
@@ -136,9 +136,8 @@ bootstrap).
 ## Mon code est-il envoyé quelque part ?
 
 Non. **Standardoc est local-only**, sans condition. L'index vit dans
-`.standardoc/` sur ton disque (gitignored, reproductible). Le RAG
-embedder (Candle BGE-small) tourne en local. Pas d'appel réseau pour
-indexer, pas de télémétrie, pas de phone-home — **jamais, même
+`.standardoc/` sur ton disque (gitignored, reproductible). Pas d'appel
+réseau pour indexer, pas de télémétrie, pas de phone-home — **jamais, même
 opt-in** : c'est un invariant culturel non négociable. Si Standardoc
 disparaît demain, ton index continue de marcher.
 

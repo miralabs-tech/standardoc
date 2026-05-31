@@ -76,16 +76,14 @@ Notification 4 boutons à la première activation :
 
 Click **Initialize**. L'extension :
 
-1. Crée `.standardoc/` — index SQLite + RAG + métadonnées
-2. Crée `.standardoc-sessions/` — memos agent cross-session
-3. Écrit `.mcp.json` à la racine (cross-client merge, préserve
+1. Crée `.standardoc/` — index SQLite + métadonnées
+2. Écrit `.mcp.json` à la racine (cross-client merge, préserve
    les fields user existants)
-4. Génère `.claude/skills/standardoc/SKILL.md` (~480 lignes —
-   enseigne MCP-first, protocole 3-phase, edge kinds, 9
-   workflows recommandés)
-5. Spawn le LSP daemon (primary writer) + le MCP daemon HTTP/SSE
-6. Cold start indexe ton workspace (5–15s suivant la taille,
-   progrès visible via `$/progress` côté LSP)
+3. Génère `.claude/skills/standardoc/SKILL.md` (enseigne MCP-first,
+   protocole 3-phase, edge kinds, workflows recommandés)
+4. Spawn le LSP daemon (primary writer) + le MCP daemon HTTP/SSE, puis
+   cold start indexe ton workspace (5–15s suivant la taille, progrès
+   visible via `$/progress` côté LSP)
 
 Le watcher garde l'index live après le cold start. Toute
 modification de `*.rs` / `*.ts` / `*.tsx` / `*.js` / `*.jsx` /
@@ -118,34 +116,18 @@ lieu de 30k.**
 
 ### Hooks Claude Code installés automatiquement
 
-L'init opt-in flow injecte **deux mécanismes** dans
-`.claude/settings.json` du workspace :
-
-**1. MCP-first guardrail** — empêche l'agent de dégénérer en
-grep-loop. Trois hooks coordonnés :
+L'init opt-in flow installe le **MCP-first guardrail** dans
+`.claude/settings.json` du workspace — il empêche l'agent de
+dégénérer en grep-loop. Trois hooks coordonnés :
 
 - `SessionStart` *(reset)* — wipe le sentinel à chaque nouveau
   chat pour rester strict
 - `PreToolUse` *(mark)* — pose le sentinel dès qu'un tool
   Standardoc est appelé
 - `PreToolUse` *(check)* — bloque `Bash` / `Read` / `Grep` /
-  `Glob` si le sentinel est absent
-
-**2. Auto-sync sessions** *(`PostToolUse`)* — quand l'agent
-écrit un memo dans son **dossier memory natif Claude**
-(`~/.claude/projects/<hash>/memory/*.md`), le contenu est
-auto-importé dans `.standardoc-sessions/sessions.db`.
-
-> **Important : le hook se déclenche uniquement sur ces
-> écritures-là.** Pas sur les `Write` / `Edit` / `MultiEdit` du
-> code source ou de fichiers projet — seulement les fichiers
-> dont le chemin matche `/.claude/projects/` ET `/memory/`
-> (les constantes `MEMORY_PATH_MARKER` + `MEMORY_PATH_TAIL`
-> côté `standardoc-cli`).
-
-**Bridge automatique entre la memory native Claude Code et la
-sessions DB Standardoc** — l'agent capitalise ses memos sans
-avoir à les ré-écrire via `session_save` à chaque fois.
+  `Glob` quand le sentinel est absent (seulement quand l'appel
+  vise un chemin DANS le workspace — les lectures hors workspace,
+  ex. `~/.claude`, ne sont jamais gatées)
 
 Si tu utilises un autre client MCP-aware, configure tes propres
 hooks équivalents :
@@ -154,54 +136,6 @@ hooks équivalents :
 standardoc claude pre-tool-hook --mode mark   # poser le sentinel
 standardoc claude pre-tool-hook --mode check  # bloquer Bash/Grep/...
 standardoc claude pre-tool-hook --mode reset  # wipe au SessionStart
-standardoc session hook                        # auto-import memo (PostToolUse)
-```
-
-### Sessions persistantes (cross-chat memory)
-
-`.standardoc-sessions/sessions.db` est **créée automatiquement
-au premier appel d'un tool `session_*`** par l'agent — aucune
-action humaine requise sur l'init de la DB. La DB est
-volontairement séparée de `.standardoc/` pour qu'un reset du
-graphe (ou un `Standardoc: Rebuild RAG index`) ne wipe pas les
-memos.
-
-**L'initiation de la convention reste à l'opérateur.** L'agent
-ne crée pas spontanément des memos — il sait le faire parce
-que le skill auto-généré documente le workflow, mais il attend
-qu'on lui dise. Il faut **briefer l'agent au premier chat** :
-
-> *« Organise-toi en sessions. Save un memo `session_save(slug,
-> body_md)` à la fin de chaque chantier ou décision lockée. Au
-> début du chat suivant, fais `session_get()` pour récupérer
-> où on en était. »*
-
-Une fois la convention établie dans les premiers chats, l'agent
-la maintient tout seul via :
-
-- **Fin de session** (locke des décisions ou ship du travail) :
-  `session_save(slug, body_md, supersedes?)` pour persister un
-  memo. Le `supersedes` chaîne les memos quand un refactor
-  invalide un lock précédent.
-- **Début de la session suivante** : `session_get()` (sans
-  slug) retourne le memo le plus récent actif comme point
-  d'entrée.
-- `session_list({active_only: true})` pour scanner les memos
-  récents.
-
-Quatre kinds distincts via le champ `type` du frontmatter :
-`session` (handoff par défaut), `feedback` (règles
-comportementales), `profile` (facts user stables), `lock`
-(décisions lockées — équivalent **ADR** au format memo).
-
-**Migration manuelle d'un dossier `.md` externe** :
-
-```sh
-# Importer un dossier .md → sessions.db
-standardoc session sync-in /chemin/workspace /chemin/dossier-memos
-
-# Exporter sessions.db → dossier .md (frontmatter complet)
-standardoc session sync-out /chemin/workspace /chemin/dossier-export
 ```
 
 ### Le menu du status bar (clic en bas à droite)
@@ -212,21 +146,6 @@ L'item Standardoc dans le status bar ouvre un QuickPick avec
 - **▶ Start daemon** / **■ Stop daemon** / **↻ Restart daemon**
 - **🗑 Purge excluded paths** — purge les symboles dont le
   fichier source matche désormais `.stdignore`
-- **Enable / Disable RAG** *(toggle dynamique selon l'état)*
-- **Switch RAG embedder…** — choix entre :
-  - **Mock** : déterministe, zéro réseau (pour le dev / tests)
-  - **Candle (BGE-small)** : BERT 384-dim local. Premier run :
-    téléchargement ~130 MB (cache `~/.cache/standardoc/models/`,
-    override via la variable d'env `STANDARDOC_MODELS_DIR`)
-- **Rebuild RAG index** — stoppe le daemon, supprime
-  `.standardoc/rag.db` (+ `-wal` / `-shm`), redémarre. Les
-  chunks sont ré-embeddés au cold start. Modal de confirmation
-  avant exécution.
-- **Show token savings** — affiche le ratio `bytes_out /
-  baseline_bytes` (ce que Standardoc a renvoyé vs. ce que
-  l'agent aurait lu en raw) par période (today / day / week /
-  all)
-- **Reset token savings…** — baseline une mesure propre
 
 ### Palette de commandes VSCode (`Ctrl+Shift+P`)
 
@@ -254,8 +173,9 @@ exclusivement palette :
 Côté client MCP (Copilot Chat / Claude Code dans VSCode, Cursor,
 etc.), chaque client a sa propre UI pour lister les MCP servers
 connectés et leurs tools disponibles. Standardoc doit y
-apparaître avec ses **16 tools** (`find_symbol`, `get_context`,
-`get_body`, `fetch_chunks`, `session_save`, etc.).
+apparaître avec son jeu de tools (`find_symbol`, `get_context`,
+`get_body`, `get_code`, `find_call_sites`, `fetch_graph`,
+`current_revision`, etc.).
 
 Si l'agent dit que Standardoc n'est pas disponible :
 
@@ -266,7 +186,7 @@ Si l'agent dit que Standardoc n'est pas disponible :
    Refresh .mcp.json paths`.
 3. **L'output channel `Standardoc`** affiche les logs du daemon
    et de la supervision — c'est là qu'on voit les erreurs de
-   démarrage, les markers `STDOC_FATAL`, les DL d'embedder, etc.
+   démarrage, les markers `STDOC_FATAL`, etc.
 
 ---
 
@@ -336,27 +256,27 @@ du workspace comme writer principal.
 ## 6. Sub-commandes utiles
 
 ```sh
+standardoc init <ws>                   # installe skill + hooks + AGENTS.md + .mcp.json
 standardoc lsp <ws>                    # primary writer daemon
+standardoc mcp <ws> --connect          # pont stdio↔http (ce que init écrit dans .mcp.json)
 standardoc mcp <ws> --readonly         # readonly MCP daemon (stdio)
-standardoc mcp <ws> --http <port>      # readonly MCP daemon (HTTP/SSE)
+standardoc mcp <ws> --http <port>      # MCP daemon (HTTP/SSE)
 standardoc index <ws>                  # one-shot index
 standardoc watch <ws>                  # watcher seul
 standardoc rescan <ws>                 # rebuild from scratch
 standardoc query <ws> ...              # CLI query (find / context / body)
 standardoc purge-excluded <ws>         # cleanup post-.stdignore edit
-standardoc reset-usage --period <p>    # reset usage_stats (today/day/week/all)
 standardoc schema-version <ws>         # print schema version
-standardoc session sync-in <ws> <dir>  # bridge .md memos → sessions.db
-standardoc session sync-out <ws> <dir> # bridge sessions.db → .md memos
 standardoc stdignore-preview <ws> <pattern>  # preview .stdignore matches
 ```
 
-La surface MCP exposée par le daemon (**16 tools** :
-`find_symbol`, `get_context`, `get_body`, `fetch_chunks`,
-`session_save`, `current_revision`, `check_stale`, `usage_stats`,
-etc.) est documentée en détail dans le `SKILL.md` auto-généré au
-workspace init — c'est ce que l'agent lit pour savoir comment
-utiliser Standardoc. Pas la peine de la mémoriser côté humain.
+La surface MCP exposée par le daemon (`find_symbol`, `get_context`,
+`get_body`, `get_code`, `find_call_sites`, `module_lookup`,
+`fetch_graph`, `current_revision`, `check_stale`, plus la famille
+cross-workspace `link_workspace` / `resolve_cross_workspace`) est
+documentée en détail dans le `SKILL.md` auto-généré au workspace
+init — c'est ce que l'agent lit pour savoir comment utiliser
+Standardoc. Pas la peine de la mémoriser côté humain.
 
 ---
 
@@ -373,17 +293,6 @@ Template par défaut : `.git/`, `node_modules/`, `target/`,
 - **Ajouts** → excluent des chemins (purge automatique des
   symboles matchant via `standardoc purge-excluded`)
 - **Retraits** → re-index automatique du sous-arbre concerné
-
-### RAG sur la prose adjacente
-
-`docs/`, `notes/`, et les `*.md` au root + aux sous-package roots
-sont chunkés et accessibles via les `chunk_refs` de `get_context`,
-ou directement via `fetch_chunks(uri)`.
-
-L'embedder par défaut est **Candle BGE-small** (~130 MB, lazy
-download au premier usage RAG). **Tourne en local, pas de cloud.**
-Les chunks vivent dans `.standardoc/rag.db`, linkés au graphe par
-FQDN.
 
 ---
 

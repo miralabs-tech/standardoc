@@ -4,7 +4,7 @@
   <a href="https://github.com/miralabs-tech/standardoc/releases"><img src="https://img.shields.io/badge/status-beta-yellow?style=flat-square" alt="Status: beta"></a>
   <a href="https://github.com/miralabs-tech/standardoc/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/miralabs-tech/standardoc/ci.yml?branch=main&label=ci&style=flat-square" alt="CI"></a>
   <a href=".important/en/ABOUT.md"><img src="https://img.shields.io/badge/core-canonical%20IR%20%2B%20live%20graph-blueviolet?style=flat-square" alt="Core: canonical IR + live graph"></a>
-  <a href=".important/en/QUICKSTART.md"><img src="https://img.shields.io/badge/surfaces-LSP%20·%20MCP%20·%20RAG-blue?style=flat-square" alt="Surfaces: LSP · MCP · RAG"></a>
+  <a href=".important/en/QUICKSTART.md"><img src="https://img.shields.io/badge/surfaces-LSP%20·%20MCP-blue?style=flat-square" alt="Surfaces: LSP · MCP"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--MIT%20→%20MIT%202028-green?style=flat-square" alt="License: FSL-1.1-MIT → MIT 2028"></a>
   <a href="https://github.com/miralabs-tech/standardoc/stargazers"><img src="https://img.shields.io/github/stars/miralabs-tech/standardoc?label=stars&style=flat-square" alt="Stars"></a>
   <a href="https://github.com/miralabs-tech/standardoc/releases"><img src="https://img.shields.io/github/downloads/miralabs-tech/standardoc/total?label=release%20downloads&style=flat-square" alt="Release downloads"></a>
@@ -45,16 +45,9 @@ Standardoc indexes your code into a **living semantic graph**:
 - **LSP daemon** (`standardoc lsp`, stdio, primary writer of the graph) —
   the official VSCode extension embeds it; any LSP client can connect
   (IntelliJ, Neovim, Helix, Emacs eglot, …) by pointing at the binary
-- **MCP daemon** (`standardoc mcp`, stdio or HTTP/SSE multi-client,
-  readonly) — 16 tools for Claude Code, Cursor, Continue, Cody, Aider,
-  Goose, and any MCP client
-- **RAG layer** (`.standardoc/rag.db`, linked to the graph by FQDN) —
-  prose chunks (`README.md`, `docs/`, `notes/`, ABOUT, etc.) re-ranked
-  through a Candle/BGE-small embedder, reachable from both daemons (via
-  the `fetch_chunks` MCP tool or the `chunk_refs` of `get_context`)
-- **Sessions DB** (`.standardoc-sessions/sessions.db`, orthogonal to the
-  graph) — persistent agent memos across chats, accessed through the
-  `session_*` MCP tools. Human content, not derived from code
+- **MCP daemon** (`standardoc mcp`, stdio or HTTP/SSE multi-client) — a
+  focused set of read-only graph tools for Claude Code, Cursor,
+  Continue, Cody, Aider, Goose, and any MCP client
 - *Coming* — static docs generated from the graph (`@standardoc/react`
   + Nextra/Docusaurus/Astro adapters), visual navigation, language
   plugins via UST + Lua
@@ -149,16 +142,13 @@ last week. Every task, the archaeology starts over — and the bigger the
 project gets, the more the archaeology costs (tokens, patience, subtle
 bugs, human cognitive debt).
 
-Standardoc addresses this from 3 complementary angles:
+Standardoc addresses this from two complementary angles:
 
 - **The graph** — the agent queries the real structure (FQDN, edges,
-  body, RAG prose), it doesn't invent
+  body), it doesn't invent
 - **The discipline** — the `MCP-first guardrail` stops the agent from
   shortcutting to `grep + read`; the PreToolUse hook forces it through
   the graph before anything else
-- **The memory** — locked decisions from one session survive in the
-  sessions DB (`session_save` / `session_get`); the agent recovers the
-  context at the next session instead of rediscovering everything
 
 Standardoc is an AI-dev co-work tool, **not a substitute for the dev**.
 An agent querying a stable semantic graph is powerful; a dev who doesn't

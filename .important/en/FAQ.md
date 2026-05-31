@@ -9,7 +9,7 @@
 ## Is it a documentation tool?
 
 Not yet, and not in the TypeDoc / JSDoc sense. Today Standardoc is a
-**semantic indexer** — a living code graph exposed via MCP / LSP / RAG.
+**semantic indexer** — a living code graph exposed via MCP / LSP.
 The *rendered* docs (static sites, `<Doc id>` components) is a
 consumption layer planned for **beta.3**: `@standardoc/core`
 (framework-agnostic query API) + `@standardoc/react` (the first
@@ -24,7 +24,7 @@ consumption surfaces, but under the hood it's a global cross-language
 graph, not a per-language server. `rust-analyzer` / `tsserver` keep the
 deep per-language resolution (complex type inference, macro expansion,
 contextual completion); Standardoc brings the cross-cutting graph + the
-MCP surface + the RAG. Use both. Post-1.0, an optional bridge to
+MCP surface. Use both. Post-1.0, an optional bridge to
 `rust-analyzer` / `tsserver` is even on the table to merge the two views
 through a single MCP interface — cf. [long-term
 vision](storytelling/vision-long-term.md).
@@ -98,11 +98,11 @@ client (Cursor, Continue, Copilot Chat, Aider, Goose, Cody, Claude
 Desktop, Claude Code…). **But** the reference calibration is done on
 **Claude Code in Opus mode**, 1M-token window. The other agents work,
 with gaps: some shortcut to grep the moment the task gets complicated,
-ignore the corrective `routing_hint`, or don't exploit the sessions DB.
+or ignore the corrective `routing_hint`.
 The calibration is **tripartite** — infrastructure + agent + operator.
 The MCP-first hooks (on the Claude Code side) enforce the discipline;
 for another client you can wire equivalent hooks (`standardoc claude
-pre-tool-hook`, `standardoc session hook`). Details in [test
+pre-tool-hook`). Details in [test
 feedback](storytelling/test-feedback.md).
 
 ## How do I install?
@@ -131,9 +131,9 @@ beta.3 (`self-update`, PATH injection, one-liner bootstrap).
 ## Is my code sent anywhere?
 
 No. **Standardoc is local-only**, unconditionally. The index lives in
-`.standardoc/` on your disk (gitignored, reproducible). The RAG
-embedder (Candle BGE-small) runs locally. No network call to index, no
-telemetry, no phone-home — **ever, even opt-in**: it's a non-negotiable
+`.standardoc/` on your disk (gitignored, reproducible). No network call
+to index, no telemetry, no phone-home — **ever, even opt-in**: it's a
+non-negotiable
 cultural invariant. If Standardoc disappears tomorrow, your index keeps
 working.
 
