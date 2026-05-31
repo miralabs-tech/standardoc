@@ -727,13 +727,17 @@ async fn current_revision_reports_indexing_ready_after_cold_start() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn current_revision_reports_watcher_active_when_handle_present() {
+async fn current_revision_reports_watcher_active_when_workspace_locked() {
     let (_dir, mcp) = fixture();
-    // No watcher has been spawned by the fixture, so this must be false.
+    // `watcher.active` now reports whether the WORKSPACE is being watched,
+    // not whether THIS process wired a watcher slot. The fixture opens
+    // the handle via `IndexHandle::open` (primary) so it owns the fs4
+    // lock — a primary writer is present — and `active` reads `true` even
+    // though no watcher handle was wired into the slot.
     let result = mcp.current_revision().await.unwrap();
     let body = body_text(&result);
     assert!(body.contains("\"watcher\""), "got `{body}`");
-    assert!(body.contains("\"active\": false"), "got `{body}`");
+    assert!(body.contains("\"active\": true"), "got `{body}`");
 }
 
 #[tokio::test(flavor = "multi_thread")]

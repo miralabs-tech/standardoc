@@ -252,11 +252,15 @@ pub(crate) fn discover_and_persist_projects_with(
     // Bug E-3 follow-up — when `standardoc.sxd` declares explicit
     // `project` blocks, REPLACE the mechanical detection entirely. The
     // declared paths become the authoritative project list ; mechanical
-    // workspace_kind sniffing is skipped (no manifest is implied).
+    // workspace_kind sniffing is skipped (no manifest is implied). The
+    // workspace is still organized — by the config itself — so record
+    // `Custom("sxd")` rather than clearing the row, so `current_revision`
+    // surfaces `workspace.kind = "custom:sxd"` instead of a bare `null`
+    // that reads as "nothing detected".
     if let Ok(Some(cfg)) = crate::config::load_workspace_config(workspace_root)
         && !cfg.projects.is_empty()
     {
-        let _ = schema_meta::delete_workspace_kind(conn);
+        let _ = schema_meta::write_workspace_kind(conn, &WorkspaceKind::Custom("sxd".into()));
         return persist_sxd_projects(conn, workspace_root, &cfg.projects);
     }
 

@@ -389,6 +389,30 @@ impl IndexHandle {
     pub fn workspace_root(&self) -> &Path {
         &self.inner.workspace_root
     }
+
+    /// True when a primary writer (LSP daemon / `standardoc watch`)
+    /// currently holds this workspace's fs4 lock — i.e. the workspace is
+    /// being actively indexed/watched, regardless of whether THIS handle
+    /// is that primary. A secondary read-only MCP daemon uses this to
+    /// report `watcher.active` truthfully: it never spawns its own
+    /// watcher but rides a peer primary's.
+    ///
+    /// Implementation: if this handle owns the lock (primary), the answer
+    /// is trivially yes. Otherwise we PROBE the lock file with a
+    /// non-blocking try-acquire — `LockHeld` means a primary is alive;
+    /// success means none exists and the probe lock drops immediately
+    /// (held for microseconds, and only when no writer is around to race
+    /// it, so the probe is non-destructive).
+    pub fn workspace_watched(&self) -> bool {
+        if self.inner.lock.is_some() {
+            return true;
+        }
+        let lock_path = self.inner.workspace_root.join(".standardoc").join("db.lock");
+        matches!(
+            WorkspaceLock::acquire(&lock_path),
+            Err(StorageError::LockHeld { .. })
+        )
+    }
 }
 
 fn parse_cold_start_progress(value: &str) -> Result<Option<(u64, u64)>, StorageError> {

@@ -859,11 +859,18 @@ impl StandardocMcp {
     )]
     async fn current_revision(&self) -> Result<CallToolResult, ErrorData> {
         let revision = self.handle.revision();
+        // `watcher.active` reports whether the WORKSPACE is being watched,
+        // not whether THIS process owns the watcher. A `mcp --readonly`
+        // daemon never spawns its own watcher (the slot below stays
+        // `None`) yet rides a primary (LSP daemon / `standardoc watch`)
+        // that does — so we also probe the workspace fs4 lock. Either
+        // signal being true means edits are being picked up live.
         let watcher_active = self
             .watcher
             .lock()
             .ok()
-            .is_some_and(|guard| guard.is_some());
+            .is_some_and(|guard| guard.is_some())
+            || self.handle.workspace_watched();
         let ready = self.index_ready.load(Ordering::Acquire);
         // Stage 3e-3 — surface the detected workspace kind. Best-effort:
         // pre-cold-start (or pre-3e-3 DBs) carry no persisted row and
