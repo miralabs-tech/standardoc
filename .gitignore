@@ -21,7 +21,12 @@ target-dev/
 /.standardoc/
 /.standardoc-sessions/
 .standarflow
-ext/vscode/.standardoc/
+# Sub-package `.standardoc/` caches — the daemon drops a marker dir in
+# whatever directory an MCP tool runs from, so they sprout under crates/
+# and ext/. Targeted (not a bare `.standardoc/`) so `examples/*/.standardoc/`
+# stay tracked per the root-anchored rule above.
+crates/**/.standardoc/
+ext/**/.standardoc/
 sessions-export/
 .claude/
 .mcp.json
