@@ -1,5 +1,6 @@
 #![allow(clippy::result_large_err)]
 
+mod connect;
 mod init;
 mod self_update;
 mod sxd_schema;
@@ -150,6 +151,18 @@ enum Command {
         /// per-chat stdio child-spawn cost of the default transport.
         #[arg(long)]
         http: Option<u16>,
+
+        /// Run as the stdio↔http bridge: ensure a warm, watcher-backed daemon
+        /// for the workspace and relay JSON-RPC to it over stdio. This is the
+        /// entry `standardoc init` wires into `.mcp.json` for a Claude Code
+        /// CLI user without the VSCode extension. Conflicts with `--http`.
+        #[arg(long, conflicts_with = "http")]
+        connect: bool,
+
+        /// Daemon port the `--connect` bridge probes/spawns (default 7700).
+        /// Ignored without `--connect`.
+        #[arg(long, requires = "connect")]
+        port: Option<u16>,
     },
 
     /// Print the on-disk schema version of the workspace index, the schema
@@ -363,7 +376,15 @@ fn main_inner() -> Result<(), ServerError> {
             path,
             readonly,
             http,
-        } => cmd_mcp(&path, readonly, http),
+            connect,
+            port,
+        } => {
+            if connect {
+                connect::run(&path, port.unwrap_or(connect::DEFAULT_PORT))
+            } else {
+                cmd_mcp(&path, readonly, http)
+            }
+        }
         Command::SchemaVersion { path } => cmd_schema_version(&path),
         Command::SxdPreview {
             path,

@@ -1,10 +1,13 @@
 //! `standardoc init` — install the Standardoc agent integration into a
 //! workspace so a Claude Code (or other SKILL.md-aware) agent discovers the
-//! live index. This increment writes the skill file; the `.mcp.json`,
-//! `.claude/settings.json` hooks, and `AGENTS.md` merges land next.
+//! live index. Writes four artefacts, each an idempotent merge that
+//! preserves user content: the agent skill, the `.claude/settings.json`
+//! MCP-first hooks, the repo-root `AGENTS.md` section, and the `.mcp.json`
+//! stdio bridge entry the agent spawns (`standardoc mcp --connect`).
 
 mod agents_md;
 mod claude_hook;
+mod mcp_config;
 
 use std::path::Path;
 
@@ -26,10 +29,14 @@ const CLAUDE_SETTINGS_PATH: &str = ".claude/settings.json";
 /// Repo-root cross-agent instructions file (Codex / Cursor / Copilot / Gemini).
 const AGENTS_MD_PATH: &str = "AGENTS.md";
 
+/// Repo-root MCP server config Claude Code (and other MCP clients) reads.
+const MCP_CONFIG_PATH: &str = ".mcp.json";
+
 pub(crate) fn run(workspace_root: &Path) -> Result<(), ServerError> {
     write_skill(workspace_root)?;
     write_claude_hook(workspace_root)?;
     write_agents_md(workspace_root)?;
+    write_mcp_config(workspace_root)?;
     Ok(())
 }
 
@@ -103,6 +110,61 @@ fn write_agents_md(workspace_root: &Path) -> Result<(), ServerError> {
     Ok(())
 }
 
+/// Merge the Standardoc stdio bridge entry into the repo-root `.mcp.json` so
+/// Claude Code spawns `standardoc mcp --connect <root>` for the live index.
+/// Uses the absolute path of the running binary and the absolute workspace
+/// root so the entry resolves regardless of the agent's working directory.
+/// Idempotent; user-authored siblings (other servers, `env`) are preserved.
+fn write_mcp_config(workspace_root: &Path) -> Result<(), ServerError> {
+    let target = workspace_root.join(MCP_CONFIG_PATH);
+    let command = std::env::current_exe()
+        .map_err(ServerError::Io)?
+        .to_string_lossy()
+        .into_owned();
+    let args = vec![
+        "mcp".to_string(),
+        "--connect".to_string(),
+        absolute_root(workspace_root),
+    ];
+    let raw = match std::fs::read_to_string(&target) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(ServerError::Io(e)),
+    };
+    match mcp_config::merge_mcp_config(raw.as_deref(), &command, &args) {
+        mcp_config::MergeOutcome::NoOp => {
+            println!("[init] .mcp.json already wires the Standardoc bridge");
+        }
+        mcp_config::MergeOutcome::Invalid(err) => {
+            eprintln!(
+                "[init] .mcp.json could not be parsed ({err}); skipping bridge wiring. \
+                 Add it manually: a `standardoc` server of type \"stdio\" running `{command} mcp --connect`."
+            );
+        }
+        mcp_config::MergeOutcome::Create(content)
+        | mcp_config::MergeOutcome::AddFirst(content)
+        | mcp_config::MergeOutcome::OverwriteStale(content) => {
+            std::fs::write(&target, content).map_err(ServerError::Io)?;
+            println!(
+                "[init] wrote the Standardoc bridge to .mcp.json (machine-specific paths — \
+                 consider adding it to .gitignore if collaborating)"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Absolutise `workspace_root` without touching symlinks, stripping the
+/// Windows `\\?\` verbatim prefix `canonicalize` adds so the path stays clean
+/// in `.mcp.json`. Falls back to the path as given if canonicalisation fails.
+fn absolute_root(workspace_root: &Path) -> String {
+    let abs = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    let s = abs.to_string_lossy();
+    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+}
+
 /// CRLF→LF + trailing-whitespace trim, mirroring the extension's `normalize`
 /// drift check so a re-init is a no-op regardless of how the editor saved it.
 fn normalize(s: &str) -> String {
@@ -167,6 +229,30 @@ mod tests {
         let first = std::fs::read_to_string(tmp.path().join(CLAUDE_SETTINGS_PATH)).unwrap();
         run(tmp.path()).unwrap();
         let second = std::fs::read_to_string(tmp.path().join(CLAUDE_SETTINGS_PATH)).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn run_writes_mcp_bridge_entry() {
+        let tmp = tempdir().unwrap();
+        run(tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(MCP_CONFIG_PATH)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let entry = &v["mcpServers"]["standardoc"];
+        assert_eq!(entry["type"], "stdio");
+        assert_eq!(entry["args"][0], "mcp");
+        assert_eq!(entry["args"][1], "--connect");
+        // The third arg is the absolute workspace root.
+        assert!(entry["args"][2].as_str().unwrap().len() > 1);
+    }
+
+    #[test]
+    fn run_is_idempotent_for_mcp_config() {
+        let tmp = tempdir().unwrap();
+        run(tmp.path()).unwrap();
+        let first = std::fs::read_to_string(tmp.path().join(MCP_CONFIG_PATH)).unwrap();
+        run(tmp.path()).unwrap();
+        let second = std::fs::read_to_string(tmp.path().join(MCP_CONFIG_PATH)).unwrap();
         assert_eq!(first, second);
     }
 

@@ -107,6 +107,23 @@ cargo install --git https://github.com/miralabs-tech/standardoc standardoc-cli
 standardoc --version
 ```
 
+Then, from a workspace, wire it into your agent in one command:
+
+```sh
+standardoc init        # writes the AI skill, MCP-first hooks, AGENTS.md, and .mcp.json
+```
+
+This makes a bare **Claude Code CLI** user (no VSCode extension)
+first-class. It writes a `.mcp.json` `standardoc` server of type `stdio`
+running `standardoc mcp --connect` — a thin bridge Claude spawns that
+ensures one warm, watcher-backed daemon for the workspace and relays
+JSON-RPC to it over HTTP. The first query pays a cold start; the index
+then stays live as you edit, is shared across chat sessions, and the
+daemon shuts down with the bridge (no orphan process). Each merge is
+idempotent and preserves your own content, so re-running `init` is safe.
+`.mcp.json` carries machine-specific absolute paths — add it to
+`.gitignore` if collaborating.
+
 → [Full 5-minute walkthrough (QUICKSTART)](.important/en/QUICKSTART.md)
 
 ---
