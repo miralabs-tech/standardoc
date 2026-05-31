@@ -18,7 +18,7 @@ suit n'est pas une explosion de nouvelles features.
 
 **beta.3 a un thème : pluraliser les usages du graphe.** Jusqu'ici,
 le graphe servait essentiellement à un agent IA en session unique
-dans un éditeur. beta.3 ouvre quatre nouvelles surfaces de
+dans un éditeur. beta.3 ouvre trois nouvelles surfaces de
 consommation :
 
 1. La **doc rendue** pour les visiteurs externes (consommateurs de
@@ -27,9 +27,10 @@ consommation :
    qui auditent leur propre code dans l'IDE)
 3. Le **CLI autonome** pour les usages hors-VSCode (ops, CI, devs
    non-IDE Microsoft)
-4. La **compréhension projet persistée** pour la continuité
-   cross-session (l'agent qui reprend son travail sans re-découvrir
-   le contexte narratif à chaque fois)
+
+(Une 4e idée, la compréhension projet persistée cross-session, a été
+extraite vers un outil voisin de session-store — le core reste un
+graphe de code.)
 
 **1.0**, lui, scelle les contrats : conventions figées, benchmarks
 publiés, droit de breaking change unilatéral éteint.
@@ -46,7 +47,7 @@ digne d'être figée, et pas avant.
 ## beta.3 — pourquoi une couche de rendu maintenant
 
 Le DSL templating v0 (`{{ @doc.X }}`) a été tué en beta.1. Le graphe est
-complet, l'IR canonique tient la route, les surfaces MCP/LSP/RAG sont
+complet, l'IR canonique tient la route, les surfaces MCP/LSP sont
 mûres — mais entre le graphe et un site de doc statique, il n'y a
 encore rien.
 
@@ -172,39 +173,16 @@ généralisation d'un mécanisme déjà éprouvé.
 
 ---
 
-## beta.3 — la compréhension projet persistée cross-session
+## Compréhension projet cross-session — extraite du core
 
-Le graphe sait suivre le code. Les sessions DB savent persister les
-décisions d'agent. Mais entre une session d'aujourd'hui et une
-session de la semaine prochaine, **la compréhension synthétique du
-projet** — ses objectifs court/moyen/long terme, sa posture, ses
-décisions structurantes lockées, son intention narrative — se
-reconstruit à chaque fois par fetches dispersés (RAG + memos +
-relecture des docs).
-
-Pour du code, ce n'est pas grave : le graphe est suffisant. **Pour
-de la rédaction narrative ou des décisions de scope, c'est cher.**
-L'agent doit re-découvrir le ton, les principes, les choix figés
-avant de pouvoir contribuer dans la ligne du projet.
-
-beta.3 candidate : étendre `sessions.db` pour persister une
-**compréhension globale projet cross-session** — synthèse vivante
-des objectifs, posture, décisions, ton. Pas un dump bullets : une
-**structure exploitable** que l'agent consulte en un tool call.
-
-**Garde-fou non négociable** : la vérité reste le code source.
-Toute synthèse persistée doit être **ré-validable par re-check du
-graphe** à la session suivante. Si elle contredit la réalité du
-code, c'est elle qui se corrige, pas le code. La synthèse est une
-projection dérivée, invalidable à tout instant — jamais une source
-de vérité indépendante.
-
-Ce chantier vient d'une observation dogfood récente
-(cf. [retours-tests](retours-tests.md)) : générer les `.md` de
-présentation projet a consommé plus de tokens que toute la phase
-shipping beta.1 → beta.2. **Calendrier non garanti** — candidate
-pour beta.3 si on n'observe pas de trou plus prioritaire pendant
-les 2 semaines de tests, sinon glisse vers beta.4.
+La compréhension synthétique du projet qu'un agent recharge à chaque
+session (objectifs, posture, décisions lockées, intention narrative) ne
+vit plus dans le core de Standardoc — elle a été déplacée vers un
+**outil voisin de session-store**, en même temps que l'extraction de la
+DB de session handoff en beta.3. Le core reste un graphe de code, pas un
+store de mémoire agent. Le garde-fou qu'elle portait est inchangé : une
+telle synthèse est une projection dérivée re-validée contre le graphe,
+jamais une source de vérité indépendante.
 
 ---
 
@@ -334,7 +312,7 @@ figée trop tôt calcifie l'outil.
 - **beta.2** = la maturité (toolkit MCP, archi multi-frontend, discipline
   encodée, primitives storage + IR posées sans bruit)
 - **beta.3** = pluralisation des usages du graphe (doc rendue +
-  navigation visuelle + CLI autonome + compréhension cross-session)
+  navigation visuelle + CLI autonome)
 - **beta.4 / 5 / …** = ce qui émergera en dogfood entre beta.3 et
   1.0 (impossible à lister à l'avance — beta.2 elle-même n'avait
   pas été planifiée dans sa forme actuelle)
@@ -364,8 +342,8 @@ Cadrage négatif important :
   post-beta.3, mais on ne disperse pas l'effort avant que React soit
   solide.
 - **Pas d'extension de la surface MCP sans nécessité dogfood claire.**
-  beta.2 a posé 16 tools sur des besoins observés. 1.0 fige cette
-  surface ; on n'en ajoute pas sans un trou dogfood manifeste.
+  beta.2 a élargi la surface MCP sur des besoins observés. 1.0 la fige ;
+  on n'en ajoute pas sans un trou dogfood manifeste.
 
 ---
 

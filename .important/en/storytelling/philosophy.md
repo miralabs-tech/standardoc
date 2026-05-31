@@ -180,10 +180,6 @@ mutates.
   in the current session. The PreToolUse hook blocks, the SessionStart
   hook resets the sentinel on every new chat. Result: the agent can't
   degenerate into a grep-loop out of laziness.
-- **Sessions DB**: `session_save(slug, body_md, supersedes?)` persists
-  locked decisions in `.standardoc-sessions/sessions.db`. At the next
-  session, `session_get()` returns the context. Decisions no longer
-  evaporate.
 - **`current_revision()` + `check_stale()`**: the agent can verify
   whether its knowledge of a symbol is still fresh, or whether the
   watcher has re-indexed something since. No more "I read this function
@@ -208,7 +204,7 @@ To avoid lazy comparisons:
   consumption surfaces, but under the hood it's a global graph, not a
   per-language server. The VSCode extension wraps the LSP daemon,
   standard LSP clients can connect to it — but the real value is in the
-  graph + MCP + RAG, not in the isolated LSP.
+  graph + MCP, not in the isolated LSP.
 
 - **It's not an AI agent.** Standardoc provides the infrastructure an AI
   agent consumes. The agent stays Claude / Cursor / Continue / Cody /
@@ -231,48 +227,27 @@ To avoid lazy comparisons:
   master their codebase, no AI and no graph will be enough to
   compensate. Standardoc is an amplifier, not a replacement.
 
-- **It's not an auto-magic system.** Standardoc encodes into the
-  infrastructure what can be encoded — a sessions DB with a 4-kind
-  discriminator (`Session` / `Feedback` / `Profile` / `Lock`, the last
-  one equivalent to an **ADR** — Architecture Decision Record — in
-  Standardoc memo format), an auto-generated skill template that teaches
-  the agent the usage logic, RAG over the adjacent prose, MCP-first
-  hooks. But **coupling an agent to these conventions, architecting your
-  project with a minimum of coherence, and knowing how to tell the agent
-  when to use which tool** — that stays the operator's responsibility.
-  And not all agents consume the protocol the same way either: the
+- **It's not an auto-magic system.** Standardoc encodes what can be
+  encoded — an auto-generated skill template that teaches the agent the
+  usage logic, MCP-first hooks. But **coupling an agent to these
+  conventions, architecting your project with a minimum of coherence, and
+  knowing when to tell the agent to use which tool** stays the operator's
+  responsibility. Not all agents consume the protocol the same way: the
   calibration is tripartite (infra + agent + operator). See [test
-  feedback](test-feedback.md) for the dogfood observations (which agents
-  match, measured numbers, what the infra provides, what stays the
-  operator's job).
+  feedback](test-feedback.md).
 
 ---
 
-## The construction ethics
+## Construction ethics
 
-Standardoc is built in **craft before promises** mode.
+**Craft before promises.** Nothing ships before it works locally, has
+tests, and integrates cleanly. We don't announce a feature for buzz before
+it's taking shape. And we dogfood — Standardoc uses Standardoc to
+understand itself; if it isn't useful to us, it's useful to no one.
 
-We don't ship a feature before it works locally, has tests, and
-integrates cleanly into the system. We don't make an aspirational
-roadmap without the weight of the implementation behind it. When we
-announce a feature, it's because it's already taking shape — not because
-we want to generate buzz.
-
-We don't do aggressive communication. No emojis everywhere in the
-README. No revolutionary-AI promises. No abusive comparisons. We'd
-rather under-promise and over-deliver — even if it means not breaking
-through as fast as less solid but better-marketed projects.
-
-We dogfood. Standardoc uses Standardoc to understand itself. The
-development sessions for Standardoc go through `session_save` /
-`session_get`. The AI agents that help code Standardoc use Standardoc's
-MCP server. If the tool isn't useful to us, it's useful to no one.
-
-We accept that it's not for everyone. Standardoc is an infrastructure
-tool for devs who have problems of scale, complexity, long-term
-stability. If you're building a 5,000-line Vue SPA, `ripgrep` & your IDE
-LSP are largely enough. That's OK. Standardoc's value isn't universal —
-it's strong where it's strong, **overkill elsewhere**, and we admit it.
+It's not for everyone, and that's fine: on a 5,000-line SPA, `ripgrep` +
+your IDE are enough. Standardoc's value is strong on large, complex
+codebases, **overkill elsewhere**, and we admit it.
 
 ---
 

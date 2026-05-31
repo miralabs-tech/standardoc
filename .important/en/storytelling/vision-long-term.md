@@ -16,9 +16,9 @@ At 1.0, the API is frozen. **All feature-addition pressure stops pushing
 on the core** — it pushes on the ecosystem that wraps around it.
 
 It's a strong philosophical choice. Until 1.0, the core grew naturally:
-RAG, sessions DB, MCP toolkit, language providers, MCP-first hooks, the
-doc rendering layer in progress. Each cycle added a piece of
-infrastructure. **That's healthy during the construction phase.**
+the MCP toolkit, language providers, MCP-first hooks, the doc rendering
+layer in progress. Each cycle added a piece of infrastructure. **That's
+healthy during the construction phase.**
 Maintained post-1.0, it produces a god-binary — a core that ends up
 doing everything badly instead of doing its base job well.
 
@@ -136,7 +136,7 @@ dogfood up to 1.0. **Everything else goes through plug-in.**
 
 ## The optional enriched surfaces
 
-Standardoc at 1.0 exposes the graph via LSP, MCP, RAG, doc rendering
+Standardoc at 1.0 exposes the graph via LSP, MCP, doc rendering
 (beta.3), visual navigation (beta.3). Post-1.0, optional surfaces can
 emerge depending on dogfood demand — always optional, never imposed.
 

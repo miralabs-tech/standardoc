@@ -37,8 +37,7 @@ with Standardoc's architecture:
   of the neighbors.
 - **Unstructured exploration** — the agent burns 100% of the budget on
   iterative searches without carrying anything over. No reuse of
-  already-visited symbols, no `check_stale` to reuse a cache, no
-  `session_save` to persist the locked decisions.
+  already-visited symbols, no `check_stale` to reuse a cache.
 
 ### The agent that matches best
 
@@ -53,34 +52,17 @@ calibration is done:
   corrective)
 - The `signature_only` / `strip_attrs` knobs of `get_body` used
   spontaneously when the context budget gets tight
-- The `session_save` / `session_get` convention adopted naturally
-  between chats — the locked decisions of one session survive
 
 The other agents work, but without the same fluidity, and with
 consumption gaps we don't observe with Opus.
 
 ### A few dogfood estimates
 
-Standardoc indexing Standardoc itself, Claude Code Opus sessions
-(alternating medium / high / extra-high depending on the nature of the
-task, 1M-token window):
-
-- **At the start of the project**, we struggled to last the **5h Claude
-  Code quota** before the throttle. Most of the budget went to redundant
-  exploration (grep, re-reading files, rediscovering structures already
-  visited in the previous session).
-- **Today**, we last on average **2 sessions** on that 5h window. It
-  varies a lot with the nature of the task (dense code generation,
-  narrative writing, debugging, refactor) and with the effort tier
-  chosen for the session.
-- **On 1M-token sessions**, we reboot a new session **between ~200k and
-  ~600k tokens used in the context** — depending on the nature of the
-  task. Not because we hit the limit, but because beyond that the
-  agent's reasoning quality degrades.
-
-These numbers are **dogfood estimates**, not controlled benchmarks. They
-reflect Standardoc + Claude Code Opus + a dev who masters their code and
-applies the 3-phase discipline.
+Standardoc indexing itself, Claude Code Opus sessions: early on, most of
+the 5h quota went to redundant exploration (grep, re-reading, rediscovering
+already-visited structures); now the same window lasts on the order of two
+work sessions. Rough dogfood estimates, not controlled benchmarks — they
+assume a dev who masters their code and applies the 3-phase discipline.
 
 ### What genuinely impressed in dogfood
 
@@ -106,34 +88,18 @@ surprises on the reviewer's side); it does *not* replace it.
 
 **We don't guarantee your agent will match the same way.** Standardoc
 provides the infrastructure (graph + MCP + discipline); if your agent
-doesn't respect the MCP-first protocol, ignores the `routing_hint`
+doesn't respect the MCP-first protocol or ignores the `routing_hint`
 corrections when it violates the `depth=1 → depth=2` pacing of
-`get_context`, or doesn't use the sessions DB, you'll only get part of
-the gains. **The calibration is tripartite**: infrastructure + agent +
-operator.
+`get_context`, you'll only get part of the gains. **The calibration is
+tripartite**: infrastructure + agent + operator.
 
 #### What the infrastructure already provides
 
-- **A sessions DB with 4 discriminated kinds** (`SessionKind` enum) —
-  `Session` (chat-to-chat handoffs, the default), `Feedback` (behavioral
-  rules the agent must follow), `Profile` (stable user facts), `Lock`
-  (locked decisions — the **ADR equivalent**, Architecture Decision
-  Record, in Standardoc memo format). The SQL schema distinguishes these
-  categories; the MCP tools (`session_save`, `session_get`,
-  `session_list`, `session_sync_in`, `session_sync_out`) exploit them.
-  The `sync_in/out` allows bridging with an external `.md` folder for
-  cross-pollination with the native memory of other agents.
-- **An auto-generated skill template** (a `SKILL.md` of ~480 lines
-  written into `.claude/skills/standardoc/`) — teaches the agent: the
-  tool fallback hierarchy (Standardoc → LSP → Read / Grep), the 3-phase
-  protocol (Explore → Target → Drill), 9 recommended workflows including
-  *"Resume / save a session handoff"* and *"Pull in prose alongside the
-  code graph"*, edge kinds, language coverage. The agent that reads this
-  skill at boot doesn't have to guess the mechanics.
-- **RAG over the adjacent prose** — `docs/`, `notes/`, root-level `*.md`
-  are chunked and reachable via `fetch_chunks(uri)` or via the
-  `chunk_refs` of `get_context(fqdn, depth, query?)`. The narrative
-  prose lives in the same daemon as the graph and is linked by FQDN.
+- **An auto-generated skill template** (a `SKILL.md` written into
+  `.claude/skills/standardoc/`) — teaches the agent the tool fallback
+  hierarchy (Standardoc → LSP → Read / Grep), the 3-phase protocol
+  (Explore → Target → Drill), the edge kinds, and the language coverage.
+  The agent that reads it at boot doesn't have to guess the mechanics.
 - **MCP-first hooks** (on the Claude Code side) — PreToolUse blocks
   `Bash` / `Read` / `Grep` / `Glob` until a Standardoc tool has been
   called in the session; SessionStart wipes the sentinel on every new
@@ -159,123 +125,18 @@ Three non-delegable human responsibilities:
 
 If your default agent is bad at this protocol, the option that works in
 practice is: (a) force MCP-first on it via the Claude Code hooks
-(guardrail), (b) give it the persistent sessions, (c) let it absorb,
-over 2-3 tasks, the `routing_hint` corrections when it skips the
-`depth=1 → depth=2` pacing of `get_context`.
+(guardrail), and (b) let it absorb, over 2-3 tasks, the `routing_hint`
+corrections when it skips the `depth=1 → depth=2` pacing of `get_context`.
 
 ---
 
 ## What we dropped
 
-Over the cycles, some initial leads were killed or pushed back. Each was
-coherent on paper; each turned out less of a priority than what we did
-instead.
-
-- **The `{{ @doc.X }}` templating DSL (v0)** — the initial concept for
-  injecting generated docs into Markdown files via custom expressions.
-  Killed in beta.1. The DSL was becoming a second source to maintain,
-  poorly tooled. Replaced by the `@standardoc/core` + `@standardoc/react`
-  layer (beta.3) that consumes the graph directly.
-- **The `materialize` command** — was supposed to write the virtual
-  enrichments into the source. Punted. **Post-1.0 candidate** within the
-  broader scope of **comment import/export via FQDN-anchored safe-edit
-  pointers** — the end goal being to maintain a clean codebase (no
-  comment walls) while keeping the docs in the graph, with the ability
-  to re-inject locally with no risk of desync between the docs and the
-  source. We'd rather not mutate the source code as long as the
-  semantics of the enrichments aren't frozen at 1.0.
-- **A separate `standardoc-server` binary** — was supposed to isolate
-  the daemon from the CLI sub-commands. Consolidated into a single
-  `standardoc` with sub-commands (`lsp`, `mcp`, `index`, `query`, …).
-  Fewer binaries to distribute, less version combinatorics, less
-  deployment error surface.
-- **A `.standardoc.json` config file** — proposed a centralized project
-  config. Replaced by `.stdignore` (gitignore syntax, a VSCode language
-  contribution) for exclusion + the SQLite `schema_meta` table for
-  runtime state. Simpler, more derived, less stable API to maintain.
-- **Renaming `.stdocignore` → `.stdignore`** — a purely cosmetic choice,
-  but frozen early to avoid the downstream rename.
-- **`cargo install standardoc-cli` as the sole channel** — dropped as
-  the primary distribution. Too slow for CI, requires a Rust toolchain.
-  Replaced by **pre-built cross-platform binaries via GitHub Releases**
-  (with a `version.json` manifest for programmatic agents). `cargo
-  install --git` stays available for source builds, but is no longer the
-  recommended path.
-- **Lua / Python / tree-sitter providers in beta.1** — the original
-  scope was too wide. Lua shipped in beta.2 (a native provider via
-  `full_moon`). Python + tree-sitter are pushed post-1.0 (cf. [long-term
-  vision](vision-long-term.md) for the UST + Lua plugin layer strategy
-  that makes these additions community-driven).
-- **An initial publish to crates.io** — dropped for beta.1. Too early to
-  freeze the public crate names; no identified third-party demand; the
-  pre-built GitHub Releases binaries cover 95% of the use cases. No firm
-  commitment on when (or if) we'll go back down this path.
-
----
-
-## Dogfood observation: docs cost more than code
-
-Over the last 2–3 days, **generating the `.md` files of `.important/`**
-(the storytelling docs, README, FAQ, comparisons, and company) consumed
-**more Claude Code Opus tokens than the entire beta.1 → beta.2 shipping
-phase** — **~90 commits, a dozen major technical work items**: daemon
-hardening, MCP expansion from 2 to 16 tools, RAG layer, sessions DB,
-MCP-first guardrail, Lua/Vue/Svelte providers, HTTP/SSE architecture,
-externals resolvers, usage stats, the VSCode ext opt-in init flow, CI
-hardening, etc. It's a paradox worth facing head-on: **writing the
-explanation of a project costs more than advancing it.**
-
-Practical note on the effort tier: we did this phase with Opus to test
-it, but in truth **Sonnet is better placed for this kind of narrative
-writing** — cheaper, precise enough for these tasks, and the cost gap
-shows immediately on the quota. Opus stays the right call for dense
-code, debugging with heavy context, cross-module refactors; not for
-writing docs.
-
-### Diagnosis
-
-The RAG prose is **under-exploited cross-session**. The graph is shared
-(every new session sees the same state). The RAG retrieve works
-intra-session (the relevant chunks come up via `fetch_chunks`). But the
-**synthesis of project understanding** — the short/mid/long-term goals,
-the system-thinking posture, the locked structural decisions, the
-narrative intent — isn't carried over from one session to the next.
-
-Every new session rediscovers that synthesis through scattered fetches
-(RAG + memos + re-reading the docs) instead of recovering a consolidated
-understanding. For code, that's not a problem: the graph is enough.
-**For narrative writing, it's expensive.** The agent has to rebuild the
-narrative context every session before it can write in the project's
-tone.
-
-### Solution lead
-
-Extend `sessions.db` beyond agent memos (already supported via
-`session_save` / `session_get`) to persist a **global cross-session
-project understanding** — a living synthesis of the goals, the posture,
-the locked decisions, the narrative tone. Not a bullet dump: an
-**exploitable structure** the agent can consult in one tool call instead
-of ten scattered fetches.
-
-### Roadmap candidate
-
-Candidate for **beta.3** (in addition to the rendering layer and the
-visual navigation), or for **beta.4** depending on what emerges in
-dogfood during the 2 weeks of tests on other projects. If other holes
-reveal themselves as higher-priority, the rendering can slip to beta.4
-and this cross-session persistence becomes the central axis of beta.3.
-
-### Non-negotiable guardrail
-
-**The truth stays the source code.** Any persisted synthesis must be
-**re-validable by a re-check of the graph** at the next session. If the
-cross-session synthesis contradicts the reality of the code, it's the
-synthesis that corrects itself, not the other way around. No
-consolidated understanding becomes an independent source of truth — it
-stays a derived projection, invalidable at any instant.
-
-Recent observation — the 2 weeks of tests on other projects will refine
-the diagnosis and the prioritization.
+Several early leads were killed or pushed back — the `{{ @doc.X }}`
+templating DSL, the `materialize` command, a separate `standardoc-server`
+binary, the `.standardoc.json` config, `cargo install` as the sole channel,
+and the RAG / sessions layers (in beta.3). The full list with reasons lives
+in [TODO-LIST → Deferred / killed](../TODO-LIST.md#deferred--killed).
 
 ---
 

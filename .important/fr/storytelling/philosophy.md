@@ -187,10 +187,6 @@ s'invalident pas correctement quand le code mute.
   Standardoc dans la session courante. Le hook PreToolUse bloque, le
   hook SessionStart reset le sentinel à chaque nouveau chat. Résultat :
   l'agent ne peut pas dégénérer en grep-loop par paresse.
-- **Sessions DB** : `session_save(slug, body_md, supersedes?)` persiste
-  les décisions lockées dans `.standardoc-sessions/sessions.db`. À la
-  session suivante, `session_get()` retourne le contexte. Les décisions
-  ne s'évaporent plus.
 - **`current_revision()` + `check_stale()`** : l'agent peut vérifier si
   sa connaissance d'un symbole est encore fraîche, ou si le watcher a
   re-indexé quelque chose depuis. Plus de "j'avais lu cette fonction il
@@ -216,7 +212,7 @@ Pour éviter les comparaisons paresseuses :
   ses surfaces de consommation, mais sous le capot c'est un graphe
   global, pas un serveur per-langage. L'extension VSCode wrap le LSP
   daemon, les clients LSP standard peuvent s'y connecter — mais la
-  valeur réelle est dans le graphe + MCP + RAG, pas dans le LSP isolé.
+  valeur réelle est dans le graphe + MCP, pas dans le LSP isolé.
 
 - **Ce n'est pas un agent IA.** Standardoc fournit l'infrastructure
   qu'un agent IA consomme. L'agent reste Claude / Cursor / Continue /
@@ -239,51 +235,28 @@ Pour éviter les comparaisons paresseuses :
   pas sa codebase, aucune IA et aucun graphe ne suffira à compenser.
   Standardoc est un amplificateur, pas un remplaçant.
 
-- **Ce n'est pas un système auto-magique.** Standardoc encode dans
-  l'infrastructure ce qui peut l'être — sessions DB avec
-  discriminator 4 kinds (`Session` / `Feedback` / `Profile` /
-  `Lock`, ce dernier équivalent à un **ADR** — Architecture Decision
-  Record — en format memo Standardoc), skill template auto-généré
-  qui enseigne à l'agent la logique d'usage, RAG sur la prose
-  adjacente, hooks MCP-first. Mais **coupler un agent à ces
-  conventions, architecturer son projet avec un minimum de
-  cohérence, et savoir indiquer à l'agent quand utiliser quel
-  outil** — ça reste à la charge de l'opérateur. Et tous les agents
-  ne consomment pas le protocole de la même façon non plus : la
-  calibration est tripartite (infra + agent + opérateur). Voir
-  [retours de tests](retours-tests.md) pour les observations
-  dogfood (quels agents matchent, chiffres mesurés, ce que l'infra
-  fournit, ce qui reste opérateur).
+- **Ce n'est pas un système auto-magique.** Standardoc encode ce qui
+  peut l'être — un skill template auto-généré qui enseigne à l'agent la
+  logique d'usage, des hooks MCP-first. Mais **coupler un agent à ces
+  conventions, architecturer son projet avec un minimum de cohérence, et
+  savoir indiquer à l'agent quand utiliser quel outil** reste à la charge
+  de l'opérateur. Tous les agents ne consomment pas le protocole de la
+  même façon : la calibration est tripartite (infra + agent + opérateur).
+  Voir [retours de tests](retours-tests.md).
 
 ---
 
 ## L'éthique de construction
 
-Standardoc est construit en mode **craft before promises**.
+**Craft before promises.** Rien ne ship avant que ça marche localement,
+ait des tests, et s'intègre proprement. On n'annonce pas une feature pour
+le buzz avant qu'elle prenne forme. Et on dogfood — Standardoc utilise
+Standardoc pour s'auto-comprendre ; si l'outil ne nous est pas utile, il
+n'est utile à personne.
 
-On ne ship pas de feature avant qu'elle marche localement, qu'elle ait
-des tests, et qu'elle s'intègre proprement dans le système. On ne fait
-pas de roadmap aspirationnelle sans avoir le poids de l'implémentation
-derrière. Quand on annonce une feature, c'est qu'elle est déjà en train
-de prendre forme — pas parce qu'on veut générer du buzz.
-
-On ne fait pas de communication agressive. Pas d'emojis partout dans le
-README. Pas de promesses d'IA révolutionnaire. Pas de comparaisons
-abusives. On préfère sous-promettre et over-deliver — quitte à ne pas
-percer aussi vite que des projets moins solides mais mieux marketés.
-
-On dogfood. Standardoc utilise Standardoc pour s'auto-comprendre. Les
-sessions de développement de Standardoc passent par `session_save` /
-`session_get`. Les agents IA qui aident à coder Standardoc utilisent le
-MCP server de Standardoc. Si l'outil ne nous est pas utile à nous-mêmes,
-il n'est utile à personne.
-
-On accepte que ce ne soit pas pour tout le monde. Standardoc est un outil
-d'infrastructure pour les devs qui ont des problèmes d'échelle, de
-complexité, de stabilité long terme. Si tu fais une SPA Vue de 5000
-lignes, `ripgrep` & ton LSP IDE suffisent largement. C'est OK. La valeur
-de Standardoc n'est pas universelle — elle est forte là où elle est
-forte, **overkill ailleurs**, et on l'admet.
+Ce n'est pas pour tout le monde, et c'est OK : sur une SPA de 5000 lignes,
+`ripgrep` + ton IDE suffisent. La valeur de Standardoc est forte sur les
+codebases grosses et complexes, **overkill ailleurs**, et on l'admet.
 
 ---
 

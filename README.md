@@ -12,15 +12,11 @@
   <a href="https://open-vsx.org/extension/miralabs-tech/standardoc"><img src="https://img.shields.io/open-vsx/dt/miralabs-tech/standardoc?label=ovsx%20downloads&style=flat-square" alt="OpenVSX downloads"></a>
 </p>
 
-> A code intelligence infrastructure, built on a canonical multi-language
-> IR and a living semantic graph. One graph, several daemons (LSP, MCP
-> stdio + HTTP/SSE), all your tools plugged into it. ~100 tokens per
-> agent query instead of 30k of grep + read. Local, derived from source
-> code, open-source.
->
-> Built for what breaks at scale and turns unmanageable in 6 months, not
-> for the 2-minute demo. Code understanding is a system, not a string of
-> greps.
+> **Your AI agent re-reads your whole codebase on every task.** Standardoc
+> indexes it once into a shared, always-live map of your code — so the
+> agent (and your other tools) just *ask* instead of re-grepping. ~100
+> tokens per question instead of 30k. Local, open-source, derived straight
+> from your source.
 
 📖 English · [Français](.important/fr/README.md)
 
@@ -30,58 +26,37 @@
 
 ## What is it?
 
-Standardoc indexes your code into a **living semantic graph**:
+Standardoc reads your code straight from its syntax tree (Rust,
+TypeScript & JavaScript with React/JSX/TSX, Vue, Svelte, Lua) and keeps a
+**living semantic graph** of it — every symbol, and the typed links between
+them: who calls who, what imports what, what implements what. A file watcher
+keeps it current as you edit.
 
-- Direct AST, multi-language (Rust, TypeScript & JavaScript with React/JSX/TSX, Vue, Svelte, Lua today)
-- Unified canonical IR — node types + typed edges shared cross-language
-  (`CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `DEFINES`,
-  `USES_TYPE`, `EXPOSES_API`), with structured attributes on some edges
-- SQLite + FTS5, filesystem watcher, BLAKE3 invalidation, versioned schema
-- Derived from the code (not another source to maintain on the side),
-  reproducible on any machine in seconds
+Your tools plug into that one graph instead of each re-parsing your code:
 
-**Several surfaces consume this state**:
+- **For AI agents** — an MCP server with focused, read-only graph queries
+  (Claude Code, Cursor, Continue, Cody, Aider, Goose, any MCP client).
+  ~100 tokens per question instead of 30k of grep + read.
+- **For editors** — an LSP daemon any client can connect to (the official
+  VSCode extension embeds it; IntelliJ, Neovim, Helix, Emacs eglot too).
+- **Coming** — docs and visual navigation generated from the same graph.
 
-- **LSP daemon** (`standardoc lsp`, stdio, primary writer of the graph) —
-  the official VSCode extension embeds it; any LSP client can connect
-  (IntelliJ, Neovim, Helix, Emacs eglot, …) by pointing at the binary
-- **MCP daemon** (`standardoc mcp`, stdio or HTTP/SSE multi-client) — a
-  focused set of read-only graph tools for Claude Code, Cursor,
-  Continue, Cody, Aider, Goose, and any MCP client
-- *Coming* — static docs generated from the graph (`@standardoc/react`
-  + Nextra/Docusaurus/Astro adapters), visual navigation, language
-  plugins via UST + Lua
-
-**The result**: your tools stop re-parsing your code each on their own
-side. The graph is the shared asset. ~100 tokens per agent query instead
-of 30k of grep + read.
+The graph is the shared asset. Nobody re-parses your code on the side.
 
 ---
 
-## Posture
+## Why it's built this way
 
-Standardoc optimizes for the questions you ask **after 6 months** on a
-monorepo, not for the 2-minute demo:
+It optimizes for the questions you ask **after 6 months** on a big
+codebase, not the 2-minute demo:
 
-- *What stays stable despite the changes?* → **canonical IR** (languages
-  mutate, the IR doesn't)
-- *Which choices become irreversible?* → **open-source FSL-1.1-MIT** that
-  becomes plain MIT on April 26, 2028 (no SaaS lock-in, no retroactive
-  change of terms possible)
-- *What creates cognitive debt?* → **a shared graph** (N tools re-parsing
-  your code = N points of desync)
-- *What breaks at scale?* → **direct AST** (no regex or heuristics that
-  rot fast)
-- *What becomes incomprehensible in 6 months?* → **MCP-first guardrail**
-  (an agent that greps 30k tokens on every task is neither comprehensible
-  nor debuggable)
+- **One graph, not N.** Every tool re-parsing your code is one more point
+  of drift.
+- **Direct AST, no regex.** Heuristics rot the moment the code moves.
+- **Local & open-source.** FSL-1.1-MIT, auto-converting to plain MIT (first
+  release: April 26, 2028). No cloud, no lock-in, no rented graph.
 
-Code understanding is a system, not a string of greps. Standardoc is the
-infrastructure for that system.
-
-→ Details in [`.important/en/storytelling/`](.important/en/storytelling/):
-philosophy, short/mid/long-term vision, dogfood observations, test
-feedback.
+→ The longer story: [`storytelling/`](.important/en/storytelling/).
 
 ---
 
@@ -106,16 +81,12 @@ Then, from a workspace, wire it into your agent in one command:
 standardoc init        # writes the AI skill, MCP-first hooks, AGENTS.md, and .mcp.json
 ```
 
-This makes a bare **Claude Code CLI** user (no VSCode extension)
-first-class. It writes a `.mcp.json` `standardoc` server of type `stdio`
-running `standardoc mcp --connect` — a thin bridge Claude spawns that
-ensures one warm, watcher-backed daemon for the workspace and relays
-JSON-RPC to it over HTTP. The first query pays a cold start; the index
-then stays live as you edit, is shared across chat sessions, and the
-daemon shuts down with the bridge (no orphan process). Each merge is
-idempotent and preserves your own content, so re-running `init` is safe.
-`.mcp.json` carries machine-specific absolute paths — add it to
-`.gitignore` if collaborating.
+This makes a bare **Claude Code CLI** user first-class: `init` writes the
+AI skill, the MCP-first hooks, an `AGENTS.md` section, and a `.mcp.json`
+that runs `standardoc mcp --connect` — a thin bridge keeping one live,
+watcher-backed daemon for the workspace. Re-running `init` is safe (every
+merge preserves your own content). `.mcp.json` holds machine-specific
+paths — add it to `.gitignore` if collaborating.
 
 → [Full 5-minute walkthrough (QUICKSTART)](.important/en/QUICKSTART.md)
 
@@ -123,36 +94,20 @@ idempotent and preserves your own content, so re-running `init` is safe.
 
 ## Who is it for?
 
-Standardoc is built for **large, complex codebases** — designed by
-dogfooding on Standardoc itself and calibrated for projects of the same
-caliber: compilers, programming languages, engines (game / runtime / db),
-heavy application monorepos, multi-team infra. Not for the weekend JS app
-— it'll still work, but that's not where the value is strongest.
+Big, complex codebases — compilers, languages, engines, heavy monorepos,
+multi-team infra. It works on a small project too, but that's not where the
+value is; there, `ripgrep` + your IDE are enough.
 
-The core problem it solves:
-**keeping a stable, controlled, non-drifting co-work with an AI agent on
-a codebase that evolves**. It's the problem nobody else tackles head-on
-today — most tools stop at "give it the context of one session", not
-"hold coherence over 6 months".
+The problem it solves: **keeping a stable, non-drifting co-work with an AI
+agent on a codebase that keeps changing.** Agents forget context between
+sessions, re-grep what they could query, and invent code that looks like
+yours but breaks your invariants. Standardoc answers that two ways — the
+**graph** (the agent queries real structure instead of guessing) and the
+**discipline** (a hook stops it from shortcutting to grep before it has
+checked the graph).
 
-AI agents drift: they forget context from one session to the next,
-re-grep what they could have queried, invent code that looks like yours
-without respecting your invariants, don't remember the decision locked
-last week. Every task, the archaeology starts over — and the bigger the
-project gets, the more the archaeology costs (tokens, patience, subtle
-bugs, human cognitive debt).
-
-Standardoc addresses this from two complementary angles:
-
-- **The graph** — the agent queries the real structure (FQDN, edges,
-  body), it doesn't invent
-- **The discipline** — the `MCP-first guardrail` stops the agent from
-  shortcutting to `grep + read`; the PreToolUse hook forces it through
-  the graph before anything else
-
-Standardoc is an AI-dev co-work tool, **not a substitute for the dev**.
-An agent querying a stable semantic graph is powerful; a dev who doesn't
-understand their code will stay frustrated whatever the AI behind it.
+It's a tool for the dev, not a replacement: a stable graph makes a good dev
+faster; it won't rescue a codebase nobody understands.
 
 ---
 

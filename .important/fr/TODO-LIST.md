@@ -154,30 +154,34 @@ additionnels une fois que le feedback user valide la fondation.
 ## v1.0.0-beta.2 — Hardening + raffinement de la surface MCP
 
 **Thème** : éprouver la fondation sous des charges agent réelles. La
-surface MCP 2-tools day-1 de beta.1 grossit en un toolkit agent de 16
-tools ; le transport HTTP/SSE atterrit ; une couche de retrieval RAG
-indexe la prose à côté du graphe de symboles ; une DB de session
-handoff permet au travail agent multi-tour de survivre entre les chats ;
-la couverture langages triple (Lua, Vue, Svelte ajoutés ; Rust + TS
-hardenés) ; la résilience du daemon encaisse l'orchestration de
-processus réelle. Aucun nouveau crate public ni package npm — ceux-là
-atterrissent en beta.3.
+surface MCP 2-tools day-1 de beta.1 grossit en un toolkit agent plus
+large ; le transport HTTP/SSE atterrit ; la couverture langages triple
+(Lua, Vue, Svelte ajoutés ; Rust + TS hardenés) ; la résilience du
+daemon encaisse l'orchestration de processus réelle. Aucun nouveau crate
+public ni package npm — ceux-là atterrissent en beta.3.
+
+> **Re-scopé en beta.3.** beta.2 a aussi shippé une couche de retrieval
+> RAG, une DB de session handoff, et une surface usage-stats /
+> token-savings. beta.3 a retiré ou extrait les trois — RAG (la
+> résolution structurelle bat la similarité vectorielle), sessions
+> (déplacée vers un outil voisin de session-store), usage-stats
+> (abandonné). Elles sont barrées plus bas et listées sous
+> [Reporté / abandonné](#reporté--abandonné).
 
 ### Livré
 
 #### Core data layer
 - [x] Schema v6 : revision du workspace persistée, handle R/W secondaire, colonne edge confidence
-- [x] Table `usage_stats` (schema v2) + API de query `log_usage`
+- [x] ~~Table `usage_stats` (schema v2) + API de query `log_usage`~~ — retiré en beta.3
 - [x] Rendu d'affichage compact pour les chaînes de type / attributs (dérivé Rust `to_token_stream` plus generic neutralizer)
 
-#### Surface des tools MCP — expansion de 2 à 16 tools
+#### Surface des tools MCP — expansion depuis les 2 tools day-1
 - [x] **Symbol discovery** — `find_symbol` (FTS5 + fallback did_you_mean), `find_symbols_by_pattern` (GLOB), `find_similar_symbols` (strsim), `list_symbols` (filter-only)
 - [x] **Context** — `get_context` avec sémantique `depth=1|2` ; le `routing_hint` corrige spécifiquement le **pacing depth=1 → depth=2** (se déclenche quand depth=2 est appelé sur un fqdn sans depth=1 récent dans les 5 min, silencieux sinon)
 - [x] **Body** — `get_body` avec knobs `max_lines`, `strip_attrs`, `signature_only` et output compact common-prefix-dedent + tab-indent
-- [x] **RAG** — `fetch_chunks`, `resolve_external` pour les lookups externes cross-language
-- [x] **Telemetry** — tool `usage_stats` (compteurs per-tool), hook de logging du read-handler
-- [x] **Capabilities & freshness** — `current_revision` expose `{rag.enabled, rag.embedder, watcher.active, indexing.ready}` ; `check_stale` pour l'invalidation des fqdn cachés
-- [x] **Sessions** — `session_save`, `session_list`, `session_get`, `session_sync_in`, `session_sync_out`
+- [x] **Externals** — `resolve_external` pour les lookups externes cross-language
+- [x] **Capabilities & freshness** — `current_revision` expose `{watcher.active, indexing.ready}` ; `check_stale` pour l'invalidation des fqdn cachés
+- [x] ~~**RAG** — `fetch_chunks`~~ · ~~**Telemetry** — tool `usage_stats`~~ · ~~**Sessions** — `session_save` / `session_list` / `session_get` / `session_sync_in` / `session_sync_out`~~ — retirés ou extraits en beta.3
 - [x] Sanitization des queries FTS5 (gère snake_case, camelCase, tokens partiels, fallback strsim did_you_mean au seuil 0.6)
 - [x] Normalisation FQDN OOP-style à la frontière MCP (`Class.method` → `Class::method`)
 
@@ -191,25 +195,11 @@ atterrissent en beta.3.
 - [x] Boot lockfile invalidation sweep (récupère après des locks fs4 stale)
 - [x] Protocole de marker `STDOC_FATAL: <code> <key>=<value>` pour la reconnaissance superviseur-side d'une config fatale
 
-#### Couche RAG (retrieval de prose)
-- [x] Scaffold du crate `standardoc-rag` (chunker, embedder, store, linker, score)
-- [x] Découverte de la prose-convention (`docs/`, `notes/`, `README.md` / `ABOUT.md` racine / `*.md` aux roots de sous-package)
-- [x] Chunk store avec invalidation BLAKE3, interface embedder-agnostic
-- [x] Embedder BGE-small-en-v1.5 via Candle (modèle lazy on-disk, ~130 MB, markers de progrès `STDOC_RAG_DL_*`)
-- [x] Embedder mock pour tests déterministes
-- [x] Stop-list (verbes communs étendus) + confidence floor des chunk-refs
-- [x] Re-link des chunks sur changement de symbole du graphe (`relink_watcher`)
-- [x] Le daemon LSP pilote le cold-start RAG + le watcher (modèle single-writer)
-- [x] Le cold-start attend le premier bump de revision AST avant le relink initial
-- [x] Le daemon MCP readonly ne race plus le LSP sur les writes RAG
-- [x] Retry d'unlink Windows sur `rag.db` en cas d'`EBUSY` / `EPERM`
+#### Couche RAG (retrieval de prose) — ~~retirée en beta.3~~
+- [x] ~~crate `standardoc-rag` (chunker, embedder, store, linker, score) ; découverte prose-convention ; BGE-small-en-v1.5 via Candle ; invalidation BLAKE3 des chunks ; `relink_watcher` re-anchrant sur changement du graphe ; cold-start piloté par le LSP~~ — shippée en beta.2, **retirée en beta.3** : Standardoc parie sur la résolution structurelle, pas la similarité vectorielle.
 
-#### DB de session handoff
-- [x] `.standardoc-sessions/sessions.db` — distincte de `.standardoc/` pour qu'un reset de workspace ne tue pas les memos opérateur
-- [x] Discriminateur `SessionKind` (`session`, `feedback`, `profile`, `lock`) ; import kind-aware depuis le frontmatter `type:`
-- [x] `SessionsHandle::open` retry sur SQLite busy transitoire
-- [x] Sync bidirectionnel avec un dossier de memos `.md` : `session_sync_in` / `session_sync_out`, frontmatter fidélité-complète (`status`, `supersedes`, `created_at`)
-- [x] CLI `standardoc session {sync-in,sync-out,hook}` ; `hook` est le driver d'auto-import PostToolUse
+#### DB de session handoff — ~~extraite en beta.3~~
+- [x] ~~`.standardoc-sessions/sessions.db` ; discriminateur `SessionKind` (`session` / `feedback` / `profile` / `lock`) ; sync `.md` ↔ DB bidirectionnel ; CLI `standardoc session {sync-in,sync-out,hook}`~~ — shippée en beta.2, **extraite en beta.3** vers un outil voisin de session-store ; le core ne porte plus la mémoire agent.
 
 #### Guardrail MCP-first
 - [x] Driver CLI `standardoc claude pre-tool-hook --mode {mark,check,reset}`
@@ -223,12 +213,8 @@ atterrissent en beta.3.
 - [x] Tool MCP `resolve_external` surface les métadonnées résolues aux agents
 - [x] Surface de test d'intégration E2E
 
-#### Usage stats / token savings
-- [x] Logging per-tool du read-handler dans la table `usage_stats`
-- [x] Tool de query MCP `usage_stats`
-- [x] CLI `standardoc reset-usage --period {today|day|week|all}` pour les runs de mesure baseline
-- [x] Commande token-savings VSCode + reporting dans la status bar
-- [x] La génération du skill template surface l'angle des savings
+#### Usage stats / token savings — ~~retiré en beta.3~~
+- [x] ~~logging per-tool du read-handler dans `usage_stats` ; tool de query MCP `usage_stats` ; CLI `standardoc reset-usage` ; commande token-savings VSCode + status bar ; angle savings du skill template~~ — shippé en beta.2, **retiré en beta.3**.
 
 #### Language providers
 - [x] **Provider Lua natif** (`full_moon`) : fonctions, locals, module tables (`M = {}`), imports `require`, edges d'appel, extraction d'annotations emmylua
@@ -251,10 +237,10 @@ atterrissent en beta.3.
 - [x] MCP server provider pour Copilot Chat / Claude Code ; merge cross-client de `.mcp.json` (5 actions discriminées, préserve les champs user)
 - [x] `.mcp.json` réécrit vers l'URL réelle du daemon à chaque transition `ready` (couvre le fallback de port éphémère)
 - [x] Contribution langage `.stdignore` + hover preview gitignore-style
-- [x] Commandes RAG dans la palette + réglages + status bar + fix de race sur l'endpoint + markers de progrès DL
-- [x] Redémarrage de daemon sérialisé ; watcher de réglages RAG débouncé
+- [x] ~~Commandes RAG dans la palette + réglages + status bar + fix de race sur l'endpoint + markers de progrès DL~~ — retiré en beta.3
+- [x] Redémarrage de daemon sérialisé
 - [x] Gestion des erreurs fatales parse les markers `STDOC_FATAL` (pas de regex sur les messages d'erreur en prose)
-- [x] Commande token savings + item dans la status bar
+- [x] ~~Commande token savings + item dans la status bar~~ — retiré en beta.3
 
 #### Infra
 - [x] Hardening CI : cleanup `cargo fmt --all` du workspace, fix des intra-doc-links cassés, fix `clippy::format_push_string` / `match_same_arms`
@@ -351,13 +337,13 @@ atterrissent en beta.3.
 ## v1.0.0-beta.3 — Pluralisation des consommateurs du graphe (rendering + nav visuelle + autonomie CLI + compréhension cross-session)
 
 **Thème** : pluraliser les consommateurs du graphe — au-delà du cas
-d'usage agent-en-session-unique. Ajoute 4 axes : doc rendering pour les
+d'usage agent-en-session-unique. Ajoute 3 axes : doc rendering pour les
 visiteurs externes, navigation visuelle pour les mainteneurs humains
-dans l'IDE, autonomie CLI pour les users hors-VSCode, et compréhension
-projet cross-session pour les agents qui continuent leur travail.
-Calendrier non garanti sur les axes nouvellement remontés (nav visuelle
-+ cross-session) — peuvent glisser en beta.4 selon les retours du
-dogfood des 2 semaines de tests.
+dans l'IDE, et autonomie CLI pour les users hors-VSCode. Calendrier non
+garanti sur l'axe nav visuelle nouvellement remonté — peut glisser en
+beta.4 selon les retours du dogfood des 2 semaines de tests. (Un 4e axe,
+la compréhension projet cross-session, a été extrait vers un outil
+voisin de session-store — voir plus bas.)
 
 ### Couche de documentation rendering
 
@@ -416,24 +402,16 @@ long-dormant), mais peut glisser en beta.4 si d'autres trous dogfood
   - CMD / Windows permanent : écrit dans `HKCU\Environment\Path` via le crate `winreg`
 - [ ] Scripts de bootstrap one-liner : `curl -sSf https://… | sh` (Unix) + `irm https://… | iex` (PowerShell)
 
-### Compréhension projet cross-session
+### Compréhension projet cross-session — ~~extraite vers un outil voisin~~
 
-Persister la compréhension synthétisée du projet (objectifs
-court/moyen/long terme, posture, décisions lockées, intention
-narrative) cross-session dans `sessions.db`, pour que les agents
-rechargent une vue consolidée en un seul tool call au lieu de fetcher
-des chunks dispersés à chaque nouvelle session. Motivé par une
-observation dogfood : écrire les `.md` narratifs du projet a consommé
-plus de tokens que tout le cycle de shipping beta.1 → beta.2.
-
-- [ ] Ajouts au schéma de `sessions.db` pour un kind project-understanding (objectifs, posture, décisions lockées, ton narratif), distinct des memos per-session
-- [ ] Tools MCP pour lire/écrire la compréhension synthétisée
-- [ ] Pass de re-validation contre le graphe au début de session : entrées stale flaguées, contradictions surfacées, la vérité reste le code source (la synthèse est une projection dérivée, jamais une source de vérité indépendante)
-
-**Calendrier non garanti** : candidate pour beta.3 si aucun trou
-dogfood de plus haute priorité n'émerge pendant le cycle de tests de 2
-semaines à venir sur d'autres projets ; sinon glisse en beta.4 et la
-couche de rendering prend le slot principal de beta.3.
+La compréhension synthétisée du projet qu'un agent recharge à chaque
+session (objectifs, posture, décisions lockées, intention narrative) ne
+vit plus dans le core de Standardoc. Elle a été déplacée vers un **outil
+voisin de session-store**, en même temps que l'extraction de la DB de
+session handoff en beta.3 — le core reste un graphe de code, pas un
+store de mémoire agent. Le garde-fou est inchangé : une telle synthèse
+est une projection dérivée re-validée contre le graphe, jamais une
+source de vérité indépendante.
 
 ---
 
@@ -498,3 +476,6 @@ code source
 - [x] ~~Fichier de config `.standardoc.json`~~ — remplacé par `.stdignore` + table SQLite `schema_meta`
 - [x] ~~`.stdocignore`~~ — renommé en `.stdignore`
 - [x] ~~`cargo install standardoc-cli` comme unique canal de distribution~~ — beta.1 ship des binaires pre-built cross-platform via GitHub Releases (`release.yml`) ; `cargo install --git` disponible pour les builds source
+- [x] ~~Couche RAG de retrieval de prose (beta.2)~~ — retirée en beta.3 ; Standardoc parie sur la résolution structurelle plutôt que la similarité vectorielle
+- [x] ~~DB de session handoff + compréhension projet cross-session (beta.2)~~ — extraites vers un outil voisin de session-store ; le core reste un graphe de code, pas un store de mémoire agent
+- [x] ~~Surface `usage_stats` / token-savings (beta.2)~~ — retirée en beta.3

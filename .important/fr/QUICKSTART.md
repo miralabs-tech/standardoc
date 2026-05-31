@@ -26,43 +26,20 @@ code --install-extension standardoc-X.Y.Z.vsix
 
 ## 2. Télécharger le binaire `standardoc`
 
-À la première activation, l'extension passe en `awaiting_binary` et
-fait apparaître un toast :
+À la première activation, l'extension affiche un toast :
+**Standardoc needs to download the native binary for this platform** —
+[Download] / [Later] / [Show logs]. **Download** fetch le `version.json`
+épinglé, récupère l'archive plateforme, vérifie son SHA256, et installe
+le binaire ; **Later** laisse une affordance `$(cloud-download)` dans la
+status bar pour réessayer. (Le binaire ship séparément du VSIX pour
+pouvoir se mettre à jour à son propre rythme.)
 
-> **Standardoc needs to download the native binary for this platform.**
-> &nbsp; [Download] &nbsp; [Later] &nbsp; [Show logs]
+Une fois en place, l'extension supervise le daemon et enregistre
+Standardoc comme MCP server pour Copilot Chat / Claude Code dans VSCode.
 
-- **Download** → l'extension fetch `version.json` depuis
-  `releases/download/v<BINARY_VERSION>/version.json` (épinglé sur la
-  release que ce build d'ext attend, pas `latest`), télécharge
-  l'archive plateforme (`.tar.gz` sur Linux/macOS, `.zip` sur
-  Windows), vérifie le SHA256, extrait via le `tar` système, et
-  installe le binaire dans
-  `<globalStorageUri>/bin/<rust-target-triple>/standardoc[.exe]`.
-- **Later** → le daemon reste en `awaiting_binary`. La status bar
-  affiche une affordance `$(cloud-download) Standardoc` ; un clic
-  relance le download.
-
-> *Pourquoi pas de binaire bundlé ?* Le VSIX serait gros
-> (plusieurs dizaines de MB × N plateformes), et le binaire évolue
-> à un rythme indépendant du cycle de release ext. Le decoupling
-> permet de mettre à jour le binaire sans bumper l'extension —
-> compat check via le champ `protocol_version` du manifeste
-> `version.json`.
-
-Une fois le binaire en place, l'extension supervise le daemon,
-gère les redémarrages (parallel spawn, rollback
-`Promise.allSettled`, backoff state machine), et enregistre
-Standardoc comme MCP server pour Copilot Chat / Claude Code dans
-VSCode.
-
-### Pour les devs / testeurs pre-release
-
-Mets `standardoc.binaryPath` sur un chemin absolu. Le setting prend
-toujours la priorité sur le binaire auto-téléchargé, donc tu peux
-pointer sur `target/debug/standardoc` pendant que tu itères en local,
-ou sur un binaire pre-release spécifique pour le tester contre l'ext
-courante.
+> *Dev / pre-release :* mets `standardoc.binaryPath` sur un chemin absolu
+> (ex. `target/debug/standardoc`) — il prime toujours sur le binaire
+> auto-téléchargé.
 
 ---
 
@@ -149,44 +126,19 @@ L'item Standardoc dans le status bar ouvre un QuickPick avec
 
 ### Palette de commandes VSCode (`Ctrl+Shift+P`)
 
-Toutes les actions du status bar menu sont accessibles à la
-palette via `Standardoc: …`, plus quelques commandes
-exclusivement palette :
-
-- `Standardoc: Find symbol` — InputBox + QuickPick sur
-  `find_symbol`, ouvre le symbole choisi à sa source
-- `Standardoc: Get context for symbol at cursor` —
-  `get_context(depth=1)` rendu dans l'output channel
-- `Standardoc: Initialize workspace` — re-déclenche l'init
-  opt-in flow (utile si `.standardoc/` a été supprimé)
-- `Standardoc: Refresh .mcp.json paths` — re-merge avec les
-  chemins absolus courants après déplacement du workspace ou
-  rebuild du binaire ailleurs
-- `Standardoc: Regenerate AI agent skill` — overwrite
-  `.claude/skills/standardoc/SKILL.md` (utile après upgrade ext)
-- `Standardoc: Reset global init prompt` — ré-arme la
-  notification 4-boutons même sur les workspaces où *Never* a
-  déjà été cliqué
+Toutes les actions du status bar sont accessibles via `Standardoc: …`,
+plus des commandes exclusivement palette : **Find symbol**, **Get context
+for symbol at cursor**, **Initialize workspace**, **Refresh .mcp.json
+paths**, **Regenerate AI agent skill**, **Reset global init prompt**.
 
 ### Vérifier que l'agent voit bien Standardoc
 
-Côté client MCP (Copilot Chat / Claude Code dans VSCode, Cursor,
-etc.), chaque client a sa propre UI pour lister les MCP servers
-connectés et leurs tools disponibles. Standardoc doit y
-apparaître avec son jeu de tools (`find_symbol`, `get_context`,
-`get_body`, `get_code`, `find_call_sites`, `fetch_graph`,
-`current_revision`, etc.).
-
-Si l'agent dit que Standardoc n'est pas disponible :
-
-1. **Status bar** — l'item indique-t-il que le daemon tourne ?
-   Sinon, **Restart daemon** depuis le menu.
-2. **`.mcp.json`** — les chemins absolus sont-ils encore valides
-   (workspace déplacé, binaire mis à jour) ? Lance `Standardoc:
-   Refresh .mcp.json paths`.
-3. **L'output channel `Standardoc`** affiche les logs du daemon
-   et de la supervision — c'est là qu'on voit les erreurs de
-   démarrage, les markers `STDOC_FATAL`, etc.
+Ton client MCP liste les servers connectés — Standardoc doit y apparaître
+avec ses tools (`find_symbol`, `get_context`, `get_body`,
+`find_call_sites`, `fetch_graph`, …). S'il n'y est pas : vérifie l'item du
+status bar (daemon lancé ? sinon **Restart daemon**), relance `Standardoc:
+Refresh .mcp.json paths` si le workspace a bougé, et lis l'output channel
+`Standardoc` pour les erreurs de démarrage.
 
 ---
 
@@ -267,7 +219,7 @@ standardoc rescan <ws>                 # rebuild from scratch
 standardoc query <ws> ...              # CLI query (find / context / body)
 standardoc purge-excluded <ws>         # cleanup post-.stdignore edit
 standardoc schema-version <ws>         # print schema version
-standardoc stdignore-preview <ws> <pattern>  # preview .stdignore matches
+standardoc sxd-preview <ws> <pattern>        # preview .stdignore matches
 ```
 
 La surface MCP exposée par le daemon (`find_symbol`, `get_context`,

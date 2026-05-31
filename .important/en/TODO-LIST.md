@@ -148,28 +148,32 @@ once user feedback validates the foundation.
 ## v1.0.0-beta.2 — Hardening + MCP surface refinement
 
 **Theme**: prove the foundation under real agent workloads. The 2-tool day-1
-MCP surface of beta.1 grows into a 16-tool agent toolkit; HTTP/SSE transport
-lands; a RAG retrieval layer indexes prose alongside the symbol graph; a
-session handoff DB lets multi-turn agent work survive across chats; lang
-coverage triples (Lua, Vue, Svelte added; Rust + TS hardened); daemon
-resilience handles real-world process orchestration. No new public crates
-or npm packages — those land in beta.3.
+MCP surface of beta.1 grows into a broader agent toolkit; HTTP/SSE transport
+lands; lang coverage triples (Lua, Vue, Svelte added; Rust + TS hardened);
+daemon resilience handles real-world process orchestration. No new public
+crates or npm packages — those land in beta.3.
+
+> **Re-scoped in beta.3.** beta.2 also shipped a RAG prose-retrieval layer,
+> a session-handoff DB, and a usage-stats / token-savings surface. beta.3
+> removed or extracted all three — RAG (structural resolution beats vector
+> similarity), sessions (moved to a sibling session-store tool), usage-stats
+> (dropped). They're struck below and recorded under
+> [Deferred / killed](#deferred--killed).
 
 ### Shipped
 
 #### Core data layer
 - [x] Schema v6: persisted workspace revision, secondary R/W handle, edge confidence column
-- [x] `usage_stats` table (schema v2) + `log_usage` query API
+- [x] ~~`usage_stats` table (schema v2) + `log_usage` query API~~ — removed in beta.3
 - [x] Compact display rendering for type / attribute strings (Rust `to_token_stream`-derived plus generic neutralizer)
 
-#### MCP tool surface — expansion from 2 to 16 tools
+#### MCP tool surface — expansion from the 2 day-1 tools
 - [x] **Symbol discovery** — `find_symbol` (FTS5 + did_you_mean fallback), `find_symbols_by_pattern` (GLOB), `find_similar_symbols` (strsim), `list_symbols` (filter-only)
 - [x] **Context** — `get_context` with `depth=1|2` semantics; `routing_hint` nudges the **depth=1 → depth=2 pacing** specifically (fires when depth=2 is called on a fqdn without a recent depth=1 within 5 min, silent otherwise)
 - [x] **Body** — `get_body` with `max_lines`, `strip_attrs`, `signature_only` knobs and compact common-prefix-dedent + tab-indent output
-- [x] **RAG** — `fetch_chunks`, `resolve_external` for cross-language external lookups
-- [x] **Telemetry** — `usage_stats` tool (per-tool counters), read-handler logging hook
-- [x] **Capabilities & freshness** — `current_revision` exposes `{rag.enabled, rag.embedder, watcher.active, indexing.ready}`; `check_stale` for cached-fqdn invalidation
-- [x] **Sessions** — `session_save`, `session_list`, `session_get`, `session_sync_in`, `session_sync_out`
+- [x] **Externals** — `resolve_external` for cross-language external lookups
+- [x] **Capabilities & freshness** — `current_revision` exposes `{watcher.active, indexing.ready}`; `check_stale` for cached-fqdn invalidation
+- [x] ~~**RAG** — `fetch_chunks`~~ · ~~**Telemetry** — `usage_stats` tool~~ · ~~**Sessions** — `session_save` / `session_list` / `session_get` / `session_sync_in` / `session_sync_out`~~ — removed or extracted in beta.3
 - [x] FTS5 query sanitization (handles snake_case, camelCase, partial tokens, did_you_mean strsim fallback at threshold 0.6)
 - [x] OOP-style FQDN normalisation at MCP boundary (`Class.method` → `Class::method`)
 
@@ -183,25 +187,11 @@ or npm packages — those land in beta.3.
 - [x] Boot lockfile invalidation sweep (recovers from stale fs4 locks)
 - [x] `STDOC_FATAL: <code> <key>=<value>` marker protocol for supervisor-side fatal-config recognition
 
-#### RAG (prose retrieval) layer
-- [x] `standardoc-rag` crate scaffold (chunker, embedder, store, linker, score)
-- [x] Convention-prose discovery (`docs/`, `notes/`, root `README.md` / `ABOUT.md` / `*.md` at sub-package roots)
-- [x] Chunk store with BLAKE3 invalidation, embedder-agnostic interface
-- [x] BGE-small-en-v1.5 embedder via Candle (lazy on-disk model, ~130 MB, `STDOC_RAG_DL_*` progress markers)
-- [x] Mock embedder for deterministic tests
-- [x] Stop-list (extended common verbs) + chunk-ref confidence floor
-- [x] Re-link chunks on graph-symbol changes (`relink_watcher`)
-- [x] LSP daemon drives RAG cold-start + watcher (single-writer model)
-- [x] Cold-start waits for first AST revision bump before initial relink
-- [x] Readonly MCP daemon no longer races LSP on RAG writes
-- [x] Windows `rag.db` unlink retry on `EBUSY` / `EPERM`
+#### RAG (prose retrieval) layer — ~~removed in beta.3~~
+- [x] ~~`standardoc-rag` crate (chunker, embedder, store, linker, score); convention-prose discovery; BGE-small-en-v1.5 via Candle; BLAKE3 chunk invalidation; `relink_watcher` re-anchoring on graph changes; LSP-driven cold-start~~ — shipped in beta.2, **removed in beta.3**: Standardoc bets on structural resolution, not vector similarity.
 
-#### Session handoff DB
-- [x] `.standardoc-sessions/sessions.db` — distinct from `.standardoc/` so workspace resets don't kill operator memos
-- [x] `SessionKind` discriminator (`session`, `feedback`, `profile`, `lock`); kind-aware import from frontmatter `type:`
-- [x] `SessionsHandle::open` retry on transient SQLite busy
-- [x] Bidirectional sync with `.md` memo dir: `session_sync_in` / `session_sync_out`, fidelity-complete frontmatter (`status`, `supersedes`, `created_at`)
-- [x] `standardoc session {sync-in,sync-out,hook}` CLI; `hook` is the PostToolUse auto-import driver
+#### Session handoff DB — ~~extracted in beta.3~~
+- [x] ~~`.standardoc-sessions/sessions.db`; `SessionKind` discriminator (`session` / `feedback` / `profile` / `lock`); bidirectional `.md` ↔ DB sync; `standardoc session {sync-in,sync-out,hook}` CLI~~ — shipped in beta.2, **extracted in beta.3** to a sibling session-store tool; the core no longer carries agent memory.
 
 #### MCP-first guardrail
 - [x] `standardoc claude pre-tool-hook --mode {mark,check,reset}` CLI driver
@@ -215,12 +205,8 @@ or npm packages — those land in beta.3.
 - [x] `resolve_external` MCP tool surfaces resolved metadata to agents
 - [x] E2E integration test surface
 
-#### Usage stats / token savings
-- [x] Per-tool read-handler logging into `usage_stats` table
-- [x] `usage_stats` MCP query tool
-- [x] `standardoc reset-usage --period {today|day|week|all}` CLI for baseline measurement runs
-- [x] VSCode token-savings command + status bar reporting
-- [x] Skill template generation surfaces the savings angle
+#### Usage stats / token savings — ~~removed in beta.3~~
+- [x] ~~per-tool read-handler logging into `usage_stats`; `usage_stats` MCP query tool; `standardoc reset-usage` CLI; VSCode token-savings command + status bar; skill-template savings angle~~ — shipped in beta.2, **removed in beta.3**.
 
 #### Language providers
 - [x] **Lua native provider** (`full_moon`): functions, locals, module tables (`M = {}`), `require` imports, call edges, emmylua annotation extraction
@@ -243,10 +229,10 @@ or npm packages — those land in beta.3.
 - [x] MCP server provider for Copilot Chat / Claude Code; `.mcp.json` cross-client merge (5 actions discriminated, preserves user fields)
 - [x] `.mcp.json` rewritten to the daemon's actual URL on every `ready` transition (covers ephemeral port fallback)
 - [x] `.stdignore` language contribution + gitignore-style hover preview
-- [x] RAG commands palette + settings + status bar + endpoint race fix + DL progress markers
-- [x] Daemon restart serialised; RAG settings watcher debounced
+- [x] ~~RAG commands palette + settings + status bar + endpoint race fix + DL progress markers~~ — removed in beta.3
+- [x] Daemon restart serialised
 - [x] Fatal error handling parses `STDOC_FATAL` markers (no regex on prose error messages)
-- [x] Token savings command + status bar item
+- [x] ~~Token savings command + status bar item~~ — removed in beta.3
 
 #### Infra
 - [x] CI hardening: `cargo fmt --all` workspace cleanup, broken intra-doc-link fixes, `clippy::format_push_string` / `match_same_arms` fixes
@@ -337,7 +323,7 @@ or npm packages — those land in beta.3.
 
 ## v1.0.0-beta.3 — Pluralized graph consumers (rendering + visual nav + CLI autonomy + cross-session understanding)
 
-**Theme**: pluralize graph consumers — beyond the agent-in-single-session use case. Adds 4 axes: doc rendering for external visitors, visual navigation for maintainer humans in the IDE, CLI autonomy for non-VSCode users, and cross-session project understanding for agents continuing work. Calendar not guaranteed on the newly-elevated axes (visual nav + cross-session) — may slip to beta.4 depending on 2-week dogfood findings.
+**Theme**: pluralize graph consumers — beyond the agent-in-single-session use case. Adds 3 axes: doc rendering for external visitors, visual navigation for maintainer humans in the IDE, and CLI autonomy for non-VSCode users. Calendar not guaranteed on the newly-elevated visual-nav axis — may slip to beta.4 depending on 2-week dogfood findings. (A fourth axis, cross-session project understanding, was extracted to a sibling session-store tool — see below.)
 
 ### Documentation rendering layer
 
@@ -385,15 +371,15 @@ Surface the graph as an interactive visual artifact for the maintainer who revie
   - CMD / Windows permanent: writes to `HKCU\Environment\Path` via `winreg` crate
 - [ ] One-liner bootstrap scripts: `curl -sSf https://… | sh` (Unix) + `irm https://… | iex` (PowerShell)
 
-### Cross-session project understanding
+### Cross-session project understanding — ~~extracted to a sibling tool~~
 
-Persist the synthesized project understanding (short/medium/long-term goals, posture, locked decisions, narrative intent) across sessions in `sessions.db`, so agents reload a consolidated view in one tool call instead of fetching scattered chunks every new session. Driven by a dogfood observation: writing the project's narrative `.md` docs consumed more tokens than the entire beta.1 → beta.2 shipping cycle.
-
-- [ ] Schema additions to `sessions.db` for a project-understanding kind (goals, posture, locked decisions, narrative tone), distinct from per-session memos
-- [ ] MCP tools to read/write the synthesized understanding
-- [ ] Re-validation pass against the graph at session start: stale entries flagged, contradictions surface, ground truth stays the code source (the synthesis is a derived projection, never an independent source of truth)
-
-**Calendar not guaranteed**: candidate for beta.3 if no higher-priority dogfood hole emerges during the upcoming 2-week test cycle on other projects; otherwise slips to beta.4 and the rendering layer takes the primary beta.3 slot.
+The synthesized project understanding an agent reloads each session (goals,
+posture, locked decisions, narrative intent) no longer lives in Standardoc
+core. It moved to a **sibling session-store tool**, alongside the beta.3
+extraction of the session-handoff DB — the core stays a code graph, not an
+agent-memory store. The guardrail is unchanged: any such synthesis is a
+derived projection re-validated against the graph, never an independent
+source of truth.
 
 ---
 
@@ -455,3 +441,6 @@ source code
 - [x] ~~`.standardoc.json` config file~~ — replaced by `.stdignore` + `schema_meta` SQLite table
 - [x] ~~`.stdocignore`~~ — renamed to `.stdignore`
 - [x] ~~`cargo install standardoc-cli` as sole distribution channel~~ — beta.1 ships pre-built cross-platform binaries via GitHub Releases (`release.yml`); `cargo install --git` available for source builds
+- [x] ~~RAG prose-retrieval layer (beta.2)~~ — removed in beta.3; Standardoc bets on structural resolution over vector similarity
+- [x] ~~Session-handoff DB + cross-session project understanding (beta.2)~~ — extracted to a sibling session-store tool; the core stays a code graph, not an agent-memory store
+- [x] ~~`usage_stats` / token-savings surface (beta.2)~~ — removed in beta.3

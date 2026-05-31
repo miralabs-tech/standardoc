@@ -4,7 +4,7 @@
 
 Standardoc is a **code intelligence infrastructure**: a canonical
 multi-language IR and a living semantic graph, derived from the AST,
-exposed to several surfaces (LSP, MCP, RAG). One shared graph — your
+exposed to several surfaces (LSP, MCP). One shared graph — your
 tools stop re-parsing your code each on their own side. Local,
 open-source, ~100 tokens per agent query instead of 30k of grep + read.
 

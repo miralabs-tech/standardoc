@@ -17,10 +17,9 @@ de pousser sur le core** — elle pousse sur l'écosystème qui s'enroule
 autour.
 
 C'est un choix philosophique fort. Jusqu'à 1.0, le core a grossi
-naturellement : RAG, sessions DB, MCP toolkit, 5 language providers,
-hooks MCP-first, doc rendering layer en cours. Chaque cycle a ajouté
-une pièce d'infrastructure. **C'est sain pendant la phase de
-construction.** Maintenu post-1.0, ça produit un god-binary — un
+naturellement : le MCP toolkit, 5 language providers, hooks MCP-first,
+doc rendering layer en cours. Chaque cycle a ajouté une pièce
+d'infrastructure. **C'est sain pendant la phase de construction.** Maintenu post-1.0, ça produit un god-binary — un
 core qui finit par tout faire mal au lieu de bien faire son métier
 de base.
 
@@ -143,7 +142,7 @@ plug-in.**
 
 ## Les surfaces enrichies optionnelles
 
-Standardoc à 1.0 expose le graphe via LSP, MCP, RAG, doc rendering
+Standardoc à 1.0 expose le graphe via LSP, MCP, doc rendering
 (beta.3), navigation visuelle (beta.3). Post-1.0, des surfaces
 optionnelles peuvent émerger selon la demande dogfood — toujours
 optionnelles, jamais imposées.

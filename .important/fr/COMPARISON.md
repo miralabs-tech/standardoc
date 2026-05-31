@@ -25,10 +25,10 @@ invariants :
 - **Local** — l'index vit dans `.standardoc/`, pas dans un cloud
 - **AST profond** — `syn` / `swc` / `full_moon` / parsers SFC, pas du
   tree-sitter de surface ni du regex
-- **Multi-surface** — un seul graphe consommé par LSP, MCP, RAG, et
+- **Multi-surface** — un seul graphe consommé par LSP, MCP, et
   bientôt la doc rendue (beta.3)
 - **Agent-first** — la surface MCP et la discipline encodée (hooks
-  MCP-first, sessions DB, `routing_hint`) sont conçues pour un agent IA
+  MCP-first) sont conçues pour un agent IA
 - **OSS irréversible** — FSL-1.1-MIT avec conversion automatique en MIT
   pur 2 ans par release
 
@@ -61,29 +61,17 @@ qu'aucune colonne ne capture.
 
 ## Code intelligence SaaS — Sourcegraph
 
-Sourcegraph est l'**anti-Standardoc**, et sa trajectoire vaut comme
-contre-exemple.
+Sourcegraph est l'**anti-Standardoc**. Jadis open-source (Apache 2.0),
+il est passé propriétaire en 2023, a fermé son code en 2024, et a pivoté
+autour de **Cody** ; l'offre est désormais enterprise-only
+(~$49–59/user/mois), hébergée, centrée sur la collaboration et la review
+en équipe.
 
-À l'origine open-source (Apache 2.0), c'était un moteur de recherche
-de code partagé en équipe, excellent dans son métier. Puis : relicencié
-en 2023 vers une licence propriétaire « Sourcegraph Enterprise », code
-passé en repo privé en 2024 (plus même source-available), pivot complet
-autour de **Cody** (assistant IA), arrêt d'investissement sur le
-produit code search lui-même. Les tiers Free et Pro de Cody ont été
-fermés en 2025 — l'offre est désormais **enterprise-only, ~$49–59 par
-utilisateur et par mois**, hébergée, avec un focus produit sur la
-collaboration et la code review à l'échelle d'une grande organisation.
-
-C'est un produit cohérent pour ce qu'il vise. Mais il contredit
-**chacun** des invariants de Standardoc : cloud au lieu de local,
-propriétaire au lieu d'OSS irréversible, facturation par siège au lieu
-de gratuit, et un graphe que tu *loues* au lieu de le posséder. Si
-l'entreprise pivote, change de pricing, ou ferme, tu perds l'asset.
-
-Les deux peuvent coexister sur un même monorepo — ils n'adressent pas
-le même problème. Mais si ton besoin est « comprendre mon propre code,
-en local, sans dépendre d'un fournisseur », Sourcegraph 2026 n'est plus
-la réponse qu'il était en 2020.
+Un produit cohérent — mais il contredit chacun des invariants de
+Standardoc : cloud pas local, propriétaire pas OSS irréversible, par
+siège pas gratuit, un graphe que tu *loues* pas que tu possèdes. Si ton
+besoin est comprendre ton propre code, en local, sans dépendre d'un
+fournisseur, Sourcegraph 2026 n'est plus la réponse qu'il était en 2020.
 
 > **SCIP / Glean / Kythe** — dans la même famille « infrastructure
 > d'indexing », mais côté formats et back-ends : SCIP est le protocole
@@ -173,113 +161,55 @@ Le tradeoff est explicite.
 
 ### Pari produit et horizon de temps
 
-**code-review-graph** parie sur **breadth + structural mining + reach
-plateforme** :
+**code-review-graph parie sur la breadth.** 24 langues via tree-sitter,
+12 plateformes IA auto-détectées à l'install, et une surface produit
+large (visualisation D3.js, multi-repo daemon, semantic search
+multi-provider, exports GraphML / Neo4j / Obsidian / SVG, MCP prompt
+templates) — préprocessing structurel scoré sur le maximum de stack
+possible.
 
-- **24 langues** via tree-sitter (TS, JS, Python, Rust, Go, Java,
-  Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl,
-  Lua, Zig, PowerShell, Julia, Nix, Vue, Svelte, Jupyter / Databricks
-  `.ipynb`)
-- **12 plateformes IA auto-détectées** au `install` (Codex, Claude
-  Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Qwen,
-  Qoder, Kiro, GitHub Copilot + CLI)
-- **Surface produit large** : visualisation D3.js interactive,
-  multi-repo daemon (`crg-daemon`), semantic search via embedders
-  multi-provider (sentence-transformers, Gemini, MiniMax,
-  OpenAI-compatible), exports GraphML / Neo4j Cypher / Obsidian / SVG,
-  wiki generation, 5 MCP prompt templates (review, architecture,
-  debug, onboard, pre-merge)
-- **Stack Python 3.10+**, license MIT permissive, écosystème
-  community-flavored (Discord, install opinionated multi-plateforme)
-
-Bet : *préprocessing structurel scoré → raisonnement LLM en aval, sur
-le maximum de stack et de plateformes possibles*.
-
-**Standardoc** parie sur **depth + contract + primitives de cognition
-repository** :
-
-- **3 providers de langage en profondeur** + Vue/Svelte SFC ; le reste
-  passe post-1.0 par le plug-in layer **UST + Lua** (community-driven,
-  pas core)
-- **IR canonique versionné** (`standardoc-ir`) avec **API freeze
-  contractuel à 1.0** : MCP tool signatures, LSP custom methods,
-  types IR, schema SQLite. Bump `protocol_version` + coexistence pour
-  tout breaking change ultérieur
-- **`BridgeKind`** = primitive opaque cross-substrat attachée aux
-  edges et signatures (Tauri / WASM / FFI / SQL / ORM / DB-table /
-  DB-model) ; vocab à figer 1.0, détecteurs frontends post-1.0 via
-  plug-in layer
-- **Sessions DB orthogonale 4 kinds** (`Session` / `Feedback` /
-  `Profile` / **`Lock`**) avec sync `.md` ↔ DB bidirectionnel ; le
-  `Lock` est l'**équivalent ADR** persisté (Architecture Decision
-  Record en format memo)
-- **RAG layer** liée au graphe par FQDN avec `relink_watcher` qui
-  re-anchre les chunks prose à chaque revision du graphe — le lien
-  prose ↔ structure évolue avec le code
-- **Discipline encodée et testée** : `compute_routing_hint` avec
-  4 tests dédiés (silent depth=1, fires naked depth=2, silent after
-  recent depth=1, fires again after window expires) ; PreToolUse hook
-  **bloquant** (deny) plutôt que purement advisory ; SessionStart wipe
-  pour repartir strict
-- **License-as-moat irréversible** : FSL-1.1-MIT avec conversion
-  automatique en MIT pur 2 ans par release ; première conversion
-  **26 avril 2028**, verrou temporel non négociable
-- **Stack Rust**, solo-maintainer pré-1.0 lockdown contributeurs
-  (issues / feedback OK, PR tiers refusés jusqu'au freeze)
-
-Bet : *substrat sémantique stable et contractuel que humains + CI +
-agents + futurs renderers / plug-ins consomment sur 5+ ans, avec
-primitives déjà posées vers ce que d'autres appellent "repository
-cognition" sans claim marketing.*
+**Standardoc parie sur la depth et le contrat.** 3 providers de langage
+en profondeur + Vue/Svelte SFC (le reste passe post-1.0 par le plug-in
+layer UST + Lua) ; un IR canonique versionné, figé comme contrat public
+à 1.0 ; une licence FSL → MIT irréversible. Un substrat sémantique
+stable que humains, CI, agents et futurs renderers consomment sur des
+années — pas un cache de tokens par tâche.
 
 ### Ce qu'on n'a pas
 
-Honnêteté nécessaire — features où ils sont objectivement en avance :
+Honnêteté nécessaire — où ils sont objectivement en avance :
 
-- **Visualisation graphe interactive** — D3.js force-directed avec
-  search, community legend, degree-scaled nodes. Notre webview de
-  navigation visuelle est candidate beta.3, pas shippée.
-- **Multi-repo daemon natif** — `crg-daemon` supervise plusieurs
-  workspaces depuis un seul process ; chez nous chaque workspace a
-  son propre couple daemon LSP / MCP.
-- **Semantic search multi-provider** — ils supportent
-  sentence-transformers, Gemini, MiniMax, OpenAI-compatible. Notre RAG
-  tourne avec un seul embedder local (Candle/BGE-small) — choix
-  volontaire pour rester local-only sans clé d'API ni appel réseau,
-  mais à plat c'est moins d'options.
-- **Exports hors-IDE** — GraphML (Gephi/yEd), Neo4j Cypher, Obsidian
-  vault avec wikilinks, SVG statique. Chez nous le graphe se consulte
-  via MCP / LSP / CLI mais ne sort pas vers des formats tiers.
+- **Visualisation graphe interactive** — D3.js force-directed. Notre
+  webview de navigation visuelle est candidate beta.3, pas shippée.
+- **Multi-repo daemon natif** — un seul process supervise plusieurs
+  workspaces ; chez nous chaque workspace a son propre couple daemon.
+- **Recherche sémantique / vectorielle** — ils offrent des embeddings
+  multi-provider. On parie sur la résolution structurelle plutôt que la
+  similarité, donc pas de recherche vectorielle chez nous — un choix de
+  cohérence, pas un accident.
+- **Exports hors-IDE** — GraphML, Neo4j Cypher, Obsidian, SVG. Notre
+  graphe se consulte via MCP / LSP / CLI, pas exporté vers des formats
+  tiers.
 - **Analytics architecturales scorées** — Leiden communities,
-  betweenness centrality (hubs/bridges), surprise scoring, refactoring
-  suggestions générées. Ces métriques n'existent pas chez nous, **par
-  cohérence avec le pari épistémologique** (résolution structurelle
-  exacte, pas fouille analytique scorée) — pas une lacune accidentelle.
+  betweenness centrality, surprise scoring. Absentes chez nous **par
+  cohérence avec le pari** (résolution structurelle exacte, pas fouille
+  scorée).
 
 ### Cible et angle
 
-**code-review-graph** est ce qu'on a de plus complet aujourd'hui pour :
+**code-review-graph** est l'outil le plus complet aujourd'hui pour le
 token-efficient AI coding sur **un maximum de langues et de
-plateformes**, avec un graphe scoré qui réduit `what to read`, et des
-analytics architecturales (communities, hubs, bridges) en bonus. La
-review reste son cas d'usage le plus visible (nom, slash commands
-`review-delta` / `review-pr`, benchmarks sur commits) mais l'outil
-dépasse maintenant la review pure (architecture / debug / onboard /
-pre-merge sont des MCP prompt templates first-class).
+plateformes**, avec des analytics architecturales scorées en bonus.
 
-**Standardoc** est purpose-built pour : **co-work AI-dev cohérent dans
-le temps long** sur **monorepos lourds et complexes**, avec un substrat
+**Standardoc** est purpose-built pour le **co-work AI-dev cohérent dans
+le temps long** sur **monorepos lourds et complexes** — un substrat
 sémantique résolu, contractualisé à 1.0, dont le graphe est un **asset
-partagé** (humains, CI, agents, futurs renderers, futurs plug-ins)
-plutôt qu'un cache d'optimisation tokens. Les primitives de cognition
-repository (`BridgeKind`, `SessionKind::Lock`, RAG FQDN-linked,
-enrichments avec `ConfidenceLevel`) sont posées **avant** que les
-conventions qui les remplissent soient figées.
+partagé** (humains, CI, agents, futurs renderers) plutôt qu'un cache de
+tokens.
 
-Les deux projets prouvent surtout la même chose : le problème — agents
-IA qui re-scannent à chaque tâche — est réel, et la réponse est un
-graphe local partagé. **On le résout sous deux paris différents sur
-l'avenir du problème AI ↔ codebase.**
+Les deux prouvent la même chose : les agents IA qui re-scannent à chaque
+tâche, c'est un vrai problème, et la réponse est un graphe local
+partagé. **On le résout sous deux paris différents.**
 
 ---
 
@@ -294,7 +224,7 @@ multi-surface.
   langages. Solide et token-efficient. Mais la vue reste
   **per-langage** (celle du LSP sous-jacent), il n'y a pas de graphe
   cross-langage propre, pas d'IR canonique, pas d'index persistant
-  réutilisable hors agent, pas de RAG sur la prose. Serena est un
+  réutilisable hors agent. Serena est un
   *adaptateur LSP pour agents* ; Standardoc est une *infrastructure
   d'indexation* dont le LSP n'est qu'une surface parmi d'autres.
 
@@ -306,12 +236,11 @@ multi-surface.
   outils.
 
 - **Continue** — **RAG vectoriel** : la codebase est découpée en
-  chunks, embeddée, stockée dans une base vectorielle, et les chunks
-  les plus *similaires sémantiquement* à la tâche sont remontés. C'est
-  une approche par **similarité**, pas par **structure** : pas de
-  graphe, pas d'arêtes typées, pas de résolution FQDN. (Standardoc
-  utilise aussi du RAG — mais *en complément* du graphe, sur la prose
-  adjacente linkée par FQDN, jamais comme substitut à la structure.)
+  chunks, embeddée, et les chunks les plus *similaires sémantiquement*
+  à la tâche sont remontés. C'est une approche par **similarité**, pas
+  par **structure** : pas de graphe, pas d'arêtes typées, pas de
+  résolution FQDN. Standardoc parie l'inverse — structure résolue, pas
+  similarité scorée.
 
 Ces trois-là peuvent même cohabiter avec Standardoc : ce sont des
 consommateurs de contexte, Standardoc est le producteur de contexte

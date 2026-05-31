@@ -31,26 +31,15 @@ imaginées au départ.
 
 ## Les cibles dogfood pendant la phase beta.1 → beta.2
 
-- **Standardoc lui-même** — le projet utilise sa propre indexation
-  en CI/CD pour valider les changes. Quand un PR casse l'IR ou la
-  surface MCP, la CI le détecte avant le merge. Méta, mais nécessaire :
-  si l'outil n'est pas utilisable sur lui-même, il ne l'est sur rien.
-- **Standarbuild** — un autre projet de StandarX (release prochaine
-  aussi) : build engine + task runner déclaratif pour monorepos
-  polyglottes. DSL `.sbuild` parsé en IR + engine de DAG en Rust,
-  hooks Lua sandboxés (mlua), détection multi-langues
-  (Rust / Bun / Node / Deno / Python / Lua / C / C++). On dev
-  standarbuild **avec** Standardoc indexant son crate Rust (parser
-  DSL, IR, engine, diagnostics). C'est là qu'on a stressé les knobs
-  `get_body` (`strip_attrs`, `signature_only`) — sans eux, lire un
-  seul handler avec doc-comments + attributes saturait facilement
-  le budget de contexte.
-- **LurLang** — un langage de programmation maison (privé). Stack
-  Rust + C (le C n'est pas encore indexé — c'est un bucket post-1.0).
-  C'est sur LurLang qu'on a validé que le pattern "monorepo
-  multi-langues avec une partie qui sort du graphe" reste utilisable :
-  l'agent comprend la partie indexée et bascule en `Read` documenté
-  sur la partie hors-graphe, sans confusion.
+- **Standardoc lui-même** — indexé dans sa propre CI ; si un PR casse
+  l'IR ou la surface MCP, la CI le détecte avant le merge. Si l'outil
+  n'est pas utilisable sur lui-même, il ne l'est sur rien.
+- **Deux autres projets** — un build engine polyglotte et un langage
+  maison (Rust + C). Ils ont stressé les knobs `get_body` (`strip_attrs`,
+  `signature_only`) sur des handlers lourds, et validé le pattern
+  "monorepo multi-langues avec une partie hors-graphe" : l'agent utilise
+  la partie indexée et bascule en `Read` documenté sur le reste, sans
+  confusion.
 
 ---
 
@@ -98,8 +87,7 @@ correctif au lieu de le laisser continuer silencieusement.
 ### 2. L'architecture multi-frontend / multi-backend a quitté le whiteboard
 
 beta.1 avait LSP + MCP stdio. beta.2 valide en pratique : MCP HTTP/SSE
-multi-client, RAG layer reliée au graphe par FQDN, sessions DB
-orthogonale, langages providers étendus (Lua, Vue, Svelte). L'enjeu
+multi-client, langages providers étendus (Lua, Vue, Svelte). L'enjeu
 n'est pas chaque pièce individuellement — c'est que **le tout reste
 cohérent**, sans qu'aucune surface ne corrompe l'état de l'autre.
 
@@ -115,7 +103,7 @@ blocage est observable (deny avec message structuré), pas silencieux.
 
 C'est la première brique d'une approche plus large : encoder les
 patterns de bon comportement dans le système, pas dans les bons
-sentiments. Les autres briques (sessions DB, routing_hint, daemon-side
+sentiments. Les autres briques (routing_hint, daemon-side
 enforcement) suivent la même logique.
 
 → [Détails exhaustifs des features beta.2 dans TODO-LIST](../TODO-LIST.md)

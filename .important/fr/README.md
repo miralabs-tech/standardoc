@@ -12,15 +12,11 @@
   <a href="https://open-vsx.org/extension/miralabs-tech/standardoc"><img src="https://img.shields.io/open-vsx/dt/miralabs-tech/standardoc?label=ovsx%20downloads&style=flat-square" alt="OpenVSX downloads"></a>
 </p>
 
-> Une infrastructure d'intelligence de code, bâtie sur un IR canonique
-> multi-langues et un graphe sémantique vivant. Un graphe, plusieurs
-> daemons (LSP, MCP stdio + HTTP/SSE), tous tes outils branchés dessus.
-> ~100 tokens par requête d'agent au lieu de 30k de grep + read.
-> Local, dérivé du code source, open-source.
->
-> Pensé pour ce qui casse à l'échelle et devient ingérable dans 6 mois,
-> pas pour la démo de 2 minutes. La compréhension de code est un
-> système, pas une suite de greps.
+> **Ton agent IA re-lit toute ta codebase à chaque tâche.** Standardoc
+> l'indexe une fois en une carte partagée et toujours à jour de ton code —
+> pour que l'agent (et tes autres outils) se contentent de *demander* au
+> lieu de re-grepper. ~100 tokens par question au lieu de 30k. Local,
+> open-source, dérivé directement de ta source.
 
 [English](../../README.md) · 📖 Français
 
@@ -30,58 +26,41 @@
 
 ## C'est quoi ?
 
-Standardoc indexe ton code en un **graphe sémantique vivant** :
+Standardoc lit ton code directement depuis son arbre syntaxique (Rust,
+TypeScript & JavaScript avec React/JSX/TSX, Vue, Svelte, Lua) et en garde
+un **graphe sémantique vivant** — chaque symbole, et les liens typés entre
+eux : qui appelle qui, qui importe quoi, qui implémente quoi. Un watcher le
+garde à jour à mesure que tu édites.
 
-- AST direct, multi-langues (Rust, TypeScript & JavaScript avec React/JSX/TSX, Vue, Svelte, Lua aujourd'hui)
-- IR canonique unifié — types de nœuds + edges typés partagés cross-langue
-  (`CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `USES_TYPE`),
-  avec attributs structurés sur certains edges
-- SQLite + FTS5, watcher filesystem, invalidation BLAKE3, schéma versionné
-- Dérivé du code (pas une source à porter en plus), reproductible sur
-  n'importe quelle machine en quelques secondes
+Tes outils se branchent sur ce graphe unique au lieu de re-parser ton code
+chacun de leur côté :
 
-**Plusieurs surfaces consomment cet état** :
+- **Pour les agents IA** — un serveur MCP avec des requêtes graphe ciblées
+  et read-only (Claude Code, Cursor, Continue, Cody, Aider, Goose, tout
+  client MCP). ~100 tokens par question au lieu de 30k de grep + read.
+- **Pour les éditeurs** — un daemon LSP auquel tout client se connecte
+  (l'extension VSCode officielle l'embarque ; IntelliJ, Neovim, Helix,
+  Emacs eglot aussi).
+- **À venir** — doc et navigation visuelle générées depuis le même graphe.
 
-- **LSP daemon** (`standardoc lsp`, stdio, primary writer du graphe) —
-  l'extension VSCode officielle l'embarque ; tout client LSP peut s'y
-  connecter (IntelliJ, Neovim, Helix, Emacs eglot, …) en pointant le
-  binaire
-- **MCP daemon** (`standardoc mcp`, stdio ou HTTP/SSE multi-client) — un
-  jeu ciblé de tools graphe read-only pour Claude Code, Cursor,
-  Continue, Cody, Aider, Goose, et tout client MCP
-- *À venir* — doc statique générée depuis le graphe (`@standardoc/react`
-  + adapters Nextra/Docusaurus/Astro), navigation visuelle, plugins de
-  langues via UST + Lua
-
-**Le résultat** : tes outils arrêtent de re-parser ton code chacun de leur
-côté. Le graphe est l'asset partagé. ~100 tokens par requête d'agent au
-lieu de 30k de grep + read.
+Le graphe est l'asset partagé. Personne ne re-parse ton code à côté.
 
 ---
 
-## Posture
+## Pourquoi c'est construit comme ça
 
-Standardoc optimise pour les questions qu'on se pose **après 6 mois** sur
-un monorepo, pas pour la démo de 2 minutes :
+Ça optimise pour les questions qu'on se pose **après 6 mois** sur une
+grosse codebase, pas pour la démo de 2 minutes :
 
-- *Qu'est-ce qui reste stable malgré les changements ?* → **IR canonique**
-  (les langages mutent, l'IR pas)
-- *Quels choix deviennent irréversibles ?* → **open-source FSL-1.1-MIT**
-  qui devient MIT au 26 avril 2028 (pas de lock-in SaaS, pas de changement
-  de termes rétroactif possible)
-- *Qu'est-ce qui crée de la dette cognitive ?* → **un graphe partagé** (N
-  outils qui re-parsent ton code = N points de désynchro)
-- *Qu'est-ce qui casse à l'échelle ?* → **AST direct** (pas de regex ni
-  d'heuristiques qui rot fast)
-- *Qu'est-ce qui devient incompréhensible dans 6 mois ?* → **MCP-first
-  guardrail** (un agent qui grep 30k tokens à chaque tâche n'est ni
-  compréhensible ni débuggable)
+- **Un seul graphe, pas N.** Chaque outil qui re-parse ton code, c'est un
+  point de désynchro de plus.
+- **AST direct, pas de regex.** Les heuristiques pourrissent dès que le
+  code bouge.
+- **Local & open-source.** FSL-1.1-MIT, conversion auto en MIT pur
+  (première release : 26 avril 2028). Pas de cloud, pas de lock-in, pas de
+  graphe loué.
 
-La compréhension de code est un système, pas une suite de greps.
-Standardoc est l'infrastructure de ce système.
-
-→ Détails dans [`storytelling/`](storytelling/) : philosophie, vision
-court/moyen/long terme, observations dogfood, retours de tests.
+→ L'histoire complète : [`storytelling/`](storytelling/).
 
 ---
 
@@ -100,46 +79,39 @@ cargo install --git https://github.com/miralabs-tech/standardoc standardoc-cli
 standardoc --version
 ```
 
+Puis, depuis un workspace, branche-le sur ton agent en une commande :
+
+```sh
+standardoc init        # écrit la skill IA, les hooks MCP-first, AGENTS.md et .mcp.json
+```
+
+`init` écrit la skill IA, les hooks MCP-first, une section `AGENTS.md` et
+un `.mcp.json` qui lance `standardoc mcp --connect` — un pont léger qui
+garde un daemon vivant et watcher-backed pour le workspace. Relancer `init`
+est sûr (chaque merge préserve ton contenu). `.mcp.json` porte des chemins
+machine-spécifiques — ajoute-le à `.gitignore` si tu collabores.
+
 → [Walkthrough complet en 5 minutes (QUICKSTART)](QUICKSTART.md)
 
 ---
 
 ## Pour qui ?
 
-Standardoc est conçu pour les **codebases grosses et complexes** — pensé
-en dogfood sur Standardoc lui-même et calibré pour des projets du même
-calibre : compilateurs, langages de programmation, moteurs (jeu / runtime
-/ db), monorepos applicatifs lourds, infra multi-équipes. Pas pour la
-petite app JS de week-end — ça marchera quand même, mais ce n'est pas
-là que la valeur est la plus forte.
+Les codebases grosses et complexes — compilateurs, langages, moteurs,
+monorepos lourds, infra multi-équipes. Ça marche aussi sur un petit projet,
+mais ce n'est pas là qu'est la valeur ; là, `ripgrep` + ton IDE suffisent.
 
-Le problème central qu'il résout :
-**maintenir un co-work stable, contrôlé, non-déviant avec un agent IA
-sur un codebase qui évolue**. C'est le problème que personne d'autre
-n'aborde frontalement aujourd'hui — la plupart des outils s'arrêtent
-à "lui donner le contexte d'une session", pas "tenir la cohérence
-sur 6 mois".
+Le problème qu'il résout : **maintenir un co-work stable et non-déviant
+avec un agent IA sur une codebase qui évolue.** Les agents oublient le
+contexte d'une session à l'autre, re-greppent ce qu'ils pourraient
+interroger, et inventent du code qui ressemble au tien mais casse tes
+invariants. Standardoc répond par deux angles — le **graphe** (l'agent
+interroge la vraie structure au lieu de deviner) et la **discipline** (un
+hook l'empêche de shortcut vers grep avant d'avoir consulté le graphe).
 
-Les agents IA dérivent : ils oublient le contexte d'une session à
-l'autre, re-greppent ce qu'ils auraient pu interroger, inventent du
-code qui ressemble au tien sans respecter tes invariants, ne se
-souviennent pas de la décision lockée la semaine dernière. À chaque
-tâche, l'archéologie recommence — et plus le projet grossit, plus
-l'archéologie coûte cher (tokens, patience, bugs subtils, dette
-cognitive humaine).
-
-Standardoc adresse ça par deux angles complémentaires :
-
-- **Le graphe** — l'agent interroge la vraie structure (FQDN, edges,
-  body), il n'invente pas
-- **La discipline** — `MCP-first guardrail` empêche l'agent de
-  shortcut vers `grep + read` ; le hook PreToolUse le force à passer
-  par le graphe avant tout
-
-Standardoc est un outil de co-work AI-dev, **pas un substitut au
-dev**. Un agent qui interroge un graphe sémantique stable est
-puissant ; un dev qui ne comprend pas son code en sortira toujours
-frustré quelle que soit l'IA derrière.
+C'est un outil pour le dev, pas un remplaçant : un graphe stable rend un
+bon dev plus rapide ; il ne sauvera pas une codebase que personne ne
+comprend.
 
 ---
 

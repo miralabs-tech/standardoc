@@ -19,7 +19,7 @@ isn't an explosion of new features.
 
 **beta.3 has a theme: pluralizing the uses of the graph.** Until now,
 the graph mostly served a single-session AI agent in an editor. beta.3
-opens four new consumption surfaces:
+opens three new consumption surfaces:
 
 1. **Rendered docs** for external visitors (consumers of the project's
    API)
@@ -27,9 +27,9 @@ opens four new consumption surfaces:
    own code in the IDE)
 3. **The autonomous CLI** for non-VSCode uses (ops, CI, non-Microsoft-IDE
    devs)
-4. **Persisted project understanding** for cross-session continuity (the
-   agent resuming its work without rediscovering the narrative context
-   every time)
+
+(A fourth idea, persisted cross-session project understanding, was
+extracted to a sibling session-store tool — the core stays a code graph.)
 
 **1.0**, for its part, seals the contracts: conventions frozen,
 benchmarks published, the right to a unilateral breaking change
@@ -46,7 +46,7 @@ API is judged worthy of being frozen, and not before.
 ## beta.3 — why a rendering layer now
 
 The v0 templating DSL (`{{ @doc.X }}`) was killed in beta.1. The graph
-is complete, the canonical IR holds up, the MCP/LSP/RAG surfaces are
+is complete, the canonical IR holds up, the MCP/LSP surfaces are
 mature — but between the graph and a static doc site, there's still
 nothing.
 
@@ -168,38 +168,15 @@ an already-proven mechanism.
 
 ---
 
-## beta.3 — persisted cross-session project understanding
+## Cross-session project understanding — extracted out of core
 
-The graph knows how to follow the code. The sessions DB knows how to
-persist agent decisions. But between a session today and a session next
-week, **the synthesized understanding of the project** — its
-short/mid/long-term goals, its posture, its locked structural decisions,
-its narrative intent — is rebuilt every time through scattered fetches
-(RAG + memos + re-reading the docs).
-
-For code, that's not a problem: the graph is enough. **For narrative
-writing or scope decisions, it's expensive.** The agent has to
-rediscover the tone, the principles, the frozen choices before it can
-contribute in line with the project.
-
-beta.3 candidate: extend `sessions.db` to persist a **global
-cross-session project understanding** — a living synthesis of the goals,
-posture, decisions, tone. Not a bullet dump: an **exploitable
-structure** the agent consults in one tool call.
-
-**Non-negotiable guardrail**: the truth stays the source code. Any
-persisted synthesis must be **re-validable by a re-check of the graph**
-at the next session. If it contradicts the reality of the code, it's the
-synthesis that corrects itself, not the code. The synthesis is a derived
-projection, invalidable at any instant — never an independent source of
-truth.
-
-This work item comes from a recent dogfood observation
-(cf. [test feedback](test-feedback.md)): generating the project's
-presentation `.md` docs consumed more tokens than the entire beta.1 →
-beta.2 shipping phase. **Calendar not guaranteed** — candidate for
-beta.3 if we don't observe a higher-priority hole during the 2 weeks of
-tests, otherwise it slips to beta.4.
+The synthesized understanding an agent reloads each session (goals,
+posture, locked decisions, narrative intent) no longer lives in
+Standardoc core — it moved to a **sibling session-store tool**, alongside
+the beta.3 extraction of the session-handoff DB. The core stays a code
+graph, not an agent-memory store. The guardrail it carried is unchanged:
+any such synthesis is a derived projection re-validated against the graph,
+never an independent source of truth.
 
 ---
 
@@ -324,7 +301,7 @@ the tool.
 - **beta.2** = the maturity (MCP toolkit, multi-frontend architecture,
   encoded discipline, storage + IR primitives laid down without noise)
 - **beta.3** = pluralization of the graph's uses (rendered docs + visual
-  navigation + autonomous CLI + cross-session understanding)
+  navigation + autonomous CLI)
 - **beta.4 / 5 / …** = whatever emerges in dogfood between beta.3 and
   1.0 (impossible to list in advance — beta.2 itself wasn't planned in
   its current form)
@@ -353,8 +330,8 @@ Important negative framing:
   mechanical post-beta.3, but we don't scatter the effort before React
   is solid.
 - **No extension of the MCP surface without a clear dogfood need.**
-  beta.2 laid down 16 tools on observed needs. 1.0 freezes that surface;
-  we don't add to it without a manifest dogfood hole.
+  beta.2 grew the MCP surface on observed needs. 1.0 freezes it; we don't
+  add to it without a manifest dogfood hole.
 
 ---
 

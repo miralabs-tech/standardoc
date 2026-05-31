@@ -32,25 +32,15 @@ under loads we hadn't imagined at the start.
 
 ## The dogfood targets during the beta.1 → beta.2 phase
 
-- **Standardoc itself** — the project uses its own indexing in CI/CD to
-  validate changes. When a PR breaks the IR or the MCP surface, CI
-  catches it before the merge. Meta, but necessary: if the tool isn't
-  usable on itself, it's usable on nothing.
-- **Standarbuild** — another StandarX project (also coming soon): build
-  engine + declarative task runner for polyglot monorepos. A `.sbuild`
-  DSL parsed into IR + a DAG engine in Rust, sandboxed Lua hooks (mlua),
-  multi-language detection (Rust / Bun / Node / Deno / Python / Lua / C
-  / C++). We dev standarbuild **with** Standardoc indexing its Rust
-  crate (DSL parser, IR, engine, diagnostics). That's where we stressed
-  the `get_body` knobs (`strip_attrs`, `signature_only`) — without them,
-  reading a single handler with doc-comments + attributes easily
-  saturated the context budget.
-- **LurLang** — a homegrown programming language (private). Rust + C
-  stack (the C isn't indexed yet — that's a post-1.0 bucket). It's on
-  LurLang that we validated that the "multi-language monorepo with a
-  part that falls outside the graph" pattern stays usable: the agent
-  understands the indexed part and switches to documented `Read` on the
-  out-of-graph part, without confusion.
+- **Standardoc itself** — indexed in its own CI; if a PR breaks the IR or
+  the MCP surface, CI catches it before merge. If the tool isn't usable on
+  itself, it's usable on nothing.
+- **Two other projects** — a polyglot build engine and a homegrown
+  language (Rust + C). They stressed the `get_body` knobs (`strip_attrs`,
+  `signature_only`) on heavy handlers, and validated the "multi-language
+  monorepo with a part outside the graph" pattern: the agent uses the
+  indexed part and falls back to documented `Read` on the rest, without
+  confusion.
 
 ---
 
@@ -98,8 +88,7 @@ silently.
 ### 2. The multi-frontend / multi-backend architecture left the whiteboard
 
 beta.1 had LSP + MCP stdio. beta.2 validates in practice: MCP HTTP/SSE
-multi-client, a RAG layer linked to the graph by FQDN, an orthogonal
-sessions DB, extended language providers (Lua, Vue, Svelte). The
+multi-client, extended language providers (Lua, Vue, Svelte). The
 challenge isn't each piece individually — it's that **the whole stays
 coherent**, without any surface corrupting another's state.
 
@@ -115,8 +104,7 @@ observable (deny with a structured message), not silent.
 
 It's the first brick of a broader approach: encode good-behavior
 patterns into the system, not into good intentions. The other bricks
-(sessions DB, routing_hint, daemon-side enforcement) follow the same
-logic.
+(routing_hint, daemon-side enforcement) follow the same logic.
 
 → [Exhaustive beta.2 feature details in TODO-LIST](../TODO-LIST.md)
 
