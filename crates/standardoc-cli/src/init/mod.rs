@@ -3,6 +3,8 @@
 //! live index. This increment writes the skill file; the `.mcp.json`,
 //! `.claude/settings.json` hooks, and `AGENTS.md` merges land next.
 
+mod claude_hook;
+
 use std::path::Path;
 
 use standardoc_server::ServerError;
@@ -16,8 +18,14 @@ const SKILL_CONTENT: &str = include_str!("../../assets/skill.md");
 /// `SKILL_RELATIVE_PATH`.
 const SKILL_RELATIVE_PATH: &str = ".claude/skills/standardoc/SKILL.md";
 
+/// Workspace-relative Claude Code settings file the hook merge targets —
+/// matches the extension's `CLAUDE_SETTINGS_FILE`.
+const CLAUDE_SETTINGS_PATH: &str = ".claude/settings.json";
+
 pub(crate) fn run(workspace_root: &Path) -> Result<(), ServerError> {
-    write_skill(workspace_root)
+    write_skill(workspace_root)?;
+    write_claude_hook(workspace_root)?;
+    Ok(())
 }
 
 fn write_skill(workspace_root: &Path) -> Result<(), ServerError> {
@@ -33,6 +41,38 @@ fn write_skill(workspace_root: &Path) -> Result<(), ServerError> {
     }
     std::fs::write(&target, SKILL_CONTENT).map_err(ServerError::Io)?;
     println!("[init] wrote agent skill: {SKILL_RELATIVE_PATH}");
+    Ok(())
+}
+
+/// Merge the five MCP-first / session-sync hooks into `.claude/settings.json`,
+/// preserving any user-authored content. Idempotent across re-runs. A
+/// settings file we cannot parse is reported and left untouched rather than
+/// clobbered.
+fn write_claude_hook(workspace_root: &Path) -> Result<(), ServerError> {
+    let target = workspace_root.join(CLAUDE_SETTINGS_PATH);
+    let raw = match std::fs::read_to_string(&target) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(ServerError::Io(e)),
+    };
+    match claude_hook::merge_claude_hook(raw.as_deref()) {
+        claude_hook::MergeOutcome::NoOp => {
+            println!("[init] .claude/settings.json already wires the Standardoc hooks");
+        }
+        claude_hook::MergeOutcome::Invalid(err) => {
+            eprintln!(
+                "[init] .claude/settings.json could not be parsed ({err}); skipping hook install"
+            );
+        }
+        claude_hook::MergeOutcome::Created(content)
+        | claude_hook::MergeOutcome::Appended(content) => {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(ServerError::Io)?;
+            }
+            std::fs::write(&target, content).map_err(ServerError::Io)?;
+            println!("[init] wrote Standardoc hooks to .claude/settings.json");
+        }
+    }
     Ok(())
 }
 
@@ -79,6 +119,26 @@ mod tests {
         std::fs::write(&target, "stale\n").unwrap();
         run(tmp.path()).unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), SKILL_CONTENT);
+    }
+
+    #[test]
+    fn run_installs_skill_and_claude_hooks() {
+        let tmp = tempdir().unwrap();
+        run(tmp.path()).unwrap();
+        assert!(tmp.path().join(SKILL_RELATIVE_PATH).exists());
+        let settings = std::fs::read_to_string(tmp.path().join(CLAUDE_SETTINGS_PATH)).unwrap();
+        assert!(settings.contains("pre-tool-hook --mode check"));
+        assert!(settings.contains("STANDARDOC_MCP_NUDGE"));
+    }
+
+    #[test]
+    fn run_is_idempotent_for_hooks() {
+        let tmp = tempdir().unwrap();
+        run(tmp.path()).unwrap();
+        let first = std::fs::read_to_string(tmp.path().join(CLAUDE_SETTINGS_PATH)).unwrap();
+        run(tmp.path()).unwrap();
+        let second = std::fs::read_to_string(tmp.path().join(CLAUDE_SETTINGS_PATH)).unwrap();
+        assert_eq!(first, second);
     }
 
     #[test]
