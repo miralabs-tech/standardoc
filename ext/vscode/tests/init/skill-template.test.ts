@@ -71,6 +71,12 @@ describe('buildSkillContent', () => {
       // Boot-time
       'mcp__standardoc__current_revision',
       'mcp__standardoc__check_stale',
+      // FQDN-only probes + code/summary/graph (refresh 2026-05-31)
+      'mcp__standardoc__find_symbol_fqdns',
+      'mcp__standardoc__list_symbol_fqdns',
+      'mcp__standardoc__get_code',
+      'mcp__standardoc__get_context_summary',
+      'mcp__standardoc__fetch_graph',
     ]) {
       expect(c).toContain(tool);
     }
@@ -102,6 +108,12 @@ describe('buildSkillContent', () => {
     // Boot-time
     expect(c).toContain('### current_revision');
     expect(c).toContain('### check_stale');
+    // FQDN-only probes + code/summary/graph (refresh 2026-05-31)
+    expect(c).toContain('### find_symbol_fqdns');
+    expect(c).toContain('### list_symbol_fqdns');
+    expect(c).toContain('### get_context_summary');
+    expect(c).toContain('### get_code');
+    expect(c).toContain('### fetch_graph');
   });
 
   test('documents workspace_id default-primary scope on the 3 discovery tools (L3e)', () => {
