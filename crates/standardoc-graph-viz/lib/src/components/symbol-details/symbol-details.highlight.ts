@@ -1,6 +1,6 @@
 import { escapeHtml } from './symbol-details.utils';
 
-type HighlightLang = 'rust' | 'ts' | null;
+type HighlightLang = 'rust' | 'ts' | 'c' | 'lua' | null;
 
 const RUST_KEYWORDS = new Set([
   'fn', 'struct', 'enum', 'trait', 'impl', 'let', 'mut', 'const', 'static',
@@ -21,11 +21,40 @@ const TS_KEYWORDS = new Set([
   'abstract', 'override', 'declare',
 ]);
 
+const C_KEYWORDS = new Set([
+  'auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do',
+  'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if', 'inline',
+  'int', 'long', 'register', 'restrict', 'return', 'short', 'signed', 'sizeof',
+  'static', 'struct', 'switch', 'typedef', 'union', 'unsigned', 'void',
+  'volatile', 'while', '_Bool', '_Atomic', '_Static_assert',
+  // stdbool / stdint / common spellings so they read as keyword-ish
+  'bool', 'true', 'false', 'NULL', 'size_t', 'ssize_t', 'ptrdiff_t',
+  'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
+  'int8_t', 'int16_t', 'int32_t', 'int64_t',
+]);
+
+const LUA_KEYWORDS = new Set([
+  'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for', 'function',
+  'goto', 'if', 'in', 'local', 'nil', 'not', 'or', 'repeat', 'return', 'then',
+  'true', 'until', 'while', 'self',
+]);
+
 export function detectLang(file: string): HighlightLang {
   const f = file.toLowerCase();
   if (f.endsWith('.rs')) return 'rust';
+  if (f.endsWith('.lua')) return 'lua';
+  if (f.endsWith('.c') || f.endsWith('.h')) return 'c';
   if (f.endsWith('.ts') || f.endsWith('.tsx') || f.endsWith('.js') || f.endsWith('.jsx') || f.endsWith('.mts') || f.endsWith('.cts')) return 'ts';
   return null;
+}
+
+function keywordsFor(lang: Exclude<HighlightLang, null>): Set<string> {
+  switch (lang) {
+    case 'rust': return RUST_KEYWORDS;
+    case 'ts': return TS_KEYWORDS;
+    case 'c': return C_KEYWORDS;
+    case 'lua': return LUA_KEYWORDS;
+  }
 }
 
 /**
@@ -46,11 +75,14 @@ export function detectLang(file: string): HighlightLang {
 export function highlightSource(code: string, file: string): string {
   const lang = detectLang(file);
   if (lang === null) return escapeHtml(code);
-  const keywords = lang === 'rust' ? RUST_KEYWORDS : TS_KEYWORDS;
+  const keywords = keywordsFor(lang);
   // Order matters in the alternation: comments + strings must win
   // over keywords/identifiers since e.g. `// fn foo` should stay all-
-  // comment, not partly-keyword.
-  const re = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`|\b\d+(?:\.\d+)?(?:[eE][-+]?\d+)?\b|\b[A-Z][a-zA-Z0-9_]*\b|\b[a-zA-Z_][a-zA-Z0-9_]*\b)/g;
+  // comment, not partly-keyword. Lua diverges: `--` / `--[[ ]]`
+  // comments and `[[ ]]` long strings instead of C-style `//` `/* */`.
+  const re = lang === 'lua'
+    ? /(--\[\[[\s\S]*?\]\]|--[^\n]*|\[\[[\s\S]*?\]\]|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|\b\d+(?:\.\d+)?(?:[eE][-+]?\d+)?\b|\b[A-Z][a-zA-Z0-9_]*\b|\b[a-zA-Z_][a-zA-Z0-9_]*\b)/g
+    : /(\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`|\b\d+(?:\.\d+)?(?:[eE][-+]?\d+)?\b|\b[A-Z][a-zA-Z0-9_]*\b|\b[a-zA-Z_][a-zA-Z0-9_]*\b)/g;
   let out = '';
   let last = 0;
   let m: RegExpExecArray | null;
@@ -68,8 +100,8 @@ export function highlightSource(code: string, file: string): string {
 }
 
 function classifyToken(tok: string, keywords: Set<string>): string | null {
-  if (tok.startsWith('//') || tok.startsWith('/*')) return '--sd-fg-muted';
-  if (tok.startsWith('"') || tok.startsWith("'") || tok.startsWith('`')) return '--sd-status-ok';
+  if (tok.startsWith('//') || tok.startsWith('/*') || tok.startsWith('--')) return '--sd-fg-muted';
+  if (tok.startsWith('"') || tok.startsWith("'") || tok.startsWith('`') || tok.startsWith('[[')) return '--sd-status-ok';
   if (/^\d/.test(tok)) return '--sd-kind-value';
   if (keywords.has(tok)) return '--sd-kind-callable';
   if (/^[A-Z]/.test(tok)) return '--sd-kind-type';

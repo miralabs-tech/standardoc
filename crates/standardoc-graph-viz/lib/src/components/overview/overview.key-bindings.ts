@@ -18,17 +18,21 @@ export const KEYBOARD_DOLLY_FACTOR = 1.015;
 /// asked for (and the QWERTY-equivalent WASD + QE):
 ///   • forward    Z (AZERTY) / W (QWERTY)  → `KeyW`
 ///   • backward   S                        → `KeyS`
-///   • strafeL    Q (AZERTY) / A (QWERTY)  → `KeyA`
-///   • strafeR    D                        → `KeyD`
+///   • strafeL    D                        → `KeyD`
+///   • strafeR    Q (AZERTY) / A (QWERTY)  → `KeyA`
 ///   • riseUp     A (AZERTY) / Q (QWERTY)  → `KeyQ`
 ///   • fallDown   E                        → `KeyE`
 ///   • orbit      ↑ ↓ ← →                   → arrows
-/// Hosts can replace any subset via the `keyBindings` property setter.
+///
+/// Strafe is deliberately swapped vs the physical ZQSD/WASD diamond
+/// (left=D, right=Q/A) — the user reported the default strafe read
+/// reversed on screen for this camera, so the `event.code`s are
+/// crossed here. Hosts can replace any subset via `keyBindings`.
 export const DEFAULT_KEY_BINDINGS = {
   forward: ['KeyW'],
   backward: ['KeyS'],
-  strafeLeft: ['KeyA'],
-  strafeRight: ['KeyD'],
+  strafeLeft: ['KeyD'],
+  strafeRight: ['KeyA'],
   riseUp: ['KeyQ'],
   fallDown: ['KeyE'],
   orbitUp: ['ArrowUp'],
