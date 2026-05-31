@@ -3,6 +3,7 @@
 //! live index. This increment writes the skill file; the `.mcp.json`,
 //! `.claude/settings.json` hooks, and `AGENTS.md` merges land next.
 
+mod agents_md;
 mod claude_hook;
 
 use std::path::Path;
@@ -22,9 +23,13 @@ const SKILL_RELATIVE_PATH: &str = ".claude/skills/standardoc/SKILL.md";
 /// matches the extension's `CLAUDE_SETTINGS_FILE`.
 const CLAUDE_SETTINGS_PATH: &str = ".claude/settings.json";
 
+/// Repo-root cross-agent instructions file (Codex / Cursor / Copilot / Gemini).
+const AGENTS_MD_PATH: &str = "AGENTS.md";
+
 pub(crate) fn run(workspace_root: &Path) -> Result<(), ServerError> {
     write_skill(workspace_root)?;
     write_claude_hook(workspace_root)?;
+    write_agents_md(workspace_root)?;
     Ok(())
 }
 
@@ -71,6 +76,28 @@ fn write_claude_hook(workspace_root: &Path) -> Result<(), ServerError> {
             }
             std::fs::write(&target, content).map_err(ServerError::Io)?;
             println!("[init] wrote Standardoc hooks to .claude/settings.json");
+        }
+    }
+    Ok(())
+}
+
+/// Merge the short marker-delimited Standardoc section into the repo-root
+/// `AGENTS.md` so non-Claude agents (Codex, Cursor, Copilot, ...) also learn
+/// the index exists. Idempotent; user content outside the markers is kept.
+fn write_agents_md(workspace_root: &Path) -> Result<(), ServerError> {
+    let target = workspace_root.join(AGENTS_MD_PATH);
+    let raw = match std::fs::read_to_string(&target) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(ServerError::Io(e)),
+    };
+    match agents_md::merge_agents_md(raw.as_deref()) {
+        agents_md::MergeOutcome::NoOp => {
+            println!("[init] AGENTS.md already references Standardoc");
+        }
+        agents_md::MergeOutcome::Written(content) => {
+            std::fs::write(&target, content).map_err(ServerError::Io)?;
+            println!("[init] wrote the Standardoc section to AGENTS.md");
         }
     }
     Ok(())
@@ -129,6 +156,8 @@ mod tests {
         let settings = std::fs::read_to_string(tmp.path().join(CLAUDE_SETTINGS_PATH)).unwrap();
         assert!(settings.contains("pre-tool-hook --mode check"));
         assert!(settings.contains("STANDARDOC_MCP_NUDGE"));
+        let agents = std::fs::read_to_string(tmp.path().join(AGENTS_MD_PATH)).unwrap();
+        assert!(agents.contains("## Standardoc"));
     }
 
     #[test]
