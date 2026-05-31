@@ -440,3 +440,147 @@ fn decl_kind_macros_are_declarative_macro() {
         Some(standardoc_ir::DeclKind::DeclarativeMacro),
     );
 }
+
+// ------------------------------------------------------------------
+// Field granularity (cf. Bug C-3) — struct / union members + the
+// dominant `typedef struct {...} Name;` idiom.
+// ------------------------------------------------------------------
+
+#[test]
+fn struct_fields_emitted_as_sub_symbols() {
+    let src = "struct Point { int x; int y; };\n";
+    let file = run(src, "runtime/vm.c");
+    let x = find(&file, "lurlang::runtime::vm::Point::x");
+    assert_eq!(x.decl_kind, Some(standardoc_ir::DeclKind::Field));
+    assert_eq!(x.language_kind.as_str(), "field");
+    assert_eq!(x.kind, Kind::Value);
+    assert_eq!(x.module.as_deref(), Some("lurlang::runtime::vm::Point"));
+    let _ = find(&file, "lurlang::runtime::vm::Point::y");
+}
+
+#[test]
+fn struct_multi_declarator_fields_each_emitted() {
+    // `int x, y;` is one field_declaration with two declarators.
+    let src = "struct P { int x, y; double z; };\n";
+    let file = run(src, "runtime/vm.c");
+    for f in ["x", "y", "z"] {
+        let _ = find(&file, &format!("lurlang::runtime::vm::P::{f}"));
+    }
+}
+
+#[test]
+fn union_fields_emitted_as_sub_symbols() {
+    let src = "union U { int i; float f; };\n";
+    let file = run(src, "runtime/vm.c");
+    let _ = find(&file, "lurlang::runtime::vm::U::i");
+    let _ = find(&file, "lurlang::runtime::vm::U::f");
+}
+
+#[test]
+fn typedef_anonymous_struct_becomes_struct_with_fields() {
+    // The dominant C idiom: anonymous struct bound to a typedef name.
+    // The alias IS the struct (not a bare TypeAlias) and carries fields.
+    let src = "typedef struct { int tag; double num; } LurValue;\n";
+    let file = run(src, "runtime/value.h");
+    let s = find(&file, "lurlang::runtime::value::LurValue");
+    assert_eq!(s.decl_kind, Some(standardoc_ir::DeclKind::Struct));
+    assert_eq!(s.language_kind.as_str(), "struct");
+    let tag = find(&file, "lurlang::runtime::value::LurValue::tag");
+    assert_eq!(tag.decl_kind, Some(standardoc_ir::DeclKind::Field));
+    let _ = find(&file, "lurlang::runtime::value::LurValue::num");
+}
+
+#[test]
+fn typedef_tagged_struct_fields_land_under_alias() {
+    let src = "typedef struct LurGcHeader { unsigned char color; unsigned char kind; } LurGcHeader;\n";
+    let file = run(src, "runtime/value.h");
+    let s = find(&file, "lurlang::runtime::value::LurGcHeader");
+    assert_eq!(s.decl_kind, Some(standardoc_ir::DeclKind::Struct));
+    let _ = find(&file, "lurlang::runtime::value::LurGcHeader::color");
+    let _ = find(&file, "lurlang::runtime::value::LurGcHeader::kind");
+}
+
+#[test]
+fn typedef_anonymous_enum_becomes_enum_with_variants() {
+    let src = "typedef enum { LUR_A = 0, LUR_B = 1 } LurTag;\n";
+    let file = run(src, "runtime/value.h");
+    let s = find(&file, "lurlang::runtime::value::LurTag");
+    assert_eq!(s.decl_kind, Some(standardoc_ir::DeclKind::Enum));
+    let a = find(&file, "lurlang::runtime::value::LurTag::LUR_A");
+    assert_eq!(a.decl_kind, Some(standardoc_ir::DeclKind::EnumVariant));
+    let _ = find(&file, "lurlang::runtime::value::LurTag::LUR_B");
+}
+
+// ------------------------------------------------------------------
+// CALLS edges — call_sites resolved into Calls edges (focus-graph
+// relations). Without this C had call_sites but no CALLS edges.
+// ------------------------------------------------------------------
+
+fn calls_edges(file: &ExtractedFile) -> Vec<&standardoc_ir::RawEdge> {
+    file.edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Calls)
+        .collect()
+}
+
+#[test]
+fn intra_file_call_resolves_to_local_function() {
+    let src = "void callee(void) {}\nvoid caller(void) { callee(); }\n";
+    let file = run(src, "runtime/vm.c");
+    let edge = calls_edges(&file)
+        .into_iter()
+        .find(|e| e.from_fqdn == "lurlang::runtime::vm::caller")
+        .expect("caller→callee Calls edge");
+    match &edge.to {
+        ResolvedOrUnresolved::Resolved { fqdn } => {
+            assert_eq!(fqdn, "lurlang::runtime::vm::callee");
+        }
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn unknown_call_stays_unresolved_by_bare_name() {
+    let src = "void caller(void) { external_thing(); }\n";
+    let file = run(src, "runtime/vm.c");
+    let edge = calls_edges(&file)
+        .into_iter()
+        .find(|e| e.from_fqdn == "lurlang::runtime::vm::caller")
+        .expect("Calls edge");
+    match &edge.to {
+        ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "external_thing"),
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn pointer_member_call_reduces_to_field_name() {
+    // `p->handler(x)` → bare name `handler`; no local `handler` symbol,
+    // so it stays unresolved by that bare name (no false positive).
+    let src = "void caller(struct S* p) { p->handler(1); }\n";
+    let file = run(src, "runtime/vm.c");
+    let edge = calls_edges(&file)
+        .into_iter()
+        .find(|e| e.from_fqdn == "lurlang::runtime::vm::caller")
+        .expect("Calls edge");
+    match &edge.to {
+        ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "handler"),
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn macro_invocation_resolves_to_local_macro() {
+    let src = "#define DO_IT() 0\nvoid caller(void) { DO_IT(); }\n";
+    let file = run(src, "runtime/vm.c");
+    let edge = calls_edges(&file)
+        .into_iter()
+        .find(|e| e.from_fqdn == "lurlang::runtime::vm::caller")
+        .expect("Calls edge");
+    match &edge.to {
+        ResolvedOrUnresolved::Resolved { fqdn } => {
+            assert_eq!(fqdn, "lurlang::runtime::vm::DO_IT");
+        }
+        other => panic!("expected Resolved macro, got {other:?}"),
+    }
+}

@@ -4,6 +4,8 @@ use standardoc_ir::{
 };
 use tree_sitter::{Node, TreeCursor};
 
+use std::collections::HashMap;
+
 use crate::utils::{hash_bytes, parent_module};
 use crate::walk_core::WalkContextCore;
 
@@ -267,43 +269,64 @@ fn emit_struct_like(
         location_from_node(&ctx.core.file_path.clone(), node),
         None,
     );
+
+    // Field granularity (cf. Bug C-3 for Rust): one Field sub-symbol per
+    // named member, parented at the struct/union FQDN.
+    if let Some(body) = node.child_by_field_name("body") {
+        let parent_fqdn = format!("{}::{}", ctx.core.file_module_fqdn, name);
+        emit_aggregate_fields(body, src, ctx, &parent_fqdn);
+    }
 }
 
-fn emit_enum(node: Node, src: &str, ctx: &mut CWalkContext) {
-    let enum_name_opt = node
-        .child_by_field_name("name")
-        .map(|n| node_text(n, src).to_string());
-
-    // Push the enum itself when named (anonymous enums are emitted only as
-    // their enumerator sub-symbols at typedef level).
-    let parent_fqdn = if let Some(ref enum_name) = enum_name_opt {
-        let enum_fqdn = format!("{}::{}", ctx.core.file_module_fqdn, enum_name);
+/// Emit one `DeclKind::Field` sub-symbol per named member of a
+/// struct/union `field_declaration_list`. `int x, y;` yields two
+/// fields (one declarator each). Anonymous members (a nested
+/// `struct {...}` / `union {...}` with no field name) have no FQDN of
+/// their own and are skipped — flattening their inner fields up into
+/// the parent is deferred.
+fn emit_aggregate_fields(body: Node, src: &str, ctx: &mut CWalkContext, parent_fqdn: &str) {
+    let file = ctx.core.file_path.clone();
+    let mut collected: Vec<(String, SymbolLocation)> = Vec::new();
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        if child.kind() != "field_declaration" {
+            continue;
+        }
+        let mut dcursor = child.walk();
+        for decl in child.children_by_field_name("declarator", &mut dcursor) {
+            if let Some(name) = declarator_name(decl, src) {
+                collected.push((name.to_string(), location_from_node(&file, decl)));
+            }
+        }
+    }
+    for (name, location) in collected {
+        let fqdn = format!("{parent_fqdn}::{name}");
         ctx.core.push_symbol(RawSymbol {
-            decl_kind: Some(DeclKind::Enum),
+            decl_kind: Some(DeclKind::Field),
             implements_trait: None,
             receiver_type: None,
             entry_point: None,
-            name: enum_name.clone(),
-            fqdn: enum_fqdn.clone(),
-            kind: Kind::Type,
-            language_kind: LanguageKind::from("enum"),
-            module: Some(ctx.core.file_module_fqdn.clone()),
+            name,
+            fqdn,
+            kind: Kind::Value,
+            language_kind: LanguageKind::from("field"),
+            module: Some(parent_fqdn.to_string()),
             visibility: Visibility::Public,
-            location: location_from_node(&ctx.core.file_path, node),
+            location,
             signature: None,
             body_hash: None,
             attributes: vec![],
             flags: vec![],
         });
-        enum_fqdn
-    } else {
-        return;
-    };
+    }
+}
 
-    // Sub-symbols per enumerator (cf. Bug C-3 granularity).
-    let Some(body) = node.child_by_field_name("body") else {
-        return;
-    };
+/// Emit one `DeclKind::EnumVariant` sub-symbol per enumerator in an
+/// `enumerator_list` body, parented at `parent_fqdn`. Shared by the
+/// named-enum and typedef-enum paths.
+fn emit_enumerators(body: Node, src: &str, ctx: &mut CWalkContext, parent_fqdn: &str) {
+    let file = ctx.core.file_path.clone();
+    let mut collected: Vec<(String, SymbolLocation)> = Vec::new();
     let mut cursor = body.walk();
     for child in body.children(&mut cursor) {
         if child.kind() != "enumerator" {
@@ -312,7 +335,12 @@ fn emit_enum(node: Node, src: &str, ctx: &mut CWalkContext) {
         let Some(name_node) = child.child_by_field_name("name") else {
             continue;
         };
-        let name = node_text(name_node, src).to_string();
+        collected.push((
+            node_text(name_node, src).to_string(),
+            location_from_node(&file, child),
+        ));
+    }
+    for (name, location) in collected {
         let fqdn = format!("{parent_fqdn}::{name}");
         ctx.core.push_symbol(RawSymbol {
             decl_kind: Some(DeclKind::EnumVariant),
@@ -323,14 +351,47 @@ fn emit_enum(node: Node, src: &str, ctx: &mut CWalkContext) {
             fqdn,
             kind: Kind::Value,
             language_kind: LanguageKind::from("enum_variant"),
-            module: Some(parent_fqdn.clone()),
+            module: Some(parent_fqdn.to_string()),
             visibility: Visibility::Public,
-            location: location_from_node(&ctx.core.file_path, child),
+            location,
             signature: None,
             body_hash: None,
             attributes: vec![],
             flags: vec![],
         });
+    }
+}
+
+fn emit_enum(node: Node, src: &str, ctx: &mut CWalkContext) {
+    // Push the enum itself when named (anonymous top-level enums are
+    // rare and carry no FQDN; their enumerators are only reachable via
+    // the typedef path, handled in emit_typedef).
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let enum_name = node_text(name_node, src).to_string();
+    let enum_fqdn = format!("{}::{}", ctx.core.file_module_fqdn, enum_name);
+    ctx.core.push_symbol(RawSymbol {
+        decl_kind: Some(DeclKind::Enum),
+        implements_trait: None,
+        receiver_type: None,
+        entry_point: None,
+        name: enum_name,
+        fqdn: enum_fqdn.clone(),
+        kind: Kind::Type,
+        language_kind: LanguageKind::from("enum"),
+        module: Some(ctx.core.file_module_fqdn.clone()),
+        visibility: Visibility::Public,
+        location: location_from_node(&ctx.core.file_path, node),
+        signature: None,
+        body_hash: None,
+        attributes: vec![],
+        flags: vec![],
+    });
+
+    // Sub-symbols per enumerator (cf. Bug C-3 granularity).
+    if let Some(body) = node.child_by_field_name("body") {
+        emit_enumerators(body, src, ctx, &enum_fqdn);
     }
 }
 
@@ -344,51 +405,44 @@ fn emit_typedef(node: Node, src: &str, ctx: &mut CWalkContext) {
     let Some(name) = declarator_name(declarator, src) else {
         return;
     };
+
+    let type_node = node.child_by_field_name("type");
+    let inline_body = type_node.and_then(|t| t.child_by_field_name("body"));
+
+    // When the typedef wraps an INLINE aggregate (`typedef struct {...}
+    // Foo;` / `typedef struct Tag {...} Foo;` and union/enum variants),
+    // the typedef name IS that nominal type — emit it with the matching
+    // DeclKind so it reads as a struct/union/enum (not a bare alias) and
+    // carries its members. `typedef struct Foo Foo;` (a reference, no
+    // body) stays a plain TypeAlias, as do scalar typedefs.
+    let (lang_kind, decl_kind) = match (type_node.map(|t| t.kind()), inline_body) {
+        (Some("struct_specifier"), Some(_)) => ("struct", DeclKind::Struct),
+        (Some("union_specifier"), Some(_)) => ("union", DeclKind::Union),
+        (Some("enum_specifier"), Some(_)) => ("enum", DeclKind::Enum),
+        _ => ("type_alias", DeclKind::TypeAlias),
+    };
     push_symbol(
         ctx,
         name,
         Kind::Type,
-        LanguageKind::from("type_alias"),
-        DeclKind::TypeAlias,
+        LanguageKind::from(lang_kind),
+        decl_kind,
         Visibility::Public,
         location_from_node(&ctx.core.file_path.clone(), node),
         None,
     );
 
-    // If the typedef wraps an inline `enum { ... }`, emit its enumerators
-    // under the typedef name so users can reach them via FQDN.
-    if let Some(type_node) = node.child_by_field_name("type")
-        && type_node.kind() == "enum_specifier"
-        && let Some(body) = type_node.child_by_field_name("body")
-    {
+    // Emit the inline aggregate's members under the typedef name so
+    // users reach them via FQDN (the name they actually reference in
+    // source).
+    if let (Some(tn), Some(body)) = (type_node, inline_body) {
         let parent_fqdn = format!("{}::{}", ctx.core.file_module_fqdn, name);
-        let mut cursor = body.walk();
-        for child in body.children(&mut cursor) {
-            if child.kind() != "enumerator" {
-                continue;
+        match tn.kind() {
+            "struct_specifier" | "union_specifier" => {
+                emit_aggregate_fields(body, src, ctx, &parent_fqdn);
             }
-            let Some(var_name_node) = child.child_by_field_name("name") else {
-                continue;
-            };
-            let var_name = node_text(var_name_node, src).to_string();
-            let fqdn = format!("{parent_fqdn}::{var_name}");
-            ctx.core.push_symbol(RawSymbol {
-                decl_kind: Some(DeclKind::EnumVariant),
-                implements_trait: None,
-                receiver_type: None,
-                entry_point: None,
-                name: var_name,
-                fqdn,
-                kind: Kind::Value,
-                language_kind: LanguageKind::from("enum_variant"),
-                module: Some(parent_fqdn.clone()),
-                visibility: Visibility::Public,
-                location: location_from_node(&ctx.core.file_path, child),
-                signature: None,
-                body_hash: None,
-                attributes: vec![],
-                flags: vec![],
-            });
+            "enum_specifier" => emit_enumerators(body, src, ctx, &parent_fqdn),
+            _ => {}
         }
     }
 }
@@ -510,4 +564,65 @@ fn classify_c_fn_entry_point(name: &str, _is_static: bool) -> Option<EntryPointK
         return Some(EntryPointKind::FfiExport);
     }
     None
+}
+
+/// Resolve the per-function `call_sites` collected during the walk into
+/// `EdgeKind::Calls` edges (mirrors the Lua provider's `emit_call_edges`).
+/// Without this pass C had call_sites but no CALLS edges, so the focus
+/// graph — which draws relations from edges, not call_sites — showed C
+/// nodes with no connections.
+///
+/// A callee whose bare name matches a function / macro DEFINED in this
+/// file resolves to it (intra-file). Everything else stays
+/// `Unresolved` by bare name so the `.h ↔ .c` join, the FFI resolve
+/// pass, and the cross-workspace `resolve_unresolved` sweep can rewrite
+/// it once sibling files are in the DB. Member / function-pointer calls
+/// (`p->handler`, `(*fp)`) reduce to their trailing field name; when
+/// that doesn't match a top-level symbol they remain unresolved (no
+/// false positives — they just don't draw an intra-file edge).
+pub(crate) fn emit_call_edges(ctx: &mut CWalkContext) {
+    let by_name: HashMap<&str, String> = ctx
+        .core
+        .symbols
+        .iter()
+        .filter(|s| matches!(s.kind, Kind::Callable | Kind::Macro))
+        .map(|s| (s.name.as_str(), s.fqdn.clone()))
+        .collect();
+
+    let mut edges: Vec<RawEdge> = Vec::with_capacity(ctx.core.call_sites.len());
+    for cs in &ctx.core.call_sites {
+        let bare = bare_callee(&cs.callee_text);
+        if bare.is_empty() {
+            continue;
+        }
+        let to = match by_name.get(bare) {
+            Some(fqdn) => ResolvedOrUnresolved::Resolved { fqdn: fqdn.clone() },
+            None => ResolvedOrUnresolved::Unresolved {
+                name: bare.to_string(),
+            },
+        };
+        let confidence = to.default_confidence();
+        edges.push(RawEdge {
+            from_fqdn: cs.from_fqdn.clone(),
+            kind: EdgeKind::Calls,
+            to,
+            sites: vec![cs.site.clone()],
+            attributes: vec![],
+            confidence,
+            receiver_type: None,
+        });
+    }
+    for edge in edges {
+        ctx.core.push_edge(edge);
+    }
+}
+
+/// Reduce a C callee expression to the bare identifier used for symbol
+/// lookup: the trailing segment after the final `->` or `.` member
+/// access. Bare identifiers pass through unchanged; punctuation-only
+/// callees (`(*fp)`) have no clean name and are returned verbatim (they
+/// simply won't match any symbol).
+fn bare_callee(callee: &str) -> &str {
+    let after_arrow = callee.rfind("->").map_or(callee, |i| &callee[i + 2..]);
+    after_arrow.rsplit('.').next().unwrap_or(after_arrow).trim()
 }

@@ -7,7 +7,7 @@ use tree_sitter::Parser;
 use crate::utils::{file_span, hash_bytes, last_segment, parent_module};
 
 use super::helpers::compute_module_path;
-use super::walk::{CWalkContext, walk_translation_unit};
+use super::walk::{CWalkContext, emit_call_edges, walk_translation_unit};
 
 /// Parse a C source file with `tree-sitter-c`, walk it, and return an
 /// `ExtractedFile` ready for the pipeline. MVP scope: emits fn defs +
@@ -65,6 +65,12 @@ pub(crate) fn extract_file(
     ctx.core.push_symbol(module_symbol);
 
     walk_translation_unit(tree.root_node(), content, &mut ctx);
+
+    // Resolve call_sites → Calls edges (intra-file resolved, rest
+    // unresolved-by-name for later passes). Mirrors the Lua provider;
+    // without this C has no CALLS edges and the focus graph draws no
+    // relations between C functions.
+    emit_call_edges(&mut ctx);
 
     // G4-c: build the AOT ModuleLookup from the just-extracted symbols
     // + edges so cross-workspace edge strengthening
