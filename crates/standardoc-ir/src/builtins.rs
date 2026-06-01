@@ -104,8 +104,8 @@ pub struct BuiltinMethodEntry {
     ///
     /// Bug E-3 ext P-E3.2: may be a parametric template (`"Iterator<T>"`)
     /// substituted from the receiver's generic args at lookup time. Token
-    /// rules per parent nominal: `T` = args[0]; `E` = args[1] for Result;
-    /// `K` / `V` = args[0] / args[1] for `HashMap` / `BTreeMap`.
+    /// rules per parent nominal: `T` = `args[0]`; `E` = `args[1]` for Result;
+    /// `K` / `V` = `args[0]` / `args[1]` for `HashMap` / `BTreeMap`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns: Option<String>,
     /// Bug E-3 ext P-E3.2: template for the closure-argument type when

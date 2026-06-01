@@ -66,7 +66,7 @@ enum Command {
     },
 
     /// Run the `.sxd` LSP backend over stdio. Drives `standarx-dsl-lsp`
-    /// with our [`SxdSchema`] plugged in so editors get both syntactic
+    /// with our `SxdSchema` plugged in so editors get both syntactic
     /// (from the DSL parser) and schema-aware (from standardoc.sxd's
     /// `ignore` / `project` / `group` rules) diagnostics live as the
     /// user edits. Stateless and workspace-agnostic — every open .sxd
