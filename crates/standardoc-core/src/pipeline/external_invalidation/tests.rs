@@ -45,6 +45,7 @@ fn npm_lockfile_kind_round_trips_via_parse() {
         NpmLockfileKind::PnpmLockYaml,
         NpmLockfileKind::YarnLock,
         NpmLockfileKind::YarnPnpCjs,
+        NpmLockfileKind::Bun,
     ] {
         assert_eq!(NpmLockfileKind::parse(kind.as_str()), Some(kind));
     }
@@ -95,6 +96,25 @@ fn compute_lockfile_hashes_falls_back_to_package_lock_only() {
     let h = compute_lockfile_hashes(dir.path()).unwrap();
     let (kind, _hash) = h.npm.expect("npm hash present");
     assert_eq!(kind, NpmLockfileKind::PackageLockJson);
+}
+
+#[test]
+fn compute_lockfile_hashes_detects_bun_over_package_lock() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
+    std::fs::write(dir.path().join("bun.lock"), "{}").unwrap();
+    let h = compute_lockfile_hashes(dir.path()).unwrap();
+    let (kind, _hash) = h.npm.expect("npm hash present");
+    assert_eq!(kind, NpmLockfileKind::Bun);
+}
+
+#[test]
+fn compute_lockfile_hashes_detects_bun_lockb_binary() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("bun.lockb"), [0u8, 1, 2, 3]).unwrap();
+    let h = compute_lockfile_hashes(dir.path()).unwrap();
+    let (kind, _hash) = h.npm.expect("npm hash present");
+    assert_eq!(kind, NpmLockfileKind::Bun);
 }
 
 #[test]
@@ -270,6 +290,8 @@ fn handle_lockfile_change_maps_npm_lockfiles_to_node_modules_origin() {
         "pnpm-lock.yaml",
         "yarn.lock",
         ".pnp.cjs",
+        "bun.lock",
+        "bun.lockb",
     ] {
         std::fs::write(handle.workspace_root().join(name), "x").unwrap();
         let result = handle_lockfile_change(
@@ -300,13 +322,15 @@ fn handle_lockfile_change_returns_none_for_unrelated_path() {
 }
 
 #[test]
-fn tracked_lockfile_paths_returns_five_known_lockfiles() {
+fn tracked_lockfile_paths_returns_known_lockfiles() {
     let paths = tracked_lockfile_paths(Path::new("/tmp/wks"));
-    assert_eq!(paths.len(), 5);
+    assert_eq!(paths.len(), 7);
     let names: Vec<&std::ffi::OsStr> = paths.iter().filter_map(|p| p.file_name()).collect();
     assert!(names.iter().any(|n| *n == "Cargo.lock"));
     assert!(names.iter().any(|n| *n == "package-lock.json"));
     assert!(names.iter().any(|n| *n == "pnpm-lock.yaml"));
     assert!(names.iter().any(|n| *n == "yarn.lock"));
     assert!(names.iter().any(|n| *n == ".pnp.cjs"));
+    assert!(names.iter().any(|n| *n == "bun.lock"));
+    assert!(names.iter().any(|n| *n == "bun.lockb"));
 }

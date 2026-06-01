@@ -18,8 +18,8 @@
 //! 2. **Live watcher** — [`handle_lockfile_change`] is wired into
 //!    `pipeline::watcher` and called whenever notify reports a change
 //!    to one of the tracked manifests (`Cargo.lock`,
-//!    `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `.pnp.cjs`).
-//!    Same purge semantics, no extra book-keeping.
+//!    `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `.pnp.cjs`,
+//!    `bun.lock`, `bun.lockb`). Same purge semantics, no extra book-keeping.
 //!
 //! Invalidation = purge only. Re-population is deferred to the next
 //! `resolve_external` call. This keeps the watcher path cheap (a
@@ -45,6 +45,7 @@ pub enum NpmLockfileKind {
     PnpmLockYaml,
     YarnLock,
     YarnPnpCjs,
+    Bun,
 }
 
 impl NpmLockfileKind {
@@ -55,6 +56,7 @@ impl NpmLockfileKind {
             Self::PnpmLockYaml => "pnpm-lock.yaml",
             Self::YarnLock => "yarn.lock",
             Self::YarnPnpCjs => ".pnp.cjs",
+            Self::Bun => "bun.lock",
         }
     }
 
@@ -64,6 +66,7 @@ impl NpmLockfileKind {
             "pnpm-lock.yaml" => Some(Self::PnpmLockYaml),
             "yarn.lock" => Some(Self::YarnLock),
             ".pnp.cjs" => Some(Self::YarnPnpCjs),
+            "bun.lock" => Some(Self::Bun),
             _ => None,
         }
     }
@@ -81,20 +84,26 @@ pub struct LockfileHashes {
 
 /// Reads each tracked lockfile from disk and BLAKE3-hashes its content.
 /// Resolves the npm lockfile kind via a priority order:
-/// `pnpm-lock.yaml` > `yarn.lock` > `.pnp.cjs` > `package-lock.json`
-/// (pnpm preferred since it's the most precise; PnP picked over
-/// `package-lock.json` because PnP overrides classic resolution).
+/// `pnpm-lock.yaml` > `yarn.lock` > `.pnp.cjs` > `bun.lock` >
+/// `bun.lockb` > `package-lock.json` (pnpm preferred since it's the most
+/// precise; PnP picked over `package-lock.json` because PnP overrides
+/// classic resolution; bun's text `bun.lock` preferred over its legacy
+/// binary `bun.lockb`).
 ///
-/// Luarocks has no canonical lockfile on disk so `LockfileHashes::luarocks`
-/// stays `None` here — the `watcher`-side and the
-/// [`crate::externals::luarocks::LuarocksResolver`] are the ones who
-/// hash the `luarocks list --porcelain` snapshot.
+/// Luarocks has no canonical lockfile on disk, so `LockfileHashes::luarocks`
+/// is always `None` and luarocks externals are NOT auto-invalidated: once a
+/// rock's symbols are cached (`is_external = 1`) they persist until a full
+/// rescan or an explicit re-resolve. A rock changed in place is not
+/// detected — accepted for this niche opt-in resolver; a `luarocks list`
+/// fingerprint was judged not worth a subprocess on every cold start.
 pub fn compute_lockfile_hashes(workspace_root: &Path) -> Result<LockfileHashes, StorageError> {
     let cargo = hash_file_if_exists(&workspace_root.join("Cargo.lock"))?;
 
     let pnpm_lock = workspace_root.join("pnpm-lock.yaml");
     let yarn_lock = workspace_root.join("yarn.lock");
     let pnp_cjs = workspace_root.join(".pnp.cjs");
+    let bun_lock = workspace_root.join("bun.lock");
+    let bun_lockb = workspace_root.join("bun.lockb");
     let package_lock = workspace_root.join("package-lock.json");
 
     let npm = if pnpm_lock.is_file() {
@@ -103,6 +112,10 @@ pub fn compute_lockfile_hashes(workspace_root: &Path) -> Result<LockfileHashes, 
         hash_file_if_exists(&yarn_lock)?.map(|h| (NpmLockfileKind::YarnLock, h))
     } else if pnp_cjs.is_file() {
         hash_file_if_exists(&pnp_cjs)?.map(|h| (NpmLockfileKind::YarnPnpCjs, h))
+    } else if bun_lock.is_file() {
+        hash_file_if_exists(&bun_lock)?.map(|h| (NpmLockfileKind::Bun, h))
+    } else if bun_lockb.is_file() {
+        hash_file_if_exists(&bun_lockb)?.map(|h| (NpmLockfileKind::Bun, h))
     } else if package_lock.is_file() {
         hash_file_if_exists(&package_lock)?.map(|h| (NpmLockfileKind::PackageLockJson, h))
     } else {
@@ -278,8 +291,8 @@ pub fn invalidate_changed_lockfiles(
 /// Path → origin mapping:
 ///
 /// - `Cargo.lock` → `SourceOrigin::CargoRegistry`.
-/// - `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` / `.pnp.cjs`
-///   → `SourceOrigin::NodeModulesDts`.
+/// - `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` / `.pnp.cjs` /
+///   `bun.lock` / `bun.lockb` → `SourceOrigin::NodeModulesDts`.
 ///
 /// Returns `None` when the path is not a tracked lockfile (no-op).
 pub fn handle_lockfile_change(
@@ -304,9 +317,8 @@ fn classify_lockfile_path(workspace_root: &Path, changed_path: &Path) -> Option<
         .and_then(|os| os.to_str())?;
     match rel_name {
         "Cargo.lock" => Some(SourceOrigin::CargoRegistry),
-        "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" | ".pnp.cjs" => {
-            Some(SourceOrigin::NodeModulesDts)
-        }
+        "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" | ".pnp.cjs" | "bun.lock"
+        | "bun.lockb" => Some(SourceOrigin::NodeModulesDts),
         _ => None,
     }
 }
@@ -322,6 +334,8 @@ pub fn tracked_lockfile_paths(workspace_root: &Path) -> Vec<PathBuf> {
         workspace_root.join("pnpm-lock.yaml"),
         workspace_root.join("yarn.lock"),
         workspace_root.join(".pnp.cjs"),
+        workspace_root.join("bun.lock"),
+        workspace_root.join("bun.lockb"),
     ]
 }
 
