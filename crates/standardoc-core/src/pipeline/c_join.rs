@@ -28,8 +28,8 @@ use crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
 use crate::storage::symbol_decl_location::upsert_decl_location;
 use standardoc_ir::SymbolLocation;
 
-/// Counters produced by a join run. Surfaced to callers (cold_start) as
-/// a debugging aid — currently logged at trace level only.
+/// Counters produced by a join run. Returned to callers as a debugging
+/// aid; the `apply_c_join_quietly` cold-start path currently drops it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CJoinReport {
     pub joined: usize,

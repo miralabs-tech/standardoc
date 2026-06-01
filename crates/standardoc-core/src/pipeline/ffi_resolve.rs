@@ -23,9 +23,7 @@
 
 use std::collections::HashMap;
 
-use rusqlite::Connection;
-
-use rusqlite::OptionalExtension;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::storage::edges::insert_edge;
 use crate::storage::error::StorageError;

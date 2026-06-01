@@ -4,11 +4,11 @@
 //! `peer_import` does) and indexes their symbols under the peer's
 //! `workspace_id` into primary's DB. Designed to coexist with
 //! `peer_import` — the latter stays useful for trusted-peer +
-//! schema-matched scenarios where blob copy is cheaper; Layer 3c will
-//! introduce a `workspace_catalog.indexing_mode` flag that picks
-//! between the two paths per linked workspace. Until then this module
-//! ships unwired; callers (cold_start, link_workspace MCP handler,
-//! refresh_peer MCP handler) land in Layer 3c.
+//! schema-matched scenarios where blob copy is cheaper. The
+//! `workspace_catalog.indexing_mode` flag (Layer 3c) picks between the
+//! two paths per linked workspace; this extractor is wired into
+//! cold_start (`process_peers_quietly`, `IndexingMode::Extract`) and the
+//! `refresh_peer` MCP handler.
 //!
 //! Path scoping (Option E from the L3a-bis design discussion):
 //! - `files.path` PK is global. Peer files with the same rel-path as

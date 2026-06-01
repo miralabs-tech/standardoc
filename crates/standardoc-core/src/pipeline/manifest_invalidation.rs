@@ -9,7 +9,7 @@
 //!
 //! ## Wired into
 //!
-//! `pipeline::watcher::process_path` calls [`handle_manifest_change`]
+//! `pipeline::watcher::process_primary_path` calls [`handle_manifest_change`]
 //! after the lockfile invalidation step (which handles dependency-tree
 //! changes, see [`crate::pipeline::external_invalidation`]) and BEFORE
 //! the supported-extension filter. Returns `Ok(Some(()))` to signal a
