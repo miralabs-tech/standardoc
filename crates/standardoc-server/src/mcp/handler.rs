@@ -55,9 +55,13 @@ pub use params::*;
 pub(super) const FIND_SYMBOL_DEFAULT_LIMIT: u8 = 20;
 pub(super) const FIND_SYMBOL_MAX_LIMIT: u8 = 100;
 /// Above this many matches, `find_symbols_by_pattern` auto-switches to the
-/// lean `summary_envelope` unless the caller forced `summary: false` — a broad
-/// glob otherwise serialises full RawSymbol records and can exceed 50k chars.
-pub(super) const SUMMARY_AUTO_THRESHOLD: usize = 25;
+/// lean `summary_envelope` unless the caller forced `summary: false`. Kept
+/// BELOW `FIND_SYMBOL_DEFAULT_LIMIT` (20) on purpose: otherwise a broad glob at
+/// the default limit caps at 20 < threshold and never degrades, dumping ~20
+/// full RawSymbol records (~600 lines). The tool's primary use — dup hunting
+/// (`strip_*_extension`) — wants lean rows anyway, so 15 is the line between
+/// "a handful, show full" and "broad, show lean".
+pub(super) const SUMMARY_AUTO_THRESHOLD: usize = 15;
 /// Similarity floor for the `did_you_mean` suggestion bundle attached to
 /// empty `find_symbol` / `find_symbols_by_pattern` results. Lower than
 /// `find_similar_symbols`'s default 0.8 because the caller has already
@@ -545,7 +549,7 @@ impl StandardocMcp {
     /// Combine with the same filters as `find_symbol` to scope the
     /// search.
     #[tool(
-        description = "Glob-pattern search over symbol names and FQDNs (SQLite GLOB: `*`, `?`, `[abc]`, case-sensitive). A symbol matches when either its name or its fqdn satisfies the pattern. Returns `{results: [...], did_you_mean: [...]}`. Use this to detect cross-module duplications (e.g. `strip_*_extension` to catch every `strip_<lang>_extension` helper). Optional filters: `kind`, `visibility`, `module` — same semantics as `find_symbol`. On a zero-hit pattern, `did_you_mean` runs strsim on the pattern's core (wildcards stripped) — useful for typos like `*to_token_string*` → `to_token_stream`. Broad patterns auto-degrade to lean rows (`{results: [{name, fqdn, kind, visibility, location}], count, mode: \"summary\"}`) above 25 matches so a wide glob can't blow up the response — pass `summary: false` to force full records, `summary: true` to force lean."
+        description = "Glob-pattern search over symbol names and FQDNs (SQLite GLOB: `*`, `?`, `[abc]`, case-sensitive). A symbol matches when either its name or its fqdn satisfies the pattern. Returns `{results: [...], did_you_mean: [...]}`. Use this to detect cross-module duplications (e.g. `strip_*_extension` to catch every `strip_<lang>_extension` helper). Optional filters: `kind`, `visibility`, `module` — same semantics as `find_symbol`. On a zero-hit pattern, `did_you_mean` runs strsim on the pattern's core (wildcards stripped) — useful for typos like `*to_token_string*` → `to_token_stream`. Broad patterns auto-degrade to lean rows (`{results: [{name, fqdn, kind, visibility, location}], count, mode: \"summary\"}`) above 15 matches so a wide glob can't blow up the response — pass `summary: false` to force full records, `summary: true` to force lean."
     )]
     async fn find_symbols_by_pattern(
         &self,

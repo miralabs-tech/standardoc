@@ -16,6 +16,19 @@ fn clamp_limit_floors_at_one_when_zero_requested() {
 }
 
 #[test]
+fn summary_threshold_stays_below_default_limit() {
+    // Regression guard (caught by live dogfood): if the auto-summary threshold
+    // reaches or exceeds the default limit, a broad glob at the default limit
+    // caps at FIND_SYMBOL_DEFAULT_LIMIT < threshold and never degrades to lean
+    // rows — the overflow footgun stays open for default-limit callers.
+    assert!(
+        SUMMARY_AUTO_THRESHOLD < FIND_SYMBOL_DEFAULT_LIMIT as usize,
+        "auto-summary threshold ({SUMMARY_AUTO_THRESHOLD}) must stay below the \
+         default limit ({FIND_SYMBOL_DEFAULT_LIMIT})"
+    );
+}
+
+#[test]
 fn indexing_message_includes_progress_when_known() {
     let msg = indexing_in_progress_message(Some((42, 100)));
     assert!(msg.contains("42/100 files"), "got `{msg}`");
