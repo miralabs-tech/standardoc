@@ -9,9 +9,9 @@
 //! the kernel finishes releasing handles.
 //!
 //! `retry_with_backoff` wraps a fallible open closure with exponential
-//! backoff for ~6.5 s total, retrying only when the error is in the
-//! transient set ([`is_transient`]). Permanent errors (schema too new,
-//! corruption, IO-not-found, …) propagate immediately.
+//! backoff for ~1.55 s total (up to 6 attempts), retrying only when the
+//! error is in the transient set ([`is_transient`]). Permanent errors
+//! (schema too new, corruption, IO-not-found, …) propagate immediately.
 
 use std::thread;
 use std::time::Duration;

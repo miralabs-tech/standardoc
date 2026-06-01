@@ -59,10 +59,11 @@ pub(crate) fn read_decl_location(
 }
 
 /// Drop the declaration-site row for a symbol. Cheap because the table
-/// is keyed by `symbol_id` PRIMARY KEY. Also runs automatically via
-/// `ON DELETE CASCADE` when the parent `symbols` row is removed; the
-/// explicit helper is exposed so the pipeline can purge stale joins
-/// when a header file is unlinked from a workspace.
+/// is keyed by `symbol_id` PRIMARY KEY. In practice rows are removed via
+/// `ON DELETE CASCADE` when the parent `symbols` row is deleted; this
+/// explicit helper is scaffold — not yet wired into the pipeline (the
+/// intended caller, purging stale joins when a header file is unlinked,
+/// does not exist today).
 pub(crate) fn delete_decl_location(conn: &Connection, symbol_id: i64) -> Result<(), StorageError> {
     conn.execute(
         "DELETE FROM symbol_decl_location WHERE symbol_id = ?1",

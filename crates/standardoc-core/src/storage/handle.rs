@@ -156,8 +156,9 @@ impl IndexHandle {
     }
 
     /// Builds the inner state (pool, writer thread, sender) shared by
-    /// both [`open`] (primary, holds fs4 lock) and [`open_readonly`]
-    /// (secondary, no fs4 lock but still R/W under SQLite WAL).
+    /// both [`Self::open`] (primary, holds fs4 lock) and
+    /// [`Self::open_readonly`] (secondary, no fs4 lock but still R/W
+    /// under SQLite WAL).
     fn wire_handle(
         pool: Pool<SqliteConnectionManager>,
         workspace_root: PathBuf,

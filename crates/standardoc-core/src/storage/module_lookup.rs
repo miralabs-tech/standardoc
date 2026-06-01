@@ -3,8 +3,11 @@
 //! Each ModuleLookup is bincode-encoded into the `module_lookups`
 //! table's `payload` BLOB column, keyed by `(workspace_id, module_fqdn)`.
 //! The flat `workspace_imports` table is kept in sync transactionally
-//! so cross-workspace import resolution can SQL-join on `origin_module`
-//! without deserialising every blob.
+//! as a reverse-dependency index (`origin_module` -> importing modules),
+//! populated locally and propagated across linked workspaces. Its
+//! `origin_module` SQL-join reader (`workspace_imports_by_origin`) is
+//! scaffolded but not yet wired: production cross-workspace resolution
+//! still blob-scans `module_lookups` directly.
 //!
 //! The `'primary'` sentinel workspace_id is reserved for the current
 //! workspace; linked workspaces use UUID v4 ids registered in
@@ -135,11 +138,16 @@ pub(crate) fn delete_module_lookup(
     Ok(())
 }
 
-/// Iterate `workspace_imports` rows whose `origin_module` matches.
-/// Returns `(workspace_id, module_fqdn, local_name, origin_symbol,
-/// is_type_only, is_re_export)` tuples. Used by Stage 3b-4
-/// cross-workspace resolver to find which modules import a given
-/// origin and therefore depend on a peer workspace's exports.
+/// Iterate `workspace_imports` rows whose `origin_module` matches —
+/// the reverse-dependency lookup "which modules import a given origin
+/// and therefore depend on a peer workspace's exports". Returns
+/// `(workspace_id, module_fqdn, local_name, origin_symbol,
+/// is_type_only, is_re_export)` tuples.
+///
+/// Scaffold: only exercised by tests today. The cross-workspace
+/// resolver does not yet route through it (it blob-scans
+/// `module_lookups`); kept wired so the consumer can be added without
+/// re-deriving the index.
 pub(crate) fn workspace_imports_by_origin(
     conn: &Connection,
     origin_module: &str,

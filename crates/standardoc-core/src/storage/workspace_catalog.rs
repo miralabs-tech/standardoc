@@ -79,8 +79,8 @@ fn row_to_linked_workspace(
 
 /// Register a new linked workspace and return its freshly-generated
 /// UUID v4 id. The same `root_path` may be registered multiple times
-/// (yielding different ids) — callers should de-dup via
-/// `find_by_root_path` first if that's the intent.
+/// (yielding different ids); de-dup-by-path via `find_by_root_path` is
+/// scaffold — the current link flow does not call it.
 pub(crate) fn register_linked_workspace(
     conn: &Connection,
     root_path: &str,
