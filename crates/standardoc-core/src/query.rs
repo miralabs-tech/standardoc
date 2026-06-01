@@ -769,15 +769,6 @@ pub fn symbol_looks_like_test(symbol: &RawSymbol) -> bool {
     fqdn_looks_like_test(&symbol.fqdn) || file_path_looks_like_test(&symbol.location.file)
 }
 
-/// Same heuristic as [`symbol_looks_like_test`] but takes only the
-/// FQDN. Use when the caller has no `RawSymbol` (e.g. *_fqdns MCP
-/// tools that return `{fqdn, kind}` pairs). Misses file-path-based
-/// signals (`*.spec.ts`, `__tests__/`); pair with `symbol_looks_like_test`
-/// when the full symbol is available.
-pub fn fqdn_looks_like_test_only(fqdn: &str) -> bool {
-    fqdn_looks_like_test(fqdn)
-}
-
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn fqdn_looks_like_test(fqdn: &str) -> bool {
     fqdn.contains("::tests::")
