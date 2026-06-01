@@ -73,7 +73,6 @@ pub(crate) fn insert_symbol(
                 source_origin           = excluded.source_origin, \
                 last_modified_revision  = excluded.last_modified_revision, \
                 flags                   = excluded.flags, \
-                workspace_id            = excluded.workspace_id, \
                 decl_kind               = excluded.decl_kind, \
                 implements_trait        = excluded.implements_trait, \
                 receiver_type           = excluded.receiver_type, \

@@ -36,65 +36,6 @@ fn json_to_signature_invalid_returns_json_error() {
 }
 
 #[test]
-fn unresolved_to_storage_resolved_returns_none() {
-    let target = ResolvedOrUnresolved::Resolved {
-        fqdn: "crate::a::foo".into(),
-    };
-    assert_eq!(unresolved_to_storage(&target).unwrap(), None);
-}
-
-#[test]
-fn unresolved_to_storage_unresolved_returns_name() {
-    let target = ResolvedOrUnresolved::Unresolved {
-        name: "do_thing".into(),
-    };
-    assert_eq!(
-        unresolved_to_storage(&target).unwrap().as_deref(),
-        Some("do_thing")
-    );
-}
-
-#[test]
-fn unresolved_to_storage_bridge_concatenates() {
-    let target = ResolvedOrUnresolved::UnresolvedBridge {
-        bridge: BridgeKind::from("tauri"),
-        name: "create_user".into(),
-    };
-    assert_eq!(
-        unresolved_to_storage(&target).unwrap().as_deref(),
-        Some("tauri::create_user")
-    );
-}
-
-#[test]
-fn unresolved_to_storage_bridge_custom_prefix_passes_validation() {
-    let target = ResolvedOrUnresolved::UnresolvedBridge {
-        bridge: BridgeKind::from("custom:internal-rpc"),
-        name: "ping".into(),
-    };
-    assert_eq!(
-        unresolved_to_storage(&target).unwrap().as_deref(),
-        Some("custom:internal-rpc::ping")
-    );
-}
-
-#[test]
-fn unresolved_to_storage_rejects_unknown_bridge_slug() {
-    // IR-1: a slug outside BUILTIN_BRIDGE_KINDS that lacks the
-    // `custom:` prefix must be refused at the storage boundary,
-    // not silently persisted.
-    let target = ResolvedOrUnresolved::UnresolvedBridge {
-        bridge: BridgeKind::from("tauri-v2"),
-        name: "create_user".into(),
-    };
-    let err = unresolved_to_storage(&target).unwrap_err();
-    assert!(
-        matches!(err, StorageError::BridgeKindInvalid(_)),
-        "got `{err:?}`"
-    );
-}
-
-#[test]
 fn signature_to_json_rejects_unknown_exposed_via_slug() {
     let sig = Signature {
         meta: standardoc_ir::SignatureMeta {

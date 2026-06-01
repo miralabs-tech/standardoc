@@ -11,27 +11,13 @@
 //! `workspace_catalog` (Stage 3b-3).
 
 use rusqlite::{Connection, OptionalExtension, params};
-use standardoc_ir::{Language, ModuleLookup};
+use standardoc_ir::ModuleLookup;
 
+use crate::storage::conv::language_to_sql_text;
 use crate::storage::error::StorageError;
 
 /// Sentinel workspace_id for the current (primary) workspace.
 pub(crate) const PRIMARY_WORKSPACE_ID: &str = "primary";
-
-/// Canonical lowercase language slug stored in `module_lookups.language`.
-/// Matches the IR's `Language` `serde(rename_all = "lowercase")` shape so
-/// the DB string is always deserialisable back via serde.
-const fn language_storage_slug(lang: Language) -> &'static str {
-    match lang {
-        Language::Rust => "rust",
-        Language::TypeScript => "typescript",
-        Language::JavaScript => "javascript",
-        Language::Lua => "lua",
-        Language::Vue => "vue",
-        Language::Svelte => "svelte",
-        Language::C => "c",
-    }
-}
 
 fn bincode_to_storage<E: std::fmt::Display>(detail: &str, e: E) -> StorageError {
     StorageError::InvalidStoredData {
@@ -49,7 +35,7 @@ pub(crate) fn put_module_lookup(
 ) -> Result<(), StorageError> {
     let payload = bincode::serde::encode_to_vec(lookup, bincode::config::standard())
         .map_err(|e| bincode_to_storage("ModuleLookup encode", e))?;
-    let language = language_storage_slug(lookup.language);
+    let language = language_to_sql_text(lookup.language);
     let built_at = i64::try_from(lookup.built_at_epoch_ms).unwrap_or(i64::MAX);
 
     conn.execute(

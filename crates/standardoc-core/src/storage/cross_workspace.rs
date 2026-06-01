@@ -43,6 +43,43 @@ fn decode_module_lookup(bytes: &[u8]) -> Result<ModuleLookup, StorageError> {
         })
 }
 
+/// Decode a `module_lookups` payload and, when it exports `origin_symbol`
+/// at ROOT scope, build the resolution attributed to `workspace_id`.
+///
+/// Prefers the binding's `resolved_fqdn` (set by the extractor when it
+/// followed the re-export chain to the canonical definition) over the
+/// naive `<origin_module>::<origin_symbol>`. Without this a peer's
+/// `use standardoc_core::LanguageProvider` re-export would resolve to the
+/// re-export FQDN `standardoc-core::pipeline::LanguageProvider` and miss
+/// the canonical trait at `…::pipeline::provider::LanguageProvider` when
+/// consumers (viz / MCP) query its dependents.
+fn root_resolution_from_payload(
+    payload: &[u8],
+    origin_module: &str,
+    origin_symbol: &str,
+    workspace_id: String,
+) -> Result<Option<CrossWorkspaceResolution>, StorageError> {
+    let lookup = decode_module_lookup(payload)?;
+    let Some(entries) = lookup.bindings.get(origin_symbol) else {
+        return Ok(None);
+    };
+    let Some(root_binding) = entries
+        .iter()
+        .find(|b| b.scope_idx == ModuleLookup::ROOT_SCOPE)
+    else {
+        return Ok(None);
+    };
+    let resolved_fqdn = root_binding
+        .resolved_fqdn
+        .clone()
+        .unwrap_or_else(|| format!("{origin_module}::{origin_symbol}"));
+    Ok(Some(CrossWorkspaceResolution {
+        workspace_id,
+        resolved_fqdn,
+        binding_source: root_binding.source.clone(),
+    }))
+}
+
 /// Resolve an import `<origin_module>::<origin_symbol>` against the
 /// linked workspaces' persisted `ModuleLookup`s.
 ///
@@ -64,33 +101,11 @@ pub(crate) fn resolve_cross_workspace_import(
     })?;
     for row in rows {
         let (workspace_id, payload) = row?;
-        let lookup = decode_module_lookup(&payload)?;
-        let Some(entries) = lookup.bindings.get(origin_symbol) else {
-            continue;
-        };
-        let Some(root_binding) = entries
-            .iter()
-            .find(|b| b.scope_idx == ModuleLookup::ROOT_SCOPE)
-        else {
-            continue;
-        };
-        // Prefer the binding's `resolved_fqdn` (set by the extractor
-        // when it followed the re-export chain to the canonical
-        // definition) over `<origin_module>::<origin_symbol>`. Without
-        // this the LuaProvider → `use standardoc_core::LanguageProvider`
-        // edge would resolve to the re-export FQDN
-        // `standardoc-core::pipeline::LanguageProvider` and miss the
-        // canonical trait at `standardoc-core::pipeline::provider::LanguageProvider`
-        // when consumers (viz / MCP) query its dependents.
-        let resolved_fqdn = root_binding
-            .resolved_fqdn
-            .clone()
-            .unwrap_or_else(|| format!("{origin_module}::{origin_symbol}"));
-        return Ok(Some(CrossWorkspaceResolution {
-            workspace_id,
-            resolved_fqdn,
-            binding_source: root_binding.source.clone(),
-        }));
+        if let Some(res) =
+            root_resolution_from_payload(&payload, origin_module, origin_symbol, workspace_id)?
+        {
+            return Ok(Some(res));
+        }
     }
     Ok(None)
 }
@@ -149,25 +164,12 @@ pub(crate) fn resolve_intra_workspace_import(
     let Some(payload) = row else {
         return Ok(None);
     };
-    let lookup = decode_module_lookup(&payload)?;
-    let Some(entries) = lookup.bindings.get(origin_symbol) else {
-        return Ok(None);
-    };
-    let Some(root_binding) = entries
-        .iter()
-        .find(|b| b.scope_idx == ModuleLookup::ROOT_SCOPE)
-    else {
-        return Ok(None);
-    };
-    let resolved_fqdn = root_binding
-        .resolved_fqdn
-        .clone()
-        .unwrap_or_else(|| format!("{origin_module}::{origin_symbol}"));
-    Ok(Some(CrossWorkspaceResolution {
-        workspace_id: PRIMARY_WORKSPACE_ID.to_string(),
-        resolved_fqdn,
-        binding_source: root_binding.source.clone(),
-    }))
+    root_resolution_from_payload(
+        &payload,
+        origin_module,
+        origin_symbol,
+        PRIMARY_WORKSPACE_ID.to_string(),
+    )
 }
 
 /// Enumerate every linked workspace that provides a matching top-level
@@ -189,21 +191,11 @@ pub(crate) fn list_cross_workspace_providers(
     let mut out = Vec::new();
     for row in rows {
         let (workspace_id, payload) = row?;
-        let lookup = decode_module_lookup(&payload)?;
-        let Some(entries) = lookup.bindings.get(origin_symbol) else {
-            continue;
-        };
-        let Some(root_binding) = entries
-            .iter()
-            .find(|b| b.scope_idx == ModuleLookup::ROOT_SCOPE)
-        else {
-            continue;
-        };
-        out.push(CrossWorkspaceResolution {
-            workspace_id,
-            resolved_fqdn: format!("{origin_module}::{origin_symbol}"),
-            binding_source: root_binding.source.clone(),
-        });
+        if let Some(res) =
+            root_resolution_from_payload(&payload, origin_module, origin_symbol, workspace_id)?
+        {
+            out.push(res);
+        }
     }
     Ok(out)
 }
@@ -358,6 +350,36 @@ mod tests {
         let conn = fresh_db();
         let result = list_cross_workspace_providers(&conn, "no::such", "Symbol").unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_providers_prefers_resolved_fqdn_over_naive() {
+        // CWS2 regression: list_cross_workspace_providers must honour the
+        // binding's `resolved_fqdn` (re-export chain canonicalised by the
+        // extractor) like its singular sibling resolve_cross_workspace_import,
+        // not the naive `<origin_module>::<origin_symbol>`.
+        let conn = fresh_db();
+        let mut linked = ModuleLookup::new("ws_b::index".into(), Language::Rust);
+        linked.push_binding(IdentResolution {
+            name: "Foo".into(),
+            source: BindingSource::LocalDecl {
+                decl_kind: LocalDeclKind::Struct,
+            },
+            resolved_fqdn: Some("ws_b::internal::Foo".into()),
+            aliases_to: None,
+            mutability: None,
+            scope_idx: ModuleLookup::ROOT_SCOPE,
+            attributes: vec![],
+            ir_kind: None,
+        });
+        put_module_lookup(&conn, "ws_b-uuid", &linked).unwrap();
+
+        let all = list_cross_workspace_providers(&conn, "ws_b::index", "Foo").unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(
+            all[0].resolved_fqdn, "ws_b::internal::Foo",
+            "list_ must prefer resolved_fqdn, not the naive ws_b::index::Foo"
+        );
     }
 
     #[test]

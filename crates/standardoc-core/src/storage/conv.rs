@@ -1,6 +1,6 @@
 use standardoc_ir::{
-    DeclKind, EdgeConfidence, EdgeKind, EntryPointKind, Kind, Language, ResolvedOrUnresolved,
-    Signature, SourceOrigin, Visibility,
+    DeclKind, EdgeConfidence, EdgeKind, EntryPointKind, Kind, Language, Signature, SourceOrigin,
+    Visibility,
 };
 
 use crate::storage::error::StorageError;
@@ -25,27 +25,6 @@ pub(crate) fn signature_to_json(sig: &Signature) -> Result<String, StorageError>
 
 pub(crate) fn json_to_signature(s: &str) -> Result<Signature, StorageError> {
     Ok(serde_json::from_str(s)?)
-}
-
-/// Maps a `ResolvedOrUnresolved` to the `to_unresolved` SQL column when the
-/// target is not (yet) resolved. Resolved targets return `None` — the caller
-/// must then look up the symbol id from the fqdn before binding `to_symbol_id`.
-/// `UnresolvedBridge` is encoded as `"<bridge_kind>::<name>"` per bridges lock #3.
-///
-/// IR-1: returns `Err(BridgeKindInvalid)` when an `UnresolvedBridge` carries
-/// a slug outside the 1.0 vocabulary lock (neither built-in nor
-/// `custom:`-prefixed). The two non-bridge variants are infallible.
-pub(crate) fn unresolved_to_storage(
-    target: &ResolvedOrUnresolved,
-) -> Result<Option<String>, StorageError> {
-    match target {
-        ResolvedOrUnresolved::Resolved { .. } => Ok(None),
-        ResolvedOrUnresolved::Unresolved { name } => Ok(Some(name.clone())),
-        ResolvedOrUnresolved::UnresolvedBridge { bridge, name } => {
-            bridge.try_validate()?;
-            Ok(Some(format!("{}::{}", bridge.as_str(), name)))
-        }
-    }
 }
 
 pub(crate) const fn language_to_sql_text(lang: Language) -> &'static str {
