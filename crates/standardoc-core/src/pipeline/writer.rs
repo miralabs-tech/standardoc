@@ -17,7 +17,14 @@ pub(crate) struct WriterContext {
 
 pub(crate) fn writer_loop(mut rx: Receiver<IngestCommand>, ctx: &WriterContext) {
     while let Some(cmd) = rx.blocking_recv() {
-        let _ = process_command(ctx, cmd);
+        if let Err(e) = process_command(ctx, cmd) {
+            // `RescanInProgress` is the benign "pool swapped out mid-rescan,
+            // drop this command" signal; anything else is a real write
+            // failure worth surfacing on the daemon's stderr.
+            if !matches!(e, StorageError::RescanInProgress) {
+                eprintln!("standardoc: writer command failed: {e}");
+            }
+        }
     }
 }
 

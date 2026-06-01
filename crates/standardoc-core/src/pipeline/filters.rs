@@ -276,7 +276,16 @@ fn collect_layers(workspace_root: &Path, root_patterns_override: Option<&str>) -
         layers.push(layer);
     }
 
-    let descent_filter = layers.first().map(|l| clone_matcher(&l.matcher));
+    // Independent descent-filter matcher mirroring the root layer, so the
+    // nested-`.stdignore` walk prunes the same subtrees the root excludes.
+    // `clone_matcher` only reconstructs from a physical `.stdignore`; in the
+    // sxd-patterns path there is none, so rebuild from the patterns instead —
+    // otherwise the walk descends into excluded dirs (target/, node_modules/)
+    // it is meant to skip.
+    let descent_filter = match root_patterns_override {
+        Some(patterns) => build_layer_from_patterns(workspace_root, patterns).map(|l| l.matcher),
+        None => layers.first().map(|l| clone_matcher(&l.matcher)),
+    };
     add_nested_layers(
         &mut layers,
         workspace_root,

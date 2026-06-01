@@ -58,6 +58,26 @@ fn gitignore_stack_negation_override() {
 }
 
 #[test]
+fn sxd_root_patterns_prune_descent_into_excluded_dirs() {
+    // FI4 regression: when the root ignore comes from sxd patterns (no
+    // physical root `.stdignore`), the nested-layer walk must still be
+    // pruned by those patterns. Otherwise it descends into `target/` and
+    // loads `target/.stdignore`, which — against git semantics — would
+    // re-include a path the root pattern excluded.
+    let dir = tempdir().unwrap();
+    write(dir.path(), "target/.stdignore", "!important.rs\n");
+    write(dir.path(), "target/important.rs", "");
+
+    let stack = GitignoreStack::build_with_root_patterns(dir.path(), "target/\n");
+
+    assert!(
+        stack.is_ignored("target/important.rs"),
+        "a file under an sxd-excluded dir must stay ignored even if a nested \
+         .stdignore tries to re-include it (descent walk must be pruned)"
+    );
+}
+
+#[test]
 fn is_ignored_matches_glob_patterns() {
     let dir = tempdir().unwrap();
     write(dir.path(), ".stdignore", "*.lock\n**/generated/**\n");
