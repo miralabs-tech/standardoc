@@ -54,13 +54,8 @@ pub(crate) fn extract_file(
     }
 
     let mut symbols = vec![module_symbol];
-    let (item_symbols, edges, item_documents, call_sites, lookup) = walk::walk_with_lookup(
-        &parsed,
-        &module_fqdn,
-        path,
-        crate_name,
-        global_return_types,
-    );
+    let (item_symbols, edges, item_documents, call_sites, lookup) =
+        walk::walk_with_lookup(&parsed, &module_fqdn, path, crate_name, global_return_types);
     symbols.extend(item_symbols);
     documents.extend(item_documents);
 
@@ -119,7 +114,14 @@ mod tests {
 
     #[test]
     fn nested_module_path() {
-        let r = extract_file("", "src/foo/bar/baz.rs", "mycrate", "src/foo/bar/baz.rs", None).unwrap();
+        let r = extract_file(
+            "",
+            "src/foo/bar/baz.rs",
+            "mycrate",
+            "src/foo/bar/baz.rs",
+            None,
+        )
+        .unwrap();
         assert_eq!(r.symbols[0].fqdn, "mycrate::foo::bar::baz");
         assert_eq!(r.symbols[0].name, "baz");
         assert_eq!(r.symbols[0].module.as_deref(), Some("mycrate::foo::bar"));

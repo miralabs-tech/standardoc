@@ -492,7 +492,8 @@ fn typedef_anonymous_struct_becomes_struct_with_fields() {
 
 #[test]
 fn typedef_tagged_struct_fields_land_under_alias() {
-    let src = "typedef struct LurGcHeader { unsigned char color; unsigned char kind; } LurGcHeader;\n";
+    let src =
+        "typedef struct LurGcHeader { unsigned char color; unsigned char kind; } LurGcHeader;\n";
     let file = run(src, "runtime/value.h");
     let s = find(&file, "lurlang::runtime::value::LurGcHeader");
     assert_eq!(s.decl_kind, Some(standardoc_ir::DeclKind::Struct));

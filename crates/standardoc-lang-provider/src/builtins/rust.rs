@@ -925,7 +925,11 @@ fn register_methods(reg: &mut BuiltinRegistry) {
     // dispatch step). Register the inherent surface separately so the
     // receiver-type direct lookup (`<builtin>::rust::Peekable::peek`)
     // hits.
-    add(reg, "Peekable", &["peek", "peek_mut", "next_if", "next_if_eq"]);
+    add(
+        reg,
+        "Peekable",
+        &["peek", "peek_mut", "next_if", "next_if_eq"],
+    );
 
     // `std::process::Command` builder — heavily used in tests and CLI
     // glue. `output` / `status` / `spawn` return `Result`; the rest
@@ -952,12 +956,7 @@ fn register_methods(reg: &mut BuiltinRegistry) {
             "get_current_dir",
         ],
     );
-    add_returning(
-        reg,
-        "Command",
-        "Result",
-        &["output", "status", "spawn"],
-    );
+    add_returning(reg, "Command", "Result", &["output", "status", "spawn"]);
 
     // Trait dispatch widening — post-pass: stamp `is_trait=true` on
     // every method whose `parent_type` is one of the comprehensively-

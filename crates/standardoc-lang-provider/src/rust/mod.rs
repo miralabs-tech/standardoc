@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
 use standardoc_ir::ExtractedFile;
 
-use self::collect_globals::{collect_global_returns, WorkspaceFile};
+use self::collect_globals::{WorkspaceFile, collect_global_returns};
 use self::global_return_type_registry::GlobalReturnTypeRegistry;
 
 mod body_hash;
@@ -156,10 +156,9 @@ impl LanguageProvider for RustProvider {
             let Ok((crate_name, crate_root_abs)) = self.resolve_crate_info(&abs, rel) else {
                 continue;
             };
-            let crate_rel = abs.strip_prefix(&crate_root_abs).map_or_else(
-                |_| rel.clone(),
-                |p| p.to_string_lossy().replace('\\', "/"),
-            );
+            let crate_rel = abs
+                .strip_prefix(&crate_root_abs)
+                .map_or_else(|_| rel.clone(), |p| p.to_string_lossy().replace('\\', "/"));
             slots.push(RustWorkspaceSlot {
                 crate_name,
                 crate_rel,

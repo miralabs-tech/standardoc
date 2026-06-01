@@ -125,7 +125,10 @@ impl StructFieldTable {
         if let Some(names) = self.by_struct_field_names.get(struct_key) {
             return names.contains(field_name);
         }
-        let Some(nominal_fqdn) = self.by_presence_nominal.get(struct_key).and_then(|o| o.as_deref())
+        let Some(nominal_fqdn) = self
+            .by_presence_nominal
+            .get(struct_key)
+            .and_then(|o| o.as_deref())
         else {
             return false;
         };

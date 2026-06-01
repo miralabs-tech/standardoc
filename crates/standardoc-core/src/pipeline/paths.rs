@@ -3,8 +3,9 @@ use std::path::Path;
 
 use standardoc_ir::Language;
 
-pub(crate) const SUPPORTED_EXTENSIONS: &[&str] =
-    &["rs", "ts", "tsx", "js", "jsx", "lua", "vue", "svelte", "c", "h"];
+pub(crate) const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "rs", "ts", "tsx", "js", "jsx", "lua", "vue", "svelte", "c", "h",
+];
 
 pub(crate) fn has_supported_extension(path: &Path) -> bool {
     path.extension()

@@ -407,7 +407,11 @@ impl IndexHandle {
         if self.inner.lock.is_some() {
             return true;
         }
-        let lock_path = self.inner.workspace_root.join(".standardoc").join("db.lock");
+        let lock_path = self
+            .inner
+            .workspace_root
+            .join(".standardoc")
+            .join("db.lock");
         matches!(
             WorkspaceLock::acquire(&lock_path),
             Err(StorageError::LockHeld { .. })

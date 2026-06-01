@@ -397,8 +397,7 @@ pub(crate) fn walk(
     Vec<RawDocument>,
     Vec<RawCallSite>,
 ) {
-    let (s, e, d, c, _lookup) =
-        walk_with_lookup(parsed, module_fqdn, file_path, crate_name, None);
+    let (s, e, d, c, _lookup) = walk_with_lookup(parsed, module_fqdn, file_path, crate_name, None);
     (s, e, d, c)
 }
 

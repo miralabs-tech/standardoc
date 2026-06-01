@@ -18,8 +18,8 @@
 //! `extract_file` so the orchestrator can feed the same file iterator
 //! to both passes without re-discovery.
 
-use syn::spanned::Spanned;
 use syn::ImplItem;
+use syn::spanned::Spanned;
 
 use super::global_return_type_registry::GlobalReturnTypeRegistry;
 use super::module_path;
@@ -107,15 +107,16 @@ fn record_item(registry: &mut GlobalReturnTypeRegistry, item: &syn::Item, curren
 /// Pull the nominal head ident from an impl block's self type. Returns
 /// `None` for non-path self types (impl trait for `&T`, tuples, etc.).
 fn impl_self_ident(ty: &syn::Type) -> Option<String> {
-    parametric_type(ty).map(|p| {
-        // `nominal_of` slices off generic args. For `Foo<T>` → "Foo".
-        super::type_name::nominal_of(&p).to_string()
-    })
-    .filter(|s| !s.is_empty())
-    .or_else(|| {
-        let _ = ty.span();
-        None
-    })
+    parametric_type(ty)
+        .map(|p| {
+            // `nominal_of` slices off generic args. For `Foo<T>` → "Foo".
+            super::type_name::nominal_of(&p).to_string()
+        })
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let _ = ty.span();
+            None
+        })
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use super::{collect_global_returns, WorkspaceFile};
+use super::{WorkspaceFile, collect_global_returns};
 
 fn file<'a>(crate_name: &'a str, crate_rel: &'a str, content: &'a str) -> WorkspaceFile<'a> {
     WorkspaceFile {

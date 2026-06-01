@@ -1605,9 +1605,7 @@ fn field_as_call_on_workspace_struct_is_suppressed() {
     // V2 (`fn()` extension) extends this guard to non-nominal field
     // types via `has_field` — see
     // `field_as_call_on_bare_fn_field_is_suppressed_v2`.
-    let parsed = parse(
-        "struct H; struct S { handler: H } fn caller(s: S) { s.handler(); }",
-    );
+    let parsed = parse("struct H; struct S { handler: H } fn caller(s: S) { s.handler(); }");
     let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
     let handler_calls: Vec<_> = method_calls(&edges)
         .into_iter()
@@ -1643,8 +1641,7 @@ fn stdlib_method_call_is_preserved_even_with_field_like_name() {
     // (not a field) must still emit a CALLS edge. Same for `.iter()`
     // and other common idents that could collide with hypothetical
     // workspace field names but aren't.
-    let parsed =
-        parse("fn caller(p: std::path::PathBuf) { p.exists(); }");
+    let parsed = parse("fn caller(p: std::path::PathBuf) { p.exists(); }");
     let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
     let exists = method_calls(&edges)
         .into_iter()
@@ -1660,9 +1657,7 @@ fn field_as_call_on_bare_fn_field_is_suppressed_v2() {
     // skips them for the typed table. The guard uses `has_field`
     // (presence-only) so `s.bare()` where `bare: fn()` no longer
     // emits a phantom CALLS edge with `name = "bare"`.
-    let parsed = parse(
-        "struct S { bare: fn() } fn caller(s: S) { s.bare(); }",
-    );
+    let parsed = parse("struct S { bare: fn() } fn caller(s: S) { s.bare(); }");
     let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
     let bare_calls: Vec<_> = method_calls(&edges)
         .into_iter()
@@ -1680,9 +1675,7 @@ fn field_as_call_on_closure_field_is_suppressed_v2() {
     // tracked by `record_presence`. The Box wrapper IS nominal so
     // `record` would catch this too, but the test makes the
     // closure-call intent explicit.
-    let parsed = parse(
-        "struct S { cb: Box<dyn Fn(u32) -> bool> } fn caller(s: &S) { s.cb(0); }",
-    );
+    let parsed = parse("struct S { cb: Box<dyn Fn(u32) -> bool> } fn caller(s: &S) { s.cb(0); }");
     let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
     let cb_calls: Vec<_> = method_calls(&edges)
         .into_iter()
@@ -1699,9 +1692,7 @@ fn field_as_call_via_ref_receiver_is_suppressed() {
     // The receiver type comes through as `&S` (or `&mut S`) via the
     // local env. The guard must strip refs before the field lookup
     // so `&S` matches struct `S` in the workspace table.
-    let parsed = parse(
-        "struct H; struct S { cb: H } fn caller(s: &S) { s.cb(); }",
-    );
+    let parsed = parse("struct H; struct S { cb: H } fn caller(s: &S) { s.cb(); }");
     let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
     let cb_calls: Vec<_> = method_calls(&edges)
         .into_iter()
@@ -1733,16 +1724,9 @@ fn cross_file_workspace_call_resolves_receiver_type_via_global_registry() {
     registry.record("other_crate::get_user", &ret_ty);
     let registry = Arc::new(registry);
 
-    let parsed = parse(
-        "fn caller() { let u = other_crate::get_user(); u.name(); }",
-    );
-    let (_, edges, _, _, _) = walk_with_lookup(
-        &parsed,
-        "c",
-        "src/lib.rs",
-        "c",
-        Some(Arc::clone(&registry)),
-    );
+    let parsed = parse("fn caller() { let u = other_crate::get_user(); u.name(); }");
+    let (_, edges, _, _, _) =
+        walk_with_lookup(&parsed, "c", "src/lib.rs", "c", Some(Arc::clone(&registry)));
     let name_edge = calls(&edges)
         .into_iter()
         .find(|e| matches!(&e.to, ResolvedOrUnresolved::Unresolved { name } if name == "name"))
@@ -1761,9 +1745,7 @@ fn cross_file_lookup_misses_when_registry_is_none() {
     // declared in this file. The `u.name()` edge stays
     // receiver_type=None — matching the pre-GRTR behaviour.
     use super::super::walk::walk_with_lookup;
-    let parsed = parse(
-        "fn caller() { let u = other_crate::get_user(); u.name(); }",
-    );
+    let parsed = parse("fn caller() { let u = other_crate::get_user(); u.name(); }");
     let (_, edges, _, _, _) = walk_with_lookup(&parsed, "c", "src/lib.rs", "c", None);
     let name_edge = calls(&edges)
         .into_iter()

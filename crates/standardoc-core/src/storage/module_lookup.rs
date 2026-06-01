@@ -121,9 +121,12 @@ pub(crate) fn get_module_lookup(
 
     payload
         .map(|bytes| {
-            bincode::serde::decode_from_slice::<ModuleLookup, _>(&bytes, bincode::config::standard())
-                .map(|(value, _)| value)
-                .map_err(|e| bincode_to_storage("ModuleLookup decode", e))
+            bincode::serde::decode_from_slice::<ModuleLookup, _>(
+                &bytes,
+                bincode::config::standard(),
+            )
+            .map(|(value, _)| value)
+            .map_err(|e| bincode_to_storage("ModuleLookup decode", e))
         })
         .transpose()
 }

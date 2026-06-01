@@ -78,10 +78,11 @@ pub(crate) fn reindex_paths(
     // correct strategy is a full re-Pass-0 on every relevant watcher
     // event ; an incremental side-index (Phase 5.b) is deferred until
     // measured perf warrants it.
-    if paths
-        .iter()
-        .any(|p| Path::new(p).extension().is_some_and(|e| e.eq_ignore_ascii_case("rs")))
-    {
+    if paths.iter().any(|p| {
+        Path::new(p)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("rs"))
+    }) {
         let candidates = crate::pipeline::cold_start::collect_candidates(&workspace_root, filters)?;
         let rel_candidates: Vec<String> = candidates
             .iter()
