@@ -9,7 +9,7 @@ use rmcp::ErrorData;
 use rmcp::model::{CallToolResult, Content};
 use serde::Serialize;
 use standardoc_core::{
-    IndexHandle, WatcherHandle,
+    IndexHandle, StorageError, WatcherHandle,
     query::{self, SymbolFilter},
 };
 use standardoc_ir::{IndexingMode, Kind, LinkDirection, RawSymbol, SourceOrigin, Visibility};
@@ -253,6 +253,26 @@ pub(super) fn glob_core_text(pattern: &str) -> String {
 /// replacement is lossless and idempotent on `::`-form inputs.
 pub(super) fn normalize_fqdn(raw: &str) -> String {
     raw.replace('.', "::")
+}
+
+/// Exact-FQDN lookup with an OOP-dot fallback. Tries `raw` verbatim
+/// (preserves TS file segments like `profiler.type`); on a miss, if `raw`
+/// carries a `.`, retries the `::`-normalised form. Centralises the
+/// raw→normalised dance that `get_context` / `get_context_summary` /
+/// `get_body` / `get_code` each used to inline in their blocking closure.
+pub(super) fn resolve_fqdn_fallback<T>(
+    raw: &str,
+    lookup: impl Fn(&str) -> Result<Option<T>, StorageError>,
+) -> Result<Option<T>, StorageError> {
+    if let Some(found) = lookup(raw)? {
+        return Ok(Some(found));
+    }
+    if raw.contains('.')
+        && let Some(found) = lookup(&normalize_fqdn(raw))?
+    {
+        return Ok(Some(found));
+    }
+    Ok(None)
 }
 
 /// Project `fqdn` to its `relative_to`-anchored form. FQDNs sharing the

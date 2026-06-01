@@ -193,24 +193,10 @@ impl StandardocMcp {
         // LLM consumers that emit `Type.method` instead of `::`.
         let handle = self.handle.clone();
         let raw_for_call = raw_fqdn.clone();
-        let (_resolved_fqdn, result) = tokio::task::spawn_blocking(move || {
-            if let Some(ctx) =
-                query::context_for_symbol_with_neighbors(&handle, &raw_for_call, depth)?
-            {
-                return Ok::<(String, Option<_>), standardoc_core::StorageError>((
-                    raw_for_call,
-                    Some(ctx),
-                ));
-            }
-            if raw_for_call.contains('.') {
-                let normalized = normalize_fqdn(&raw_for_call);
-                if let Some(ctx) =
-                    query::context_for_symbol_with_neighbors(&handle, &normalized, depth)?
-                {
-                    return Ok((normalized, Some(ctx)));
-                }
-            }
-            Ok((raw_for_call, None))
+        let result = tokio::task::spawn_blocking(move || {
+            resolve_fqdn_fallback(&raw_for_call, |fqdn| {
+                query::context_for_symbol_with_neighbors(&handle, fqdn, depth)
+            })
         })
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
@@ -244,19 +230,9 @@ impl StandardocMcp {
         let handle = self.handle.clone();
         let raw_for_call = raw_fqdn.clone();
         let result = tokio::task::spawn_blocking(move || {
-            if let Some(ctx) = query::context_for_symbol_with_neighbors(&handle, &raw_for_call, 1)?
-            {
-                return Ok::<_, standardoc_core::StorageError>(Some(ctx));
-            }
-            if raw_for_call.contains('.') {
-                let normalized = normalize_fqdn(&raw_for_call);
-                if let Some(ctx) =
-                    query::context_for_symbol_with_neighbors(&handle, &normalized, 1)?
-                {
-                    return Ok(Some(ctx));
-                }
-            }
-            Ok(None)
+            resolve_fqdn_fallback(&raw_for_call, |fqdn| {
+                query::context_for_symbol_with_neighbors(&handle, fqdn, 1)
+            })
         })
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
@@ -712,16 +688,9 @@ impl StandardocMcp {
         let raw_for_call = raw_fqdn.clone();
         let opts_clone = opts;
         let result = tokio::task::spawn_blocking(move || {
-            if let Some(slice) = query::body_for_fqdn(&handle, &raw_for_call, &opts_clone)? {
-                return Ok::<_, standardoc_core::StorageError>(Some(slice));
-            }
-            if raw_for_call.contains('.') {
-                let normalized = normalize_fqdn(&raw_for_call);
-                if let Some(slice) = query::body_for_fqdn(&handle, &normalized, &opts_clone)? {
-                    return Ok(Some(slice));
-                }
-            }
-            Ok(None)
+            resolve_fqdn_fallback(&raw_for_call, |fqdn| {
+                query::body_for_fqdn(&handle, fqdn, &opts_clone)
+            })
         })
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
@@ -766,16 +735,9 @@ impl StandardocMcp {
         let raw_for_call = raw_fqdn.clone();
         let opts_clone = opts;
         let result = tokio::task::spawn_blocking(move || {
-            if let Some(slice) = query::body_for_fqdn(&handle, &raw_for_call, &opts_clone)? {
-                return Ok::<_, standardoc_core::StorageError>(Some(slice));
-            }
-            if raw_for_call.contains('.') {
-                let normalized = normalize_fqdn(&raw_for_call);
-                if let Some(slice) = query::body_for_fqdn(&handle, &normalized, &opts_clone)? {
-                    return Ok(Some(slice));
-                }
-            }
-            Ok(None)
+            resolve_fqdn_fallback(&raw_for_call, |fqdn| {
+                query::body_for_fqdn(&handle, fqdn, &opts_clone)
+            })
         })
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?

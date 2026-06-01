@@ -344,10 +344,10 @@ async fn find_symbol_returns_empty_results_for_blank_query() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_str(&body_text(&result)).unwrap();
     assert!(
-        json["results"].as_array().is_some_and(|a| a.is_empty()),
+        json["results"].as_array().is_some_and(Vec::is_empty),
         "blank query must short-circuit to empty `results`, got `{json}`"
     );
-    assert!(json["did_you_mean"].as_array().is_some_and(|a| a.is_empty()));
+    assert!(json["did_you_mean"].as_array().is_some_and(Vec::is_empty));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -368,8 +368,8 @@ async fn find_symbols_by_pattern_returns_empty_results_for_blank_pattern() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_str(&body_text(&result)).unwrap();
-    assert!(json["results"].as_array().is_some_and(|a| a.is_empty()));
-    assert!(json["did_you_mean"].as_array().is_some_and(|a| a.is_empty()));
+    assert!(json["results"].as_array().is_some_and(Vec::is_empty));
+    assert!(json["did_you_mean"].as_array().is_some_and(Vec::is_empty));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -407,7 +407,7 @@ async fn find_similar_symbols_blank_reference_returns_empty_results() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_str(&body_text(&result)).unwrap();
-    assert!(json["results"].as_array().is_some_and(|a| a.is_empty()));
+    assert!(json["results"].as_array().is_some_and(Vec::is_empty));
 }
 
 #[tokio::test(flavor = "multi_thread")]
