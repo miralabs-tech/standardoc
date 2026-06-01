@@ -9,7 +9,7 @@ members = ["crates/*"]
 exclude = [".projects/*", "vendor/*"]
 
 [workspace.package]
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 edition = "2024"
 license = "LicenseRef-FSL-1.1-MIT"
 repository = "https://github.com/miralabs-tech/standardoc"
@@ -20,13 +20,13 @@ rust-version = "1.95"
 # External deps (blake3, notify, syn, swc_*, wasmtime, ...) get pinned here as
 # each subject starts consuming them — no spec deps day-1.
 [workspace.dependencies]
-standardoc-ir            = { version = "1.0.0-beta.2", path = "crates/standardoc-ir" }
-standardoc-bridge-sdk    = { version = "1.0.0-beta.2", path = "crates/standardoc-bridge-sdk" }
-standardoc-lang-provider = { version = "1.0.0-beta.2", path = "crates/standardoc-lang-provider" }
-standardoc-core          = { version = "1.0.0-beta.2", path = "crates/standardoc-core" }
-standardoc-server        = { version = "1.0.0-beta.2", path = "crates/standardoc-server" }
-standardoc-graph-viz     = { version = "1.0.0-beta.2", path = "crates/standardoc-graph-viz" }
-standardoc-mcp-proxy     = { version = "1.0.0-beta.2", path = "crates/standardoc-mcp-proxy" }
+standardoc-ir            = { version = "1.0.0-beta.3", path = "crates/standardoc-ir" }
+standardoc-bridge-sdk    = { version = "1.0.0-beta.3", path = "crates/standardoc-bridge-sdk" }
+standardoc-lang-provider = { version = "1.0.0-beta.3", path = "crates/standardoc-lang-provider" }
+standardoc-core          = { version = "1.0.0-beta.3", path = "crates/standardoc-core" }
+standardoc-server        = { version = "1.0.0-beta.3", path = "crates/standardoc-server" }
+standardoc-graph-viz     = { version = "1.0.0-beta.3", path = "crates/standardoc-graph-viz" }
+standardoc-mcp-proxy     = { version = "1.0.0-beta.3", path = "crates/standardoc-mcp-proxy" }
 # Versioned independently of the core workspace per SOURCEMAP_v1.md §8 —
 # protocol semver tracks the wire format, not the standardoc release train.
 standardoc-sourcemap     = { version = "1.0.0", path = "crates/standardoc-sourcemap" }

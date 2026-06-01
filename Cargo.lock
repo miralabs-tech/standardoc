@@ -3168,11 +3168,11 @@ dependencies = [
 
 [[package]]
 name = "standardoc-bridge-sdk"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 
 [[package]]
 name = "standardoc-cli"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -3197,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "standardoc-core"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "bincode",
  "blake3",
@@ -3224,7 +3224,7 @@ dependencies = [
 
 [[package]]
 name = "standardoc-graph-viz"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "bytemuck",
  "console_error_panic_hook",
@@ -3243,7 +3243,7 @@ dependencies = [
 
 [[package]]
 name = "standardoc-ir"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -3251,7 +3251,7 @@ dependencies = [
 
 [[package]]
 name = "standardoc-lang-provider"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "blake3",
  "full_moon",
@@ -3269,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "standardoc-mcp-proxy"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "axum",
  "blake3",
@@ -3287,7 +3287,7 @@ dependencies = [
 
 [[package]]
 name = "standardoc-server"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "async-trait",
  "axum",
