@@ -469,9 +469,10 @@ fn pre_tool_hook_decide(mode: &str, raw_payload: &str, sentinel: &Path) -> Strin
         "check" => {
             // Scope the guardrail to the workspace: a Read/Grep/Glob aimed at
             // an absolute path OUTSIDE the project (e.g. `~/.claude` memory,
-            // a sibling repo) is not code exploration of THIS workspace, so
-            // never gate it behind an MCP call.
-            if targets_outside_workspace(&payload) {
+            // a sibling repo) is not code exploration of THIS workspace, and a
+            // Read of a file Standardoc does not index (docs, config, data) can
+            // never be answered by an MCP tool — gating either is pure friction.
+            if targets_outside_workspace(&payload) || targets_non_source_file(&payload) {
                 return "{}".to_string();
             }
             if sentinel.exists() {
@@ -533,6 +534,50 @@ fn targets_outside_workspace(payload: &serde_json::Value) -> bool {
     let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
     let cwd_n = norm(cwd);
     !cwd_n.is_empty() && !norm(target).starts_with(&cwd_n)
+}
+
+/// True when the inbound tool is a `Read` of a file Standardoc does not index
+/// as code — docs (`.md`), config / data (`.json`, `.yml`, `.toml`, `tsconfig`,
+/// lockfiles), or extensionless files (`LICENSE`, `Makefile`, `.gitignore`).
+/// The MCP-first guardrail steers CODE exploration toward the index; a file the
+/// index never sees can't be answered by an MCP tool, so gating it is pure
+/// friction.
+///
+/// Conservative, like `targets_outside_workspace`: only `Read` with a known
+/// `file_path`, and any source-looking extension returns `false` so the
+/// guardrail still fires. The source set errs generous — keeping the gate on a
+/// doubtful extension is the safe direction.
+fn targets_non_source_file(payload: &serde_json::Value) -> bool {
+    // Extensions Standardoc's extractors index as code (Rust / TS-JS / Lua / C,
+    // plus C++ cousins). Generous on purpose: erring toward "is source" keeps
+    // the guardrail firing.
+    const SOURCE_EXTS: &[&str] = &[
+        "rs", "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "lua", "c", "h", "cpp", "cc",
+        "cxx", "hpp", "hh",
+    ];
+    let tool = payload
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if tool != "Read" {
+        return false;
+    }
+    let Some(target) = payload
+        .get("tool_input")
+        .and_then(|i| i.get("file_path"))
+        .and_then(|v| v.as_str())
+    else {
+        return false;
+    };
+    match Path::new(target)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+    {
+        // Extensionless reads (LICENSE, Makefile, .gitignore) are never code.
+        None => true,
+        Some(ext) => !SOURCE_EXTS.contains(&ext.as_str()),
+    }
 }
 
 fn cmd_schema_version(path: &Path) -> Result<(), ServerError> {

@@ -321,6 +321,36 @@ pub(super) fn search_envelope<T: Serialize>(
     }))
 }
 
+/// Lean envelope for `find_symbols_by_pattern` when the match set is broad —
+/// one compact row per symbol (`name` / `fqdn` / `kind` / `visibility` /
+/// `location`) instead of the full RawSymbol, so a wide glob can't blow the
+/// response up to tens of thousands of chars. Carries `count` + `mode` so the
+/// caller knows it's a projection and can re-run with `summary:false`.
+pub(super) fn summary_envelope(results: &[RawSymbol]) -> CallToolResult {
+    let rows: Vec<serde_json::Value> = results
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "fqdn": s.fqdn,
+                "kind": s.kind,
+                "visibility": s.visibility,
+                "location": {
+                    "file": s.location.file,
+                    "line": s.location.start_line,
+                },
+            })
+        })
+        .collect();
+    success_json(&serde_json::json!({
+        "results": rows,
+        "count": rows.len(),
+        "mode": "summary",
+        "hint": "Lean rows. Pass summary:false for full RawSymbol records, or narrow the pattern.",
+        "did_you_mean": [],
+    }))
+}
+
 /// Uniform "no symbol for this FQDN" reply for the FQDN-keyed tools
 /// (`get_context`, `get_context_summary`, `get_body`, `get_code`). A JSON
 /// `null` — the contract their descriptions already promise, and the shape

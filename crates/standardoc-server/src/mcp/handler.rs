@@ -54,6 +54,10 @@ pub use params::*;
 
 pub(super) const FIND_SYMBOL_DEFAULT_LIMIT: u8 = 20;
 pub(super) const FIND_SYMBOL_MAX_LIMIT: u8 = 100;
+/// Above this many matches, `find_symbols_by_pattern` auto-switches to the
+/// lean `summary_envelope` unless the caller forced `summary: false` — a broad
+/// glob otherwise serialises full RawSymbol records and can exceed 50k chars.
+pub(super) const SUMMARY_AUTO_THRESHOLD: usize = 25;
 /// Similarity floor for the `did_you_mean` suggestion bundle attached to
 /// empty `find_symbol` / `find_symbols_by_pattern` results. Lower than
 /// `find_similar_symbols`'s default 0.8 because the caller has already
@@ -154,7 +158,7 @@ impl StandardocMcp {
     /// recent depth=1 scoping pass — an in-band nudge to follow the
     /// explore→cible→drill protocol.
     #[tool(
-        description = "Aggregate context for a symbol identified by its fully-qualified name (FQDN). Returns the symbol's signature, descriptions, and four pre-grouped neighbor lists (callers, callees, imports, imported_by).\n\n**Pick `depth` deliberately:** `depth=1` returns neighbor FQDNs only — cheap, the right call to map a symbol's neighborhood. `depth=2` enriches each resolved neighbor with its full RawSymbol — only worth it when you have already used a depth=1 pass to identify which neighbors matter. Hard-clamped to 1..=2. The response carries `routing_hint` when a depth=2 call is detected without a prior depth=1 on the same FQDN within the last 5 minutes — that's a signal to map first, drill second."
+        description = "Aggregate context for a symbol identified by its fully-qualified name (FQDN). Returns the symbol's signature, descriptions, and pre-grouped neighbor lists (callers, callees, imports, imported_by, dependents, depends_on, tests).\n\n**Pick `depth` deliberately:** `depth=1` returns neighbor FQDNs only — cheap, the right call to map a symbol's neighborhood. `depth=2` enriches each resolved neighbor with its full RawSymbol — only worth it when you have already used a depth=1 pass to identify which neighbors matter. Hard-clamped to 1..=2. The response carries `routing_hint` when a depth=2 call is detected without a prior depth=1 on the same FQDN within the last 5 minutes — that's a signal to map first, drill second.\n\n**Dead-code judgment:** `callers` holds RESOLVED `CALLS` edges only and MISSES cross-crate / unresolved calls — never conclude a symbol is dead from an empty `callers`. At `depth>=2` on callables the response also carries `textual_callers`: a name-contains sweep of call sites the resolver couldn't bind, deduped by caller FQDN. Read `callers` ∪ `textual_callers` together to judge whether a symbol is truly unused."
     )]
     async fn get_context(
         &self,
@@ -541,7 +545,7 @@ impl StandardocMcp {
     /// Combine with the same filters as `find_symbol` to scope the
     /// search.
     #[tool(
-        description = "Glob-pattern search over symbol names and FQDNs (SQLite GLOB: `*`, `?`, `[abc]`, case-sensitive). A symbol matches when either its name or its fqdn satisfies the pattern. Always returns `{results: [...], did_you_mean: [...]}`. Use this to detect cross-module duplications (e.g. `strip_*_extension` to catch every `strip_<lang>_extension` helper). Optional filters: `kind`, `visibility`, `module` — same semantics as `find_symbol`. On a zero-hit pattern, `did_you_mean` runs strsim on the pattern's core (wildcards stripped) — useful for typos like `*to_token_string*` → `to_token_stream`."
+        description = "Glob-pattern search over symbol names and FQDNs (SQLite GLOB: `*`, `?`, `[abc]`, case-sensitive). A symbol matches when either its name or its fqdn satisfies the pattern. Returns `{results: [...], did_you_mean: [...]}`. Use this to detect cross-module duplications (e.g. `strip_*_extension` to catch every `strip_<lang>_extension` helper). Optional filters: `kind`, `visibility`, `module` — same semantics as `find_symbol`. On a zero-hit pattern, `did_you_mean` runs strsim on the pattern's core (wildcards stripped) — useful for typos like `*to_token_string*` → `to_token_stream`. Broad patterns auto-degrade to lean rows (`{results: [{name, fqdn, kind, visibility, location}], count, mode: \"summary\"}`) above 25 matches so a wide glob can't blow up the response — pass `summary: false` to force full records, `summary: true` to force lean."
     )]
     async fn find_symbols_by_pattern(
         &self,
@@ -584,6 +588,13 @@ impl StandardocMcp {
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
         let result = apply_exclude_tests(result, params.exclude_tests.unwrap_or(false));
+
+        let use_summary = params
+            .summary
+            .unwrap_or(result.len() > SUMMARY_AUTO_THRESHOLD);
+        if use_summary && !result.is_empty() {
+            return Ok(summary_envelope(&result));
+        }
 
         let suggestions = if result.is_empty() {
             let core = glob_core_text(&trimmed);

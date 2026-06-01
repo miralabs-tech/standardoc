@@ -227,6 +227,13 @@ pub(crate) struct FindSymbolsByPatternParams {
     /// Defaults to the primary workspace.
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// Optional — return lean rows (`name` / `fqdn` / `kind` /
+    /// `visibility` / `location`) instead of full RawSymbol records.
+    /// Auto-engages above `SUMMARY_AUTO_THRESHOLD` matches so a broad
+    /// glob can't blow the response up to tens of thousands of chars.
+    /// Pass `false` to force full records, `true` to force lean.
+    #[serde(default)]
+    pub summary: Option<bool>,
 }
 
 /// Tool input — `find_call_sites(from_fqdn?, callee_text?, callee_pattern?, limit?)`.

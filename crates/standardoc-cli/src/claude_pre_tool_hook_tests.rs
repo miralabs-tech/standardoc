@@ -138,6 +138,67 @@ fn check_gates_bash_regardless_of_path() {
 }
 
 #[test]
+fn check_allows_read_of_non_source_file_inside_workspace() {
+    // Reading a doc/config/data file Standardoc never indexes (.md/.json/.yml/
+    // .toml…) must not be gated even inside the workspace — MCP cannot answer it.
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp); // absent
+    let cwd = std::env::temp_dir().join("ws-root");
+    for name in [
+        "README.md",
+        "package.json",
+        "ci.yml",
+        "Cargo.toml",
+        "tsconfig.json",
+    ] {
+        let inside = cwd.join(name);
+        let payload = serde_json::json!({
+            "cwd": cwd.to_string_lossy(),
+            "tool_name": "Read",
+            "tool_input": { "file_path": inside.to_string_lossy() },
+        })
+        .to_string();
+        let out = pre_tool_hook_decide("check", &payload, &sentinel);
+        assert_eq!(out, "{}", "non-source read must be allowed: {name}");
+    }
+}
+
+#[test]
+fn check_allows_read_of_extensionless_file() {
+    // LICENSE / Makefile / .gitignore have no source extension → not code.
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp); // absent
+    let cwd = std::env::temp_dir().join("ws-root");
+    let inside = cwd.join("LICENSE");
+    let payload = serde_json::json!({
+        "cwd": cwd.to_string_lossy(),
+        "tool_name": "Read",
+        "tool_input": { "file_path": inside.to_string_lossy() },
+    })
+    .to_string();
+    let out = pre_tool_hook_decide("check", &payload, &sentinel);
+    assert_eq!(out, "{}", "extensionless read must be allowed");
+}
+
+#[test]
+fn check_still_gates_grep_on_non_source_target() {
+    // The non-source exemption is Read-only; Grep/Glob search trees and stay
+    // gated toward MCP even when pointed at a .md path.
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp); // absent
+    let cwd = std::env::temp_dir().join("ws-root");
+    let inside = cwd.join("notes.md");
+    let payload = serde_json::json!({
+        "cwd": cwd.to_string_lossy(),
+        "tool_name": "Grep",
+        "tool_input": { "path": inside.to_string_lossy() },
+    })
+    .to_string();
+    let out = pre_tool_hook_decide("check", &payload, &sentinel);
+    assert!(out.contains(r#""permissionDecision":"deny""#), "out={out}");
+}
+
+#[test]
 fn reset_removes_sentinel() {
     let tmp = TempDir::new().unwrap();
     let sentinel = sentinel_in(&tmp);

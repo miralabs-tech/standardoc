@@ -164,6 +164,70 @@ fn find_call_sites_limit_clamps_to_max() {
 }
 
 #[test]
+fn callers_textual_matches_name_contains_across_callee_shapes() {
+    let (_d, h) = fresh_handle();
+    seed_file(&h, "src/a.rs");
+    // Path-form, method-form and bare-ident calls all mention `find_by_pattern`.
+    insert(
+        &h,
+        "src/a.rs",
+        &cs("c::a", "query::find_by_pattern", "src/a.rs", 1),
+    );
+    insert(
+        &h,
+        "src/a.rs",
+        &cs("c::b", "self.find_by_pattern", "src/a.rs", 2),
+    );
+    insert(&h, "src/a.rs", &cs("c::c", "unrelated_call", "src/a.rs", 3));
+    let rows = callers_textual_for_name(&h, "find_by_pattern", &HashSet::new(), 25).unwrap();
+    assert_eq!(rows.len(), 2, "both name-mentioning callers surface");
+    assert!(
+        rows.iter()
+            .all(|r| r.callee_text.contains("find_by_pattern"))
+    );
+}
+
+#[test]
+fn callers_textual_dedups_by_caller_and_excludes_resolved_and_self() {
+    let (_d, h) = fresh_handle();
+    seed_file(&h, "src/a.rs");
+    // c::a calls `foo` twice → one row. c::resolved is already a resolved edge.
+    // c::target is the symbol itself (recursion).
+    insert(&h, "src/a.rs", &cs("c::a", "foo", "src/a.rs", 1));
+    insert(&h, "src/a.rs", &cs("c::a", "obj.foo", "src/a.rs", 2));
+    insert(&h, "src/a.rs", &cs("c::resolved", "foo", "src/a.rs", 3));
+    insert(&h, "src/a.rs", &cs("c::target", "foo", "src/a.rs", 4));
+    let mut exclude = HashSet::new();
+    exclude.insert("c::resolved".to_string());
+    exclude.insert("c::target".to_string());
+    let rows = callers_textual_for_name(&h, "foo", &exclude, 25).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "deduped to one row per caller, exclusions dropped"
+    );
+    assert_eq!(rows[0].from_fqdn, "c::a");
+}
+
+#[test]
+fn callers_textual_empty_name_or_zero_limit_short_circuits() {
+    let (_d, h) = fresh_handle();
+    seed_file(&h, "src/a.rs");
+    insert(&h, "src/a.rs", &cs("c::a", "foo", "src/a.rs", 1));
+    let ex = HashSet::new();
+    assert!(
+        callers_textual_for_name(&h, "   ", &ex, 25)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        callers_textual_for_name(&h, "foo", &ex, 0)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn hydrate_round_trips_args_and_receiver_chain_through_json() {
     let (_d, h) = fresh_handle();
     seed_file(&h, "src/a.rs");

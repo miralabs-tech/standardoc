@@ -228,6 +228,7 @@ async fn find_symbols_by_pattern_returns_indexing_in_progress_when_not_ready() {
             include_external: None,
             exclude_tests: None,
             workspace_id: None,
+            summary: None,
         }))
         .await
         .expect("tool returns Ok with friendly degradation");
@@ -364,6 +365,7 @@ async fn find_symbols_by_pattern_returns_empty_results_for_blank_pattern() {
             include_external: None,
             exclude_tests: None,
             workspace_id: None,
+            summary: None,
         }))
         .await
         .unwrap();

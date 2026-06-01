@@ -100,6 +100,13 @@ pub struct NeighborSymbol {
 ///   matches a test naming convention (contains `::tests::`, `::test::`,
 ///   or ends in `_test` / `_tests`). Coarse heuristic; treats false
 ///   positives as acceptable noise.
+/// - `textual_callers` — dead-code-trust augmentation for `callers`. Call
+///   sites whose callee text mentions this symbol's name but that the
+///   resolver could not bind to a `CALLS` edge (cross-crate / unresolved).
+///   `callers` alone misses those, so a symbol can look falsely dead; this
+///   recovers them via a name-contains sweep, deduped by caller FQDN against
+///   `callers` and the symbol's own recursion. Populated only at `depth >= 2`
+///   for callables. Heuristic — read it together with `callers`, not alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolContextWithNeighbors {
     pub context: SymbolContext,
@@ -113,6 +120,8 @@ pub struct SymbolContextWithNeighbors {
     pub depends_on: Vec<NeighborSymbol>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tests: Vec<NeighborSymbol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub textual_callers: Vec<call_sites::CallSiteRow>,
 }
 
 fn with_conn<F, R>(handle: &IndexHandle, f: F) -> Result<R, StorageError>
@@ -738,6 +747,32 @@ pub fn context_for_symbol_with_neighbors(
         .cloned()
         .collect();
 
+    // Dead-code-trust augmentation: the resolved `callers` above are `CALLS`
+    // edges only and miss cross-crate / unresolved calls, so a symbol with real
+    // textual callers can look falsely dead. Recover them with a name-contains
+    // sweep over `call_sites`, deduped against the resolved callers and the
+    // symbol's own recursion. Only at the rich shape (`depth >= 2`, the
+    // reasoning view) and only for callables — a name sweep over a type/value/
+    // module name is mostly noise, and depth=1 must stay cheap for mapping.
+    let textual_callers = if depth >= 2 && context.symbol.kind == Kind::Callable {
+        let mut exclude: std::collections::HashSet<String> = callers
+            .iter()
+            .filter_map(|n| match &n.target {
+                ResolvedOrUnresolved::Resolved { fqdn } => Some(fqdn.clone()),
+                _ => None,
+            })
+            .collect();
+        exclude.insert(context.symbol.fqdn.clone());
+        call_sites::callers_textual_for_name(
+            handle,
+            &context.symbol.name,
+            &exclude,
+            call_sites::TEXTUAL_CALLERS_CAP,
+        )?
+    } else {
+        Vec::new()
+    };
+
     Ok(Some(SymbolContextWithNeighbors {
         context,
         callers,
@@ -747,6 +782,7 @@ pub fn context_for_symbol_with_neighbors(
         dependents,
         depends_on,
         tests,
+        textual_callers,
     }))
 }
 

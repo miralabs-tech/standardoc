@@ -2112,3 +2112,110 @@ fn symbol_filter_effective_workspace_id_defaults_to_primary() {
     };
     assert_eq!(explicit.effective_workspace_id(), "abc");
 }
+
+fn seed_textual_call(conn: &Connection, from: &str, callee: &str) {
+    let site = standardoc_ir::RawCallSite {
+        from_fqdn: from.into(),
+        callee_text: callee.into(),
+        args: vec![],
+        receiver_chain: vec![],
+        site: Site {
+            file: "src/main.rs".into(),
+            line: 9,
+            col: 0,
+        },
+    };
+    crate::storage::call_sites::insert_call_site(conn, "src/main.rs", &site).unwrap();
+}
+
+#[test]
+fn context_textual_callers_recovers_unresolved_caller_at_depth_two() {
+    let (_dir, handle) = open_handle();
+    {
+        let conn = handle.pool().unwrap().get().unwrap();
+        seed_file(&conn, "src/main.rs");
+        // Callable target with NO resolved CALLS edge pointing at it.
+        seed_symbol(&conn, "src/main.rs", "widget", "crate::widget", 1);
+        // A cross-crate-style textual call the resolver never bound to an edge.
+        seed_textual_call(&conn, "other::caller", "crate::widget");
+    }
+    let d1 = context_for_symbol_with_neighbors(&handle, "crate::widget", 1)
+        .unwrap()
+        .unwrap();
+    assert!(d1.callers.is_empty(), "no resolved CALLS edge");
+    assert!(
+        d1.textual_callers.is_empty(),
+        "depth=1 stays cheap — no textual sweep"
+    );
+
+    let d2 = context_for_symbol_with_neighbors(&handle, "crate::widget", 2)
+        .unwrap()
+        .unwrap();
+    assert!(d2.callers.is_empty(), "still no resolved edge");
+    assert_eq!(
+        d2.textual_callers.len(),
+        1,
+        "depth=2 textual sweep recovers the unresolved caller"
+    );
+    assert_eq!(d2.textual_callers[0].from_fqdn, "other::caller");
+}
+
+#[test]
+fn context_textual_callers_excludes_resolved_callers_and_self() {
+    let (_dir, handle) = open_handle();
+    {
+        let conn = handle.pool().unwrap().get().unwrap();
+        seed_file(&conn, "src/main.rs");
+        seed_symbol(&conn, "src/main.rs", "widget", "crate::widget", 1);
+        let (caller_id, _) = seed_symbol(&conn, "src/main.rs", "caller", "crate::caller", 30);
+        seed_call_edge(
+            &conn,
+            caller_id,
+            "crate::caller",
+            ResolvedOrUnresolved::Resolved {
+                fqdn: "crate::widget".into(),
+            },
+        );
+        // crate::caller is already a resolved edge; crate::widget is self
+        // (recursion). Only other::x is a genuinely missing caller.
+        seed_textual_call(&conn, "crate::caller", "widget");
+        seed_textual_call(&conn, "crate::widget", "widget");
+        seed_textual_call(&conn, "other::x", "crate::widget");
+    }
+    let ctx = context_for_symbol_with_neighbors(&handle, "crate::widget", 2)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ctx.callers.len(), 1, "resolved caller present");
+    assert_eq!(
+        ctx.textual_callers.len(),
+        1,
+        "resolved caller + self excluded from the textual sweep"
+    );
+    assert_eq!(ctx.textual_callers[0].from_fqdn, "other::x");
+}
+
+#[test]
+fn context_textual_callers_skips_non_callable_symbols() {
+    let (_dir, handle) = open_handle();
+    {
+        let conn = handle.pool().unwrap().get().unwrap();
+        seed_file(&conn, "src/main.rs");
+        seed_symbol_full(
+            &conn,
+            "src/main.rs",
+            "Widget",
+            "crate::Widget",
+            Kind::Type,
+            Visibility::Public,
+            None,
+        );
+        seed_textual_call(&conn, "other::x", "crate::Widget");
+    }
+    let ctx = context_for_symbol_with_neighbors(&handle, "crate::Widget", 2)
+        .unwrap()
+        .unwrap();
+    assert!(
+        ctx.textual_callers.is_empty(),
+        "a name sweep over a type name is noise — callables only"
+    );
+}

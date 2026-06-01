@@ -16,6 +16,8 @@
 //! recent N call_sites workspace-wide (LIMIT cap), useful for ops /
 //! debugging dashboards.
 
+use std::collections::HashSet;
+
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use standardoc_ir::{RawCallArg, RawCallSite, Site};
@@ -78,6 +80,54 @@ pub fn find_call_sites(
     let pool = handle.pool()?;
     let conn = pool.get()?;
     find_call_sites_conn(&conn, filters, limit)
+}
+
+/// Hard cap on the textual-caller augmentation `get_context` attaches for its
+/// dead-code-trust signal. The list answers "is this REALLY dead?" — a single
+/// hit already says "no" — so a tight cap keeps the response small even for
+/// common names (`new`, `get`) that match thousands of call sites.
+pub const TEXTUAL_CALLERS_CAP: u32 = 25;
+
+/// Call sites whose callee text mentions `name`, deduped to one row per caller
+/// FQDN — the dead-code-trust augmentation of `get_context`'s `callers`.
+///
+/// The resolver-graph `callers` are RESOLVED `CALLS` edges only and miss
+/// cross-crate / unresolved calls entirely, so a symbol with real textual
+/// callers can look falsely dead (cf. the `find_call_sites` dead-code lesson).
+/// This recovers them with a name-contains sweep (SQLite GLOB `*name*`),
+/// deliberately loose: a false positive (keeping a symbol from looking dead)
+/// errs in the safe direction. `exclude_fqdns` drops callers already covered by
+/// a resolved edge and the symbol's own recursive sites; the result is capped
+/// at `limit` distinct caller FQDNs.
+pub fn callers_textual_for_name<S: std::hash::BuildHasher>(
+    handle: &IndexHandle,
+    name: &str,
+    exclude_fqdns: &HashSet<String, S>,
+    limit: u32,
+) -> Result<Vec<CallSiteRow>, StorageError> {
+    let name = name.trim();
+    if name.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let filters = CallSiteFilters {
+        callee_pattern: Some(format!("*{name}*")),
+        ..Default::default()
+    };
+    // Over-fetch to the hard ceiling so per-caller dedup + exclusion still
+    // yields up to `limit` distinct rows.
+    let raw = find_call_sites(handle, &filters, FIND_CALL_SITES_MAX_LIMIT)?;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for row in raw {
+        if exclude_fqdns.contains(&row.from_fqdn) || !seen.insert(row.from_fqdn.clone()) {
+            continue;
+        }
+        out.push(row);
+        if out.len() >= limit as usize {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 fn find_call_sites_conn(
