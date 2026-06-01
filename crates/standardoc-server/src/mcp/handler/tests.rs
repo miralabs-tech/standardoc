@@ -307,7 +307,7 @@ fn parse_filter_propagates_include_external_false() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn get_context_returns_no_symbol_message_when_fqdn_unknown() {
+async fn get_context_returns_null_when_fqdn_unknown() {
     let (dir, mcp) = fixture();
     cold_start_workspace(&mcp, dir.path());
     let result = mcp
@@ -318,14 +318,15 @@ async fn get_context_returns_no_symbol_message_when_fqdn_unknown() {
         .await
         .unwrap();
     let text = body_text(&result);
-    assert!(
-        text.contains("no symbol found"),
-        "expected `no symbol found` message, got `{text}`"
+    assert_eq!(
+        text.trim(),
+        "null",
+        "unknown FQDN must return JSON null, got `{text}`"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn find_symbol_returns_empty_array_for_blank_query() {
+async fn find_symbol_returns_empty_results_for_blank_query() {
     let (dir, mcp) = fixture();
     cold_start_workspace(&mcp, dir.path());
     let result = mcp
@@ -341,15 +342,16 @@ async fn find_symbol_returns_empty_array_for_blank_query() {
         }))
         .await
         .unwrap();
-    let text = body_text(&result);
+    let json: serde_json::Value = serde_json::from_str(&body_text(&result)).unwrap();
     assert!(
-        text.trim() == "[]",
-        "blank query must short-circuit to empty JSON array, got `{text}`"
+        json["results"].as_array().is_some_and(|a| a.is_empty()),
+        "blank query must short-circuit to empty `results`, got `{json}`"
     );
+    assert!(json["did_you_mean"].as_array().is_some_and(|a| a.is_empty()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn find_symbols_by_pattern_returns_empty_array_for_blank_pattern() {
+async fn find_symbols_by_pattern_returns_empty_results_for_blank_pattern() {
     let (dir, mcp) = fixture();
     cold_start_workspace(&mcp, dir.path());
     let result = mcp
@@ -365,7 +367,9 @@ async fn find_symbols_by_pattern_returns_empty_array_for_blank_pattern() {
         }))
         .await
         .unwrap();
-    assert_eq!(body_text(&result).trim(), "[]");
+    let json: serde_json::Value = serde_json::from_str(&body_text(&result)).unwrap();
+    assert!(json["results"].as_array().is_some_and(|a| a.is_empty()));
+    assert!(json["did_you_mean"].as_array().is_some_and(|a| a.is_empty()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -387,7 +391,7 @@ async fn find_similar_symbols_returns_indexing_in_progress_when_not_ready() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn find_similar_symbols_blank_reference_returns_empty_array() {
+async fn find_similar_symbols_blank_reference_returns_empty_results() {
     let (dir, mcp) = fixture();
     cold_start_workspace(&mcp, dir.path());
     let result = mcp
@@ -402,7 +406,8 @@ async fn find_similar_symbols_blank_reference_returns_empty_array() {
         }))
         .await
         .unwrap();
-    assert_eq!(body_text(&result).trim(), "[]");
+    let json: serde_json::Value = serde_json::from_str(&body_text(&result)).unwrap();
+    assert!(json["results"].as_array().is_some_and(|a| a.is_empty()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -656,7 +661,7 @@ async fn record_recent_depth_one_evicts_entries_older_than_retention() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn get_body_returns_no_symbol_message_when_fqdn_unknown() {
+async fn get_body_returns_null_when_fqdn_unknown() {
     let (dir, mcp) = fixture();
     cold_start_workspace(&mcp, dir.path());
     let result = mcp
@@ -669,7 +674,7 @@ async fn get_body_returns_no_symbol_message_when_fqdn_unknown() {
         }))
         .await
         .unwrap();
-    assert!(body_text(&result).contains("no symbol found"));
+    assert_eq!(body_text(&result).trim(), "null");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1536,7 +1541,7 @@ async fn find_call_sites_no_filter_returns_all_extracted_rows() {
     // 4 calls in the fixture: caller_a→tauri_invoke, caller_a→foo,
     // caller_b→tauri_invoke, caller_c→M.api.create.
     assert_eq!(
-        arr.as_array().unwrap().len(),
+        arr["call_sites"].as_array().unwrap().len(),
         4,
         "expected 4 extracted call_sites, got `{body}`"
     );
@@ -1558,7 +1563,7 @@ async fn find_call_sites_filter_by_callee_text_narrows_to_matching_records() {
         .unwrap();
     let body = body_text(&result);
     let arr: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let rows = arr.as_array().unwrap();
+    let rows = arr["call_sites"].as_array().unwrap();
     assert_eq!(
         rows.len(),
         2,
@@ -1587,7 +1592,7 @@ async fn find_call_sites_filter_by_from_fqdn_returns_calls_of_one_caller() {
         .unwrap();
     let body = body_text(&result);
     let arr: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let rows = arr.as_array().unwrap();
+    let rows = arr["call_sites"].as_array().unwrap();
     assert_eq!(
         rows.len(),
         2,
@@ -1615,7 +1620,7 @@ async fn find_call_sites_filter_by_callee_pattern_matches_glob() {
         .unwrap();
     let body = body_text(&result);
     let arr: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let rows = arr.as_array().unwrap();
+    let rows = arr["call_sites"].as_array().unwrap();
     assert_eq!(rows.len(), 1, "only M.api.create matches the glob");
     assert_eq!(rows[0]["callee_text"].as_str(), Some("M.api.create"));
 }
@@ -1640,7 +1645,7 @@ async fn find_call_sites_empty_string_filter_treated_as_unset() {
     let body = body_text(&result);
     let arr: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
-        arr.as_array().unwrap().len(),
+        arr["call_sites"].as_array().unwrap().len(),
         4,
         "empty / whitespace filters must read as no filter, got `{body}`"
     );

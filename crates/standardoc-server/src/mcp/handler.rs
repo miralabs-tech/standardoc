@@ -160,10 +160,8 @@ impl StandardocMcp {
         &self,
         Parameters(params): Parameters<GetContextParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         // Cache key uses the dot-normalized form so a depth=1 hit on
         // `Foo.bar` and a depth=2 hit on `Foo::bar` route to the same
@@ -223,9 +221,7 @@ impl StandardocMcp {
                 let response = GetContextResponse { ctx, routing_hint };
                 Ok(success_json(&response))
             }
-            None => Ok(CallToolResult::success(vec![Content::text(
-                "no symbol found for the given FQDN",
-            )])),
+            None => Ok(not_found()),
         }
     }
 
@@ -241,10 +237,8 @@ impl StandardocMcp {
         &self,
         Parameters(params): Parameters<GetContextSummaryParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         let raw_fqdn = params.fqdn.clone();
         let handle = self.handle.clone();
@@ -294,9 +288,7 @@ impl StandardocMcp {
                 });
                 Ok(success_json(&summary))
             }
-            None => Ok(CallToolResult::success(vec![Content::text(
-                "no symbol found for the given FQDN",
-            )])),
+            None => Ok(not_found()),
         }
     }
 
@@ -336,6 +328,20 @@ impl StandardocMcp {
         guard.insert(fqdn.to_owned(), now);
     }
 
+    /// Uniform "indexing in progress" short-circuit. Returns `Some(reply)`
+    /// when cold start hasn't flipped `index_ready` yet, so each tool can do
+    /// `if let Some(busy) = self.not_ready() { return Ok(busy); }` instead of
+    /// inlining the same five lines.
+    fn not_ready(&self) -> Option<CallToolResult> {
+        if self.index_ready.load(Ordering::Acquire) {
+            None
+        } else {
+            Some(CallToolResult::success(vec![Content::text(
+                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
+            )]))
+        }
+    }
+
     /// FTS5 search across symbol `name` and `fqdn` columns. Returns ranked
     /// matches as a JSON array of `RawSymbol`. `limit` defaults to 20 and
     /// is server-capped at 100 to keep tool results small. Optional
@@ -343,16 +349,14 @@ impl StandardocMcp {
     /// exact `module` (no wildcards — use `find_symbols_by_pattern` for
     /// glob-style module/name matching).
     #[tool(
-        description = "Full-text search across the workspace index over symbol names and FQDNs. Returns ranked matches as a JSON array. `limit` defaults to 20 and is capped at 100 server-side. Use this to discover symbols when you only know a fragment of the name; follow up with `get_context` to drill into a specific FQDN. Optional filters: `kind` (function/type/value/module/macro), `visibility` (public/private/crate/protected), `module` (exact match on the symbol's module fqdn). When the query returns zero matches, the response switches to `{results: [], did_you_mean: [{fqdn, name, kind, score}, ...]}` with up to 5 strsim-based suggestions (threshold 0.6). One probe is enough — accept the absence rather than trying variant names."
+        description = "Full-text search across the workspace index over symbol names and FQDNs. Always returns the object `{results: [...], did_you_mean: [...]}` — `results` holds the ranked RawSymbol matches, `did_you_mean` the strsim fallbacks (non-empty only when `results` is empty). `limit` defaults to 20 and is capped at 100 server-side. Use this to discover symbols when you only know a fragment of the name; follow up with `get_context` to drill into a specific FQDN. Optional filters: `kind` (function/type/value/module/macro), `visibility` (public/private/crate/protected), `module` (exact match on the symbol's module fqdn). On a zero-hit query, `did_you_mean` carries up to 5 suggestions `[{fqdn, name, kind, score}, ...]` (threshold 0.6). One probe is enough — accept the absence rather than trying variant names."
     )]
     async fn find_symbol(
         &self,
         Parameters(params): Parameters<FindSymbolParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         // Don't normalise the module filter — that turns TS file
         // segments (`profiler.type`, `hud.element`) into nonexistent
@@ -361,7 +365,7 @@ impl StandardocMcp {
 
         let trimmed = params.query.trim().to_owned();
         if trimmed.is_empty() {
-            return Ok(success_json::<Vec<RawSymbol>>(&Vec::new()));
+            return Ok(search_envelope::<RawSymbol>(&[], &[]));
         }
 
         let filter = parse_filter(
@@ -387,26 +391,14 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
-        let result: Vec<RawSymbol> = if params.exclude_tests.unwrap_or(false) {
-            result
-                .into_iter()
-                .filter(|s| !query::symbol_looks_like_test(s))
-                .collect()
+        let result = apply_exclude_tests(result, params.exclude_tests.unwrap_or(false));
+
+        let suggestions = if result.is_empty() {
+            compute_did_you_mean(self.handle.clone(), trimmed, filter).await?
         } else {
-            result
+            Vec::new()
         };
-
-        if result.is_empty() {
-            let suggestions = compute_did_you_mean(self.handle.clone(), trimmed, filter).await?;
-            if !suggestions.is_empty() {
-                return Ok(success_json(&serde_json::json!({
-                    "results": Vec::<RawSymbol>::new(),
-                    "did_you_mean": suggestions,
-                })));
-            }
-        }
-
-        Ok(success_json(&result))
+        Ok(search_envelope(&result, &suggestions))
     }
 
     /// Compact variant of `find_symbol` — returns `{fqdn, kind}` per
@@ -415,20 +407,18 @@ impl StandardocMcp {
     /// or `get_code`. Massive payload reduction on broad queries.
     /// Optional `relative_to` shortens matching FQDNs to `::<rest>`.
     #[tool(
-        description = "FQDN-only variant of `find_symbol`. Returns `[{fqdn, kind}, ...]` ranked by FTS5 — the minimal shape needed to follow up with `get_context` / `get_code`. Same filters and limit semantics as `find_symbol`. When the query returns zero matches, the response switches to `{results: [], did_you_mean: [...]}` — same did-you-mean envelope as `find_symbol`. Use this as your default discovery probe; reach for `find_symbol` only when you actually need the full RawSymbol shape per match. Pass `relative_to = \"foo::bar\"` to collapse matching FQDNs into `::baz::qux` form — kills the prefix repetition that dominates scoped scans."
+        description = "FQDN-only variant of `find_symbol`. Always returns `{results: [{fqdn, kind}, ...], did_you_mean: [...]}` ranked by FTS5 — the minimal shape needed to follow up with `get_context` / `get_code`. Same filters and limit semantics as `find_symbol`; same `did_you_mean` envelope, populated only on a zero-hit query. Use this as your default discovery probe; reach for `find_symbol` only when you actually need the full RawSymbol shape per match. Pass `relative_to = \"foo::bar\"` to collapse matching FQDNs into `::baz::qux` form — kills the prefix repetition that dominates scoped scans."
     )]
     async fn find_symbol_fqdns(
         &self,
         Parameters(params): Parameters<FindSymbolFqdnsParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         let trimmed = params.query.trim().to_owned();
         if trimmed.is_empty() {
-            return Ok(success_json::<Vec<serde_json::Value>>(&Vec::new()));
+            return Ok(search_envelope::<serde_json::Value>(&[], &[]));
         }
 
         let filter = parse_filter(
@@ -454,25 +444,13 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
-        let result: Vec<RawSymbol> = if params.exclude_tests.unwrap_or(false) {
-            result
-                .into_iter()
-                .filter(|s| !query::symbol_looks_like_test(s))
-                .collect()
+        let result = apply_exclude_tests(result, params.exclude_tests.unwrap_or(false));
+
+        let suggestions = if result.is_empty() {
+            compute_did_you_mean(self.handle.clone(), trimmed, filter).await?
         } else {
-            result
+            Vec::new()
         };
-
-        if result.is_empty() {
-            let suggestions = compute_did_you_mean(self.handle.clone(), trimmed, filter).await?;
-            if !suggestions.is_empty() {
-                return Ok(success_json(&serde_json::json!({
-                    "results": Vec::<serde_json::Value>::new(),
-                    "did_you_mean": suggestions,
-                })));
-            }
-        }
-
         let relative_to = params.relative_to.unwrap_or_default();
         let projected: Vec<_> = result
             .into_iter()
@@ -483,7 +461,7 @@ impl StandardocMcp {
                 })
             })
             .collect();
-        Ok(success_json(&projected))
+        Ok(search_envelope(&projected, &suggestions))
     }
 
     /// Filter-only listing — no FTS query, no glob pattern. Returns
@@ -500,10 +478,8 @@ impl StandardocMcp {
         &self,
         Parameters(params): Parameters<ListSymbolsParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         // Don't normalise the module filter — same reason as
         // `find_symbol`: TS file segments carry literal `.` chars.
@@ -525,14 +501,7 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
-        let items: Vec<_> = if params.exclude_tests.unwrap_or(false) {
-            page.items
-                .into_iter()
-                .filter(|s| !query::symbol_looks_like_test(s))
-                .collect()
-        } else {
-            page.items
-        };
+        let items = apply_exclude_tests(page.items, params.exclude_tests.unwrap_or(false));
         let envelope = serde_json::json!({
             "items": items,
             "next_cursor": page.next_cursor,
@@ -552,10 +521,8 @@ impl StandardocMcp {
         &self,
         Parameters(params): Parameters<ListSymbolFqdnsParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         let filter = parse_filter(
             params.kind.as_deref(),
@@ -574,14 +541,7 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
-        let items: Vec<_> = if params.exclude_tests.unwrap_or(false) {
-            page.items
-                .into_iter()
-                .filter(|s| !query::symbol_looks_like_test(s))
-                .collect()
-        } else {
-            page.items
-        };
+        let items = apply_exclude_tests(page.items, params.exclude_tests.unwrap_or(false));
         let relative_to = params.relative_to.unwrap_or_default();
         let projected: Vec<_> = items
             .into_iter()
@@ -605,16 +565,14 @@ impl StandardocMcp {
     /// Combine with the same filters as `find_symbol` to scope the
     /// search.
     #[tool(
-        description = "Glob-pattern search over symbol names and FQDNs (SQLite GLOB: `*`, `?`, `[abc]`, case-sensitive). A symbol matches when either its name or its fqdn satisfies the pattern. Use this to detect cross-module duplications (e.g. `strip_*_extension` to catch every `strip_<lang>_extension` helper). Optional filters: `kind`, `visibility`, `module` — same semantics as `find_symbol`. When the pattern returns zero matches, the response switches to `{results: [], did_you_mean: [...]}` running strsim on the pattern's core (wildcards stripped) — useful for typos like `*to_token_string*` → `to_token_stream`."
+        description = "Glob-pattern search over symbol names and FQDNs (SQLite GLOB: `*`, `?`, `[abc]`, case-sensitive). A symbol matches when either its name or its fqdn satisfies the pattern. Always returns `{results: [...], did_you_mean: [...]}`. Use this to detect cross-module duplications (e.g. `strip_*_extension` to catch every `strip_<lang>_extension` helper). Optional filters: `kind`, `visibility`, `module` — same semantics as `find_symbol`. On a zero-hit pattern, `did_you_mean` runs strsim on the pattern's core (wildcards stripped) — useful for typos like `*to_token_string*` → `to_token_stream`."
     )]
     async fn find_symbols_by_pattern(
         &self,
         Parameters(params): Parameters<FindSymbolsByPatternParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         // Don't normalise the pattern or module filter — TS file
         // segments (`profiler.type`, `hud.element`) embed a literal
@@ -623,7 +581,7 @@ impl StandardocMcp {
         // canonical `::` form here.
         let trimmed = params.pattern.trim().to_owned();
         if trimmed.is_empty() {
-            return Ok(success_json::<Vec<RawSymbol>>(&Vec::new()));
+            return Ok(search_envelope::<RawSymbol>(&[], &[]));
         }
 
         let filter = parse_filter(
@@ -649,29 +607,19 @@ impl StandardocMcp {
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
-        let result: Vec<RawSymbol> = if params.exclude_tests.unwrap_or(false) {
-            result
-                .into_iter()
-                .filter(|s| !query::symbol_looks_like_test(s))
-                .collect()
-        } else {
-            result
-        };
+        let result = apply_exclude_tests(result, params.exclude_tests.unwrap_or(false));
 
-        if result.is_empty() {
+        let suggestions = if result.is_empty() {
             let core = glob_core_text(&trimmed);
-            if !core.is_empty() {
-                let suggestions = compute_did_you_mean(self.handle.clone(), core, filter).await?;
-                if !suggestions.is_empty() {
-                    return Ok(success_json(&serde_json::json!({
-                        "results": Vec::<RawSymbol>::new(),
-                        "did_you_mean": suggestions,
-                    })));
-                }
+            if core.is_empty() {
+                Vec::new()
+            } else {
+                compute_did_you_mean(self.handle.clone(), core, filter).await?
             }
-        }
-
-        Ok(success_json(&result))
+        } else {
+            Vec::new()
+        };
+        Ok(search_envelope(&result, &suggestions))
     }
 
     /// Similarity-scored search around an anchor name. Returns symbols whose
@@ -682,16 +630,14 @@ impl StandardocMcp {
     /// pool bounded). Use this to detect cluster-style duplications without
     /// having to guess a glob pattern.
     #[tool(
-        description = "Similarity-scored search for symbols whose name is close to an anchor `reference`. Returns ranked `[{score, symbol}]` (score in [0,1], descending). Hybrid score = max(jaro_winkler, jaccard_tokens) — captures both typo-style matches (`parseFile` ↔ `parseFiles`) and templated-name clusters (`strip_rs_extension` ↔ `strip_ts_extension` ↔ `strip_lua_extension`). Self-skips the anchor by case-insensitive name. `threshold` defaults to 0.8 in [0.0, 1.0]; `limit` defaults to 20, capped at 100. Comparison runs on `name` only; use `module` filter to scope by module. Optional filters: `kind`, `visibility`, `module`."
+        description = "Similarity-scored search for symbols whose name is close to an anchor `reference`. Returns `{results: [{score, symbol}, ...]}` (score in [0,1], descending). Hybrid score = max(jaro_winkler, jaccard_tokens) — captures both typo-style matches (`parseFile` ↔ `parseFiles`) and templated-name clusters (`strip_rs_extension` ↔ `strip_ts_extension` ↔ `strip_lua_extension`). Self-skips the anchor by case-insensitive name. `threshold` defaults to 0.8 in [0.0, 1.0]; `limit` defaults to 20, capped at 100. Comparison runs on `name` only; use `module` filter to scope by module. Optional filters: `kind`, `visibility`, `module`."
     )]
     async fn find_similar_symbols(
         &self,
         Parameters(params): Parameters<FindSimilarSymbolsParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         // `reference` is a name anchor, not an fqdn — leave it intact.
         // Module filter is left verbatim too: TS file segments carry
@@ -699,7 +645,7 @@ impl StandardocMcp {
 
         let trimmed = params.reference.trim().to_owned();
         if trimmed.is_empty() {
-            return Ok(success_json::<Vec<SimilarSymbolJson>>(&Vec::new()));
+            return Ok(search_envelope::<SimilarSymbolJson>(&[], &[]));
         }
 
         let threshold = parse_threshold(params.threshold)?;
@@ -727,7 +673,7 @@ impl StandardocMcp {
             .into_iter()
             .map(|(symbol, score)| SimilarSymbolJson { score, symbol })
             .collect();
-        Ok(success_json(&envelope))
+        Ok(search_envelope(&envelope, &[]))
     }
 
     /// Returns the raw source text of the symbol identified by `fqdn`. This is
@@ -748,10 +694,8 @@ impl StandardocMcp {
         &self,
         Parameters(params): Parameters<GetBodyParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         // Try raw FQDN first (preserves TS file segments like
         // `profiler.type`), fall back to OOP-normalized form for LLM
@@ -785,9 +729,7 @@ impl StandardocMcp {
 
         match result {
             Some(slice) => Ok(success_json(&slice)),
-            None => Ok(CallToolResult::success(vec![Content::text(
-                "no symbol found for the given FQDN",
-            )])),
+            None => Ok(not_found()),
         }
     }
 
@@ -805,10 +747,8 @@ impl StandardocMcp {
         &self,
         Parameters(params): Parameters<GetCodeParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         let raw_fqdn = params.fqdn.clone();
         let handle = self.handle.clone();
@@ -843,9 +783,7 @@ impl StandardocMcp {
 
         match result {
             Some(slice) => Ok(success_json(&slice)),
-            None => Ok(CallToolResult::success(vec![Content::text(
-                "no symbol found for the given FQDN",
-            )])),
+            None => Ok(not_found()),
         }
     }
 
@@ -894,18 +832,12 @@ impl StandardocMcp {
         }))
     }
 
-    /// Aggregated read-path telemetry — the running tally of bytes the
     /// Lazy on-demand resolution of an external FQDN (Cargo crate, npm
     /// package, luarocks rock). Routes the FQDN through the registered
     /// resolvers in order; the first non-`NotInThisRegistry` answer wins.
     /// On success, the produced `ExtractedFile` is submitted to the
     /// writer pipeline (`is_external = 1` + the resolver's `SourceOrigin`)
     /// and the new symbol's `RawSymbol` is returned in the envelope.
-    ///
-    /// Scaffold A surface — body is unimplemented until the registry
-    /// is wired into `StandardocMcp::new`. Calls return
-    /// `status = "scaffold_a_unimplemented"` rather than crashing the
-    /// daemon so existing integration tests stay green.
     #[tool(
         description = "Lazy on-demand resolution of an external FQDN (a symbol that lives outside the workspace — Cargo crate, npm package, luarocks rock). Routes the FQDN through registered resolvers and submits the produced ExtractedFile to the writer pipeline. Returns `{status, fqdn, source_origin?, symbol?, missing_binary?, detail?}`. `status` is `resolved` (success — `symbol` is the new RawSymbol), `not_found` (no resolver claimed the FQDN), `missing_binary` (the matching resolver is gated behind a CLI that is not installed — `missing_binary` names which one), or `error` (resolver-level failure — `detail` carries the message). Use this when `get_context(fqdn)` returned a neighbor with `to: Unresolved` and the FQDN shape matches a known dependency."
     )]
@@ -913,10 +845,8 @@ impl StandardocMcp {
         &self,
         Parameters(params): Parameters<ResolveExternalParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         // Leave the FQDN verbatim — callers feed `resolve_external`
         // with FQDNs taken straight from `find_symbol` output, which
@@ -1001,10 +931,8 @@ impl StandardocMcp {
         &self,
         Parameters(params): Parameters<CheckStaleParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         // Leave entry FQDNs verbatim — `check_stale` is called after
         // `find_symbol` / `get_context` have already given the caller
@@ -1195,7 +1123,6 @@ impl StandardocMcp {
         let new_direction = parse_link_direction(&params.direction)?;
         let handle = self.handle.clone();
         let workspace_id = params.workspace_id;
-        let workspace_id_for_response = workspace_id.clone();
         let result = tokio::task::spawn_blocking(move || {
             workspace_query::set_link_direction(&handle, &workspace_id, new_direction)
         })
@@ -1237,7 +1164,6 @@ impl StandardocMcp {
                 ))
             }
             Err(workspace_query::SetLinkDirectionError::Storage(e)) => {
-                let _ = workspace_id_for_response;
                 Err(server_error_to_rmcp(&e.into()))
             }
         }
@@ -1372,16 +1298,14 @@ impl StandardocMcp {
     /// Calling with no filters returns the most recent N call_sites for
     /// ops-style scanning.
     #[tool(
-        description = "Read-only query over the `call_sites` table — every call expression emitted by the extractors (CallExpr in Rust/TS/Lua, NewExpr, OptChain call, method call). Returns a JSON array of records: `{from_fqdn, callee_text, args: [{value, is_string_literal}], receiver_chain: [..], site: {file, line, col}}`. Three optional AND-composable filters: `from_fqdn` (exact match on the enclosing fn/method FQDN — answers `what does X call?`), `callee_text` (exact match on the called expression text — answers `who calls Y?`), `callee_pattern` (SQLite GLOB on the callee text, e.g. `*tauri.invoke*` for every Tauri invocation, `M.api.*` for every call into the M.api namespace). `limit` defaults to 50, capped at 200. Use this to discover textual call patterns the symbol graph alone can't surface — bridge invocations, method-chain shapes, literal-string arg payloads."
+        description = "Read-only query over the `call_sites` table — every call expression emitted by the extractors (CallExpr in Rust/TS/Lua, NewExpr, OptChain call, method call). Returns `{call_sites: [{from_fqdn, callee_text, args: [{value, is_string_literal}], receiver_chain: [..], site: {file, line, col}}, ...]}`. Three optional AND-composable filters: `from_fqdn` (exact match on the enclosing fn/method FQDN — answers `what does X call?`), `callee_text` (exact match on the called expression text — answers `who calls Y?`), `callee_pattern` (SQLite GLOB on the callee text, e.g. `*tauri.invoke*` for every Tauri invocation, `M.api.*` for every call into the M.api namespace). `limit` defaults to 50, capped at 200. Use this to discover textual call patterns the symbol graph alone can't surface — bridge invocations, method-chain shapes, literal-string arg payloads."
     )]
     async fn find_call_sites(
         &self,
         Parameters(params): Parameters<FindCallSitesParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         let filters = CallSiteFilters {
             from_fqdn: params.from_fqdn.and_then(non_empty),
@@ -1402,7 +1326,7 @@ impl StandardocMcp {
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
-        Ok(success_json(&rows))
+        Ok(success_json(&serde_json::json!({ "call_sites": rows })))
     }
 
     /// Pre-composed graph slice ready for the `standardoc-graph-viz` WASM
@@ -1419,10 +1343,8 @@ impl StandardocMcp {
         &self,
         Parameters(params): Parameters<FetchGraphParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if !self.index_ready.load(Ordering::Acquire) {
-            return Ok(CallToolResult::success(vec![Content::text(
-                indexing_in_progress_message(self.handle.cold_start_progress().ok().flatten()),
-            )]));
+        if let Some(busy) = self.not_ready() {
+            return Ok(busy);
         }
         let req = params.into_request();
         let handle = self.handle.clone();

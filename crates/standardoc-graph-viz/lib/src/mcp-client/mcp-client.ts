@@ -150,20 +150,24 @@ export class McpBrowse {
   /**
    * Fuzzy / glob pattern match. Feeds the global search autocomplete.
    * Daemon caps the result count; `limit` lets the caller request fewer.
+   * The daemon returns `{results, did_you_mean}`; we surface just the
+   * matches. Tolerant of the legacy bare-array shape for older daemons.
    */
   async findSymbolsByPattern(pattern: string, limit?: number): Promise<ReadonlyArray<RawSymbol>> {
     const args: Record<string, unknown> = { pattern };
     if (limit !== undefined) args.limit = limit;
     const raw = await this.callTool('find_symbols_by_pattern', args);
-    return JSON.parse(raw) as ReadonlyArray<RawSymbol>;
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed as ReadonlyArray<RawSymbol>;
+    return (parsed as { results?: ReadonlyArray<RawSymbol> }).results ?? [];
   }
 
   /**
    * FTS5 full-text search over symbol `name` + `fqdn`. Tokenizes
-   * snake_case / camelCase. The daemon switches its response shape
-   * on zero results to surface strsim "did you mean…" suggestions;
-   * this wrapper normalises both variants into `{results, suggestions}`
-   * so the caller never branches on the wire format.
+   * snake_case / camelCase. The daemon returns `{results, did_you_mean}`
+   * (did_you_mean populated only on a zero-hit query); this wrapper maps
+   * it to `{results, suggestions}` and stays tolerant of the legacy
+   * bare-array shape so it keeps working against older daemons.
    */
   async findSymbol(query: string, limit?: number): Promise<FindSymbolResponse> {
     const args: Record<string, unknown> = { query };

@@ -12,7 +12,7 @@ use standardoc_core::{
     IndexHandle, WatcherHandle,
     query::{self, SymbolFilter},
 };
-use standardoc_ir::{IndexingMode, Kind, LinkDirection, SourceOrigin, Visibility};
+use standardoc_ir::{IndexingMode, Kind, LinkDirection, RawSymbol, SourceOrigin, Visibility};
 
 use crate::mcp::error::server_error_to_rmcp;
 
@@ -282,6 +282,44 @@ pub(super) fn success_json<T: Serialize>(value: &T) -> CallToolResult {
         Err(e) => CallToolResult::error(vec![Content::text(format!(
             "failed to serialize tool result: {e}"
         ))]),
+    }
+}
+
+/// Uniform envelope for the search tools (`find_symbol`,
+/// `find_symbol_fqdns`, `find_symbols_by_pattern`, `find_similar_symbols`).
+/// Always an object — never a bare array, never a shape that flips between
+/// array and object depending on whether suggestions kicked in. `results`
+/// holds the matches (empty when none); `did_you_mean` the strsim fallbacks
+/// (empty when there ARE matches).
+pub(super) fn search_envelope<T: Serialize>(
+    results: &[T],
+    did_you_mean: &[serde_json::Value],
+) -> CallToolResult {
+    success_json(&serde_json::json!({
+        "results": results,
+        "did_you_mean": did_you_mean,
+    }))
+}
+
+/// Uniform "no symbol for this FQDN" reply for the FQDN-keyed tools
+/// (`get_context`, `get_context_summary`, `get_body`, `get_code`). A JSON
+/// `null` — the contract their descriptions already promise, and the shape
+/// `module_lookup` / `project_for_file` already return — instead of a
+/// free-text message a JSON consumer can't distinguish from a real result.
+pub(super) fn not_found() -> CallToolResult {
+    success_json(&serde_json::Value::Null)
+}
+
+/// Drop test-looking symbols when the caller passed `exclude_tests: true`.
+/// Centralises the filter every search / list tool used to inline.
+pub(super) fn apply_exclude_tests(symbols: Vec<RawSymbol>, exclude: bool) -> Vec<RawSymbol> {
+    if exclude {
+        symbols
+            .into_iter()
+            .filter(|s| !query::symbol_looks_like_test(s))
+            .collect()
+    } else {
+        symbols
     }
 }
 

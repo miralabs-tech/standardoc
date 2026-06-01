@@ -385,8 +385,6 @@ pub struct ResolveExternalParams {
 ///   `detail` carries the env var hint.
 /// - `status = "lockfile_not_found"` → `detail` names the absent lockfile.
 /// - `status = "error"` → `detail` carries the resolver error.
-/// - `status = "scaffold_a_unimplemented"` → temporary while scaffold B
-///   wires the registry; `detail` carries the pending message.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ResolveExternalJson {
     pub status: String,

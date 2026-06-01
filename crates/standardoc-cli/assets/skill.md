@@ -108,12 +108,11 @@ Fuzzy FTS5 search over symbol `name` and `fqdn` columns → array of
 | `include_external` | bool | true | Set `false` to scope to workspace-only symbols. |
 | `workspace_id` | string | primary | UUID of a linked peer; omit for primary scope. |
 
-**Empty result enrichment** — when the query produces zero matches,
-the response switches from a bare array to
-`{results: [], did_you_mean: [{fqdn, name, kind, score}, …]}` with
-up to 5 strsim-scored suggestions (threshold 0.6). Accept the
-`did_you_mean` list as the answer instead of spinning variant
-queries.
+**Response shape** — always the object `{results: [...], did_you_mean: [...]}`.
+`results` holds the matches; `did_you_mean` is populated only on a
+zero-hit query, with up to 5 strsim-scored suggestions
+`[{fqdn, name, kind, score}, …]` (threshold 0.6). Accept the
+`did_you_mean` list as the answer instead of spinning variant queries.
 
 ```
 find_symbol({ query: "createUser", limit: 5 })
@@ -123,8 +122,8 @@ find_symbol({ query: "createUser", limit: 5 })
 
 `find_symbol_fqdns({ query, limit?, kind?, visibility?, module?, exclude_tests?, include_external?, workspace_id?, relative_to? })`
 
-FQDN-only variant of `find_symbol` — returns `[{fqdn, kind}, …]` instead
-of the full `RawSymbol`. **Prefer this as your default discovery probe**:
+FQDN-only variant of `find_symbol` — returns `{results: [{fqdn, kind}, …], did_you_mean}`
+instead of the full `RawSymbol` per match. **Prefer this as your default discovery probe**:
 it is the cheapest way to map candidate FQDNs in Phase 1. Reach for
 `find_symbol` only when you actually need the full shape (file:line,
 signature) per match. Same filters, limits, and `did_you_mean` envelope
@@ -147,9 +146,8 @@ catch every `strip_<lang>_extension` helper, or `myapp::utils::*` to
 enumerate a module.
 
 Same `workspace_id` semantics as `find_symbol` (defaults to primary).
-Same `did_you_mean` enrichment on empty result:
-`{results: [], did_you_mean: [...]}` with strsim run on the
-pattern's core (wildcards stripped).
+Same `{results, did_you_mean}` envelope; on a zero-hit pattern,
+`did_you_mean` runs strsim on the pattern's core (wildcards stripped).
 
 ```
 find_symbols_by_pattern({ pattern: "strip_*_extension" })
@@ -160,7 +158,7 @@ find_symbols_by_pattern({ pattern: "strip_*_extension" })
 `find_similar_symbols({ reference, threshold?, limit?, kind?, visibility?, module?, include_external? })`
 
 Similarity-scored search around an anchor. Returns
-`[{score, symbol}]` ranked by score descending. The score combines
+`{results: [{score, symbol}, …]}` ranked by score descending. The score combines
 Jaro-Winkler (typo / prefix-similar) and Jaccard over snake/camel-case
 tokens (templated families). The anchor itself is self-skipped by
 case-insensitive name.
@@ -241,8 +239,7 @@ Empty/whitespace-only filter strings normalise to "no filter"
 server-side. Calling with no filters returns the most recent N
 call_sites for ops-style scanning.
 
-Response shape: JSON array of
-`{from_fqdn, callee_text, args: [{value, is_string_literal}], receiver_chain: [..], site: {file, line, col}}`.
+Response shape: `{call_sites: [{from_fqdn, callee_text, args: [{value, is_string_literal}], receiver_chain: [..], site: {file, line, col}}, …]}`.
 
 ```
 find_call_sites({ callee_pattern: "*tauri.invoke*" })
