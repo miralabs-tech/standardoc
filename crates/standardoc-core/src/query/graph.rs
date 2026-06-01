@@ -27,7 +27,7 @@
 //! edge re-discovered from both directions of the BFS doesn't
 //! double-render.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -273,6 +273,12 @@ fn compose_focal(
 
     let visited_vec: Vec<String> = visited.iter().cloned().collect();
     let symbols = load_graph_symbols(handle, &visited_vec, include_external)?;
+    // `push_edge` runs before the `max_nodes` guard admits a neighbor, and
+    // `include_external = false` later drops external rows — both leave edges
+    // whose endpoint never ships. Retain only edges both of whose ends ship,
+    // matching the no-dangling guarantee `compose_bounded` enforces up front.
+    let shipped: HashSet<&str> = symbols.iter().map(|s| s.fqdn.as_str()).collect();
+    edges.retain(|e| shipped.contains(e.from.as_str()) && shipped.contains(e.to.as_str()));
     let projects = load_graph_projects(handle)?;
     Ok(GraphResponse {
         symbols,
@@ -544,13 +550,6 @@ fn read_graph_symbol(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSymbolRow
         receiver_type: row.get(13)?,
         entry_point: row.get(14)?,
     })
-}
-
-// Convenience used by tests / direct callers that want to surface the
-// composed payload as JSON without an MCP roundtrip.
-#[doc(hidden)]
-pub fn graph_response_lookup(symbols: &[GraphSymbol]) -> HashMap<&str, &GraphSymbol> {
-    symbols.iter().map(|s| (s.fqdn.as_str(), s)).collect()
 }
 
 #[cfg(test)]

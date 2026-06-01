@@ -369,11 +369,11 @@ pub(super) fn count_leading_noise_lines(slice: &[&str]) -> usize {
             i += 1;
             continue;
         }
-        if line.starts_with("///") || line.starts_with("//!") || line.starts_with("//") {
+        if line.starts_with("//") {
             i += 1;
             continue;
         }
-        if line.starts_with("/**") || line.starts_with("/*") {
+        if line.starts_with("/*") {
             if !line.contains("*/") {
                 in_block_comment = true;
             }
