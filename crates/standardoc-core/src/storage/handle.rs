@@ -16,6 +16,7 @@ use crate::storage::error::StorageError;
 use crate::storage::lock::WorkspaceLock;
 use crate::storage::migrate::ensure_schema;
 use crate::storage::retry::retry_with_backoff;
+use crate::storage::schema_meta;
 
 const PRAGMA_BOOT_SQL: &str = "
 PRAGMA journal_mode = WAL;
@@ -246,22 +247,10 @@ impl IndexHandle {
     /// caller treats them as "no observable writes yet". Persisted in
     /// schema v6+; see migration `v5_to_v6.sql`.
     pub fn revision(&self) -> u64 {
-        let pool = match self.pool() {
-            Ok(p) => p,
-            Err(_) => return 0,
+        let Ok(conn) = self.conn() else {
+            return 0;
         };
-        let conn = match pool.get() {
-            Ok(c) => c,
-            Err(_) => return 0,
-        };
-        conn.query_row(
-            "SELECT value FROM schema_meta WHERE key = 'revision'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|raw| raw.parse().ok())
-        .unwrap_or(0)
+        schema_meta::read_revision(&conn).unwrap_or(0)
     }
 
     /// Atomically increments the persisted revision counter. Used by
@@ -271,19 +260,10 @@ impl IndexHandle {
     /// SQLite WAL serialises concurrent increments from both LSP and
     /// MCP daemons.
     pub(crate) fn bump_revision(&self) {
-        let pool = match self.pool() {
-            Ok(p) => p,
-            Err(_) => return,
+        let Ok(conn) = self.conn() else {
+            return;
         };
-        let conn = match pool.get() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let _ = conn.execute(
-            "UPDATE schema_meta SET value = CAST((CAST(value AS INTEGER) + 1) AS TEXT) \
-             WHERE key = 'revision'",
-            [],
-        );
+        let _ = schema_meta::bump_revision(&conn);
     }
 
     /// Sets the paused flag. `cold_start::run` aborts at the next chunk
@@ -311,8 +291,7 @@ impl IndexHandle {
         &self,
         filters: &ScanFilters,
     ) -> Result<Vec<String>, StorageError> {
-        let pool = self.pool()?;
-        let conn = pool.get()?;
+        let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT path FROM files")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut out = Vec::new();
@@ -332,8 +311,7 @@ impl IndexHandle {
         if paths.is_empty() {
             return Ok(());
         }
-        let pool = self.pool()?;
-        let mut conn = pool.get()?;
+        let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut removed: usize = 0;
         {
@@ -352,8 +330,7 @@ impl IndexHandle {
     /// Returns every workspace-relative path currently stored in the `files`
     /// table. Used by the watcher to diff old vs new `.stdignore` stacks.
     pub(crate) fn list_all_file_paths(&self) -> Result<Vec<String>, StorageError> {
-        let pool = self.pool()?;
-        let conn = pool.get()?;
+        let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT path FROM files")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut out = Vec::new();
@@ -364,8 +341,7 @@ impl IndexHandle {
     }
 
     pub fn cold_start_progress(&self) -> Result<Option<(u64, u64)>, StorageError> {
-        let pool = self.pool()?;
-        let conn = pool.get()?;
+        let conn = self.conn()?;
         let value: String = conn.query_row(
             "SELECT value FROM schema_meta WHERE key = 'cold_start_progress'",
             [],
@@ -384,6 +360,16 @@ impl IndexHandle {
             .as_ref()
             .cloned()
             .ok_or(StorageError::RescanInProgress)
+    }
+
+    /// Borrow a pooled connection in one step — collapses the
+    /// `self.pool()?.get()?` idiom. Both failures map to `StorageError`
+    /// (`RescanInProgress` while a rescan has swapped the pool out, or the
+    /// pool's own connection-timeout error).
+    pub(crate) fn conn(
+        &self,
+    ) -> Result<r2d2::PooledConnection<SqliteConnectionManager>, StorageError> {
+        Ok(self.pool()?.get()?)
     }
 
     pub fn workspace_root(&self) -> &Path {

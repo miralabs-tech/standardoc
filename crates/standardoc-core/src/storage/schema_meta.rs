@@ -18,6 +18,52 @@ use standardoc_ir::WorkspaceKind;
 use crate::storage::error::StorageError;
 
 const WORKSPACE_KIND_KEY: &str = "workspace_kind";
+const REVISION_KEY: &str = "revision";
+
+/// Read the persisted workspace revision counter (schema v6+). Strict:
+/// errors on a missing row or an unparseable value (the writer loop
+/// relies on this to refuse a corrupt counter). Callers that prefer
+/// "treat any failure as 0" wrap with `.unwrap_or(0)`.
+pub(crate) fn read_revision(conn: &Connection) -> Result<u64, StorageError> {
+    let raw: String = conn
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = ?1",
+            params![REVISION_KEY],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::from)?;
+    raw.parse::<u64>()
+        .map_err(|_| StorageError::InvalidSchemaMetadata {
+            key: REVISION_KEY.into(),
+            value: raw,
+        })
+}
+
+/// Persist an explicit revision value. Used by the writer loop, which
+/// computes `current + 1` inside its own transaction so the row writes
+/// and the bumped counter commit atomically.
+pub(crate) fn set_revision(conn: &Connection, revision: u64) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE schema_meta SET value = ?1 WHERE key = ?2",
+        params![revision.to_string(), REVISION_KEY],
+    )
+    .map_err(StorageError::from)?;
+    Ok(())
+}
+
+/// Atomically increment the persisted revision counter in a single SQL
+/// statement. Used by direct-write callers outside the writer loop's
+/// own transaction-bound bump; SQLite WAL serialises concurrent
+/// increments from both the LSP and MCP daemons.
+pub(crate) fn bump_revision(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE schema_meta SET value = CAST((CAST(value AS INTEGER) + 1) AS TEXT) \
+         WHERE key = ?1",
+        params![REVISION_KEY],
+    )
+    .map_err(StorageError::from)?;
+    Ok(())
+}
 
 /// Read the primary workspace's persisted [`WorkspaceKind`]. Returns
 /// `Ok(None)` when the key has never been written (legacy databases
@@ -134,6 +180,31 @@ mod tests {
         delete_workspace_kind(&conn).unwrap();
         delete_workspace_kind(&conn).unwrap();
         assert!(read_workspace_kind(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn revision_roundtrips_through_accessors() {
+        let conn = fresh_db();
+        // init_v0.sql seeds `('revision', '0')`.
+        assert_eq!(read_revision(&conn).unwrap(), 0);
+        set_revision(&conn, 7).unwrap();
+        assert_eq!(read_revision(&conn).unwrap(), 7);
+        bump_revision(&conn).unwrap();
+        assert_eq!(read_revision(&conn).unwrap(), 8);
+    }
+
+    #[test]
+    fn read_revision_rejects_unparseable_value() {
+        let conn = fresh_db();
+        conn.execute(
+            "UPDATE schema_meta SET value = 'not-a-number' WHERE key = 'revision'",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            read_revision(&conn),
+            Err(StorageError::InvalidSchemaMetadata { .. })
+        ));
     }
 
     #[test]

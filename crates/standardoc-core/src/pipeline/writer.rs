@@ -10,6 +10,7 @@ use crate::pipeline::batch::{apply_delete_file, apply_upsert_file, record_parse_
 use crate::pipeline::peer_extract::{peer_path, scope_extracted_paths};
 use crate::storage::error::StorageError;
 use crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
+use crate::storage::schema_meta;
 
 pub(crate) struct WriterContext {
     pub(crate) pool: Arc<RwLock<Option<Pool<SqliteConnectionManager>>>>,
@@ -37,15 +38,12 @@ fn process_command(ctx: &WriterContext, cmd: IngestCommand) -> Result<(), Storag
     // transaction commits the row writes AND the bumped revision, so
     // any reader (LSP + MCP daemons sharing the DB under WAL) sees the
     // pair atomically.
-    let current_revision: u64 = read_revision(&tx)?;
+    let current_revision: u64 = schema_meta::read_revision(&tx)?;
     let next_revision = current_revision.saturating_add(1);
     let res = dispatch(&tx, cmd, next_revision);
     match res {
         Ok(()) => {
-            tx.execute(
-                "UPDATE schema_meta SET value = ?1 WHERE key = 'revision'",
-                [next_revision.to_string()],
-            )?;
+            schema_meta::set_revision(&tx, next_revision)?;
             tx.commit()?;
             Ok(())
         }
@@ -54,19 +52,6 @@ fn process_command(ctx: &WriterContext, cmd: IngestCommand) -> Result<(), Storag
             Err(e)
         }
     }
-}
-
-fn read_revision(tx: &rusqlite::Transaction<'_>) -> Result<u64, StorageError> {
-    let raw: String = tx.query_row(
-        "SELECT value FROM schema_meta WHERE key = 'revision'",
-        [],
-        |row| row.get(0),
-    )?;
-    raw.parse::<u64>()
-        .map_err(|_| StorageError::InvalidSchemaMetadata {
-            key: "revision".into(),
-            value: raw,
-        })
 }
 
 fn dispatch(
