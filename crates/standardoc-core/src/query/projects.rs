@@ -24,15 +24,6 @@ pub fn upsert_project(
     projects::upsert_project(&conn, label, kind, root_path, rel_path)
 }
 
-pub fn get_project(
-    handle: &IndexHandle,
-    project_id: u32,
-) -> Result<Option<ProjectInfo>, StorageError> {
-    let pool = handle.pool()?;
-    let conn = pool.get().map_err(StorageError::from)?;
-    projects::get_project(&conn, project_id)
-}
-
 pub fn list_projects(handle: &IndexHandle) -> Result<Vec<ProjectInfo>, StorageError> {
     let pool = handle.pool()?;
     let conn = pool.get().map_err(StorageError::from)?;
@@ -47,10 +38,4 @@ pub fn project_for_file(
     let pool = handle.pool()?;
     let conn = pool.get().map_err(StorageError::from)?;
     projects::find_for_file_path(&conn, file_abs_path)
-}
-
-pub fn delete_project(handle: &IndexHandle, project_id: u32) -> Result<(), StorageError> {
-    let pool = handle.pool()?;
-    let conn = pool.get().map_err(StorageError::from)?;
-    projects::delete_project(&conn, project_id)
 }

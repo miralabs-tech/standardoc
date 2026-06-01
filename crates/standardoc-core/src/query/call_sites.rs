@@ -80,26 +80,6 @@ pub fn find_call_sites(
     find_call_sites_conn(&conn, filters, limit)
 }
 
-/// File-scoped lookup — every call_site emitted by the extractor for
-/// `file_path`, in source-emission order (id ASC). Useful for the
-/// post-extract diagnostic dashboard and for plugins that index per-
-/// file rather than per-FQDN.
-pub fn call_sites_by_file(
-    handle: &IndexHandle,
-    file_path: &str,
-) -> Result<Vec<CallSiteRow>, StorageError> {
-    let pool = handle.pool()?;
-    let conn = pool.get()?;
-    let sql = "SELECT from_fqdn, callee_text, args_json, receiver_chain_json, \
-                      file_path, line, col \
-               FROM call_sites WHERE file_path = ?1 ORDER BY id ASC";
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt
-        .query_map([file_path], read_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    rows.into_iter().map(hydrate).collect()
-}
-
 fn find_call_sites_conn(
     conn: &Connection,
     filters: &CallSiteFilters,

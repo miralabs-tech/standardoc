@@ -164,20 +164,6 @@ fn find_call_sites_limit_clamps_to_max() {
 }
 
 #[test]
-fn call_sites_by_file_returns_rows_in_id_order() {
-    let (_d, h) = fresh_handle();
-    seed_file(&h, "src/a.rs");
-    seed_file(&h, "src/b.rs");
-    insert(&h, "src/a.rs", &cs("c::a", "alpha", "src/a.rs", 1));
-    insert(&h, "src/b.rs", &cs("c::b", "beta", "src/b.rs", 2));
-    insert(&h, "src/a.rs", &cs("c::a", "gamma", "src/a.rs", 3));
-    let rows = call_sites_by_file(&h, "src/a.rs").unwrap();
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].callee_text, "alpha");
-    assert_eq!(rows[1].callee_text, "gamma");
-}
-
-#[test]
 fn hydrate_round_trips_args_and_receiver_chain_through_json() {
     let (_d, h) = fresh_handle();
     seed_file(&h, "src/a.rs");
@@ -202,7 +188,7 @@ fn hydrate_round_trips_args_and_receiver_chain_through_json() {
         },
     };
     insert(&h, "src/a.rs", &original);
-    let rows = call_sites_by_file(&h, "src/a.rs").unwrap();
+    let rows = find_call_sites(&h, &CallSiteFilters::default(), 10).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0], original);
 }
