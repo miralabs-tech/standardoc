@@ -38,8 +38,7 @@ pub(crate) struct CJoinReport {
 }
 
 fn apply_c_join_primary(handle: &IndexHandle) -> Result<CJoinReport, StorageError> {
-    let pool = handle.pool()?;
-    let conn = pool.get().map_err(StorageError::from)?;
+    let conn = handle.conn()?;
     run_pass(&conn, PRIMARY_WORKSPACE_ID)
 }
 

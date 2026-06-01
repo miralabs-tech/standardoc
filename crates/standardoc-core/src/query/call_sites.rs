@@ -77,8 +77,7 @@ pub fn find_call_sites(
         return Ok(Vec::new());
     }
     let limit = limit.min(FIND_CALL_SITES_MAX_LIMIT);
-    let pool = handle.pool()?;
-    let conn = pool.get()?;
+    let conn = handle.conn()?;
     find_call_sites_conn(&conn, filters, limit)
 }
 

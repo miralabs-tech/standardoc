@@ -72,10 +72,7 @@ impl<'a> DbCrossWorkspaceResolver<'a> {
     }
 
     fn compute_with_key(&self, origin_module: &str, origin_symbol: &str) -> CrossWorkspaceLookup {
-        let Ok(pool) = self.handle.pool() else {
-            return CrossWorkspaceLookup::Unknown;
-        };
-        let Ok(conn) = pool.get() else {
+        let Ok(conn) = self.handle.conn() else {
             return CrossWorkspaceLookup::Unknown;
         };
         // Pass 1 — linked peer workspaces. Cheapest hit path for the

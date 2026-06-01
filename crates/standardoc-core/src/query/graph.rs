@@ -384,8 +384,7 @@ fn push_edge(
 }
 
 fn symbol_exists(handle: &IndexHandle, fqdn: &str) -> Result<bool, StorageError> {
-    let pool = handle.pool()?;
-    let conn = pool.get()?;
+    let conn = handle.conn()?;
     let found: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM symbols WHERE workspace_id = ?1 AND fqdn = ?2 LIMIT 1",
@@ -404,8 +403,7 @@ fn list_bounded_fqdns(
     if max_nodes == 0 {
         return Ok(Vec::new());
     }
-    let pool = handle.pool()?;
-    let conn = pool.get()?;
+    let conn = handle.conn()?;
     let mut out: Vec<String> = Vec::with_capacity(max_nodes.min(BOUNDED_LIST_PAGE));
     let mut cursor: Option<String> = None;
     while out.len() < max_nodes {
@@ -457,8 +455,7 @@ fn load_graph_symbols(
     if fqdns.is_empty() {
         return Ok(Vec::new());
     }
-    let pool = handle.pool()?;
-    let conn = pool.get()?;
+    let conn = handle.conn()?;
     // `json_each` over a JSON array sidesteps the SQLITE_MAX_VARIABLE_NUMBER
     // ceiling (999 by default), so the same SQL works for both a small
     // BFS expansion and the 5000-node bounded ceiling without chunking.

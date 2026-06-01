@@ -128,8 +128,7 @@ fn with_conn<F, R>(handle: &IndexHandle, f: F) -> Result<R, StorageError>
 where
     F: FnOnce(&Connection) -> Result<R, StorageError>,
 {
-    let pool = handle.pool()?;
-    let conn = pool.get()?;
+    let conn = handle.conn()?;
     f(&conn)
 }
 

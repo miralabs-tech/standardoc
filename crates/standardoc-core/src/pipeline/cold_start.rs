@@ -136,28 +136,14 @@ pub fn run(
 /// failure (typically a transient FS error during the walk); never
 /// blocks cold start.
 fn discover_projects_quietly(handle: &IndexHandle, workspace_root: &Path) {
-    let pool = match handle.pool() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let conn = match pool.get() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    let Ok(conn) = handle.conn() else { return };
     let _ = discover_and_persist_projects(&conn, workspace_root);
 }
 
 /// Stage 3d-2 — best-effort reconcile of `files.project_id`. Same
 /// graceful-degradation rationale as `discover_projects_quietly`.
 fn reconcile_projects_quietly(handle: &IndexHandle) {
-    let pool = match handle.pool() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let conn = match pool.get() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    let Ok(conn) = handle.conn() else { return };
     let _ = reconcile_files_project_id(&conn);
 }
 
@@ -180,8 +166,7 @@ fn reconcile_projects_quietly(handle: &IndexHandle) {
 /// cold_start finish untouched.
 fn process_peers_quietly(handle: &IndexHandle, provider: &dyn LanguageProvider) {
     let peers = {
-        let Ok(pool) = handle.pool() else { return };
-        let Ok(conn) = pool.get() else { return };
+        let Ok(conn) = handle.conn() else { return };
         match list_linked_workspaces(&conn) {
             Ok(p) => p,
             Err(_) => return,
@@ -191,8 +176,9 @@ fn process_peers_quietly(handle: &IndexHandle, provider: &dyn LanguageProvider) 
     for peer in peers {
         match peer.indexing_mode {
             IndexingMode::BlobImport => {
-                let Ok(pool) = handle.pool() else { continue };
-                let Ok(mut conn) = pool.get() else { continue };
+                let Ok(mut conn) = handle.conn() else {
+                    continue;
+                };
                 let _ = peer_import::import_peer_workspace(&mut conn, &peer);
             }
             IndexingMode::Extract => {
@@ -249,8 +235,7 @@ fn process_chunk(
 }
 
 fn cleanup_unseen(handle: &IndexHandle, seen: &[String]) -> Result<(), ColdStartError> {
-    let pool = handle.pool()?;
-    let mut conn = pool.get().map_err(StorageError::from)?;
+    let mut conn = handle.conn()?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(StorageError::from)?;
@@ -319,8 +304,7 @@ fn clear_progress(handle: &IndexHandle) -> Result<(), ColdStartError> {
 }
 
 fn write_progress_value(handle: &IndexHandle, value: &str) -> Result<(), ColdStartError> {
-    let pool = handle.pool()?;
-    let conn = pool.get().map_err(StorageError::from)?;
+    let conn = handle.conn()?;
     conn.execute(
         "UPDATE schema_meta SET value = ?1 WHERE key = 'cold_start_progress'",
         [value],
