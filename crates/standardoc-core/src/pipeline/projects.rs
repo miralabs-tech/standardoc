@@ -105,14 +105,8 @@ fn normalise_rel_path(rel: &str) -> String {
     rel.strip_prefix("./").unwrap_or(rel).to_string()
 }
 
-/// Run `standarbuild_detect::discover` against `workspace_root` with
-/// defaults, UPSERT every detected project into `projects`, and return
-/// the canonicalised list (with assigned project_ids).
-///
-/// Idempotent: re-running picks up new projects + updates label/kind
-/// drift on existing roots without losing project_id continuity.
-/// Run discovery with the built-in detector registry (Rust / Node /
-/// Bun / Deno / Python / Lua / C / Cpp) plus our locally-registered
+/// Discovery with the built-in detector registry (Rust / Node / Bun /
+/// Deno / Python / Lua / C / Cpp) plus our locally-registered
 /// [`CMakeSubdirDetector`] that recognises canonical CMake layouts
 /// (`CMakeLists.txt` + sources under `src/`, `include/`, `tests/`,
 /// `lib/`). Shortcut for [`discover_and_persist_projects_with`].
@@ -124,8 +118,8 @@ pub(crate) fn discover_and_persist_projects(
 }
 
 /// The detector registry used by [`discover_and_persist_projects`] —
-/// built-ins plus our [`CMakeSubdirDetector`] overlay. Exposed so peer-
-/// extraction can reuse the exact same detection space.
+/// built-ins (Rust / Node / Bun / Deno / Python / Lua / C / Cpp) plus
+/// our [`CMakeSubdirDetector`] overlay.
 pub(crate) fn default_registry() -> DetectorRegistry {
     let mut r = DetectorRegistry::with_builtins();
     r.add(CMakeSubdirDetector);
@@ -240,10 +234,13 @@ fn subtree_has_any_ext(dir: &Path, exts: &[&str]) -> bool {
 }
 
 /// Run discovery against a custom [`DetectorRegistry`], UPSERTing every
-/// detected project into `projects`. Use this to extend the detection
-/// space with user-registered detectors (e.g. a WGSL detector that
-/// matches on `shaders/` directories with `priority() > 100` to
-/// override built-ins).
+/// detected project into `projects` and returning the canonicalised list
+/// (with assigned `project_id`s). Use this to extend the detection space
+/// with user-registered detectors (e.g. a WGSL detector that matches on
+/// `shaders/` directories with `priority() > 100` to override built-ins).
+///
+/// Idempotent: re-running picks up new projects + updates label/kind
+/// drift on existing roots without losing `project_id` continuity.
 pub(crate) fn discover_and_persist_projects_with(
     conn: &Connection,
     workspace_root: &Path,
@@ -317,13 +314,8 @@ fn persist_sxd_projects(
 
 /// Run `standarbuild_detect::discover` against `workspace_root` and return
 /// the full [`DetectionResult`] — both projects and workspace manifests.
-/// Stage 3e-3 callers use the `.workspaces` part to seed the primary
-/// `workspace_kind` in `schema_meta`. The plain
-/// [`discover_and_persist_projects`] flow ignores it and only persists
-/// the project list.
-///
-/// Same shape as the original (now removed) `discover_workspace` wrapper,
-/// kept available against a custom registry for tests + Stage 3e-3 callers.
+/// [`discover_and_persist_projects_with`] consumes `.workspaces` to seed
+/// the primary `workspace_kind` in `schema_meta`, then persists `.projects`.
 pub(crate) fn discover_workspace_with(
     workspace_root: &Path,
     registry: &DetectorRegistry,
@@ -378,14 +370,16 @@ fn persist_projects(
 /// on the `ext/vscode` Bun project, not the workspace-root Rust one.
 pub(crate) fn reconcile_files_project_id(conn: &Connection) -> Result<usize, StorageError> {
     // Two SQL statements: clear first (so unlinked projects' files
-    // become NULL again), then re-assign by deepest match.
+    // become NULL again), then re-assign by deepest match. The prefix
+    // test uses substr (not LIKE) so `_` / `%` in a project rel_path
+    // can't act as wildcards and capture sibling directories.
     conn.execute("UPDATE files SET project_id = NULL", [])?;
     let updated = conn.execute(
         "UPDATE files SET project_id = ( \
             SELECT p.project_id FROM projects p \
             WHERE p.rel_path = '' \
                OR files.path = p.rel_path \
-               OR files.path LIKE p.rel_path || '/%' \
+               OR substr(files.path, 1, length(p.rel_path) + 1) = p.rel_path || '/' \
             ORDER BY length(p.rel_path) DESC \
             LIMIT 1 \
          )",
@@ -770,6 +764,47 @@ mod tests {
             )
             .unwrap();
         assert!(post.is_none(), "stale project_id must be cleared");
+    }
+
+    #[test]
+    fn reconcile_does_not_misattribute_underscore_wildcard_siblings() {
+        // PR1 regression: `rel_path` must be matched as a literal prefix,
+        // not a LIKE pattern. A project at `my_lib` must NOT capture a
+        // sibling `myXlib/` — under the old `LIKE rel_path || '/%'` the
+        // `_` matched any char (`X`) and mis-attributed the sibling.
+        let conn = fresh_db();
+        let lib_id =
+            projects::insert_project(&conn, "my_lib", &ProjectKind::Rust, "/r/my_lib", "my_lib")
+                .unwrap();
+        seed_file(&conn, "my_lib/src/lib.rs");
+        seed_file(&conn, "myXlib/src/lib.rs");
+
+        reconcile_files_project_id(&conn).unwrap();
+
+        let inside: Option<i64> = conn
+            .query_row(
+                "SELECT project_id FROM files WHERE path = 'my_lib/src/lib.rs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let sibling: Option<i64> = conn
+            .query_row(
+                "SELECT project_id FROM files WHERE path = 'myXlib/src/lib.rs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            inside,
+            Some(i64::from(lib_id)),
+            "file under my_lib must link"
+        );
+        assert!(
+            sibling.is_none(),
+            "myXlib/ sibling must NOT be captured by my_lib's rel_path (no LIKE wildcard)"
+        );
     }
 
     // --- Bug E-3 follow-up : sxd-driven REPLACE semantics ---
