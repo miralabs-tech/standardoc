@@ -939,17 +939,7 @@ pub fn file_info(handle: &IndexHandle, path: &str) -> Result<Option<FileInfo>, S
 /// Useful for the CLI pre-flight schema check: a client can compare the on-disk
 /// version against `SUPPORTED_SCHEMA_VERSION` before spawning daemons.
 pub fn schema_version(handle: &IndexHandle) -> Result<u32, StorageError> {
-    with_conn(handle, |conn| {
-        let raw: String = conn.query_row(
-            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
-            [],
-            |row| row.get(0),
-        )?;
-        raw.parse::<u32>()
-            .map_err(|_| StorageError::InvalidStoredData {
-                detail: format!("schema_meta.schema_version is not a u32: {raw}"),
-            })
-    })
+    with_conn(handle, crate::storage::schema_meta::read_schema_version)
 }
 
 /// Bulk-lookup the `last_modified_revision` for each FQDN. Missing FQDNs are

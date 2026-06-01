@@ -1,9 +1,10 @@
 //! Stage 3e-3 — typed access to the `schema_meta` key-value table for
-//! workspace-scope singleton metadata. Keys already in use elsewhere
-//! (`schema_version`, `workspace_root`, `created_at`,
-//! `cold_start_progress`, `watcher_debounce_ms`, `external_*_hash`,
-//! `revision`) are touched directly by their respective owners; this
-//! module owns the `workspace_kind` slot specifically.
+//! workspace-scope singleton metadata. This module owns the
+//! `workspace_kind` slot, the `revision` counter, and the shared
+//! `schema_version` reader (deduplicated from `migrate` + `query`). The
+//! remaining keys (`workspace_root`, `created_at`, `cold_start_progress`,
+//! `watcher_debounce_ms`, `external_*_hash`) are still touched directly
+//! by their respective owners.
 //!
 //! Why `schema_meta` and not `workspace_catalog`: the latter is the
 //! peer-workspace registry (linked workspaces), and the primary
@@ -19,6 +20,7 @@ use crate::storage::error::StorageError;
 
 const WORKSPACE_KIND_KEY: &str = "workspace_kind";
 const REVISION_KEY: &str = "revision";
+const SCHEMA_VERSION_KEY: &str = "schema_version";
 
 /// Read the persisted workspace revision counter (schema v6+). Strict:
 /// errors on a missing row or an unparseable value (the writer loop
@@ -63,6 +65,25 @@ pub(crate) fn bump_revision(conn: &Connection) -> Result<(), StorageError> {
     )
     .map_err(StorageError::from)?;
     Ok(())
+}
+
+/// Read the persisted schema version (the consolidated `init_v0.sql`
+/// version). Strict: errors on a missing row or an unparseable value.
+/// Shared reader deduplicated from `migrate::ensure_schema` and
+/// `query::schema_version`.
+pub(crate) fn read_schema_version(conn: &Connection) -> Result<u32, StorageError> {
+    let raw: String = conn
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = ?1",
+            params![SCHEMA_VERSION_KEY],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::from)?;
+    raw.parse::<u32>()
+        .map_err(|_| StorageError::InvalidSchemaMetadata {
+            key: SCHEMA_VERSION_KEY.into(),
+            value: raw,
+        })
 }
 
 /// Read the primary workspace's persisted [`WorkspaceKind`]. Returns

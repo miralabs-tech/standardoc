@@ -2,6 +2,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::storage::error::StorageError;
 use crate::storage::init::run_init_schema;
+use crate::storage::schema_meta;
 
 /// Single supported schema version. Beta-era reboot — the v1→v15
 /// chain inherited from earlier iterations was consolidated into
@@ -25,7 +26,7 @@ pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), StorageError> {
         return Ok(());
     }
 
-    let version = read_schema_version(conn)?;
+    let version = schema_meta::read_schema_version(conn)?;
     if version == SUPPORTED_SCHEMA_VERSION {
         return Ok(());
     }
@@ -84,19 +85,6 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool, StorageError> {
         )
         .optional()?;
     Ok(row.is_some())
-}
-
-fn read_schema_version(conn: &Connection) -> Result<u32, StorageError> {
-    let raw: String = conn.query_row(
-        "SELECT value FROM schema_meta WHERE key = 'schema_version'",
-        [],
-        |row| row.get(0),
-    )?;
-    raw.parse::<u32>()
-        .map_err(|_| StorageError::InvalidSchemaMetadata {
-            key: "schema_version".into(),
-            value: raw,
-        })
 }
 
 #[cfg(test)]

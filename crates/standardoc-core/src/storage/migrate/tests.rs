@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::schema_meta::read_schema_version;
 
 fn fresh_conn() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
