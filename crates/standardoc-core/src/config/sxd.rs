@@ -13,6 +13,8 @@
 //!     present, mechanical detection is short-circuited and only the
 //!     declared paths are indexed.
 //!   * `group "<slug>" { label "..." members [...] }` — optional, repeatable
+//!   * `mcp { port <u16> }` — optional, singleton — MCP HTTP port override
+//!   * `viz { port <u16> }` — optional, singleton — graph-viz dev-server port
 
 use std::fs;
 use std::io;
@@ -110,7 +112,10 @@ pub struct ProjectBlock {
 ///
 /// Optional layer ABOVE projects — bundles multiple projects under one
 /// label (e.g. one "platform" group with several projects inside).
-/// Members must reference declared project slugs.
+/// `members` are project slugs the viz Overview resolves at render time
+/// (declared `project` blocks OR mechanically-detected projects); an
+/// unmatched member is ignored, not a parse error — referential
+/// integrity is not enforced here.
 #[derive(Debug, Clone, Serialize)]
 pub struct GroupBlock {
     pub slug: String,
