@@ -1,14 +1,11 @@
 # Standardoc — VSCode extension
 
-> A code intelligence infrastructure, built on a canonical multi-language
-> IR and a living semantic graph. One graph, several daemons (LSP, MCP
-> stdio + HTTP/SSE), all your tools plugged into it. ~100 tokens per
-> agent query instead of 30k of grep + read. Local, derived from source
-> code, open-source.
+> **Your AI agent re-reads your whole codebase on every task.** Standardoc
+> indexes it once into a living map of your code — so the agent just *asks*.
+> **~100 tokens per question instead of 30k.** Local, open-source.
 >
-> Built for what breaks at scale and turns unmanageable in 6 months, not
-> for the 2-minute demo. Code understanding is a system, not a string of
-> greps.
+> This extension embeds the daemon, downloads the binary, and wires your
+> agent up in one click.
 
 ## 🆕 v1.1.0 — breaking install change
 
@@ -121,9 +118,9 @@ Common config file locations: Claude Desktop → `claude_desktop_config.json`; C
 ## Support
 
 - **Issues** — [github.com/miralabs-tech/standardoc/issues](https://github.com/miralabs-tech/standardoc/issues) for bugs, regressions, feature requests.
-- **Discussions and roadmap** — see [SUPPORT.md](https://github.com/miralabs-tech/standardoc/blob/main/.important/en/SUPPORT.md) for triage policy, scope discipline, and current focus areas. Standardoc is maintained by a single person; the SUPPORT doc explains what is in / out of scope before 1.0.
-- **Roadmap and what's shipped** — [TODO-LIST.md](https://github.com/miralabs-tech/standardoc/blob/main/.important/en/TODO-LIST.md).
-- **Storytelling** (philosophy, short / mid / long-term vision) — [.important/en/storytelling/](https://github.com/miralabs-tech/standardoc/tree/main/.important/en/storytelling).
+  Standardoc is maintained by a single person; before 1.0, third-party PRs are held back, but feedback and ideas are very welcome.
+- **Roadmap & what's shipped** — [TODO-LIST.md](https://github.com/miralabs-tech/standardoc/blob/main/.important/en/TODO-LIST.md).
+- **Sponsor** — [StandarX on OpenCollective](https://opencollective.com/standarx).
 
 ## Local development (dogfood)
 

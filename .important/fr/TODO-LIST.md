@@ -334,18 +334,19 @@ public ni package npm — ceux-là atterrissent en beta.3.
 
 ---
 
-## v1.0.0-beta.3 — Pluralisation des consommateurs du graphe (rendering + nav visuelle + autonomie CLI + compréhension cross-session)
+## v1.0.0-beta.3 — Graphes multi-workspace · navigation visuelle · provider C
 
-**Thème** : pluraliser les consommateurs du graphe — au-delà du cas
-d'usage agent-en-session-unique. Ajoute 3 axes : doc rendering pour les
-visiteurs externes, navigation visuelle pour les mainteneurs humains
-dans l'IDE, et autonomie CLI pour les users hors-VSCode. Calendrier non
-garanti sur l'axe nav visuelle nouvellement remonté — peut glisser en
-beta.4 selon les retours du dogfood des 2 semaines de tests. (Un 4e axe,
-la compréhension projet cross-session, a été extrait vers un outil
-voisin de session-store — voir plus bas.)
+**Thème** : pluraliser les consommateurs du graphe. Le *plan* était doc
+rendering + navigation visuelle + autonomie CLI ; en pratique le dogfood a
+tiré beta.3 vers **les graphes multi-workspace / multi-root, la
+visualisation interactive, un provider C natif, un proxy multi-workspace, et
+une refonte profonde de la résolution d'edges** — pendant que RAG et la
+session DB étaient coupés. **Navigation visuelle et autonomie CLI ont
+shippé ; le doc rendering a glissé** vers une beta ultérieure. La surface
+complète shippée vit dans [`CHANGELOG.md`](../../CHANGELOG.md) ; les axes
+planifiés ci-dessous sont annotés avec ce qui a atterri.
 
-### Couche de documentation rendering
+### Couche de documentation rendering — ~~glissée après beta.3~~
 
 Le doc graph (SQLite) est la source de vérité universelle. Les
 renderers sont des consommateurs — MDX est une option, pas la base. Le
@@ -374,28 +375,22 @@ code source → parser @doc → doc graph (SQLite) → query API framework-agnos
 - [ ] `@standardoc/vue` — mêmes composants pour Vue / VitePress / Nuxt
 - [ ] `@standardoc/svelte` — pour SvelteKit, Svelte plain
 
-### Navigation visuelle (webview in-VSCode)
+### Navigation visuelle — ✅ shippée (`standardoc-graph-viz`)
 
-Surface le graphe comme un artefact visuel interactif pour le
-mainteneur qui review/audite son propre code — particulièrement visé
-pour les projets long-dormant où le mainteneur revient après des
-mois/années et a besoin que le graphe soit **directement lisible**, pas
-seulement requêtable. Même source de vérité SQLite ; consommée par un
-panel webview dans l'extension.
+Surface le graphe comme un artefact visuel interactif pour le mainteneur
+qui review/audite son propre code. Shippée comme le crate WASM
+`standardoc-graph-viz` + shell en web-components, hébergée dans une webview
+VSCode et un playground standalone, pilotée via MCP.
 
-- [ ] Panel webview Preact embarqué dans l'extension (vue graphe autour d'un symbole focal : callers / callees / imports / imported_by typés)
-- [ ] Click-to-navigate (drill dans les voisins, breadcrumb retour, marquage de symboles d'intérêt)
-- [ ] Vue compacte des enrichissements (descriptions / exemples / params annotés sans ouvrir de fichiers)
-- [ ] Filter chips pour `kind` / `visibility` / langue pour cadrer les audits
+- [x] Shell graphe : overview (topologie 3D + clusters projet) / focus-graph / explorer / symbol-details / search
+- [x] Click-to-navigate (drill dans les voisins, breadcrumb retour)
+- [x] Vue compacte des enrichissements (signatures / champs / relations sans ouvrir de fichiers)
+- [x] Filter chips `kind` / `visibility` / langue + hide-tests
 
-**Calendrier non garanti** : candidate pour beta.3 parce que la valeur
-dogfood est haute (motive le mainteneur à revenir sur des projets
-long-dormant), mais peut glisser en beta.4 si d'autres trous dogfood
-émergent d'abord.
+### Self-management du CLI (`standardoc` sans VSCode) — ✅ en partie shippé
 
-### Self-management du CLI (`standardoc` sans VSCode)
-
-- [ ] Sub-commande `standardoc self-update` : lit `version.json` depuis les GitHub Releases (manifeste déjà généré par `release.yml`), détecte la plateforme, télécharge + SHA256-vérifie le binaire correspondant, remplace l'exécutable courant (crate : `self_update`, rename-on-replace Windows-aware)
+- [x] `standardoc init` (skill agent + hooks MCP-first + `AGENTS.md` + `.mcp.json`) + `standardoc mcp --connect` (pont stdio↔http) — wiring agent hors-VSCode first-class
+- [x] Sub-commande `standardoc self-update` : lit `version.json` depuis les GitHub Releases, détecte la plateforme, télécharge + SHA256-vérifie le binaire correspondant, remplace l'exécutable courant (rename-on-replace Windows-aware)
 - [ ] Injection PATH à l'install initiale : place le binaire sous `~/.stdoc/bin/` (Unix) ou `%USERPROFILE%\.stdoc\bin\` (Windows) et enregistre le path dans :
   - bash/zsh : append `export PATH="$HOME/.stdoc/bin:$PATH"` dans `.bashrc` / `.zshrc`
   - PowerShell : append dans `$PROFILE`
@@ -432,7 +427,7 @@ verrouiller la surface.
 
 - [ ] Language providers additionnels (Go, Java, Swift, C#, Kotlin, Zig) — Lua, Vue, Svelte shippés en beta.2
 - [ ] Méthodes LSP custom pour les queries spécifiques à Standardoc
-- [ ] UI de doc locale optionnelle façon GitBook (si la demande émerge ; licence à vie, voir [SUPPORT.md](SUPPORT.md))
+- [ ] UI de doc locale optionnelle façon GitBook (si la demande émerge ; licence à vie)
 - [ ] Bridge LSP vers rust-analyzer / tsserver pour une profondeur per-langage plus riche
 - [ ] **Import/export de commentaires de code via pointeurs safe-edit FQDN-ancrés** — remplacer la commande `materialize` abandonnée par une primitive plus rigoureuse : réécrire les doc-comments / annotations / blocs `@doc` dans le code source, ancrés sur des locations FQDN (plus stables que les line ranges brutes à travers les refactors). But : maintenir des codebases épurées (signatures + body, pas de murs de commentaires) tout en gardant la prose dans le graphe, avec ré-injection safe à la demande et aucun risque de désync entre graphe et source.
 
