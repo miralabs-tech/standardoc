@@ -6,8 +6,8 @@
 //!
 //! The resolver answers `(origin_module, origin_symbol) -> CrossWorkspaceLookup`
 //! at extract time so cross-workspace edges materialise in the
-//! [`ExtractedFile`] payload (Resolved-with-peer-attrs / typed
-//! UnresolvedBridge) rather than only at MCP query time.
+//! [`standardoc_ir::ExtractedFile`] payload (Resolved-with-peer-attrs /
+//! typed UnresolvedBridge) rather than only at MCP query time.
 //!
 //! Strategy:
 //! 1. Per-resolve lookup against the persisted `module_lookups` table via
