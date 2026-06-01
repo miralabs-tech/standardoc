@@ -226,7 +226,7 @@ fn apply_edges(
         if !touched.contains(edge.from_fqdn.as_str()) {
             continue;
         }
-        let Some(from_id) = lookup_symbol_id(conn, &edge.from_fqdn, workspace_id)? else {
+        let Some(from_id) = lookup_symbol_id_by_fqdn(conn, &edge.from_fqdn, workspace_id)? else {
             continue;
         };
         let edge_id = insert_edge(conn, from_id, edge, workspace_id)?;
@@ -268,7 +268,7 @@ fn apply_documents(
         if !touched.contains(doc.symbol_fqdn.as_str()) {
             continue;
         }
-        let Some(id) = lookup_symbol_id(conn, &doc.symbol_fqdn, workspace_id)? else {
+        let Some(id) = lookup_symbol_id_by_fqdn(conn, &doc.symbol_fqdn, workspace_id)? else {
             continue;
         };
         upsert_document(
@@ -294,14 +294,6 @@ fn touched_fqdns<'a>(plan: &'a DiffPlan<'_>) -> HashSet<&'a str> {
         out.insert(sym.fqdn.as_str());
     }
     out
-}
-
-fn lookup_symbol_id(
-    conn: &Connection,
-    fqdn: &str,
-    workspace_id: &str,
-) -> Result<Option<i64>, StorageError> {
-    lookup_symbol_id_by_fqdn(conn, fqdn, workspace_id)
 }
 
 fn fetch_symbol_ids_by_file(conn: &Connection, path: &str) -> Result<Vec<i64>, StorageError> {
