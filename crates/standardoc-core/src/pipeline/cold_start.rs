@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use rusqlite::TransactionBehavior;
-use walkdir::{DirEntry, WalkDir};
+use walkdir::WalkDir;
 
 use standardoc_ir::IndexingMode;
 
@@ -214,7 +214,7 @@ pub(crate) fn collect_candidates(
     let walker = WalkDir::new(workspace_root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| !is_dir_excluded(entry, workspace_root, filters));
+        .filter_entry(|entry| !filters.is_dir_excluded(entry, workspace_root));
 
     for entry in walker {
         let entry = entry?;
@@ -233,16 +233,6 @@ pub(crate) fn collect_candidates(
         out.push(entry.into_path());
     }
     Ok(out)
-}
-
-fn is_dir_excluded(entry: &DirEntry, workspace_root: &Path, filters: &ScanFilters) -> bool {
-    if entry.depth() == 0 || !entry.file_type().is_dir() {
-        return false;
-    }
-    let Some(rel) = to_workspace_relative(entry.path(), workspace_root) else {
-        return false;
-    };
-    filters.is_skipped(&rel)
 }
 
 fn process_chunk(
@@ -289,6 +279,11 @@ fn cleanup_unseen(handle: &IndexHandle, seen: &[String]) -> Result<(), ColdStart
     // naive cleanup would purge every cached external on every daemon
     // boot. The flag is set by external resolvers when they submit their
     // `ExtractedFile` and read here to skip cleanup.
+    // NB: `seen` holds files that were walked AND produced an Outcome
+    // (Upsert / ParseError / Skip). A file present on disk but unprocessable
+    // this pass (read error, non-UTF8, provider IO error) yields no Outcome,
+    // so it is treated as missing and purged here — correct for genuine
+    // deletions, but a transient FS error re-indexes it on the next run.
     let missing: Vec<String> = {
         let mut stmt = tx
             .prepare(

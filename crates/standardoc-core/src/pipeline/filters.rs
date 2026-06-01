@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
+
+use crate::pipeline::paths::to_workspace_relative;
 
 /// Legacy `.stdignore` filename, kept so the nested-cascade behaviour
 /// (per-subfolder excludes) survives the migration to `standardoc.sxd`.
@@ -136,6 +138,20 @@ impl ScanFilters {
     /// language opt-outs, ...) without touching call sites.
     pub fn is_skipped(&self, rel_path: &str) -> bool {
         self.stack.is_ignored(rel_path)
+    }
+
+    /// Whether a directory `entry` should be pruned from a `WalkDir` walk.
+    /// `false` for the root (depth 0) and non-directory entries, so files
+    /// still reach the extension / `is_skipped` gates downstream. Shared by
+    /// `cold_start::run` and the watcher's newly-allowed re-index walk.
+    pub(crate) fn is_dir_excluded(&self, entry: &DirEntry, workspace_root: &Path) -> bool {
+        if entry.depth() == 0 || !entry.file_type().is_dir() {
+            return false;
+        }
+        let Some(rel) = to_workspace_relative(entry.path(), workspace_root) else {
+            return false;
+        };
+        self.is_skipped(&rel)
     }
 }
 

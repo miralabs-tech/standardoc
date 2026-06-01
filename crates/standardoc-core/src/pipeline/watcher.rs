@@ -14,7 +14,7 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
     DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
 };
-use walkdir::{DirEntry, WalkDir};
+use walkdir::WalkDir;
 
 use crate::commands::IngestCommand;
 use crate::pipeline::external_invalidation;
@@ -350,6 +350,12 @@ fn process_primary_path(
         return;
     }
 
+    // Only file-granular events reach here — the extension gate above drops
+    // directory events. A recursive directory deletion that `notify`
+    // coalesces into a single dir-level Remove therefore leaves the file
+    // rows beneath it orphaned; they are reconciled away on the next
+    // `cold_start::cleanup_unseen` sweep (DB paths the walk no longer sees
+    // are deleted).
     if abs_path.is_file() {
         upsert_path(handle, provider, abs_path, &rel, workspace_root);
     } else if !abs_path.exists() {
@@ -456,7 +462,7 @@ fn collect_newly_allowed_workspace_paths(
     let walker = WalkDir::new(workspace_root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| !is_dir_excluded(entry, workspace_root, new_filters));
+        .filter_entry(|entry| !new_filters.is_dir_excluded(entry, workspace_root));
 
     let mut out = Vec::new();
     for entry in walker.flatten() {
@@ -474,16 +480,6 @@ fn collect_newly_allowed_workspace_paths(
         }
     }
     out
-}
-
-fn is_dir_excluded(entry: &DirEntry, workspace_root: &Path, filters: &ScanFilters) -> bool {
-    if entry.depth() == 0 || !entry.file_type().is_dir() {
-        return false;
-    }
-    let Some(rel) = to_workspace_relative(entry.path(), workspace_root) else {
-        return false;
-    };
-    filters.is_skipped(&rel)
 }
 
 fn filters_skipped(filters: &Arc<RwLock<ScanFilters>>, rel: &str) -> bool {
