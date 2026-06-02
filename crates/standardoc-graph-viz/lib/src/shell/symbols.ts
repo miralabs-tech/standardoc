@@ -174,11 +174,22 @@ export function formatSignature(sig: RawSymbol['signature']): string | null {
   return ret ? `(${paramStr}) → ${ret}` : `(${paramStr})`;
 }
 
+/**
+ * Display-kind ladder shared by every shell mapper: prefer the
+ * extractor's `decl_kind`, fall back to `language_kind`, then the
+ * coarse `kind`. One place so the panels don't drift apart.
+ */
+export function displayKindLabel(
+  s: { decl_kind?: string | null; language_kind?: string | null; kind: string },
+): string {
+  return s.decl_kind ?? s.language_kind ?? s.kind;
+}
+
 export function toSymbolSearchResult(s: RawSymbol): SymbolSearchResult {
   return {
     fqdn: s.fqdn,
     name: s.name,
-    kindLabel: s.decl_kind ?? s.language_kind ?? s.kind,
+    kindLabel: displayKindLabel(s),
     kind: s.kind,
     file: s.location.file,
     startLine: s.location.start_line,

@@ -21,7 +21,7 @@ import type {
  */
 export function buildOverviewPayloadForScope(
   scope: OverviewScope,
-  projects: ReadonlyArray<{ project_id: number; label: string; rel_path: string; kind: { kind: string } }>,
+  projects: ReadonlyArray<WorkspaceProject>,
   symbols: ReadonlyArray<BrowseSymbol>,
   edges: ReadonlyArray<GraphEdge>,
   symbolByFqdn: Map<string, BrowseSymbol>,
@@ -41,7 +41,7 @@ export function buildOverviewPayloadForScope(
  */
 function buildScopedModulesPayload(
   scope: Exclude<OverviewScope, { kind: 'workspace' }>,
-  projects: ReadonlyArray<{ project_id: number; label: string; rel_path: string; kind: { kind: string } }>,
+  projects: ReadonlyArray<WorkspaceProject>,
   symbols: ReadonlyArray<BrowseSymbol>,
   edges: ReadonlyArray<GraphEdge>,
   symbolByFqdn: Map<string, BrowseSymbol>,

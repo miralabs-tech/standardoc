@@ -3,10 +3,13 @@ import type {
   GetContextResponse,
 } from '../mcp-client';
 
+import type { GraphEdge } from './types';
+import { displayKindLabel } from './symbols';
+
 export function buildFocusPayload(
   fqdn: string,
   ctx: GetContextResponse | null,
-  neighborhoodEdges: ReadonlyArray<{ from: string; to: string; kind: string; outbound: boolean }>,
+  neighborhoodEdges: ReadonlyArray<GraphEdge>,
   neighborhoodSymbols: ReadonlyArray<BrowseSymbol>,
   centerFieldCount: number,
   centerMethodCount: number,
@@ -15,7 +18,7 @@ export function buildFocusPayload(
   const center = centerSym !== undefined ? {
     fqdn: centerSym.fqdn,
     name: centerSym.name,
-    kind: centerSym.decl_kind ?? centerSym.language_kind ?? centerSym.kind,
+    kind: displayKindLabel(centerSym),
     depth: 0,
     field_count: centerFieldCount,
     method_count: centerMethodCount,
@@ -30,7 +33,7 @@ export function buildFocusPayload(
     .map(s => ({
       fqdn: s.fqdn,
       name: s.name,
-      kind: s.language_kind ?? s.kind,
+      kind: displayKindLabel(s),
       depth: depthByFqdn.get(s.fqdn) ?? 1,
       file: s.file && s.file.length > 0 ? s.file : null,
       start_line: typeof s.start_line === 'number' ? s.start_line : null,
@@ -46,7 +49,7 @@ export function buildFocusPayload(
 
 function computeDepthFromFocal(
   focal: string,
-  edges: ReadonlyArray<{ from: string; to: string; outbound: boolean }>,
+  edges: ReadonlyArray<{ from: string; to: string }>,
 ): Map<string, number> {
   const adj = new Map<string, Set<string>>();
   const pushAdj = (a: string, b: string): void => {

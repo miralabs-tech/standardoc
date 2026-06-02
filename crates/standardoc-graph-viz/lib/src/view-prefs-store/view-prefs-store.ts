@@ -48,7 +48,12 @@ export class ViewPrefsStore {
    *  fire iff the merged state actually differs from the previous. */
   setPrefs(partial: Partial<ViewPrefsState>): void {
     const next: ViewPrefsState = { ...this.state, ...partial };
-    if (next.excludeTests === this.state.excludeTests) return;
+    // Structural diff over every key so the store scales additively —
+    // a new pref field is picked up here without editing this guard
+    // (a single-field `===` check would silently no-op the new field).
+    const changed = (Object.keys(next) as (keyof ViewPrefsState)[])
+      .some(k => next[k] !== this.state[k]);
+    if (!changed) return;
     this.state = next;
     this.persist();
     this.emit();

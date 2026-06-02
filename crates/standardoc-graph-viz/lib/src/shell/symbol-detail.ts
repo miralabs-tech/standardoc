@@ -11,12 +11,12 @@ import type {
   SymbolSubItem,
 } from '../index';
 
-import type { FileEntry } from './types';
-import { formatSignature, shortFqdn } from './symbols';
+import type { FileEntry, GraphEdge } from './types';
+import { displayKindLabel, formatSignature, shortFqdn } from './symbols';
 
 export function buildSymbolDetail(
   ctx: GetContextResponse,
-  neighborhoodEdges: ReadonlyArray<{ from: string; to: string; kind: string; outbound: boolean }>,
+  neighborhoodEdges: ReadonlyArray<GraphEdge>,
   subItems: ReadonlyArray<RawSymbol>,
   fqdn: string,
 ): SymbolDetail {
@@ -36,21 +36,27 @@ export function buildSymbolDetail(
     if (!m.has(fq)) m.set(fq, { fqdn: fq, label: shortFqdn(fq), kindLabel });
   };
 
+  // Prefer the real kind off the edge's resolved_symbol (get_context
+  // ships it at depth >= 2, the default) over a hardcoded guess so a
+  // method / closure caller isn't mislabelled as a plain "fn".
+  const edgeKindLabel = (sym: RawSymbol | null | undefined, fallback: string): string =>
+    sym ? (sym.decl_kind ?? sym.language_kind ?? sym.kind) : fallback;
+
   for (const e of ctx.callers) {
-    if (e.target.fqdn) pushBucket('usedBy', e.target.fqdn, 'fn');
+    if (e.target.fqdn) pushBucket('usedBy', e.target.fqdn, edgeKindLabel(e.resolved_symbol, 'fn'));
   }
   for (const e of ctx.callees) {
-    if (e.target.fqdn) pushBucket('calls', e.target.fqdn, 'fn');
+    if (e.target.fqdn) pushBucket('calls', e.target.fqdn, edgeKindLabel(e.resolved_symbol, 'fn'));
   }
   // `ctx.imports` = OUTBOUND imports from this symbol (what it pulls in).
   // `ctx.imported_by` = INBOUND imports (who imports this symbol).
   // Used to be collapsed into the same `importedBy` bucket which mis-
   // labelled outbound imports as "Imported by" in the panel.
   for (const e of ctx.imports) {
-    if (e.target.fqdn) pushBucket('imports', e.target.fqdn, 'mod');
+    if (e.target.fqdn) pushBucket('imports', e.target.fqdn, edgeKindLabel(e.resolved_symbol, 'mod'));
   }
   for (const e of ctx.imported_by) {
-    if (e.target.fqdn) pushBucket('importedBy', e.target.fqdn, 'mod');
+    if (e.target.fqdn) pushBucket('importedBy', e.target.fqdn, edgeKindLabel(e.resolved_symbol, 'mod'));
   }
 
   // Walk the focal neighborhood — every edge kind, both directions.
@@ -63,7 +69,11 @@ export function buildSymbolDetail(
         else pushBucket('usedBy', other, kindLabel);
         break;
       case 'IMPORTS':
-        pushBucket('importedBy', other, 'mod');
+        // Split on direction like CALLS — an outbound import is "imports",
+        // not "importedBy" (mirror of the ctx-path fix above; collapsing
+        // both into importedBy re-introduced the double-listing bug).
+        if (e.outbound) pushBucket('imports', other, 'mod');
+        else pushBucket('importedBy', other, 'mod');
         break;
       case 'USES_TYPE':
       case 'REFERENCES':
@@ -110,7 +120,7 @@ export function buildSymbolDetail(
     const item: SymbolSubItem = {
       fqdn: s.fqdn,
       name: s.name,
-      kindLabel: s.decl_kind ?? s.language_kind ?? s.kind,
+      kindLabel: displayKindLabel(s),
       file: s.location.file,
       startLine: s.location.start_line,
       signature: formatSignature(s.signature),
@@ -127,7 +137,7 @@ export function buildSymbolDetail(
   return {
     fqdn: sym.fqdn,
     name: sym.name,
-    kindLabel: sym.decl_kind ?? sym.language_kind ?? sym.kind,
+    kindLabel: displayKindLabel(sym),
     visibility: sym.visibility,
     file: sym.location.file,
     startLine: sym.location.start_line,
@@ -194,7 +204,7 @@ export function buildFileSyntheticDetail(file: FileEntry): SymbolDetail {
       items: file.symbols.map(s => ({
         fqdn: s.fqdn,
         label: s.name,
-        kindLabel: s.language_kind ?? s.kind,
+        kindLabel: displayKindLabel(s),
       })),
       total: file.symbols.length,
     }],

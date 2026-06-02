@@ -290,7 +290,7 @@ function trieToExplorerNodes(
 }
 
 function buildProjectNode(
-  project: { project_id: number; label: string; rel_path: string },
+  project: ProjectLike,
   allSymbols: ReadonlyArray<BrowseSymbol>,
   out: TreeOut,
 ): ExplorerTreeNode {

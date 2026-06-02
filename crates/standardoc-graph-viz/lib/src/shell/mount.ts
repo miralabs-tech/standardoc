@@ -285,10 +285,13 @@ export async function mountShell(
     if (target === undefined) return;
     switch (target.kind) {
       case 'drill-project':
-        // Workspace → project: enter the project's module hierarchy.
-        // We use the `module` scope (FQDN prefix) so subsequent drills
-        // share the same "one segment deeper at a time" semantics.
-        applyOverviewScope({ kind: 'module', prefix: target.label, label: target.label });
+        // Workspace → project: scope the Overview to the project's
+        // modules — the same `project` scope the Explorer project click
+        // dispatches. NOT a `module` scope keyed on the label: the
+        // daemon project label ("Standardoc", "Lurlang", …) is not an
+        // FQDN root, so a label-prefix module scope matches nothing and
+        // the canvas comes back empty.
+        applyOverviewScope({ kind: 'project', projectId: target.projectId, label: target.label });
         break;
       case 'drill-folder':
         applyOverviewScope({
