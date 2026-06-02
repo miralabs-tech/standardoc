@@ -10,7 +10,6 @@ import type {
   SymbolSearchResult,
 } from '../index';
 
-import type { ProjectLike } from './types';
 import { shortFqdn } from '../text';
 
 // Daemon caps `limit` at u8 (255) — we used to send 500 and the
@@ -71,13 +70,13 @@ export async function collectWorkspaceSymbols(
 
 /**
  * Convert a list_symbols RawSymbol into the flatter BrowseSymbol shape
- * the tree builder consumes. list_symbols doesn't carry project_id, so
- * we resolve it via longest-prefix match on the file path — sub-project
- * paths (lib/pkg/playground inside standardoc-graph-viz) bind to the
- * deepest matching project rather than the parent crate.
+ * the tree builder consumes. `project_id` and `is_test` ride straight
+ * off the daemon's list_symbols projection — the shell no longer infers
+ * the owning project from a path-prefix match (that duplicated the
+ * daemon's `reconcile_files_project_id` JOIN) nor re-derives the test
+ * verdict.
  */
-export function rawToBrowseSymbol(s: RawSymbol, projects: ReadonlyArray<ProjectLike>): BrowseSymbol {
-  const file = s.location.file;
+export function rawToBrowseSymbol(s: RawSymbol): BrowseSymbol {
   return {
     fqdn: s.fqdn,
     name: s.name,
@@ -85,29 +84,13 @@ export function rawToBrowseSymbol(s: RawSymbol, projects: ReadonlyArray<ProjectL
     visibility: s.visibility,
     module: s.module,
     language_kind: s.language_kind,
-    language: '',
     is_external: false,
-    file,
+    is_test: s.is_test ?? false,
+    file: s.location.file,
     start_line: s.location.start_line,
-    project_id: inferProjectId(file, projects),
+    project_id: s.project_id ?? null,
     entry_point: s.entry_point ?? null,
   };
-}
-
-export function inferProjectId(filePath: string, projects: ReadonlyArray<ProjectLike>): number | null {
-  if (!filePath) return null;
-  const norm = filePath.replace(/\\/g, '/');
-  let best: { id: number; len: number } | null = null;
-  for (const p of projects) {
-    const prefix = p.rel_path.replace(/\\/g, '/');
-    if (prefix.length === 0) continue;
-    if (norm === prefix || norm.startsWith(`${prefix}/`)) {
-      if (best === null || prefix.length > best.len) {
-        best = { id: p.project_id, len: prefix.length };
-      }
-    }
-  }
-  return best?.id ?? null;
 }
 
 export function stripProjectPrefix(filePath: string, projectRelPath: string): string | null {
@@ -135,26 +118,6 @@ export function mapBrowseSymbolKind(s: BrowseSymbol): ExplorerNodeKind {
     case 'macro': return 'macro';
     default: return 'unknown';
   }
-}
-
-/**
- * Coarse test-symbol heuristic, mirror of the Rust
- * `query::symbol_looks_like_test` + the Symbol Details panel's
- * local `looksLikeTest`. Used by the shell to filter focus / overview
- * payloads when the global `viewPrefsStore.excludeTests` is on so
- * the wasm canvases match the panel's "hide tests" state without
- * a round-trip.
- */
-export function looksLikeTest(fqdn: string, file?: string | null): boolean {
-  if (fqdn.includes('::tests::') || fqdn.includes('::test::')) return true;
-  if (fqdn.endsWith('::tests') || fqdn.endsWith('::test')) return true;
-  if (fqdn.endsWith('_test') || fqdn.endsWith('_tests')) return true;
-  if (fqdn.endsWith('.test') || fqdn.endsWith('.spec')) return true;
-  if (!file) return false;
-  const norm = file.replace(/\\/g, '/');
-  if (norm.includes('/tests/') || norm.includes('/test/') || norm.includes('/__tests__/')) return true;
-  if (/(?:_tests?\.rs|\.(?:test|spec)\.(?:tsx?|jsx?))$/.test(norm)) return true;
-  return false;
 }
 
 export function formatSignature(sig: RawSymbol['signature']): string | null {

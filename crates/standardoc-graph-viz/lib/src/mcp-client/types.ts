@@ -11,8 +11,10 @@ export interface BrowseSymbol {
   readonly visibility: string;
   readonly module: string | null;
   readonly language_kind: string;
-  readonly language: string;
   readonly is_external: boolean;
+  /** Daemon-computed test-symbol verdict (`symbol_looks_like_test`),
+   *  so the shell filters the "hide tests" toggle without re-deriving. */
+  readonly is_test: boolean;
   readonly file: string;
   readonly start_line: number;
   readonly project_id?: number | null;
@@ -90,6 +92,12 @@ export interface RawSymbol {
    *  shapes → `"iter"`, language-specific tags like
    *  `"lua:coroutine-yielding"`). Omitted when empty. */
   readonly flags?: ReadonlyArray<string>;
+  /** Owning project id, projected onto `list_symbols` rows only (absent
+   *  on `find_symbol` / `get_context`). Cross-reference `list_projects`. */
+  readonly project_id?: number | null;
+  /** Daemon-computed test-symbol verdict, projected onto `list_symbols`
+   *  rows only. Lets consumers skip re-deriving `looksLikeTest`. */
+  readonly is_test?: boolean;
 }
 
 export interface ListSymbolsOptions {

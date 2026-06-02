@@ -35,7 +35,7 @@ use standardoc_ir::{
     DeclKind, EdgeKind, EntryPointKind, Kind, LanguageKind, ResolvedOrUnresolved, Visibility,
 };
 
-use crate::query::{edges_from, edges_to};
+use crate::query::{edges_from, edges_to, file_path_looks_like_test, fqdn_looks_like_test};
 use crate::storage::conv::{
     decl_kind_from_sql_text, entry_point_from_sql_text, kind_from_sql_text,
     visibility_from_sql_text,
@@ -96,10 +96,10 @@ pub struct GraphRequest {
     pub include_external: bool,
 }
 
-/// Flat symbol entry shaped for the WASM viz consumer. Mirrors the
-/// `SymbolEntry` definition in `standardoc-graph-viz::payload` byte
-/// for byte (lowercase `kind`, lowercase `visibility`, top-level
-/// `file` + `start_line`).
+/// Flat symbol entry shaped for the WASM viz consumer: lowercase
+/// `kind` / `visibility`, top-level `file` + `start_line`, and the
+/// `is_test` verdict precomputed so the shell never re-derives it.
+/// Consumed by the `standardoc-graph-viz` TS `BrowseSymbol` shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphSymbol {
     pub fqdn: String,
@@ -109,8 +109,8 @@ pub struct GraphSymbol {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     pub language_kind: LanguageKind,
-    pub language: String,
     pub is_external: bool,
+    pub is_test: bool,
     pub file: String,
     pub start_line: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -461,7 +461,7 @@ fn load_graph_symbols(
     // BFS expansion and the 5000-node bounded ceiling without chunking.
     let fqdns_json = serde_json::to_string(fqdns)?;
     let mut stmt = conn.prepare(
-        "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.language, s.module, \
+        "SELECT s.fqdn, s.name, s.kind, s.language_kind, s.module, \
                 s.visibility, s.file_path, s.start_line, s.is_external, f.project_id, \
                 s.decl_kind, s.implements_trait, s.receiver_type, s.entry_point \
          FROM symbols s \
@@ -489,6 +489,8 @@ fn load_graph_symbols(
                 .as_deref()
                 .map(entry_point_from_sql_text)
                 .transpose()?;
+            let is_test = fqdn_looks_like_test(&raw.fqdn)
+                || file_path_looks_like_test(&raw.file_path);
             Ok(GraphSymbol {
                 fqdn: raw.fqdn,
                 name: raw.name,
@@ -496,8 +498,8 @@ fn load_graph_symbols(
                 visibility: visibility_from_sql_text(&raw.visibility)?,
                 module: raw.module,
                 language_kind: LanguageKind::from(raw.language_kind),
-                language: raw.language,
                 is_external: raw.is_external,
+                is_test,
                 file: raw.file_path,
                 start_line: raw.start_line,
                 project_id: raw.project_id,
@@ -516,7 +518,6 @@ struct GraphSymbolRowRaw {
     name: String,
     kind: String,
     language_kind: String,
-    language: String,
     module: Option<String>,
     visibility: String,
     file_path: String,
@@ -535,17 +536,16 @@ fn read_graph_symbol(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSymbolRow
         name: row.get(1)?,
         kind: row.get(2)?,
         language_kind: row.get(3)?,
-        language: row.get(4)?,
-        module: row.get(5)?,
-        visibility: row.get(6)?,
-        file_path: row.get(7)?,
-        start_line: row.get(8)?,
-        is_external: row.get(9)?,
-        project_id: row.get(10)?,
-        decl_kind: row.get(11)?,
-        implements_trait: row.get(12)?,
-        receiver_type: row.get(13)?,
-        entry_point: row.get(14)?,
+        module: row.get(4)?,
+        visibility: row.get(5)?,
+        file_path: row.get(6)?,
+        start_line: row.get(7)?,
+        is_external: row.get(8)?,
+        project_id: row.get(9)?,
+        decl_kind: row.get(10)?,
+        implements_trait: row.get(11)?,
+        receiver_type: row.get(12)?,
+        entry_point: row.get(13)?,
     })
 }
 

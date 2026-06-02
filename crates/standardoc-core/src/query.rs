@@ -416,6 +416,25 @@ pub struct ListSymbolsPage {
     pub next_cursor: Option<String>,
 }
 
+/// Viz-facing projection of a `list_symbols` row. Carries the two
+/// attributes the graph shell would otherwise re-derive client-side:
+/// `project_id` (resolved here via the same `files.project_id` the
+/// cold-start JOIN assigns — kills the shell's path-prefix
+/// `inferProjectId`) and `is_test` (the daemon's `symbol_looks_like_test`
+/// verdict — kills the shell's `looksLikeTest` copies). Both are
+/// query-time concerns, not extraction output, so they live on this
+/// projection rather than on the shared `RawSymbol` IR. The inner
+/// `RawSymbol` is flattened so the wire shape stays a `RawSymbol` plus
+/// these two keys.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListSymbol {
+    #[serde(flatten)]
+    pub symbol: RawSymbol,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<u32>,
+    pub is_test: bool,
+}
+
 /// Returns symbols matching `filter` ordered by canonical fqdn. No
 /// query string, no pattern — pure server-side filter listing useful
 /// for audits like "list every private function in module X". Pass
@@ -478,6 +497,56 @@ pub fn list_symbols(
         None
     };
     Ok(ListSymbolsPage { items, next_cursor })
+}
+
+/// `list_symbols` enriched with the viz projection (see [`ListSymbol`]).
+/// Runs the base listing, then a single batched `files.project_id`
+/// lookup keyed on the page's file paths (`files.path` is the table's
+/// primary key, so the map is exact) and stamps each row's `is_test`
+/// from [`symbol_looks_like_test`]. Pagination semantics are identical
+/// to [`list_symbols`] — `next_cursor` is carried through untouched.
+pub fn list_symbols_projected(
+    handle: &IndexHandle,
+    filter: &SymbolFilter,
+    limit: usize,
+    cursor: Option<&str>,
+) -> Result<(Vec<ListSymbol>, Option<String>), StorageError> {
+    let page = list_symbols(handle, filter, limit, cursor)?;
+    if page.items.is_empty() {
+        return Ok((Vec::new(), page.next_cursor));
+    }
+    let paths: Vec<&str> = page.items.iter().map(|s| s.location.file.as_str()).collect();
+    let paths_json = serde_json::to_string(&paths)?;
+    let project_by_path: std::collections::HashMap<String, Option<u32>> =
+        with_conn(handle, |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT path, project_id FROM files \
+                 WHERE path IN (SELECT value FROM json_each(?1))",
+            )?;
+            let rows = stmt
+                .query_map(rusqlite::params![paths_json], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<u32>>(1)?))
+                })?
+                .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+            Ok(rows)
+        })?;
+    let items = page
+        .items
+        .into_iter()
+        .map(|symbol| {
+            let project_id = project_by_path
+                .get(&symbol.location.file)
+                .copied()
+                .flatten();
+            let is_test = symbol_looks_like_test(&symbol);
+            ListSymbol {
+                symbol,
+                project_id,
+                is_test,
+            }
+        })
+        .collect();
+    Ok((items, page.next_cursor))
 }
 
 /// Glob-pattern search over `symbols.name` and `symbols.fqdn`. Uses

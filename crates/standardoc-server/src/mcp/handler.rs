@@ -456,7 +456,7 @@ impl StandardocMcp {
     /// page fills, `next_cursor` carries the last fqdn returned; pass
     /// it back in `cursor` to fetch the next slice. `null` means done.
     #[tool(
-        description = "Filter-only listing of symbols. No query string, no pattern — returns every symbol matching the provided filters, ordered by fqdn. Response shape: `{items: [...], next_cursor: string | null}`. Walk the full set by re-calling with `cursor = next_cursor` until it returns `null`. Use this for audits and inventories like 'all private functions' or 'all types in module X'. At least one filter SHOULD be provided to keep the result set bounded. Filters: `kind`, `visibility`, `module` (all optional, all match exactly)."
+        description = "Filter-only listing of symbols. No query string, no pattern — returns every symbol matching the provided filters, ordered by fqdn. Response shape: `{items: [...], next_cursor: string | null}`. Each item is a `RawSymbol` plus two projected keys: `project_id` (the owning project's id — cross-reference `list_projects`) and `is_test` (the daemon's test-symbol verdict). Walk the full set by re-calling with `cursor = next_cursor` until it returns `null`. Use this for audits and inventories like 'all private functions' or 'all types in module X'. At least one filter SHOULD be provided to keep the result set bounded. Filters: `kind`, `visibility`, `module` (all optional, all match exactly)."
     )]
     async fn list_symbols(
         &self,
@@ -477,18 +477,26 @@ impl StandardocMcp {
         )?;
         let limit = clamp_limit(params.limit);
         let cursor = params.cursor;
+        let exclude_tests = params.exclude_tests.unwrap_or(false);
         let handle = self.handle.clone();
-        let page = tokio::task::spawn_blocking(move || {
-            query::list_symbols(&handle, &filter, limit as usize, cursor.as_deref())
+        let (items, next_cursor) = tokio::task::spawn_blocking(move || {
+            query::list_symbols_projected(&handle, &filter, limit as usize, cursor.as_deref())
         })
         .await
         .map_err(|e| ErrorData::internal_error(format!("spawn_blocking: {e}"), None))?
         .map_err(|e| server_error_to_rmcp(&e.into()))?;
 
-        let items = apply_exclude_tests(page.items, params.exclude_tests.unwrap_or(false));
+        // The projection already stamped each row's `is_test`, so the
+        // exclude filter reuses that verdict instead of re-running the
+        // heuristic `apply_exclude_tests` would.
+        let items = if exclude_tests {
+            items.into_iter().filter(|s| !s.is_test).collect::<Vec<_>>()
+        } else {
+            items
+        };
         let envelope = serde_json::json!({
             "items": items,
-            "next_cursor": page.next_cursor,
+            "next_cursor": next_cursor,
         });
         Ok(success_json(&envelope))
     }
@@ -1314,7 +1322,7 @@ impl StandardocMcp {
     /// All clamps (`depth`, `max_nodes`) happen here at the transport
     /// boundary; the core composition trusts what it receives.
     #[tool(
-        description = "Pre-composed graph payload for the visualisation layer. Returns `{symbols: [{fqdn, name, kind, visibility, module?, language_kind, language, is_external, file, start_line, project_id?}], edges: [{from, to, kind, outbound}], projects: [{project_id, label, kind, rel_path}], focal?}` — flat shape the WASM viz consumes directly (no client-side reshape). `projects` is the lookup table for the `project_id` foreign key; the viz frames symbols by project and colours each frame by `kind`.\n\nTwo modes:\n- `focal: Some(fqdn)` → bounded BFS expansion around the node, `depth` hops (1..=5, default 2). Both outbound (edges_from) and inbound (edges_to) edges are walked; unresolved targets are skipped.\n- `focal: None` → bounded snapshot of the workspace ordered by FQDN ASC. Only edges whose target is also in the bounded set are included (no dangling).\n\nKnobs: `kinds` (allow-list of edge kinds — `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `USES_TYPE`; case-insensitive, unknown values silently ignored); `max_nodes` (safety cap, default 500, clamped to 1..=5000); `include_external` (default false, scopes to workspace-authored symbols).\n\nReturns an empty `symbols`/`edges` vec with `focal` echoed when `focal` is supplied but the FQDN is unknown — lets the consumer distinguish 'no neighbors' from 'unknown symbol'."
+        description = "Pre-composed graph payload for the visualisation layer. Returns `{symbols: [{fqdn, name, kind, visibility, module?, language_kind, is_external, is_test, file, start_line, project_id?}], edges: [{from, to, kind, outbound}], projects: [{project_id, label, kind, rel_path}], focal?}` — flat shape the WASM viz consumes directly (no client-side reshape). `projects` is the lookup table for the `project_id` foreign key; the viz frames symbols by project and colours each frame by `kind`.\n\nTwo modes:\n- `focal: Some(fqdn)` → bounded BFS expansion around the node, `depth` hops (1..=5, default 2). Both outbound (edges_from) and inbound (edges_to) edges are walked; unresolved targets are skipped.\n- `focal: None` → bounded snapshot of the workspace ordered by FQDN ASC. Only edges whose target is also in the bounded set are included (no dangling).\n\nKnobs: `kinds` (allow-list of edge kinds — `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, `REFERENCES`, `USES_TYPE`; case-insensitive, unknown values silently ignored); `max_nodes` (safety cap, default 500, clamped to 1..=5000); `include_external` (default false, scopes to workspace-authored symbols).\n\nReturns an empty `symbols`/`edges` vec with `focal` echoed when `focal` is supplied but the FQDN is unknown — lets the consumer distinguish 'no neighbors' from 'unknown symbol'."
     )]
     async fn fetch_graph(
         &self,

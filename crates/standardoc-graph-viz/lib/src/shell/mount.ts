@@ -70,7 +70,6 @@ import type {
 import type { ClusterTarget, OverviewScope, TreeOut } from './types';
 import {
   collectWorkspaceSymbols,
-  looksLikeTest,
   rawToBrowseSymbol,
   toSymbolSearchResult,
 } from './symbols';
@@ -387,13 +386,10 @@ export async function mountShell(
   const { all: rawSymbols, entryPoints } = await collectWorkspaceSymbols(mcp, status => setStatus(status));
   explorerEl.entryPoints = entryPoints;
 
-  // Resolve every symbol to its owning project via longest-prefix
-  // match on the file path. list_symbols doesn't surface project_id
-  // directly, but rel_path on each project gives us the same answer
-  // — and longest-prefix correctly nests sub-projects (lib/pkg/
-  // playground all under standardoc-graph-viz) instead of pulling
-  // their files up to the parent.
-  const treeSymbols: BrowseSymbol[] = rawSymbols.map(s => rawToBrowseSymbol(s, projects));
+  // Flatten each list_symbols RawSymbol to the tree's BrowseSymbol
+  // shape. project_id + is_test ride off the daemon's projection, so
+  // there's no client-side project inference or test re-derivation here.
+  const treeSymbols: BrowseSymbol[] = rawSymbols.map(s => rawToBrowseSymbol(s));
 
   // Load the workspace graph for inter-cluster edge aggregation. Edges
   // come from fetchGraph (bounded ~5k) but the per-cluster symbol_count
@@ -420,7 +416,7 @@ export async function mountShell(
     currentOverviewScope = next;
     const excludeTests = viewPrefsStore.get().excludeTests;
     const scopedSymbols = excludeTests
-      ? treeSymbols.filter(s => !looksLikeTest(s.fqdn, s.file))
+      ? treeSymbols.filter(s => !s.is_test)
       : treeSymbols;
     const allowedFqdns = excludeTests
       ? new Set(scopedSymbols.map(s => s.fqdn))
@@ -544,7 +540,7 @@ export async function mountShell(
     // filtered set drops the test files entirely (their parent
     // folders / projects collapse if they end up empty).
     const symbols = viewPrefsStore.get().excludeTests
-      ? treeSymbols.filter(s => !looksLikeTest(s.fqdn, s.file))
+      ? treeSymbols.filter(s => !s.is_test)
       : treeSymbols;
     let root: ExplorerTreeNode;
     if (view === 'projects') {
@@ -813,7 +809,7 @@ export async function mountShell(
     // test) so the wasm canvas matches the panel's "hide tests" view.
     const excludeTests = viewPrefsStore.get().excludeTests;
     const neighborhoodSymbols = excludeTests
-      ? (neighborhood?.symbols ?? []).filter(s => !looksLikeTest(s.fqdn, s.file))
+      ? (neighborhood?.symbols ?? []).filter(s => !s.is_test)
       : (neighborhood?.symbols ?? []);
     const allowedFqdns = excludeTests
       ? new Set(neighborhoodSymbols.map(s => s.fqdn).concat([fqdn]))

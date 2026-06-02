@@ -55,6 +55,10 @@ export interface SymbolSubItem {
    *  chip in the Fields/Methods rows so the call shape reads at a
    *  glance without opening Source. */
   readonly isAsync: boolean;
+  /** Daemon-computed test-symbol verdict, carried from the list_symbols
+   *  projection that sources the sub-items so the "Hide tests" toggle
+   *  reads it instead of re-deriving `looksLikeTest`. */
+  readonly is_test: boolean;
   /** Standalone type display for FIELD-shaped sub-items (no params,
    *  return = the field's type). Methods leave this `null` — their
    *  return type is already visible in `signature` and a separate

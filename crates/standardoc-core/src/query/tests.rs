@@ -923,6 +923,60 @@ fn list_symbols_filter_by_module_exact_match() {
 }
 
 #[test]
+fn list_symbols_projected_surfaces_project_id_and_is_test() {
+    let (_dir, handle) = open_handle();
+    {
+        let conn = handle.pool().unwrap().get().unwrap();
+        conn.execute(
+            "INSERT INTO projects (label, kind, root_path, rel_path) \
+             VALUES ('mycrate', 'rust', '/x', 'src')",
+            [],
+        )
+        .unwrap();
+        seed_file(&conn, "src/lib.rs");
+        seed_symbol_full(
+            &conn,
+            "src/lib.rs",
+            "a",
+            "crate::a",
+            Kind::Callable,
+            Visibility::Public,
+            None,
+        );
+        seed_symbol_full(
+            &conn,
+            "src/lib.rs",
+            "it_works",
+            "crate::tests::it_works",
+            Kind::Callable,
+            Visibility::Private,
+            Some("crate::tests"),
+        );
+        crate::pipeline::projects::reconcile_files_project_id(&conn).unwrap();
+    }
+    let (items, next_cursor) =
+        list_symbols_projected(&handle, &SymbolFilter::default(), 50, None).unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(next_cursor.is_none());
+
+    let prod = items
+        .iter()
+        .find(|s| s.symbol.fqdn == "crate::a")
+        .expect("production symbol present");
+    let test = items
+        .iter()
+        .find(|s| s.symbol.fqdn == "crate::tests::it_works")
+        .expect("test symbol present");
+
+    // project_id is surfaced from the `files` JOIN, not re-derived client-side.
+    assert_eq!(prod.project_id, Some(1));
+    assert_eq!(test.project_id, Some(1));
+    // is_test mirrors the daemon's `symbol_looks_like_test` verdict.
+    assert!(!prod.is_test);
+    assert!(test.is_test);
+}
+
+#[test]
 fn list_symbols_respects_limit() {
     let (_dir, handle) = open_handle();
     {

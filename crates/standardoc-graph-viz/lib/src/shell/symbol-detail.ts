@@ -127,6 +127,7 @@ export function buildSymbolDetail(
       signature: formatSignature(s.signature),
       visibility: s.visibility ?? null,
       isAsync: Array.isArray(s.flags) && s.flags.includes('async'),
+      is_test: s.is_test ?? false,
       type: fieldType,
     };
     if (cls === 'field') fields.push(item);

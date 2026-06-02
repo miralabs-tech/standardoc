@@ -327,13 +327,13 @@ export class SymbolDetailsElement extends HTMLElement {
     kind: 'fields' | 'methods',
   ): void {
     mount.innerHTML = '';
-    // Apply the panel-level "hide tests" toggle to the row set. The
-    // fqdn-only check covers `::tests::` modules; the file fallback
-    // catches `*_test.rs` / `*.test.ts` / `__tests__/`. Empty-state
-    // message stays the same — the user can flip the toggle off if
-    // the absence is suspicious.
+    // Apply the panel-level "hide tests" toggle to the row set. Sub-items
+    // come from the list_symbols projection, so each carries the daemon's
+    // `is_test` verdict — no client-side re-derivation. Empty-state message
+    // stays the same — the user can flip the toggle off if the absence is
+    // suspicious.
     const visibleItems = this.#excludeTests
-      ? items.filter(it => !looksLikeTest(it.fqdn, it.file))
+      ? items.filter(it => !it.is_test)
       : items;
     if (visibleItems.length === 0) {
       const empty = document.createElement('div');

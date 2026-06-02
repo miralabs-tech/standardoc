@@ -3,7 +3,9 @@
 // McpBrowse wrapper JSON.parses the first text block of each tool
 // result, so these must match the wire types in
 // `src/mcp-client/types.ts`:
-//   - list_symbols  → { items: RawSymbol[], next_cursor }
+//   - list_symbols  → { items: RawSymbol[], next_cursor } where each row
+//                       is also stamped with project_id + is_test (the
+//                       daemon's list_symbols projection)
 //   - RawSymbol     → { fqdn, name, kind, module, visibility,
 //                       language_kind, location: {...}, entry_point? }
 //   - get_context   → { context: { symbol, enrichment_description,
@@ -109,10 +111,11 @@ const GRAPH = {
     visibility: s.visibility,
     module: s.module,
     language_kind: s.language_kind,
-    language: 'rust',
     is_external: false,
+    is_test: s.fqdn.includes('::tests::'),
     file: s.location.file,
     start_line: s.location.start_line,
+    project_id: 1,
     entry_point: s.entry_point ?? null,
   })),
   edges: [
@@ -146,7 +149,16 @@ export function resolveTool(name: string, args: Record<string, unknown>): ToolRe
     case 'list_projects':
       return text(PROJECTS);
     case 'list_symbols':
-      return text({ items: SYMBOLS, next_cursor: null });
+      // Mirror the daemon's list_symbols projection: each RawSymbol row
+      // carries the JOIN-resolved project_id + the is_test verdict.
+      return text({
+        items: SYMBOLS.map(s => ({
+          ...s,
+          project_id: 1,
+          is_test: s.fqdn.includes('::tests::'),
+        })),
+        next_cursor: null,
+      });
     case 'fetch_graph':
       return text(GRAPH);
     case 'get_context':
