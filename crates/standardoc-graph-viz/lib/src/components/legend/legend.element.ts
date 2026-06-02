@@ -21,6 +21,7 @@
 import classigo from 'classigo';
 
 import type { LegendCategory, LegendFilterDetail } from './legend.type';
+import { CROSS_EDGE_KINDS } from '../../edge-kinds';
 import s from './legend.module.scss';
 
 export const STANDARDOC_LEGEND_TAG = 'standardoc-legend';
@@ -61,16 +62,17 @@ const KIND_ENTRIES: ReadonlyArray<SwatchEntry> = [
 	{ value: 'macro', label: 'Macro', color: '#f48771' },
 ];
 
-// EXTENDS (~0.03%) and TESTS (0 emitted as of rev 836 — bucket TestedBy
-// uses an FQDN heuristic, not extracted edges) are intentionally omitted.
-// Re-add when the daemon emits them with material counts.
-const EDGE_ENTRIES: ReadonlyArray<SwatchEntry> = [
-	{ value: 'CALLS', label: 'Calls', color: '#3794ff' },
-	{ value: 'IMPORTS', label: 'Imports', color: '#b180d7' },
-	{ value: 'USES_TYPE', label: 'Uses type', color: '#cca700' },
-	{ value: 'IMPLEMENTS', label: 'Implements', color: '#f48771', dashed: true },
-	{ value: 'REFERENCES', label: 'References', color: '#9d9d9d' },
-];
+// Derived from the shared canonical palette (src/edge-kinds.ts) so the
+// legend can't drift from the Overview chips / Rust renderer — shows
+// every real edge kind, including the rare EXTENDS. TESTS has no
+// extracted edge (the TestedBy bucket is an FQDN heuristic), so it
+// legitimately has no swatch here.
+const EDGE_ENTRIES: ReadonlyArray<SwatchEntry> = CROSS_EDGE_KINDS.map(e => ({
+	value: e.kind,
+	label: e.label,
+	color: e.color,
+	dashed: e.dashed,
+}));
 
 const LANG_ENTRIES: ReadonlyArray<SwatchEntry> = [
 	{ value: 'rust', label: 'Rust', color: '#f48771', short: 'rs' },

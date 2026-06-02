@@ -1,4 +1,5 @@
 import { C } from './symbol-details.constants';
+import { kindFamily } from '../../kind-family';
 
 /**
  * Coarse test-symbol detector mirroring the Rust
@@ -20,20 +21,15 @@ export function looksLikeTest(fqdn: string, file?: string | null): boolean {
   return false;
 }
 
-const KIND_CALLABLE = new Set(['function', 'fn', 'method', 'impl_fn', 'trait_fn', 'interface_method', 'getter', 'setter', 'constructor']);
-const KIND_TYPE = new Set(['struct', 'enum', 'class', 'interface', 'trait', 'type_alias', 'union']);
-const KIND_VALUE = new Set(['const', 'static', 'let', 'var', 'field', 'enum_variant', 'property', 'interface_property']);
-const KIND_MODULE = new Set(['module', 'namespace', 'package', 'crate']);
-const KIND_MACRO = new Set(['macro', 'macro_rules', 'proc_macro', 'decorator', 'declarativemacro', 'procmacro']);
-
 export function kindFamilyTagClass(kindLabel: string): string {
-  const k = kindLabel.toLowerCase();
-  if (KIND_CALLABLE.has(k)) return C.tagKindCallable;
-  if (KIND_TYPE.has(k)) return C.tagKindType;
-  if (KIND_VALUE.has(k)) return C.tagKindValue;
-  if (KIND_MODULE.has(k)) return C.tagKindModule;
-  if (KIND_MACRO.has(k)) return C.tagKindMacro;
-  return '';
+  switch (kindFamily(kindLabel)) {
+    case 'callable': return C.tagKindCallable;
+    case 'type': return C.tagKindType;
+    case 'value': return C.tagKindValue;
+    case 'module': return C.tagKindModule;
+    case 'macro': return C.tagKindMacro;
+    default: return '';
+  }
 }
 
 export function visibilityTagClass(visibility: string): string {
