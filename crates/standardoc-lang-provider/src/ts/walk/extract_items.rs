@@ -21,9 +21,7 @@ use swc_core::ecma::ast::{
 
 use super::super::helpers::map_access_modifier;
 use super::super::visit;
-use super::{
-    CallTarget, ResolutionOutcome, TsWalkContext, render_expr_name, render_ts_entity_name,
-};
+use super::{CallTarget, ResolutionOutcome, TsWalkContext, render_member_expr_name};
 
 /// Phase 3 (Flow) — first-pass entry-point detector for TS/JS
 /// function declarations. The Rust/C convention of a `main` symbol
@@ -164,7 +162,7 @@ pub(super) fn extract_class_inner(
         // becomes flagged `async`); Emit ⇒ stamp the heritage edge.
         // Generic args still recurse regardless so inner type refs
         // surface their own UsesType edges.
-        match ctx.resolve_call(&render_expr_name(super_class), parent_fqdn) {
+        match ctx.resolve_call(&render_member_expr_name(super_class), parent_fqdn) {
             ResolutionOutcome::Drop => {}
             ResolutionOutcome::Attribute(tag) => {
                 ctx.register_attribute_flag(&class_fqdn, &tag);
@@ -187,7 +185,7 @@ pub(super) fn extract_class_inner(
     }
     for impl_target in &class.implements {
         let span = impl_target.span;
-        match ctx.resolve_call(&render_ts_entity_name(&impl_target.expr), parent_fqdn) {
+        match ctx.resolve_call(&render_member_expr_name(&impl_target.expr), parent_fqdn) {
             ResolutionOutcome::Drop => {}
             ResolutionOutcome::Attribute(tag) => {
                 ctx.register_attribute_flag(&class_fqdn, &tag);
@@ -545,7 +543,7 @@ pub(super) fn extract_interface_decl(
     );
     for ext in &item.extends {
         let span = ext.span;
-        match ctx.resolve_call(&render_expr_name(&ext.expr), parent_fqdn) {
+        match ctx.resolve_call(&render_member_expr_name(&ext.expr), parent_fqdn) {
             ResolutionOutcome::Drop => {}
             ResolutionOutcome::Attribute(tag) => {
                 ctx.register_attribute_flag(&fqdn, &tag);

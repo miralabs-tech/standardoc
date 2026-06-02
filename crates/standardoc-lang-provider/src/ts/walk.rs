@@ -895,18 +895,6 @@ pub(crate) fn render_member_expr_name(expr: &swc_core::ecma::ast::Expr) -> Strin
     }
 }
 
-fn render_expr_name(expr: &swc_core::ecma::ast::Expr) -> String {
-    match expr {
-        swc_core::ecma::ast::Expr::Ident(i) => i.sym.to_string(),
-        swc_core::ecma::ast::Expr::Member(_) => render_member_expr_name(expr),
-        _ => String::new(),
-    }
-}
-
-fn render_ts_entity_name(expr: &swc_core::ecma::ast::Expr) -> String {
-    render_expr_name(expr)
-}
-
 fn clamp_line(n: usize) -> u32 {
     let v = u32::try_from(n).unwrap_or(u32::MAX);
     v.max(1)
