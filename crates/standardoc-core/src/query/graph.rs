@@ -489,8 +489,8 @@ fn load_graph_symbols(
                 .as_deref()
                 .map(entry_point_from_sql_text)
                 .transpose()?;
-            let is_test = fqdn_looks_like_test(&raw.fqdn)
-                || file_path_looks_like_test(&raw.file_path);
+            let is_test =
+                fqdn_looks_like_test(&raw.fqdn) || file_path_looks_like_test(&raw.file_path);
             Ok(GraphSymbol {
                 fqdn: raw.fqdn,
                 name: raw.name,

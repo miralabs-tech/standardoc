@@ -515,7 +515,11 @@ pub fn list_symbols_projected(
     if page.items.is_empty() {
         return Ok((Vec::new(), page.next_cursor));
     }
-    let paths: Vec<&str> = page.items.iter().map(|s| s.location.file.as_str()).collect();
+    let paths: Vec<&str> = page
+        .items
+        .iter()
+        .map(|s| s.location.file.as_str())
+        .collect();
     let paths_json = serde_json::to_string(&paths)?;
     let project_by_path: std::collections::HashMap<String, Option<u32>> =
         with_conn(handle, |conn| {
