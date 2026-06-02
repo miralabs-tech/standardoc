@@ -5,7 +5,7 @@
 use standardoc_ir::SymbolLocation;
 
 /// Builds a `SymbolLocation` covering the entire file. Lines are
-/// 1-indexed, columns 0-indexed (cohérent avec swc + syn).
+/// 1-indexed, columns 0-indexed (consistent with swc + syn).
 pub(crate) fn file_span(path: &str, content: &str) -> SymbolLocation {
     let (end_line, end_col) = content_extent(content);
     SymbolLocation {

@@ -184,7 +184,7 @@ fn dispatch(path: &str) -> Option<Dispatch> {
 /// the prescribed order (the overwhelmingly common case); when the
 /// user writes `<script setup>` before `<script>` in source, the
 /// reordered second block's swc spans drift by the inter-block byte
-/// gap — accepted edge case (cohérent feedback_scope_graph_not_lsp).
+/// gap — accepted edge case (consistent with feedback_scope_graph_not_lsp).
 fn build_script_payload(
     content: &str,
     doc: &SfcDocument,
@@ -320,7 +320,7 @@ fn block_outer_end(content: &str, content_end: usize) -> usize {
 /// REFERENCES edge with the bare local identifier name. The
 /// `promote_unresolved_batch` pass will lift the edge if any symbol's
 /// fqdn happens to match the bare name (rare). Resolution against the
-/// SFC's import alias table is a beta.2 follow-up.
+/// SFC's import alias table is deferred — not yet wired as of beta.3.
 fn template_ref_to_edge(r: TemplateRef, content: &str, path: &str, module_fqdn: &str) -> RawEdge {
     let (line, col) = byte_offset_to_line_col(content, r.byte_offset);
     let to = ResolvedOrUnresolved::Unresolved { name: r.name };
