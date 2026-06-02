@@ -548,12 +548,12 @@ fn targets_outside_workspace(payload: &serde_json::Value) -> bool {
 /// guardrail still fires. The source set errs generous — keeping the gate on a
 /// doubtful extension is the safe direction.
 fn targets_non_source_file(payload: &serde_json::Value) -> bool {
-    // Extensions Standardoc's extractors index as code (Rust / TS-JS / Lua / C,
-    // plus C++ cousins). Generous on purpose: erring toward "is source" keeps
-    // the guardrail firing.
+    // Extensions Standardoc's extractors index as code (Rust / TS-JS +
+    // Vue/Svelte SFC / Lua / C, plus C++ cousins). Generous on purpose:
+    // erring toward "is source" keeps the guardrail firing.
     const SOURCE_EXTS: &[&str] = &[
         "rs", "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "lua", "c", "h", "cpp", "cc",
-        "cxx", "hpp", "hh",
+        "cxx", "hpp", "hh", "vue", "svelte",
     ];
     let tool = payload
         .get("tool_name")

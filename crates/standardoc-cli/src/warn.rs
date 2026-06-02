@@ -18,7 +18,7 @@
 //!   info-level so users learn why a previously-cached `resolve_external`
 //!   takes longer the next time it is invoked.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 
 use serde::Serialize;
 use standardoc_core::{
@@ -63,10 +63,10 @@ pub(crate) enum WarnEvent {
     },
 }
 
-/// Emits a single WARN line to stderr. Uses a non-blocking write so a
-/// closed/redirected stderr cannot stall the daemon. Lines are
-/// gracefully no-op'd when stderr is not a terminal AND not a pipe (the
-/// VSCode supervisor pipes stderr, so the marker still reaches it).
+/// Emits a single WARN line to stderr, prefixed with `STDOC_WARN_PREFIX`.
+/// Write/flush errors are swallowed so a closed or redirected stderr can't
+/// stall or crash the daemon. Always emitted regardless of TTY/pipe — the
+/// VSCode supervisor pipes stderr, so the marker reaches it.
 pub(crate) fn emit_warn(event: &WarnEvent) {
     let payload = match serde_json::to_string(event) {
         Ok(p) => p,
@@ -75,7 +75,6 @@ pub(crate) fn emit_warn(event: &WarnEvent) {
     let mut stderr = io::stderr().lock();
     let _ = writeln!(stderr, "{STDOC_WARN_PREFIX}{payload}");
     let _ = stderr.flush();
-    let _ = stderr.is_terminal(); // silences unused warning on TTY check.
 }
 
 const fn env_override_for(binary: &str) -> &'static str {

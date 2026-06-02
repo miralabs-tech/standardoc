@@ -118,6 +118,29 @@ fn check_still_denies_read_inside_workspace() {
 }
 
 #[test]
+fn check_gates_read_of_sfc_source_files() {
+    // Vue/Svelte SFCs ARE indexed by the SFC extractor, so a Read of one is
+    // source — keep it gated toward MCP like any .ts/.rs file.
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp); // absent
+    let cwd = std::env::temp_dir().join("ws-root");
+    for name in ["App.vue", "Widget.svelte"] {
+        let inside = cwd.join("src").join(name);
+        let payload = serde_json::json!({
+            "cwd": cwd.to_string_lossy(),
+            "tool_name": "Read",
+            "tool_input": { "file_path": inside.to_string_lossy() },
+        })
+        .to_string();
+        let out = pre_tool_hook_decide("check", &payload, &sentinel);
+        assert!(
+            out.contains(r#""permissionDecision":"deny""#),
+            "{name}: out={out}"
+        );
+    }
+}
+
+#[test]
 fn check_gates_relative_path_reads() {
     // A relative target resolves under cwd → still gated.
     let tmp = TempDir::new().unwrap();
