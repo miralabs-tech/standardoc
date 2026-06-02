@@ -28,19 +28,12 @@
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_lossless)]
-// `palette` and `payload` still carry helpers that used to feed the
-// legacy GraphEngine; the slim canvases consume only a subset. The
-// crate-wide allow keeps the slim-down focused on deletion rather than
-// another bookkeeping pass — the next time one of these helpers grows
-// a real consumer the lint will fire.
-#![allow(dead_code)]
 
 mod camera;
 mod focus;
 mod kind;
 mod overview;
 mod palette;
-mod payload;
 
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;

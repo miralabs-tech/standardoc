@@ -30,7 +30,12 @@ use crate::camera::Camera3D;
 pub(crate) struct OverviewNode {
     pub id: u32,
     pub label: String,
+    /// Reserved wire field — `overview-payload.ts` sends the project
+    /// ecosystem tag (`rust` / `node` / …) here, but the overview
+    /// currently tints nodes by a hash of `label`, not by this. Kept so
+    /// the payload contract stays stable until per-kind tinting lands.
     #[serde(default)]
+    #[allow(dead_code)]
     pub kind: Option<String>,
     pub symbol_count: u32,
     pub depth: u32,
@@ -454,18 +459,10 @@ impl OverviewCanvas {
             self.place_subtree(root_idx, pos, max_count, &children_of);
         }
 
-        // Render order: deepest first so shallower nodes paint over
-        // (better occlusion read). Within a depth, by id for stability.
-        let mut order: Vec<u32> = self.nodes.iter().map(|n| n.id).collect();
-        order.sort_by(|a, b| {
-            let na = self.nodes.iter().find(|n| n.id == *a);
-            let nb = self.nodes.iter().find(|n| n.id == *b);
-            match (na, nb) {
-                (Some(na), Some(nb)) => nb.depth.cmp(&na.depth).then(na.id.cmp(&nb.id)),
-                _ => std::cmp::Ordering::Equal,
-            }
-        });
-        self.render_order = order;
+        // Render order seed — `draw()` re-sorts this by projected depth
+        // every frame, so the set just needs to carry every node id; an
+        // up-front depth sort here would only be overwritten.
+        self.render_order = self.nodes.iter().map(|n| n.id).collect();
     }
 
     fn place_node(
@@ -698,6 +695,11 @@ impl OverviewCanvas {
             projected.keys().copied().collect()
         };
 
+        // O(1) id → node lookup so the per-node loop stays linear; a
+        // `self.nodes.iter().find()` here is O(n) per node → O(n²) over
+        // the full render, quadratic at workspace scale.
+        let node_by_id: std::collections::HashMap<u32, &OverviewNode> =
+            self.nodes.iter().map(|n| (n.id, n)).collect();
         for id in &order {
             let Some(proj) = projected.get(id) else {
                 continue;
@@ -705,7 +707,7 @@ impl OverviewCanvas {
             if !proj.visible {
                 continue;
             }
-            let Some(n) = self.nodes.iter().find(|n| n.id == *id) else {
+            let Some(n) = node_by_id.get(id).copied() else {
                 continue;
             };
             let highlighted = self.hovered == Some(*id);

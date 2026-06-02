@@ -76,11 +76,6 @@ struct LaidNode {
     y: f64,
     w: f64,
     h: f64,
-    is_center: bool,
-    /// Bucket this card belongs to (None for the centre). Drives the
-    /// card border colour so neighbours read as part of their bucket
-    /// at a glance, not just from their angular position.
-    bucket: Option<Bucket>,
 }
 
 /// Spatial bucket a neighbour gets placed into based on the edge type
@@ -735,8 +730,6 @@ impl FocusGraphCanvas {
                 y: cy - CENTER_H * 0.5,
                 w: CENTER_W,
                 h: CENTER_H,
-                is_center: true,
-                bucket: None,
             },
         );
         if self.neighbors.is_empty() {
@@ -822,8 +815,6 @@ impl FocusGraphCanvas {
                                 y: item_y,
                                 w: ITEM_W,
                                 h: ITEM_H,
-                                is_center: false,
-                                bucket: Some(*bucket),
                             },
                         );
                     }
@@ -845,8 +836,6 @@ impl FocusGraphCanvas {
                                 y: bucket_cy - ITEM_H * 0.5,
                                 w: ITEM_W,
                                 h: ITEM_H,
-                                is_center: false,
-                                bucket: Some(*bucket),
                             },
                         );
                     }
