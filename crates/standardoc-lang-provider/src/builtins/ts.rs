@@ -63,17 +63,20 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
         },
         BuiltinTier::Edge,
     );
+    // `JSON`/`Math` are namespace objects — you call `JSON.parse` /
+    // `Math.max`, never construct them — so `Kind::Module`, consistent
+    // with `console` (shared ambient seed) and the JS registry.
     add(
         reg,
         &["JSON"],
-        Kind::Type,
+        Kind::Module,
         BuiltinTag::Custom { tag: "json".into() },
         BuiltinTier::Edge,
     );
     add(
         reg,
         &["Math"],
-        Kind::Type,
+        Kind::Module,
         BuiltinTag::Math,
         BuiltinTier::Edge,
     );

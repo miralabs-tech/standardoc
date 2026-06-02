@@ -10,10 +10,13 @@ const INT_TYPES: &[&str] = &[
     "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
 ];
 
-/// Method names shared by every primitive int type. Receivers at the
-/// call site carry the bare primitive name as `receiver_type`, so the
-/// 3-tier resolver lands on `<builtin>::rust::<int>::<method>` via the
-/// direct-builtin fallback.
+/// Method names shared by every primitive int type (signed AND unsigned).
+/// Receivers at the call site carry the bare primitive name as
+/// `receiver_type`, so the 3-tier resolver lands on
+/// `<builtin>::rust::<int>::<method>` via the direct-builtin fallback.
+/// Type-specific surfaces live in [`INT_METHODS_SIGNED`] /
+/// [`INT_METHODS_UNSIGNED`] so we don't seed phantom rows (`u8::abs`,
+/// `i8::is_power_of_two`) the compiler would reject.
 const INT_METHODS: &[&str] = &[
     "saturating_add",
     "saturating_sub",
@@ -33,7 +36,6 @@ const INT_METHODS: &[&str] = &[
     "checked_rem",
     "checked_neg",
     "checked_pow",
-    "abs",
     "pow",
     "min",
     "max",
@@ -49,9 +51,13 @@ const INT_METHODS: &[&str] = &[
     "swap_bytes",
     "to_be",
     "to_le",
-    "is_power_of_two",
-    "next_power_of_two",
 ];
+
+/// Methods that exist only on the signed primitive int types.
+const INT_METHODS_SIGNED: &[&str] = &["abs"];
+
+/// Methods that exist only on the unsigned primitive int types.
+const INT_METHODS_UNSIGNED: &[&str] = &["is_power_of_two", "next_power_of_two"];
 
 pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
     register_types_and_macros(reg);
@@ -918,6 +924,13 @@ fn register_methods(reg: &mut BuiltinRegistry) {
     // matching the `receiver_type` the extractor populates.
     for ty in INT_TYPES {
         add(reg, ty, INT_METHODS);
+        // `i*`/`isize` are signed, `u*`/`usize` unsigned — seed only the
+        // surface each half actually exposes (`abs` vs `is_power_of_two`).
+        if ty.starts_with('i') {
+            add(reg, ty, INT_METHODS_SIGNED);
+        } else {
+            add(reg, ty, INT_METHODS_UNSIGNED);
+        }
     }
 
     // `Peekable<I>` inherent — `peek` / `peek_mut` are NOT on Iterator

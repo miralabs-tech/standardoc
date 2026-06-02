@@ -134,7 +134,15 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
     );
     add(
         reg,
-        &["Error", "TypeError", "RangeError"],
+        &[
+            "Error",
+            "TypeError",
+            "RangeError",
+            "SyntaxError",
+            "ReferenceError",
+            "EvalError",
+            "URIError",
+        ],
         Kind::Type,
         BuiltinTag::Custom {
             tag: "error".into(),

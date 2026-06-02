@@ -196,4 +196,69 @@ mod tests {
         assert_eq!(func.kind, standardoc_ir::Kind::Callable);
         assert_eq!(func.synthetic_fqdn, "<builtin>::c::time");
     }
+
+    #[test]
+    fn js_ts_error_globals_reach_parity() {
+        // The 4 ECMAScript error globals TS already carried must also be
+        // seeded under JavaScript so a `.js` doesn't under-classify them.
+        let reg = standard();
+        for name in [
+            "Error",
+            "TypeError",
+            "RangeError",
+            "SyntaxError",
+            "ReferenceError",
+            "EvalError",
+            "URIError",
+        ] {
+            assert!(
+                reg.lookup(name, Language::JavaScript).is_some(),
+                "JS {name}"
+            );
+            assert!(
+                reg.lookup(name, Language::TypeScript).is_some(),
+                "TS {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_globals_are_modules_in_both_registries() {
+        // `Math`/`JSON` are namespace objects (member access, never
+        // constructed) — `Kind::Module` across JS and TS, matching
+        // `console`. Guards against the prior JS-Module / TS-Type split.
+        let reg = standard();
+        for lang in [Language::JavaScript, Language::TypeScript] {
+            for name in ["Math", "JSON"] {
+                let entry = reg.lookup(name, lang).expect("namespace global seeded");
+                assert_eq!(
+                    entry.kind,
+                    standardoc_ir::Kind::Module,
+                    "{name} in {lang:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn int_methods_are_split_by_signedness() {
+        // `abs` is signed-only, `is_power_of_two` unsigned-only — no
+        // phantom `u8::abs` / `i8::is_power_of_two` rows get seeded.
+        let reg = standard();
+        assert!(reg.lookup_method("i8", "abs", Language::Rust).is_some());
+        assert!(reg.lookup_method("u8", "abs", Language::Rust).is_none());
+        assert!(reg
+            .lookup_method("u8", "is_power_of_two", Language::Rust)
+            .is_some());
+        assert!(reg
+            .lookup_method("i8", "is_power_of_two", Language::Rust)
+            .is_none());
+        // Common surface still seeded on both halves.
+        assert!(reg
+            .lookup_method("u8", "saturating_add", Language::Rust)
+            .is_some());
+        assert!(reg
+            .lookup_method("i8", "saturating_add", Language::Rust)
+            .is_some());
+    }
 }
