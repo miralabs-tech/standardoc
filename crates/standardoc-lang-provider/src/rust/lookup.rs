@@ -6,8 +6,8 @@ use standardoc_ir::{
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{
-    Expr, File, FnArg, GenericParam, ImplItem, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMacro,
-    ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemType, ItemUnion, ItemUse, Local, Pat, UseTree,
+    Expr, File, FnArg, GenericParam, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMacro, ItemMod,
+    ItemStatic, ItemStruct, ItemTrait, ItemType, ItemUnion, ItemUse, Local, Pat, UseTree,
 };
 
 use super::walk::path_to_string;
@@ -508,11 +508,6 @@ impl<'ast> Visit<'ast> for LookupBuilder<'_> {
         self.pop_scope();
     }
 }
-
-// `ImplItem` is unused after the visitor split — re-export to keep
-// the syn surface tidy in case Stage 4 expands here.
-#[allow(dead_code)]
-const _: Option<&ImplItem> = None;
 
 /// Stage 3e-2-bis — leftmost-base of an alias-worthy RHS expression.
 /// Restricted to `Expr::Path` (single-ident OR multi-segment) day-1.

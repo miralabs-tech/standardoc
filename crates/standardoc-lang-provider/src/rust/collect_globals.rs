@@ -19,7 +19,6 @@
 //! to both passes without re-discovery.
 
 use syn::ImplItem;
-use syn::spanned::Spanned;
 
 use super::global_return_type_registry::GlobalReturnTypeRegistry;
 use super::module_path;
@@ -113,10 +112,6 @@ fn impl_self_ident(ty: &syn::Type) -> Option<String> {
             super::type_name::nominal_of(&p).to_string()
         })
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            let _ = ty.span();
-            None
-        })
 }
 
 #[cfg(test)]

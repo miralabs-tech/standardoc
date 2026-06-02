@@ -106,11 +106,11 @@ fn push_trimmed<'a>(out: &mut Vec<&'a str>, s: &'a str) {
 /// template string using the receiver's nominal + args. E.g. for receiver
 /// `Vec<Foo>` and template `"Iterator<T>"`, returns `"Iterator<Foo>"`.
 /// Token rules per receiver nominal:
-///   * `Vec | Option | HashSet | BTreeSet | Iterator | VecDeque |
-///     LinkedList | BinaryHeap | Box | Rc | Arc | Cell | RefCell |
-///     Mutex | RwLock`: `T` = args[0]
 ///   * `Result`: `T` = args[0], `E` = args[1]
 ///   * `HashMap | BTreeMap`: `K` = args[0], `V` = args[1]
+///   * any other nominal: `T` = args[0] — the permissive catch-all
+///     covering every single-type-param container (`Vec`, `Option`,
+///     `Box`, `Arc`, `Iterator`, `Rc`, `Cell`, `RefCell`, `Mutex`, …).
 /// Stops short of full type-param resolution — that's E-3.3.
 pub(crate) fn substitute_template(
     template: &str,
