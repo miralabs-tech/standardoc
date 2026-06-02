@@ -458,8 +458,18 @@ impl Visit for LookupBuilder<'_> {
     }
 
     fn visit_class_decl(&mut self, node: &ClassDecl) {
-        // Class name is hoisted at module level by `hoist_module_items`.
-        // Just descend so `visit_class` handles type params + body scope.
+        // Top-level class names are hoisted by `hoist_module_items`; a
+        // nested class binds its name at the enclosing scope (mirror
+        // visit_fn_decl) before `visit_class` opens its type-container.
+        if self.current_scope() != ModuleLookup::ROOT_SCOPE {
+            self.add_binding(
+                node.ident.sym.to_string(),
+                BindingSource::LocalDecl {
+                    decl_kind: LocalDeclKind::Class,
+                },
+                vec![],
+            );
+        }
         node.visit_children_with(self);
     }
 
@@ -519,8 +529,17 @@ impl Visit for LookupBuilder<'_> {
     }
 
     fn visit_ts_type_alias_decl(&mut self, node: &TsTypeAliasDecl) {
-        // Top-level already hoisted; nested would land here. Type params
-        // bind in the alias's own scope.
+        // Top-level already hoisted; a nested alias binds its name at the
+        // enclosing scope before its own type-param scope opens.
+        if self.current_scope() != ModuleLookup::ROOT_SCOPE {
+            self.add_binding(
+                node.id.sym.to_string(),
+                BindingSource::LocalDecl {
+                    decl_kind: LocalDeclKind::TypeAlias,
+                },
+                vec![],
+            );
+        }
         self.push_scope(ScopeKind::TypeContainer, node.span.lo, node.span.hi);
         for tp in node.type_params.iter().flat_map(|t| &t.params) {
             self.add_binding(tp.name.sym.to_string(), BindingSource::TypeParam, vec![]);
@@ -530,6 +549,17 @@ impl Visit for LookupBuilder<'_> {
     }
 
     fn visit_ts_interface_decl(&mut self, node: &TsInterfaceDecl) {
+        // Top-level already hoisted; a nested interface binds its name at
+        // the enclosing scope before its own type-param scope opens.
+        if self.current_scope() != ModuleLookup::ROOT_SCOPE {
+            self.add_binding(
+                node.id.sym.to_string(),
+                BindingSource::LocalDecl {
+                    decl_kind: LocalDeclKind::Interface,
+                },
+                vec![],
+            );
+        }
         self.push_scope(ScopeKind::TypeContainer, node.span.lo, node.span.hi);
         for tp in node.type_params.iter().flat_map(|t| &t.params) {
             self.add_binding(tp.name.sym.to_string(), BindingSource::TypeParam, vec![]);
@@ -539,6 +569,17 @@ impl Visit for LookupBuilder<'_> {
     }
 
     fn visit_ts_enum_decl(&mut self, node: &TsEnumDecl) {
+        // Top-level already hoisted; a nested enum binds its name at the
+        // enclosing scope before opening its member scope.
+        if self.current_scope() != ModuleLookup::ROOT_SCOPE {
+            self.add_binding(
+                node.id.sym.to_string(),
+                BindingSource::LocalDecl {
+                    decl_kind: LocalDeclKind::Enum,
+                },
+                vec![],
+            );
+        }
         // Enum members are sub-symbols (Bug C-1) — they are bindings inside
         // the enum's own scope so qualified refs `Color.Red` can resolve.
         self.push_scope(ScopeKind::TypeContainer, node.span.lo, node.span.hi);

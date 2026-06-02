@@ -58,6 +58,55 @@ fn top_level_function_and_class_hoisted_to_root() {
 }
 
 #[test]
+fn nested_type_decls_bind_their_name_in_the_enclosing_scope() {
+    // class / interface / enum / type aliases declared inside a function
+    // body are NOT module-hoisted — their name must still bind at the local
+    // scope so scope-local refs resolve (mirror of nested fn/var binding).
+    let src = "function outer() {\n  class Inner {}\n  interface Shape {}\n  enum Color { Red }\n  type Alias = number;\n}\n";
+    let module = parse(src);
+    let lookup = build_ts_lookup(&module, "m");
+
+    let nested = |name: &str| {
+        let b = lookup
+            .bindings
+            .get(name)
+            .and_then(|v| v.first())
+            .unwrap_or_else(|| panic!("{name} must bind"));
+        assert_ne!(
+            b.scope_idx,
+            ModuleLookup::ROOT_SCOPE,
+            "{name} must bind in the nested scope, not ROOT"
+        );
+        b
+    };
+
+    assert!(matches!(
+        nested("Inner").source,
+        BindingSource::LocalDecl {
+            decl_kind: LocalDeclKind::Class
+        }
+    ));
+    assert!(matches!(
+        nested("Shape").source,
+        BindingSource::LocalDecl {
+            decl_kind: LocalDeclKind::Interface
+        }
+    ));
+    assert!(matches!(
+        nested("Color").source,
+        BindingSource::LocalDecl {
+            decl_kind: LocalDeclKind::Enum
+        }
+    ));
+    assert!(matches!(
+        nested("Alias").source,
+        BindingSource::LocalDecl {
+            decl_kind: LocalDeclKind::TypeAlias
+        }
+    ));
+}
+
+#[test]
 fn imports_populate_both_bindings_and_import_records() {
     let src = r#"import { foo, bar as baz } from "other";
 import type { T } from "other";
