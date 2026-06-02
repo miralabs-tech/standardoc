@@ -10,10 +10,11 @@
 //!
 //! Per-bucket categorisation is driven by the edge connecting each
 //! neighbour to the centre (kind + direction). Neighbours that don't
-//! touch the centre directly — depth-2+ in multi-hop modes — are
-//! dropped from the layout entirely (they have no canonical bucket).
-//! Each bucket caps at BUCKET_TOP_N items and surfaces the truncation
-//! as a "+N more" badge under the column.
+//! touch the centre directly — depth-2+ in multi-hop modes — have no
+//! canonical bucket, so they land in the `Indirect` bucket (due south)
+//! rather than dropping out of the layout. Each bucket caps at
+//! BUCKET_TOP_N items and surfaces the truncation as a "+N more" badge
+//! under the column.
 //!
 //! Camera (pan/zoom + drag) is unchanged from the prior multi-ring
 //! revision; hover illumination + hit-test were ported to the new
@@ -81,7 +82,8 @@ struct LaidNode {
 /// Spatial bucket a neighbour gets placed into based on the edge type
 /// + direction connecting it to the centre. The mapping is canonical:
 /// inbound CALLS → UsedBy, outbound CALLS → Calls, etc. Neighbours
-/// reachable only via depth-2+ paths are skipped entirely (no bucket).
+/// reachable only via depth-2+ paths fall through to the `Indirect`
+/// bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Bucket {
     UsedBy,
@@ -739,8 +741,8 @@ impl FocusGraphCanvas {
         // Categorise neighbours into typed buckets based on the edge
         // connecting them to the centre. Multi-edge neighbours collapse
         // to the first edge's bucket. Neighbours with no direct edge to
-        // the centre (depth-2+) are skipped entirely in V0 — they have
-        // no canonical bucket and would clutter the layout.
+        // the centre (depth-2+) have no canonical bucket, so they land in
+        // the `Indirect` bucket (due south).
         let centre_fqdn = centre.fqdn.clone();
         let mut buckets: std::collections::HashMap<Bucket, Vec<&FocusNode>> =
             std::collections::HashMap::new();
