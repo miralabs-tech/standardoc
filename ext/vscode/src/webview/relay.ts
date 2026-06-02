@@ -61,7 +61,14 @@ export class WebviewMcpRelay implements vscode.Disposable {
       this.output.appendLine('[viz-relay] daemon transport closed');
     };
     this.transport = transport;
-    this.started = transport.start();
+    // Reset the memoised promise on failure so a later frame opens a fresh
+    // transport instead of reusing a rejected start() forever (a daemon not
+    // yet listening on the first frame would otherwise wedge the relay).
+    this.started = transport.start().catch((err: unknown) => {
+      this.started = null;
+      this.transport = null;
+      throw err;
+    });
     return this.started;
   }
 

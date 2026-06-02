@@ -97,22 +97,3 @@ export interface SymbolContextWithNeighborsJson {
   imported_by: NeighborSymbolJson[];
 }
 
-export interface ListSymbolsPageJson {
-  items: RawSymbolJson[];
-  next_cursor: string | null;
-}
-
-export interface CurrentRevisionJson {
-  revision: number;
-  watcher: { active: boolean };
-  indexing: { ready: boolean };
-}
-
-export type CheckStaleEntryJson =
-  | { fqdn: string; status: 'fresh' }
-  | { fqdn: string; status: 'stale'; last_modified_revision: number }
-  | { fqdn: string; status: 'missing' };
-
-export interface CheckStaleJson {
-  results: CheckStaleEntryJson[];
-}

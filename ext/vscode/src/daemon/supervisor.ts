@@ -50,6 +50,7 @@ export class DaemonSupervisor implements vscode.Disposable {
   private expectedStopping = false;
   private lspStateSub: vscode.Disposable | null = null;
   private mcpFatalSub: vscode.Disposable | null = null;
+  private mcpExitSub: vscode.Disposable | null = null;
 
   readonly onDidChangeState: vscode.Event<DaemonState> = this.emitter.event;
 
@@ -61,6 +62,7 @@ export class DaemonSupervisor implements vscode.Disposable {
   ) {
     this.lspStateSub = deps.lsp.onStateChange(state => this.onLspStateChange(state));
     this.mcpFatalSub = deps.mcp.onFatalConfig(config => this.onFatalConfig(config));
+    this.mcpExitSub = deps.mcp.onExit(() => this.onMcpExit());
   }
 
   current(): DaemonState {
@@ -205,6 +207,19 @@ export class DaemonSupervisor implements vscode.Disposable {
   }
 
   /**
+   * The MCP daemon child died on its own (crash / OOM / panic with no
+   * STDOC_FATAL marker). Mirror `onLspStateChange`: only react from a
+   * live `ready` state — an exit during `starting` is already surfaced
+   * by `spawn()`'s own error path, and `expectedStopping` covers our own
+   * teardown.
+   */
+  private onMcpExit(): void {
+    if (!this.expectedStopping && this.state.kind === 'ready') {
+      this.handleCrash('MCP daemon exited unexpectedly');
+    }
+  }
+
+  /**
    * Drives the state machine into `fatal_config` and stops the
    * backoff/retry loop. Reaching `fatal_config` requires the user to
    * fix the host-side condition (typically: rebuild + re-install the
@@ -335,6 +350,8 @@ export class DaemonSupervisor implements vscode.Disposable {
     this.lspStateSub = null;
     this.mcpFatalSub?.dispose();
     this.mcpFatalSub = null;
+    this.mcpExitSub?.dispose();
+    this.mcpExitSub = null;
     this.emitter.dispose();
   }
 }

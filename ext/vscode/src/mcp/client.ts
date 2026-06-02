@@ -37,6 +37,19 @@ export class McpClient implements vscode.Disposable {
    */
   readonly onFatalConfig: vscode.Event<FatalConfig> = this.fatalEmitter.event;
 
+  private readonly exitEmitter = new vscode.EventEmitter<void>();
+
+  /**
+   * Fires when the supervised MCP child exits WITHOUT going through
+   * `stop()` (crash, OOM-kill, panic with no STDOC_FATAL marker).
+   * `stop()` nulls `this.child` before killing, so the exit handler tells
+   * a deliberate teardown apart from an unexpected death. The supervisor
+   * subscribes to drive its crash/backoff machinery — otherwise a dead
+   * MCP daemon paired with a still-running LSP would leave the supervisor
+   * stuck at `ready`.
+   */
+  readonly onExit: vscode.Event<void> = this.exitEmitter.event;
+
   constructor(
     private readonly workspaceRoot: string,
     private readonly output: vscode.OutputChannel,
@@ -76,6 +89,18 @@ export class McpClient implements vscode.Disposable {
     // We never write to this pipe; it carries no protocol data.
     const child = spawn(binaryPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     this.child = child;
+    // Surface an UNEXPECTED death (crash / OOM / panic) so the supervisor
+    // can restart. `stop()` nulls this.child before killing, so a still-
+    // matching reference here means the daemon died on its own.
+    child.on('exit', (code, signal) => {
+      if (this.child !== child) return;
+      this.child = null;
+      this.endpointUrl = null;
+      this.output.appendLine(
+        `[mcp] daemon child exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'})`,
+      );
+      this.exitEmitter.fire();
+    });
     this.attachStderrScanner(child);
 
     const endpoint = await this.waitForEndpoint();
@@ -145,32 +170,6 @@ export class McpClient implements vscode.Disposable {
     return this.callTool('get_context', { fqdn, depth });
   }
 
-  async currentRevision(): Promise<string> {
-    return this.callTool('current_revision', {});
-  }
-
-  async checkStale(pairs: ReadonlyArray<{ fqdn: string; fetched_at_revision: number }>): Promise<string> {
-    return this.callTool('check_stale', { pairs: [...pairs] });
-  }
-
-  async listSymbols(args: {
-    readonly kind?: string;
-    readonly visibility?: string;
-    readonly module?: string;
-    readonly limit?: number;
-    readonly include_external?: boolean;
-    readonly cursor?: string;
-  }): Promise<string> {
-    const payload: Record<string, unknown> = {};
-    if (args.kind !== undefined) payload.kind = args.kind;
-    if (args.visibility !== undefined) payload.visibility = args.visibility;
-    if (args.module !== undefined) payload.module = args.module;
-    if (args.limit !== undefined) payload.limit = args.limit;
-    if (args.include_external !== undefined) payload.include_external = args.include_external;
-    if (args.cursor !== undefined) payload.cursor = args.cursor;
-    return this.callTool('list_symbols', payload);
-  }
-
   async stop(): Promise<void> {
     const client = this.client;
     this.client = null;
@@ -219,6 +218,7 @@ export class McpClient implements vscode.Disposable {
   dispose(): void {
     void this.stop();
     this.fatalEmitter.dispose();
+    this.exitEmitter.dispose();
   }
 
   private async callTool(name: string, args: Record<string, unknown>): Promise<string> {
