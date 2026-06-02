@@ -7,7 +7,7 @@ use swc_core::ecma::ast::{
     ArrowExpr, BlockStmt, BlockStmtOrExpr, CallExpr, Callee, CatchClause, Expr, ExprOrSpread,
     ForInStmt, ForOfStmt, ForStmt, Function, Ident, JSXAttrOrSpread, JSXAttrValue, JSXElement,
     JSXElementChild, JSXElementName, JSXExpr, Lit, MemberProp, NewExpr, OptChainBase, OptChainExpr,
-    Pat, TsAsExpr, TsEntityName, TsTypeAnn, TsTypeAssertion, TsTypeParamInstantiation, TsTypeRef,
+    TsAsExpr, TsEntityName, TsTypeAssertion, TsTypeRef,
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
 
@@ -85,76 +85,24 @@ const TYPE_TAG_UNRESOLVED: &str = "unresolved-type";
 // emission context, then ride swc's default traversal which fires our
 // `visit_ts_type_ref` override on every leaf reference.
 
-pub(crate) fn visit_type_ann_for_uses(
+// One generic entry collapses the six near-identical `visit_*_for_uses`
+// wrappers: any swc node that can be walked by a `CallVisitor`
+// (`TsTypeAnn`, `TsTypeParamInstantiation`, `TsType`, `Pat`, `TsFnParam`,
+// `TsTypeParamDecl`) seeds the visitor with the emission context, then
+// rides the default traversal. The HRTB binds `CallVisitor`'s two
+// lifetimes since the visitor is built locally.
+pub(crate) fn visit_for_uses<N>(
     ctx: &mut TsWalkContext<'_>,
-    ann: &TsTypeAnn,
+    node: &N,
     current_module: &str,
     enclosing_fqdn: &str,
     emission_context: &'static str,
-) {
+) where
+    N: for<'a, 'b> VisitWith<CallVisitor<'a, 'b>>,
+{
     let mut visitor = CallVisitor::new(ctx, current_module, enclosing_fqdn);
     visitor.type_emission_context = Some(emission_context);
-    ann.visit_with(&mut visitor);
-}
-
-pub(crate) fn visit_type_params_for_uses(
-    ctx: &mut TsWalkContext<'_>,
-    params: &TsTypeParamInstantiation,
-    current_module: &str,
-    enclosing_fqdn: &str,
-    emission_context: &'static str,
-) {
-    let mut visitor = CallVisitor::new(ctx, current_module, enclosing_fqdn);
-    visitor.type_emission_context = Some(emission_context);
-    params.visit_with(&mut visitor);
-}
-
-pub(crate) fn visit_ts_type_for_uses(
-    ctx: &mut TsWalkContext<'_>,
-    ts_type: &swc_core::ecma::ast::TsType,
-    current_module: &str,
-    enclosing_fqdn: &str,
-    emission_context: &'static str,
-) {
-    let mut visitor = CallVisitor::new(ctx, current_module, enclosing_fqdn);
-    visitor.type_emission_context = Some(emission_context);
-    ts_type.visit_with(&mut visitor);
-}
-
-pub(crate) fn visit_pat_for_uses(
-    ctx: &mut TsWalkContext<'_>,
-    pat: &Pat,
-    current_module: &str,
-    enclosing_fqdn: &str,
-    emission_context: &'static str,
-) {
-    let mut visitor = CallVisitor::new(ctx, current_module, enclosing_fqdn);
-    visitor.type_emission_context = Some(emission_context);
-    pat.visit_with(&mut visitor);
-}
-
-pub(crate) fn visit_ts_fn_param_for_uses(
-    ctx: &mut TsWalkContext<'_>,
-    param: &swc_core::ecma::ast::TsFnParam,
-    current_module: &str,
-    enclosing_fqdn: &str,
-    emission_context: &'static str,
-) {
-    let mut visitor = CallVisitor::new(ctx, current_module, enclosing_fqdn);
-    visitor.type_emission_context = Some(emission_context);
-    param.visit_with(&mut visitor);
-}
-
-pub(crate) fn visit_ts_type_param_decl_for_uses(
-    ctx: &mut TsWalkContext<'_>,
-    decl: &swc_core::ecma::ast::TsTypeParamDecl,
-    current_module: &str,
-    enclosing_fqdn: &str,
-    emission_context: &'static str,
-) {
-    let mut visitor = CallVisitor::new(ctx, current_module, enclosing_fqdn);
-    visitor.type_emission_context = Some(emission_context);
-    decl.visit_with(&mut visitor);
+    node.visit_with(&mut visitor);
 }
 
 /// Pass-2 entry: walk a function body for `CallExpr` / `NewExpr`. Mirror of
@@ -285,7 +233,7 @@ enum NameResolution {
     Attribute(BuiltinTag),
 }
 
-struct CallVisitor<'a, 'b> {
+pub(crate) struct CallVisitor<'a, 'b> {
     ctx: &'a mut TsWalkContext<'b>,
     current_module: String,
     enclosing_fqdn: String,

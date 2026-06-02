@@ -173,7 +173,7 @@ pub(super) fn extract_class_inner(
         // Bug B Stage 2b: walk extends' generic args
         // (`class X extends Foo<Bar>` → UsesType edge to Bar).
         if let Some(type_params) = &class.super_type_params {
-            visit::visit_type_params_for_uses(
+            visit::visit_for_uses(
                 ctx,
                 type_params,
                 parent_fqdn,
@@ -196,7 +196,7 @@ pub(super) fn extract_class_inner(
         // Bug B Stage 2b: walk implements' generic args
         // (`class X implements Foo<Bar>` → UsesType edge to Bar).
         if let Some(type_args) = &impl_target.type_args {
-            visit::visit_type_params_for_uses(
+            visit::visit_for_uses(
                 ctx,
                 type_args,
                 parent_fqdn,
@@ -232,7 +232,7 @@ pub(super) fn extract_class_inner(
                     // (`class X { field: Foo }` → UsesType from
                     // `X::field` to Foo).
                     if let Some(ann) = &prop.type_ann {
-                        visit::visit_type_ann_for_uses(
+                        visit::visit_for_uses(
                             ctx,
                             ann,
                             parent_fqdn,
@@ -248,7 +248,7 @@ pub(super) fn extract_class_inner(
                 let prop_fqdn = sym.fqdn.clone();
                 ctx.push_symbol_with_doc(sym, pprop.span.lo);
                 if let Some(ann) = &pprop.type_ann {
-                    visit::visit_type_ann_for_uses(
+                    visit::visit_for_uses(
                         ctx,
                         ann,
                         parent_fqdn,
@@ -500,7 +500,7 @@ pub(super) fn extract_var_decl(
         // annotations, but only when an init is present. Walking the
         // pattern here covers init-less let-decls and top-level ambient
         // shapes consistently.
-        visit::visit_pat_for_uses(
+        visit::visit_for_uses(
             ctx,
             &declarator.name,
             parent_fqdn,
@@ -554,13 +554,7 @@ pub(super) fn extract_interface_decl(
         // Bug B Stage 2b: walk the extends' generic args
         // (`interface I extends J<K>` → UsesType edge to K).
         if let Some(type_args) = &ext.type_args {
-            visit::visit_type_params_for_uses(
-                ctx,
-                type_args,
-                parent_fqdn,
-                &fqdn,
-                visit::TYPE_CTX_EXTENDS,
-            );
+            visit::visit_for_uses(ctx, type_args, parent_fqdn, &fqdn, visit::TYPE_CTX_EXTENDS);
         }
     }
     // Bug C-1 — push a `RawSymbol` per interface body member so the
@@ -603,7 +597,7 @@ pub(super) fn extract_interface_decl(
                     prop.span.lo,
                 );
                 if let Some(ann) = &prop.type_ann {
-                    visit::visit_type_ann_for_uses(
+                    visit::visit_for_uses(
                         ctx,
                         ann,
                         parent_fqdn,
@@ -641,7 +635,7 @@ pub(super) fn extract_interface_decl(
                     method.span.lo,
                 );
                 for p in &method.params {
-                    visit::visit_ts_fn_param_for_uses(
+                    visit::visit_for_uses(
                         ctx,
                         p,
                         parent_fqdn,
@@ -650,7 +644,7 @@ pub(super) fn extract_interface_decl(
                     );
                 }
                 if let Some(ann) = &method.type_ann {
-                    visit::visit_type_ann_for_uses(
+                    visit::visit_for_uses(
                         ctx,
                         ann,
                         parent_fqdn,
@@ -659,7 +653,7 @@ pub(super) fn extract_interface_decl(
                     );
                 }
                 if let Some(type_params) = &method.type_params {
-                    visit::visit_ts_type_param_decl_for_uses(
+                    visit::visit_for_uses(
                         ctx,
                         type_params,
                         parent_fqdn,
@@ -697,7 +691,7 @@ pub(super) fn extract_interface_decl(
                     getter.span.lo,
                 );
                 if let Some(ann) = &getter.type_ann {
-                    visit::visit_type_ann_for_uses(
+                    visit::visit_for_uses(
                         ctx,
                         ann,
                         parent_fqdn,
@@ -734,7 +728,7 @@ pub(super) fn extract_interface_decl(
                     },
                     setter.span.lo,
                 );
-                visit::visit_ts_fn_param_for_uses(
+                visit::visit_for_uses(
                     ctx,
                     &setter.param,
                     parent_fqdn,

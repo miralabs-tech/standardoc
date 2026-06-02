@@ -699,7 +699,7 @@ fn process_decl(
             ctx.push_symbol_with_doc(sym, outer_pos);
             // Bug B Stage 2b: walk the alias body for `UsesType` edges
             // (`type X = Foo | Bar` → edges from X to Foo and Bar).
-            visit::visit_ts_type_for_uses(
+            visit::visit_for_uses(
                 ctx,
                 &it.type_ann,
                 current_module,
