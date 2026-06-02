@@ -117,8 +117,8 @@ function runChildToOutput(
 ): Promise<number> {
   return new Promise(resolve => {
     const child = spawn(binaryPath, [...args], { stdio: ['ignore', 'pipe', 'pipe'] });
-    child.stdout?.on('data', chunk => output.append(stripTrailingNewline(chunk.toString())));
-    child.stderr?.on('data', chunk => output.append(stripTrailingNewline(chunk.toString())));
+    child.stdout?.on('data', chunk => output.append(ensureTrailingNewline(chunk.toString())));
+    child.stderr?.on('data', chunk => output.append(ensureTrailingNewline(chunk.toString())));
     child.on('error', err => {
       output.appendLine(`[purge] child spawn error: ${err.message}`);
       resolve(-1);
@@ -127,8 +127,8 @@ function runChildToOutput(
   });
 }
 
-function stripTrailingNewline(s: string): string {
-  return s.endsWith('\n') ? s.slice(0, -1) + '\n' : s + '\n';
+function ensureTrailingNewline(s: string): string {
+  return s.endsWith('\n') ? s : s + '\n';
 }
 
 async function commandInitWorkspace(ctx: CommandContext): Promise<void> {
