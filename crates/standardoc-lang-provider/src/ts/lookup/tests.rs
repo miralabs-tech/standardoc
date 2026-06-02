@@ -107,6 +107,37 @@ fn nested_type_decls_bind_their_name_in_the_enclosing_scope() {
 }
 
 #[test]
+fn namespace_re_export_binds_alias_and_import_record() {
+    // `export * as ns from "mod"` must bind `ns` and flatten an ImportRecord
+    // (the lookup half of the namespace re-export the walker already edges).
+    let module = parse("export * as ns from \"other\";\n");
+    let lookup = build_ts_lookup(&module, "m");
+
+    let ns = lookup
+        .bindings
+        .get("ns")
+        .and_then(|v| v.first())
+        .expect("ns binding");
+    assert!(matches!(
+        &ns.source,
+        BindingSource::Import {
+            is_re_export: true,
+            original_name: None,
+            ..
+        }
+    ));
+
+    let record = lookup
+        .imports
+        .iter()
+        .find(|r| r.local_name == "ns")
+        .expect("ns import record");
+    assert_eq!(record.origin_module, "other");
+    assert!(record.is_re_export);
+    assert!(record.origin_symbol.is_none());
+}
+
+#[test]
 fn imports_populate_both_bindings_and_import_records() {
     let src = r#"import { foo, bar as baz } from "other";
 import type { T } from "other";

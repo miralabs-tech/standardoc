@@ -381,6 +381,35 @@ impl LookupBuilder<'_> {
                     is_type_only,
                     is_re_export: true,
                 });
+            } else if let ExportSpecifier::Namespace(ns_spec) = spec {
+                // `export * as ns from "mod"` — bind the namespace alias to
+                // the whole source module (no single origin symbol) so refs
+                // to `ns` resolve, and flatten the re-export for Stage 3b.
+                let local_alias = match &ns_spec.name {
+                    ModuleExportName::Ident(i) => i.sym.to_string(),
+                    ModuleExportName::Str(s) => s.value.to_string_lossy().into_owned(),
+                };
+                self.add_binding(
+                    local_alias.clone(),
+                    BindingSource::Import {
+                        module_path: module_path.clone(),
+                        original_name: None,
+                        is_type_only: decl_type_only,
+                        is_re_export: true,
+                    },
+                    if decl_type_only {
+                        vec!["type-only".into(), "re-export".into()]
+                    } else {
+                        vec!["re-export".into()]
+                    },
+                );
+                self.lookup.push_import(ImportRecord {
+                    local_name: local_alias,
+                    origin_module: module_path.clone(),
+                    origin_symbol: None,
+                    is_type_only: decl_type_only,
+                    is_re_export: true,
+                });
             }
         }
     }
