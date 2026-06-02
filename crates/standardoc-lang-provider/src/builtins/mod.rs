@@ -177,4 +177,23 @@ mod tests {
             .expect("pairs registered");
         assert_eq!(pairs.synthetic_fqdn, "<builtin>::lua::pairs");
     }
+
+    #[test]
+    fn c_header_namespace_distinct_from_functions() {
+        // C headers carry `.h` in their builtin fqdn so `#include <time.h>`
+        // (Module) no longer collides with the `time()` function (Callable)
+        // at the seeding layer — they are separate synthetic symbol rows.
+        let reg = standard();
+        let header = reg
+            .lookup("time.h", Language::C)
+            .expect("time.h header registered");
+        assert_eq!(header.kind, standardoc_ir::Kind::Module);
+        assert_eq!(header.synthetic_fqdn, "<builtin>::c::time.h");
+
+        let func = reg
+            .lookup("time", Language::C)
+            .expect("time() function registered");
+        assert_eq!(func.kind, standardoc_ir::Kind::Callable);
+        assert_eq!(func.synthetic_fqdn, "<builtin>::c::time");
+    }
 }

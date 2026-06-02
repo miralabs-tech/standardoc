@@ -197,14 +197,14 @@ fn system_include_emits_import_record_with_builtin_origin() {
     let edges = vec![imports_edge(
         "pkg::a",
         ResolvedOrUnresolved::Resolved {
-            fqdn: "<builtin>::c::stdio".into(),
+            fqdn: "<builtin>::c::stdio.h".into(),
         },
     )];
     let lookup = build_c_lookup(&symbols, &edges, "pkg::a");
     assert_eq!(lookup.imports.len(), 1);
     let record = &lookup.imports[0];
     assert_eq!(record.local_name, "stdio");
-    assert_eq!(record.origin_module, "<builtin>::c::stdio");
+    assert_eq!(record.origin_module, "<builtin>::c::stdio.h");
     assert!(!record.is_type_only);
 }
 

@@ -77,12 +77,13 @@ fn emit_include(node: Node, src: &str, ctx: &mut CWalkContext) {
     };
     let raw = node_text(path_node, src);
     let target = match path_node.kind() {
-        // `<stdio.h>` → builtin tier. Strip `<>` and `.h`.
+        // `<stdio.h>` → builtin tier. Strip `<>` but keep `.h` so the
+        // header namespace stays distinct from same-named functions
+        // (`<time.h>` vs `time()`); see `builtins::c::register_all`.
         "system_lib_string" => {
             let inner = raw.trim_start_matches('<').trim_end_matches('>');
-            let stem = inner.strip_suffix(".h").unwrap_or(inner);
             ResolvedOrUnresolved::Resolved {
-                fqdn: format!("<builtin>::c::{stem}"),
+                fqdn: format!("<builtin>::c::{inner}"),
             }
         }
         // `"foo.h"` → unresolved by name (storage layer matches via

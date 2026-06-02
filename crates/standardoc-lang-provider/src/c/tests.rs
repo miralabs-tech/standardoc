@@ -151,7 +151,7 @@ fn system_include_emits_resolved_builtin_edge() {
     assert_eq!(edge.from_fqdn, "lurlang::runtime::vm");
     match &edge.to {
         ResolvedOrUnresolved::Resolved { fqdn } => {
-            assert_eq!(fqdn, "<builtin>::c::stdio");
+            assert_eq!(fqdn, "<builtin>::c::stdio.h");
         }
         other => panic!("expected Resolved builtin, got {other:?}"),
     }

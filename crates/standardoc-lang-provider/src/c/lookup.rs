@@ -141,7 +141,10 @@ fn import_record_from_edge(edge: &RawEdge, module_fqdn: &str) -> Option<ImportRe
     }
     let (origin_module, local_name) = match &edge.to {
         ResolvedOrUnresolved::Resolved { fqdn } => {
-            let local = fqdn.rsplit("::").next()?.to_owned();
+            // Builtin header fqdns carry `.h` (`<builtin>::c::stdio.h`);
+            // strip it so `local_name` stays the bare stem, matching the
+            // Unresolved branch and how headers name-collide in source.
+            let local = fqdn.rsplit("::").next()?.trim_end_matches(".h").to_owned();
             (fqdn.clone(), local)
         }
         ResolvedOrUnresolved::Unresolved { name } => {
