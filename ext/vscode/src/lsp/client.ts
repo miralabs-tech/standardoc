@@ -38,6 +38,8 @@ export class LspClient implements vscode.Disposable {
         { scheme: 'file', language: 'typescriptreact' },
         { scheme: 'file', language: 'javascript' },
         { scheme: 'file', language: 'javascriptreact' },
+        { scheme: 'file', language: 'lua' },
+        { scheme: 'file', language: 'c' },
       ],
       outputChannel: this.output,
     };

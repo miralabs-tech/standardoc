@@ -225,6 +225,9 @@ export class McpClient implements vscode.Disposable {
     const client = this.client;
     if (!client) throw new Error('MCP client not started');
     const result = await client.callTool({ name, arguments: args });
+    if ((result as { isError?: boolean }).isError) {
+      throw new Error(extractFirstText(result) || `MCP tool ${name} returned an error`);
+    }
     return extractFirstText(result);
   }
 }
