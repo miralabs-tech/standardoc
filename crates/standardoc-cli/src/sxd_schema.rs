@@ -35,7 +35,36 @@ pub(crate) struct SxdSchema;
 impl Schema for SxdSchema {
     fn validate(&self, file: &File, _src: &str) -> Vec<Diag> {
         let mut diags = Vec::new();
+        // Mirror the core lowering's singleton rule: `mcp` / `viz` may
+        // appear at most once. The core `parse_sxd_source` hard-errors on
+        // a duplicate; without this the editor would stay silent while the
+        // config fails to load at daemon start.
+        let mut seen_mcp = false;
+        let mut seen_viz = false;
         for stmt in &file.stmts {
+            if let Stmt::Block(b) = &stmt.node {
+                match b.kind.node.as_str() {
+                    "mcp" => {
+                        if seen_mcp {
+                            diags.push(Diag::schema(
+                                b.kind.span.clone(),
+                                "`mcp` block declared more than once",
+                            ));
+                        }
+                        seen_mcp = true;
+                    }
+                    "viz" => {
+                        if seen_viz {
+                            diags.push(Diag::schema(
+                                b.kind.span.clone(),
+                                "`viz` block declared more than once",
+                            ));
+                        }
+                        seen_viz = true;
+                    }
+                    _ => {}
+                }
+            }
             validate_top_stmt(stmt, &mut diags);
         }
         diags
@@ -475,8 +504,9 @@ fn field_key_doc(parent_kind: &str, key: &str) -> Option<String> {
         }
         ("group", "members") => {
             "**`members [ \"<project-slug>\" ... ]`** — project slugs that belong \
-             to this group. Each slug must match a `project` block declared \
-             elsewhere in this file."
+             to this group. Resolved by the viz Overview against declared \
+             `project` blocks OR mechanically-detected projects ; an unmatched \
+             slug is ignored, not an error."
         }
         ("mcp" | "viz", "port") => "**`port <u16>`** — TCP port (1..=65535).",
         _ => return None,
@@ -584,6 +614,27 @@ ignore { patterns ```.git/``` }
     #[test]
     fn viz_block_valid_no_diags() {
         assert!(diags_for("viz { port 3001 }\n").is_empty());
+    }
+
+    #[test]
+    fn duplicate_mcp_block_reports_diag() {
+        // Mirrors the core parser's singleton rule — both must reject.
+        let diags = diags_for("mcp { port 7700 }\nmcp { port 7701 }\n");
+        let msg = "`mcp` block declared more than once";
+        assert!(
+            diags.iter().any(|d| d.kind.to_string().contains(msg)),
+            "got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_viz_block_reports_diag() {
+        let diags = diags_for("viz { port 3000 }\nviz { port 3001 }\n");
+        let msg = "`viz` block declared more than once";
+        assert!(
+            diags.iter().any(|d| d.kind.to_string().contains(msg)),
+            "got: {diags:?}"
+        );
     }
 
     #[test]
