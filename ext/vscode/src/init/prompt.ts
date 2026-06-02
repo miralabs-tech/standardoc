@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { spawn } from 'node:child_process';
 import { resolveBinary } from '../daemon/binary';
 import {
   buildStandardocEntry,
@@ -155,25 +156,60 @@ export async function writeClaudeHook(deps: InitDeps): Promise<void> {
   }
 }
 
-export async function writeMcpConfig(deps: InitDeps): Promise<void> {
-  // We no longer need the binary path for the .mcp.json entry — the
-  // canonical Standardoc MCP server is the HTTP/SSE endpoint supervised
-  // by the VSCode extension. We still try to resolve the binary first so
-  // a user without it installed gets a clear error before we write a
-  // dangling .mcp.json.
+/**
+ * Resolve the PROXY MCP URL `.mcp.json` should point at for this
+ * workspace: `http://<proxyBind>:<proxyPort>/ws/<id>/mcp`. The proxy is
+ * the per-machine singleton that fronts every workspace's (ephemeral)
+ * daemon — a stable URL across daemon restarts AND sibling VSCode
+ * windows. The `<id>` is the blake3-short workspace id; we shell out to
+ * `standardoc workspace-id <root>` so it stays bit-identical to what the
+ * proxy itself computes (no TS re-implementation of the hash).
+ *
+ * Returns `null` when the binary is unresolved or `workspace-id` fails —
+ * the caller skips writing rather than emit a dangling entry.
+ */
+export async function resolveProxyMcpUrl(
+  context: vscode.ExtensionContext,
+  workspaceRoot: string,
+): Promise<string | null> {
+  let binaryPath: string;
   try {
-    await resolveBinary(deps.context);
-  } catch (e) {
+    binaryPath = (await resolveBinary(context)).path;
+  } catch {
+    return null;
+  }
+  const id = await runWorkspaceId(binaryPath, workspaceRoot);
+  if (id === null) return null;
+  const config = vscode.workspace.getConfiguration('standardoc');
+  const bind = config.get<string>('proxyBind', '127.0.0.1');
+  const port = config.get<number>('proxyPort', 7700);
+  return `http://${bind}:${port}/ws/${id}/mcp`;
+}
+
+function runWorkspaceId(binaryPath: string, workspaceRoot: string): Promise<string | null> {
+  return new Promise(resolve => {
+    const child = spawn(binaryPath, ['workspace-id', workspaceRoot], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout?.on('data', chunk => (out += chunk.toString()));
+    child.on('error', () => resolve(null));
+    child.on('close', code => resolve(code === 0 ? out.trim() || null : null));
+  });
+}
+
+export async function writeMcpConfig(deps: InitDeps): Promise<void> {
+  // `.mcp.json` points external MCP clients at the PROXY singleton, not
+  // the workspace's ephemeral daemon port: the proxy URL is stable across
+  // daemon restarts AND sibling VSCode windows, and routes by workspace
+  // id (`/ws/<id>/mcp`).
+  const endpointUrl = await resolveProxyMcpUrl(deps.context, deps.workspaceRoot);
+  if (endpointUrl === null) {
     deps.output.appendLine(
-      `[init] cannot resolve binary for .mcp.json: ${describeError(e)}`,
+      '[init] cannot resolve proxy MCP url for .mcp.json (binary unresolved or workspace-id failed)',
     );
     return;
   }
-
-  const port = vscode.workspace
-    .getConfiguration('standardoc')
-    .get<number>('mcpHttpPort', 7700);
-  const endpointUrl = `http://127.0.0.1:${port}/mcp`;
   const expected = buildStandardocEntry({ endpointUrl });
   const target = path.join(deps.workspaceRoot, MCP_CONFIG_FILE);
   const raw = readFileOrNull(target);
@@ -271,13 +307,12 @@ export async function regenerateSkill(deps: InitDeps): Promise<void> {
 }
 
 /**
- * Sync `.mcp.json` to point at the daemon's ACTUAL endpoint URL.
- *
- * The supervisor calls this after the MCP daemon transitions to `ready`,
- * so external consumers (claude-code CLI, Copilot Chat, ...) always
- * connect to the live port — even when the daemon fell back to an
- * ephemeral port because the user's configured port was already bound
- * by another VSCode window.
+ * Sync `.mcp.json` to the given MCP URL (the proxy URL, see
+ * `resolveProxyMcpUrl`). The extension calls this after the daemon
+ * transitions to `ready` to migrate any pre-existing `.mcp.json` that
+ * still points at a daemon port over to the stable proxy route — even
+ * for already-initialised workspaces that spawn without the opt-in
+ * prompt.
  *
  * Behaviour is intentionally quieter than the init-time write: no toast
  * on success, only a log line. The merge layer remains idempotent — a

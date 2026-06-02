@@ -118,11 +118,11 @@
         },
         "standardoc.mcpHttpPort": {
           "type": "integer",
-          "default": 7700,
+          "default": 0,
           "minimum": 0,
           "maximum": 65535,
           "scope": "resource",
-          "description": "TCP port on `127.0.0.1` where the Standardoc MCP daemon listens for streamable HTTP / SSE connections. Set to `0` to let the kernel pick a random ephemeral port (the resolved port is then written to `.standardoc/mcp.endpoint` for client discovery). When multiple Standardoc workspaces run in parallel, give each a distinct port here."
+          "description": "TCP port on `127.0.0.1` where this workspace's Standardoc MCP daemon listens. Default `0` = ephemeral (the kernel picks a free port, written to `.standardoc/mcp.endpoint`), which is recommended: external clients connect through the stable proxy (`standardoc.proxyPort`), and in-window consumers discover the port via the endpoint file. Set a fixed non-zero port only for direct daemon access without the proxy — it MUST differ from `standardoc.proxyPort`."
         },
         "standardoc.proxyBind": {
           "type": "string",
@@ -136,7 +136,7 @@
           "minimum": 1,
           "maximum": 65535,
           "scope": "machine-overridable",
-          "description": "TCP port for the Standardoc MCP proxy singleton. MUST differ from any workspace's `standardoc.mcpHttpPort` or sxd `mcp { port }` — the proxy forwards INTO the mcp daemons, so they cannot share a port."
+          "description": "TCP port for the Standardoc MCP proxy singleton — the stable URL external MCP clients (`.mcp.json`) connect to, routed per workspace as `/ws/<id>/mcp`. The proxy forwards INTO each workspace's MCP daemon, so it must NOT share a port with a non-ephemeral `standardoc.mcpHttpPort`. Default `7700`; daemons default to ephemeral, so they never collide out of the box."
         }
       }
     },

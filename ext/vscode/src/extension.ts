@@ -8,13 +8,16 @@ import { ProxyClient } from './proxy/client';
 import { StandardocMcpServerProvider } from './mcp/serverDefinitionProvider';
 import { StatusBarController } from './statusBar';
 import { registerCommands } from './commands';
-import { maybePromptForInit, syncMcpConfigToUrl } from './init/prompt';
+import { maybePromptForInit, resolveProxyMcpUrl, syncMcpConfigToUrl } from './init/prompt';
 import { registerStdignoreHover } from './stdignore/hover';
 import { registerSxdHover } from './sxd/hover';
 import { readSxdPort } from './sxd/config-port';
 
 const MCP_PROVIDER_ID = 'standardoc.mcp';
-const DEFAULT_MCP_HTTP_PORT = 7700;
+// 0 = ephemeral: the OS assigns the daemon a free port and the proxy
+// (DEFAULT_PROXY_PORT) fronts the stable URL. The daemon and the proxy
+// must NOT share a port — the proxy forwards INTO the daemon.
+const DEFAULT_MCP_HTTP_PORT = 0;
 const DEFAULT_PROXY_BIND = '127.0.0.1';
 const DEFAULT_PROXY_PORT = 7700;
 
@@ -29,16 +32,17 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(output);
 
   // Precedence: standardoc.sxd `mcp { port N }` > VSCode setting
-  // `standardoc.mcpHttpPort` > default 7700. Sxd wins as the
+  // `standardoc.mcpHttpPort` > default 0 (ephemeral). Sxd wins as the
   // workspace-authoritative source ; the setting stays as a per-user
-  // override surface for workspaces without an .sxd, and the default
-  // catches the fresh-install case.
+  // override for direct daemon access. Default 0 means the daemon binds
+  // an OS-assigned port and the proxy fronts the stable URL.
   const sxdPort = readSxdPort(workspaceRoot, 'mcp');
   const config = vscode.workspace.getConfiguration('standardoc');
   const settingPort = config.get<number>('mcpHttpPort', DEFAULT_MCP_HTTP_PORT);
   const port = sxdPort ?? settingPort;
   const portSource = sxdPort !== null ? 'sxd' : 'setting';
-  output.appendLine(`[mcp] http port=${port} (source=${portSource})`);
+  const portLabel = port === 0 ? '0 (ephemeral)' : String(port);
+  output.appendLine(`[mcp] daemon http port=${portLabel} (source=${portSource})`);
 
   // Proxy bind/port are machine-scoped settings, NOT workspace sxd:
   // the proxy is a per-machine singleton and all sibling VSCode
@@ -83,16 +87,17 @@ export function activate(context: vscode.ExtensionContext): void {
       } else if (state.kind === 'awaiting_binary') {
         void notifyAwaitingBinary(output);
       } else if (state.kind === 'ready') {
-        // Sync `.mcp.json` to the daemon's actual endpoint. When the
-        // configured port is already bound (e.g. a sibling VSCode window
-        // running standardoc), the daemon falls back to an ephemeral
-        // port and writes the real URL to `.standardoc/mcp.endpoint` —
-        // external consumers (claude-code CLI, Copilot Chat, ...) must
-        // see that URL in `.mcp.json` or they'd hit the dead/wrong port.
-        const actualUrl = mcp.url();
-        if (actualUrl !== null) {
-          void syncMcpConfigToUrl(workspaceRoot, output, actualUrl);
-        }
+        // Point `.mcp.json` at the PROXY route for this workspace, not the
+        // daemon's ephemeral port: the proxy URL is stable across daemon
+        // restarts AND sibling VSCode windows. Migrates already-init
+        // workspaces (spawned without the opt-in prompt) off any stale
+        // daemon-port entry. In-window consumers (webview, chat provider)
+        // keep talking to the daemon directly via `mcp.url()`.
+        void resolveProxyMcpUrl(context, workspaceRoot).then(proxyUrl => {
+          if (proxyUrl !== null) {
+            void syncMcpConfigToUrl(workspaceRoot, output, proxyUrl);
+          }
+        });
       }
     }),
   );
