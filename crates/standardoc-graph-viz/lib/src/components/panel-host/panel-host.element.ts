@@ -1,7 +1,7 @@
 /**
  * `<standardoc-panel-host>` — bottom drawer hosting the spawnable
- * Phase-4 panels (Callers Graph today; Field Details / Source View
- * later). The element subscribes to the global `panelManager`
+ * Phase-4 panels (Compare today; Callers Graph / Field Details /
+ * Source View later). The element subscribes to the global `panelManager`
  * singleton: every mutation re-renders the tab strip + the active
  * panel's body. Lives as a sibling of `<standardoc-panel-layout>`
  * (not inside its grid) so the existing layout isn't disturbed —
@@ -72,7 +72,7 @@ export class PanelHostElement extends HTMLElement {
   }
 
   /**
-   * The currently mounted child element (e.g. `<standardoc-callers-graph>`).
+   * The currently mounted child element (e.g. `<standardoc-compare-panel>`).
    * Hosts use this to push panel-specific data after calling
    * `panelManager.open(...)`.
    */

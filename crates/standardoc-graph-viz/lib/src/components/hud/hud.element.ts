@@ -53,7 +53,7 @@ const C = {
   valueWarn: s['hud__value--warn'] ?? '',
 } as const;
 
-const GPU_WARN_PCT = 85;
+const GPU_WARN_PCT = DEFAULT_PERF_THRESHOLDS.gpuWarnPct;
 
 function fmtMs(ms: number): string {
   if (!Number.isFinite(ms)) return '—';

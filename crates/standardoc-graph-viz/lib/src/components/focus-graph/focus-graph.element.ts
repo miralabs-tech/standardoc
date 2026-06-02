@@ -3,8 +3,9 @@
  * `FocusGraphCanvas` for the symbol-local view. Composes a hop selector
  * (1 / 2 / 3 / All) above the canvas and an absolute DOM overlay for
  * edge labels (CALLS / IMPORTS / USES_TYPE / etc.). The overlay is
- * refreshed from `canvas.label_layout()` on each tick — Phase 3a
- * returns `[]` so the overlay stays empty until Phase 3b populates it.
+ * refreshed from `canvas.label_layout()` on each tick: the wasm side
+ * emits bucket headers + per-kind edge chips, and an empty payload
+ * just clears the overlay.
  *
  * Owns:
  *   - canvas + overlay div

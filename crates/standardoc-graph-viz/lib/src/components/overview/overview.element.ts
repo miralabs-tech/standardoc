@@ -98,6 +98,11 @@ export class OverviewElement extends HTMLElement {
   /// keys pressed at once compose smoothly (e.g. Z+D for diagonal).
   #pressedKeys = new Set<string>();
   #keyBindings: OverviewKeyBindings = DEFAULT_KEY_BINDINGS;
+  /// Global listeners (window blur / document visibilitychange) kept on
+  /// fields so `disconnectedCallback` can remove them — otherwise they
+  /// leak the element + closures when the overview is torn down.
+  #onWindowBlur: (() => void) | null = null;
+  #onVisibilityChange: (() => void) | null = null;
 
   set canvasFactory(factory: OverviewCanvasFactory) {
     this.#factory = factory;
@@ -150,6 +155,14 @@ export class OverviewElement extends HTMLElement {
     }
     this.#observer?.disconnect();
     this.#observer = null;
+    if (this.#onWindowBlur !== null) {
+      window.removeEventListener('blur', this.#onWindowBlur);
+      this.#onWindowBlur = null;
+    }
+    if (this.#onVisibilityChange !== null) {
+      document.removeEventListener('visibilitychange', this.#onVisibilityChange);
+      this.#onVisibilityChange = null;
+    }
   }
 
   #render(): void {
@@ -443,14 +456,16 @@ export class OverviewElement extends HTMLElement {
     // level blur catches the alt-tab case where the panel root's blur
     // wouldn't fire because focus moved to another window entirely.
     n.root.addEventListener('blur', () => { this.#pressedKeys.clear(); });
-    window.addEventListener('blur', () => { this.#pressedKeys.clear(); });
+    this.#onWindowBlur = () => { this.#pressedKeys.clear(); };
+    window.addEventListener('blur', this.#onWindowBlur);
     // Tab hidden = no rAF firing, but a key held when the tab gets
     // hidden would resume mutating the camera the instant the tab
     // returns. Clear on visibility loss so the user always lands on
     // a stationary camera when they switch back.
-    document.addEventListener('visibilitychange', () => {
+    this.#onVisibilityChange = () => {
       if (document.visibilityState !== 'visible') this.#pressedKeys.clear();
-    });
+    };
+    document.addEventListener('visibilitychange', this.#onVisibilityChange);
     // Focus the panel when the user clicks the canvas — without this
     // the first key press after panel mount does nothing because focus
     // is still on whatever the user clicked before.

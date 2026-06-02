@@ -552,10 +552,10 @@ export class ExplorerElement extends HTMLElement {
     n.recentsMount.replaceChildren(frag);
   }
 
-  // Legend removed — the kind filter chips at the top of the Explorer
-  // now double as a live legend (each chip carries a coloured swatch
-  // of the same hue used by the tree icons). The standalone Legend
-  // section was muted at the bottom and never read in practice.
+  // The kind filter chips at the top double as a quick kind legend
+  // (each carries a coloured swatch matching the tree icons); the full
+  // Kinds / Edges / Languages reference lives in the <standardoc-legend>
+  // section rendered at the bottom of the body.
 
   #scrollSelectedIntoView(): void {
     const n = this.#nodes;
