@@ -40,6 +40,11 @@ describe('parseClaudeSettings', () => {
     const result = parseClaudeSettings(JSON.stringify({ hooks: {} }));
     expect(result.kind).toBe('parsed');
   });
+
+  test('parses JSONC (comments + trailing commas) that Claude Code tolerates', () => {
+    const src = '{\n  // hooks config\n  "hooks": {}, /* trailing */\n}';
+    expect(parseClaudeSettings(src)).toEqual({ kind: 'parsed', value: { hooks: {} } });
+  });
 });
 
 describe('mergeClaudeHook', () => {

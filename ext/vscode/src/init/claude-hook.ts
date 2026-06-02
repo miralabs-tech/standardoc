@@ -16,6 +16,8 @@
  * pre-existing user-authored hooks are never reordered or removed.
  */
 
+import { stripJsonc } from './jsonc';
+
 export interface ClaudeHookEntry {
   readonly type: 'command';
   readonly command: string;
@@ -125,8 +127,14 @@ export function parseClaudeSettings(raw: string | null): ParseResult {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch (e) {
-    return { kind: 'invalid', error: e instanceof Error ? e.message : String(e) };
+  } catch {
+    // Claude Code tolerates JSONC (comments / trailing commas) here; retry
+    // after stripping it to plain JSON before declaring the file invalid.
+    try {
+      parsed = JSON.parse(stripJsonc(raw));
+    } catch (e) {
+      return { kind: 'invalid', error: e instanceof Error ? e.message : String(e) };
+    }
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     return { kind: 'invalid', error: 'Root of .claude/settings.json must be a JSON object' };
