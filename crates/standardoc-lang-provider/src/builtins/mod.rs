@@ -247,18 +247,14 @@ mod tests {
         let reg = standard();
         assert!(reg.lookup_method("i8", "abs", Language::Rust).is_some());
         assert!(reg.lookup_method("u8", "abs", Language::Rust).is_none());
-        assert!(reg
-            .lookup_method("u8", "is_power_of_two", Language::Rust)
-            .is_some());
-        assert!(reg
-            .lookup_method("i8", "is_power_of_two", Language::Rust)
-            .is_none());
+        let u8_p2 = reg.lookup_method("u8", "is_power_of_two", Language::Rust);
+        let i8_p2 = reg.lookup_method("i8", "is_power_of_two", Language::Rust);
+        assert!(u8_p2.is_some());
+        assert!(i8_p2.is_none());
         // Common surface still seeded on both halves.
-        assert!(reg
-            .lookup_method("u8", "saturating_add", Language::Rust)
-            .is_some());
-        assert!(reg
-            .lookup_method("i8", "saturating_add", Language::Rust)
-            .is_some());
+        let u8_sat = reg.lookup_method("u8", "saturating_add", Language::Rust);
+        let i8_sat = reg.lookup_method("i8", "saturating_add", Language::Rust);
+        assert!(u8_sat.is_some());
+        assert!(i8_sat.is_some());
     }
 }
