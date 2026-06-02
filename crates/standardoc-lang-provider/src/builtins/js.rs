@@ -1,19 +1,20 @@
 use standardoc_ir::{BuiltinEntry, BuiltinRegistry, BuiltinTag, BuiltinTier, Kind, Language};
 
-pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
+/// Ambient JS runtime globals — identifiers reachable without an import in
+/// both JS and TS (`console`, `window`, `parseInt`, `Proxy`, `undefined`, …).
+/// Shared with [`crate::builtins::ts`] so the TS registry stays a strict
+/// superset of JS: there is no `JsProvider`, so every `.js`/`.jsx`/`.ts`/
+/// `.tsx`/`.vue`/`.svelte` file resolves builtins against the TS map under
+/// [`Language::TypeScript`] — a global missing there resolves `Unresolved`
+/// instead of being classified.
+pub(crate) fn register_ambient_globals(reg: &mut BuiltinRegistry, language: Language) {
     let add = |reg: &mut BuiltinRegistry,
                names: &[&str],
                kind: Kind,
                tag: BuiltinTag,
                tier: BuiltinTier| {
         for name in names {
-            reg.register(BuiltinEntry::new(
-                *name,
-                Language::JavaScript,
-                kind,
-                tag.clone(),
-                tier,
-            ));
+            reg.register(BuiltinEntry::new(*name, language, kind, tag.clone(), tier));
         }
     };
 
@@ -34,6 +35,75 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
         },
         BuiltinTier::Edge,
     );
+    add(
+        reg,
+        &["Proxy", "Reflect"],
+        Kind::Type,
+        BuiltinTag::Reflection,
+        BuiltinTier::Edge,
+    );
+    add(
+        reg,
+        &["parseInt", "parseFloat"],
+        Kind::Callable,
+        BuiltinTag::Decode,
+        BuiltinTier::Edge,
+    );
+    add(
+        reg,
+        &["encodeURI", "encodeURIComponent"],
+        Kind::Callable,
+        BuiltinTag::Encode,
+        BuiltinTier::Edge,
+    );
+    add(
+        reg,
+        &["decodeURI", "decodeURIComponent"],
+        Kind::Callable,
+        BuiltinTag::Decode,
+        BuiltinTier::Edge,
+    );
+
+    // --- Tier::Drop --- structural noise, no edge, no attribute
+    add(
+        reg,
+        &["undefined", "NaN", "Infinity"],
+        Kind::Value,
+        BuiltinTag::Custom {
+            tag: "global-constant".into(),
+        },
+        BuiltinTier::Drop,
+    );
+    // Predicate helpers — structural, never semantically interesting.
+    add(
+        reg,
+        &["isNaN", "isFinite"],
+        Kind::Callable,
+        BuiltinTag::Reflection,
+        BuiltinTier::Drop,
+    );
+}
+
+pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
+    register_ambient_globals(reg, Language::JavaScript);
+
+    let add = |reg: &mut BuiltinRegistry,
+               names: &[&str],
+               kind: Kind,
+               tag: BuiltinTag,
+               tier: BuiltinTier| {
+        for name in names {
+            reg.register(BuiltinEntry::new(
+                *name,
+                Language::JavaScript,
+                kind,
+                tag.clone(),
+                tier,
+            ));
+        }
+    };
+
+    // --- Tier::Edge --- std-lib namespaces, reflection, observable APIs
     add(
         reg,
         &["Math"],
@@ -80,34 +150,6 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
         BuiltinTag::Reflection,
         BuiltinTier::Edge,
     );
-    add(
-        reg,
-        &["Proxy", "Reflect"],
-        Kind::Type,
-        BuiltinTag::Reflection,
-        BuiltinTier::Edge,
-    );
-    add(
-        reg,
-        &["parseInt", "parseFloat"],
-        Kind::Callable,
-        BuiltinTag::Decode,
-        BuiltinTier::Edge,
-    );
-    add(
-        reg,
-        &["encodeURI", "encodeURIComponent"],
-        Kind::Callable,
-        BuiltinTag::Encode,
-        BuiltinTier::Edge,
-    );
-    add(
-        reg,
-        &["decodeURI", "decodeURIComponent"],
-        Kind::Callable,
-        BuiltinTag::Decode,
-        BuiltinTier::Edge,
-    );
 
     // --- Tier::Attribute --- semantic effect folded into the source symbol
     // `Promise<T>` → source fn flagged async; the wrapper itself is not
@@ -121,15 +163,6 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
     );
 
     // --- Tier::Drop --- structural noise, no edge, no attribute
-    add(
-        reg,
-        &["undefined", "NaN", "Infinity"],
-        Kind::Value,
-        BuiltinTag::Custom {
-            tag: "global-constant".into(),
-        },
-        BuiltinTier::Drop,
-    );
     // Primitive-cast wrappers: `Array()`, `String()`, `Number()`, `Boolean()`
     // — pure conversion noise, no semantic edge worth drawing.
     add(
@@ -146,14 +179,6 @@ pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
         &["Map", "Set", "WeakMap", "WeakSet"],
         Kind::Type,
         BuiltinTag::Iter,
-        BuiltinTier::Drop,
-    );
-    // Predicate helpers — structural, never semantically interesting.
-    add(
-        reg,
-        &["isNaN", "isFinite"],
-        Kind::Callable,
-        BuiltinTag::Reflection,
         BuiltinTier::Drop,
     );
 }

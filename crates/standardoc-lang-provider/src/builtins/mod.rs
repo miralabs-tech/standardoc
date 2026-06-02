@@ -66,6 +66,44 @@ mod tests {
     }
 
     #[test]
+    fn ts_registry_subsumes_js_ambient_globals() {
+        // No `JsProvider` exists — `.js`/`.jsx`/`.vue`/`.svelte` all flow
+        // through `TsProvider`, which looks builtins up under
+        // `Language::TypeScript`. The ambient runtime globals must resolve
+        // there or every bare `console` / `parseInt` / `Proxy` reference
+        // lands `Unresolved`. They stay registered under JavaScript too
+        // (seed parity) so a future `JsProvider` keeps working.
+        let reg = standard();
+        for name in [
+            "console",
+            "window",
+            "document",
+            "globalThis",
+            "self",
+            "parseInt",
+            "parseFloat",
+            "Proxy",
+            "Reflect",
+            "encodeURIComponent",
+            "decodeURIComponent",
+            "undefined",
+            "NaN",
+            "Infinity",
+            "isNaN",
+            "isFinite",
+        ] {
+            assert!(
+                reg.lookup(name, Language::TypeScript).is_some(),
+                "{name} must resolve under TypeScript (TsProvider live path)"
+            );
+            assert!(
+                reg.lookup(name, Language::JavaScript).is_some(),
+                "{name} must stay seeded under JavaScript"
+            );
+        }
+    }
+
+    #[test]
     fn rust_derive_trait_targets_are_seeded() {
         // `rust::derive_impls` emits `IMPLEMENTS → <builtin>::rust::<Trait>`
         // edges for every recognised derive. Each target must resolve to

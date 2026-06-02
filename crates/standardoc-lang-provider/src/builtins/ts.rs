@@ -1,6 +1,13 @@
 use standardoc_ir::{BuiltinEntry, BuiltinRegistry, BuiltinTag, BuiltinTier, Kind, Language};
 
+use super::js::register_ambient_globals;
+
 pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
+    // TS is a strict superset of JS — seed the ambient runtime globals
+    // (`console`, `parseInt`, `Proxy`, …) so they resolve here too. Every
+    // TsProvider file looks builtins up under `Language::TypeScript`.
+    register_ambient_globals(reg, Language::TypeScript);
+
     let add = |reg: &mut BuiltinRegistry,
                names: &[&str],
                kind: Kind,
