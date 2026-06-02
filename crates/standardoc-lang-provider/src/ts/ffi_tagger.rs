@@ -51,9 +51,11 @@ use standardoc_ir::{
 use swc_core::common::{SourceMap, Spanned};
 use swc_core::ecma::ast::{
     CallExpr, Callee, Expr, ImportSpecifier, Lit, MemberExpr, MemberProp, Module, ModuleDecl,
-    ModuleExportName, ModuleItem, ObjectLit, Pat, Prop, PropName, PropOrSpread, VarDeclarator,
+    ModuleExportName, ModuleItem, ObjectLit, Pat, Prop, PropOrSpread, VarDeclarator,
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
+
+use super::helpers::prop_name_static;
 
 /// Source module identifier the bun:ffi `dlopen` re-export lives in.
 const BUN_FFI_MODULE: &str = "bun:ffi";
@@ -451,18 +453,6 @@ fn member_prop_is(prop: &MemberProp, name: &str) -> bool {
             _ => false,
         },
         MemberProp::PrivateName(_) => false,
-    }
-}
-
-/// Static property-name extraction. Returns `Some(name)` for
-/// identifiers, string keys, and numeric keys (stringified). Returns
-/// `None` for computed keys (`[expr]: ...`) and bigint keys.
-fn prop_name_static(key: &PropName) -> Option<String> {
-    match key {
-        PropName::Ident(id) => Some(id.sym.as_ref().to_owned()),
-        PropName::Str(s) => Some(s.value.to_string_lossy().into_owned()),
-        PropName::Num(n) => Some(n.value.to_string()),
-        PropName::Computed(_) | PropName::BigInt(_) => None,
     }
 }
 

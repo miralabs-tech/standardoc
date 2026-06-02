@@ -67,6 +67,31 @@ pub(crate) fn parse_package_name(json_content: &str) -> Option<String> {
     value.get("name")?.as_str().map(str::to_string)
 }
 
+/// Static property-name extraction (`PropName` → `Option<String>`). Returns
+/// `Some(name)` for identifier, string, and numeric keys (numbers
+/// stringified); `None` for computed (`[expr]: ...`) and bigint keys. Shared
+/// by the symbol walker (method / property names) and the FFI tagger
+/// (object-literal keys).
+pub(crate) fn prop_name_static(key: &swc_core::ecma::ast::PropName) -> Option<String> {
+    use swc_core::ecma::ast::PropName;
+    match key {
+        PropName::Ident(i) => Some(i.sym.to_string()),
+        PropName::Str(s) => Some(s.value.to_string_lossy().into_owned()),
+        PropName::Num(n) => Some(n.value.to_string()),
+        PropName::Computed(_) | PropName::BigInt(_) => None,
+    }
+}
+
+/// Bug C-1 — textual name of a `TsEnumMember.id`. swc parses both
+/// `Ident(Foo)` and `Str("Foo")` flavors (TS allows `enum E { "foo bar" = 1 }`).
+pub(crate) fn ts_enum_member_id_name(id: &swc_core::ecma::ast::TsEnumMemberId) -> String {
+    use swc_core::ecma::ast::TsEnumMemberId;
+    match id {
+        TsEnumMemberId::Ident(i) => i.sym.to_string(),
+        TsEnumMemberId::Str(s) => s.value.to_string_lossy().into_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

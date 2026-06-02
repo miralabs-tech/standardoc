@@ -12,6 +12,8 @@ use swc_core::ecma::ast::{
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
 
+use super::helpers::ts_enum_member_id_name;
+
 /// Build the AOT identifier-resolution table for a TS/JS module.
 ///
 /// Two-pass design:
@@ -644,13 +646,6 @@ const fn var_decl_kind_to_local(kind: VarDeclKind) -> LocalDeclKind {
         VarDeclKind::Var => LocalDeclKind::Var,
         VarDeclKind::Let => LocalDeclKind::Let,
         VarDeclKind::Const => LocalDeclKind::Const,
-    }
-}
-
-fn ts_enum_member_id_name(id: &swc_core::ecma::ast::TsEnumMemberId) -> String {
-    match id {
-        swc_core::ecma::ast::TsEnumMemberId::Ident(i) => i.sym.to_string(),
-        swc_core::ecma::ast::TsEnumMemberId::Str(s) => s.value.to_string_lossy().into_owned(),
     }
 }
 

@@ -16,7 +16,7 @@ use swc_core::ecma::ast::{
 };
 
 use super::extract_doc;
-use super::helpers::map_access_modifier;
+use super::helpers::{map_access_modifier, prop_name_static};
 use super::lookup::build_ts_lookup;
 use super::resolver::{TsConfigPaths, resolve_import};
 use super::visit;
@@ -28,7 +28,7 @@ mod extract_items;
 use extract_items::{
     build_function_signature, classify_ts_fn_entry_point, declarator_name, extract_class_decl,
     extract_class_inner, extract_enum_decl, extract_fn_decl, extract_interface_decl,
-    extract_type_alias_decl, extract_var_decl, method_name_string,
+    extract_type_alias_decl, extract_var_decl,
 };
 
 /// Per-file walker state for the TS/JS provider.
@@ -643,7 +643,7 @@ fn visit_class_methods(
     for member in &class.body {
         match member {
             ClassMember::Method(method) => {
-                let Some(method_name) = method_name_string(&method.key) else {
+                let Some(method_name) = prop_name_static(&method.key) else {
                     continue;
                 };
                 let method_fqdn = format!("{class_fqdn}::{method_name}");

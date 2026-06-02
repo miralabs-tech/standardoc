@@ -6,8 +6,7 @@
 //! edge emitter (`push_heritage_edge`) and the signature/render helpers
 //! consumed exclusively by extraction (`build_function_signature`,
 //! `build_param`, `render_pat`, `signature_from_declarator`,
-//! `declarator_name`, `method_name_string`, `interface_member_key_name`,
-//! `ts_enum_member_id_name`) live here too.
+//! `declarator_name`, `interface_member_key_name`) live here too.
 
 use standardoc_ir::{
     DeclKind, EdgeKind, EntryPointKind, Kind, LanguageKind, Modifiers, Param, RawEdge, RawSymbol,
@@ -19,7 +18,7 @@ use swc_core::ecma::ast::{
     TsInterfaceDecl, TsTypeAliasDecl, VarDecl, VarDeclarator,
 };
 
-use super::super::helpers::map_access_modifier;
+use super::super::helpers::{map_access_modifier, prop_name_static, ts_enum_member_id_name};
 use super::super::visit;
 use super::{CallTarget, ResolutionOutcome, TsWalkContext, render_member_expr_name};
 
@@ -210,7 +209,7 @@ pub(super) fn extract_class_inner(
     for member in &class.body {
         match member {
             ClassMember::Method(method) => {
-                if let Some(method_name) = method_name_string(&method.key) {
+                if let Some(method_name) = prop_name_static(&method.key) {
                     let method_sym = extract_method(ctx, method, &class_fqdn, &method_name);
                     ctx.push_symbol_with_doc(method_sym, method.span.lo);
                 }
@@ -225,7 +224,7 @@ pub(super) fn extract_class_inner(
                 ctx.push_symbol_with_doc(sym, ctor.span.lo);
             }
             ClassMember::ClassProp(prop) => {
-                if let Some(prop_name) = method_name_string(&prop.key) {
+                if let Some(prop_name) = prop_name_static(&prop.key) {
                     let sym = extract_class_prop(ctx, prop, &class_fqdn, &prop_name);
                     let prop_fqdn = sym.fqdn.clone();
                     ctx.push_symbol_with_doc(sym, prop.span.lo);
@@ -984,17 +983,6 @@ pub(super) fn declarator_name(declarator: &VarDeclarator) -> Option<String> {
     }
 }
 
-pub(super) fn method_name_string(key: &swc_core::ecma::ast::PropName) -> Option<String> {
-    match key {
-        swc_core::ecma::ast::PropName::Ident(i) => Some(i.sym.to_string()),
-        swc_core::ecma::ast::PropName::Str(s) => Some(s.value.to_string_lossy().into_owned()),
-        swc_core::ecma::ast::PropName::Num(n) => Some(n.value.to_string()),
-        swc_core::ecma::ast::PropName::Computed(_) | swc_core::ecma::ast::PropName::BigInt(_) => {
-            None
-        }
-    }
-}
-
 /// Bug C-1 — extract a stable name from a TS interface-member key
 /// (`TsPropertySignature.key: Box<Expr>` and friends). Common shapes:
 /// `Expr::Ident` → identifier name, `Expr::Lit(Str)` → quoted property
@@ -1010,15 +998,5 @@ fn interface_member_key_name(expr: &swc_core::ecma::ast::Expr) -> Option<String>
             Some(n.value.to_string())
         }
         _ => None,
-    }
-}
-
-/// Bug C-1 — extract the textual name of a `TsEnumMember.id`.
-/// swc parses both `Ident(Foo)` and `Str("Foo")` flavors (TS lets you
-/// write `enum E { "foo bar" = 1 }`).
-fn ts_enum_member_id_name(id: &swc_core::ecma::ast::TsEnumMemberId) -> String {
-    match id {
-        swc_core::ecma::ast::TsEnumMemberId::Ident(i) => i.sym.to_string(),
-        swc_core::ecma::ast::TsEnumMemberId::Str(s) => s.value.to_string_lossy().into_owned(),
     }
 }
