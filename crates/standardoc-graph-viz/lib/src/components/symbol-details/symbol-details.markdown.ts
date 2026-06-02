@@ -33,8 +33,15 @@ export function renderMarkdown(md: string): string {
   text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>');
   text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
   text = text.replace(/(^|[^\w*])\*([^*\n]+)\*(?!\w)/g, '$1<em>$2</em>');
-  text = text.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_, t: string, u: string) =>
-    `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`);
+  text = text.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_, t: string, u: string) => {
+    // Scheme allowlist — a `javascript:` / `data:` href in a doc comment
+    // would otherwise render a clickable XSS vector once this string is
+    // assigned via innerHTML. Relative / fragment / http(s) / mailto pass;
+    // anything carrying another scheme falls back to inert escaped text.
+    const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(u);
+    if (hasScheme && !/^(?:https?|mailto):/i.test(u)) return `[${t}](${u})`;
+    return `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`;
+  });
   text = text.replace(/^(\s*)[-*] (.+)$/gm, '$1<li>$2</li>');
   text = text.replace(/^(\s*)\d+\. (.+)$/gm, '$1<li data-ord="1">$2</li>');
   text = text.replace(/((?:^<li[^>]*>.*<\/li>\n?)+)/gm, m =>
