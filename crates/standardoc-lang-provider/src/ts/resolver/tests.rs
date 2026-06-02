@@ -53,6 +53,23 @@ fn parse_tsconfig_tolerates_block_comments() {
 }
 
 #[test]
+fn parse_tsconfig_preserves_multibyte_utf8_in_string_values() {
+    // Regression for TS-RESOLVER-JSONC-UTF8: `strip_jsonc` used to rebuild
+    // its output with `c as char` per byte, splitting multi-byte sequences
+    // into Latin-1 mojibake. A non-ASCII path must survive verbatim.
+    let json = r#"
+        {
+          // force the comment-stripping byte path
+          "compilerOptions": {
+            "baseUrl": "src/é-modulé/café"
+          }
+        }
+        "#;
+    let cfg = parse_tsconfig(json).expect("parse ok");
+    assert_eq!(cfg.base_url.as_deref(), Some("src/é-modulé/café"));
+}
+
+#[test]
 fn parse_tsconfig_returns_none_on_missing_compiler_options() {
     assert!(parse_tsconfig("{}").is_none());
 }

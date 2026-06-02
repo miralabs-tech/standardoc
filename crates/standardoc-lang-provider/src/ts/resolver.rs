@@ -4,10 +4,14 @@ use super::helpers::compute_module_path;
 
 /// Subset of `tsconfig.json` `compilerOptions` consumed by the resolver.
 ///
-/// Day-1 we honour `baseUrl` + `paths` (with single-fallback target only
-/// when the value array contains 2+ entries — first match wins, log warn).
-/// `extends` is followed exactly one level (no recursive chain). Project
-/// `references` are PUNTed post-beta.1.
+/// Resolution honours `paths` only (single target — first match wins when
+/// the value array has 2+ entries, log warn). `baseUrl` is parsed and
+/// retained but NOT wired into resolution: a lexical baseUrl lookup would
+/// shadow real `node_modules` packages (no fs-existence check to tell
+/// `baseUrl/<spec>` apart from `node_modules/<spec>`), so bare specifiers
+/// fall through to the node_modules walk. Wiring baseUrl (with existence
+/// probing) is deferred. `extends` is followed exactly one level (no
+/// recursive chain). Project `references` are PUNTed post-beta.1.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TsConfigPaths {
     pub(crate) base_url: Option<String>,
@@ -51,14 +55,14 @@ pub(crate) fn parse_tsconfig(jsonc_content: &str) -> Option<TsConfigPaths> {
 /// quoted strings).
 fn strip_jsonc(input: &str) -> String {
     let bytes = input.as_bytes();
-    let mut out = String::with_capacity(input.len());
+    let mut out: Vec<u8> = Vec::with_capacity(input.len());
     let mut i = 0;
     let mut in_string = false;
     let mut escape = false;
     while i < bytes.len() {
         let c = bytes[i];
         if in_string {
-            out.push(c as char);
+            out.push(c);
             if escape {
                 escape = false;
             } else if c == b'\\' {
@@ -71,7 +75,7 @@ fn strip_jsonc(input: &str) -> String {
         }
         if c == b'"' {
             in_string = true;
-            out.push('"');
+            out.push(b'"');
             i += 1;
             continue;
         }
@@ -95,10 +99,14 @@ fn strip_jsonc(input: &str) -> String {
                 _ => {}
             }
         }
-        out.push(c as char);
+        out.push(c);
         i += 1;
     }
-    out
+    // Comments are delimited by ASCII (`/`, `*`), so removing them never
+    // splits a multi-byte UTF-8 sequence — the retained bytes stay valid
+    // UTF-8 (input was `&str`). Pushing bytes rather than `c as char`
+    // keeps multi-byte chars in string values intact.
+    String::from_utf8(out).unwrap_or_default()
 }
 
 /// Resolve a TS/JS import specifier to a best-effort canonical FQDN.
