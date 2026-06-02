@@ -47,7 +47,7 @@ use crate::storage::handle::IndexHandle;
 const SUBMIT_DRAIN_TIMEOUT: Duration = Duration::from_mins(1);
 const SUBMIT_DRAIN_POLL: Duration = Duration::from_millis(20);
 const MINIFIED_LINE_THRESHOLD: usize = 1000;
-const NPM_EXTENSIONS: &[&str] = &["d.ts", "ts", "tsx", "js", "jsx", "mjs", "cjs"];
+const NPM_EXTENSIONS: &[&str] = &["d.ts", "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
 
 /// Resolver backed by `node_modules` discovery + optional `node`
 /// subprocess for yarn-PnP. Holds the workspace root and the latest

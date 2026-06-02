@@ -48,6 +48,12 @@ impl LookupBuilder<'_> {
     }
 
     fn push_scope(&mut self, kind: ScopeKind, lo: BytePos, hi: BytePos) {
+        // NOTE: swc yields byte positions and this builder has no SourceMap
+        // to convert them, so `ScopeRange.start_line`/`end_line` carry raw
+        // byte offsets here — NOT lines (the rust builder fills real lines).
+        // Harmless: nothing reads those fields; scope containment is driven
+        // entirely by the `span_to_scope` byte map, keyed by the same
+        // `(lo, hi)` passed below.
         let parent = Some(self.current_scope());
         let idx = self.lookup.push_scope_with_span(
             ScopeRange {
