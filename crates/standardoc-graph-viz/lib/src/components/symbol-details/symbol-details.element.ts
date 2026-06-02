@@ -67,12 +67,11 @@ import {
   entryPointBadgeClass,
 } from './symbol-details.constants';
 import {
-  escapeHtml,
   kindFamilyTagClass,
   looksLikeTest,
-  shortFqdn,
   visibilityTagClass,
 } from './symbol-details.utils';
+import { escapeHtml, shortFqdn } from '../../text';
 import { renderMarkdown } from './symbol-details.markdown';
 import { highlightSource } from './symbol-details.highlight';
 

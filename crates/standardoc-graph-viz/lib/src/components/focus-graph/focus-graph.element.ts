@@ -41,6 +41,7 @@ import type {
   FocusGraphReadyDetail,
 } from './focus-graph.type';
 import s from './focus-graph.module.scss';
+import { escapeHtml } from '../../text';
 
 export const STANDARDOC_FOCUS_GRAPH_TAG = 'standardoc-focus-graph';
 
@@ -444,14 +445,6 @@ export class FocusGraphElement extends HTMLElement {
       n.legend.classList.remove(C.legendEmpty);
     }
   }
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
 
 if (typeof customElements !== 'undefined' && !customElements.get(STANDARDOC_FOCUS_GRAPH_TAG)) {

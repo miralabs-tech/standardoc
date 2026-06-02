@@ -1,10 +1,5 @@
 import type { ExplorerTreeNode } from './explorer.type';
 
-export function shortFqdn(fqdn: string): string {
-  const idx = fqdn.lastIndexOf('::');
-  return idx >= 0 ? fqdn.slice(idx + 2) : fqdn;
-}
-
 export function entryPointScope(fqdn: string): string | null {
   const colonIdx = fqdn.indexOf('::');
   if (colonIdx >= 0) return fqdn.slice(0, colonIdx);

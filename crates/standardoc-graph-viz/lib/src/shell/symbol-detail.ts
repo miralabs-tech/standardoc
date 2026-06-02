@@ -12,7 +12,8 @@ import type {
 } from '../index';
 
 import type { FileEntry, GraphEdge } from './types';
-import { displayKindLabel, formatSignature, shortFqdn } from './symbols';
+import { displayKindLabel, formatSignature } from './symbols';
+import { shortFqdn } from '../text';
 
 export function buildSymbolDetail(
   ctx: GetContextResponse,

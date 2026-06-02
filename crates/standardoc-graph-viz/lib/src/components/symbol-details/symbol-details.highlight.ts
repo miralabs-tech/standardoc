@@ -1,4 +1,4 @@
-import { escapeHtml } from './symbol-details.utils';
+import { escapeHtml } from '../../text';
 
 type HighlightLang = 'rust' | 'ts' | 'c' | 'lua' | null;
 

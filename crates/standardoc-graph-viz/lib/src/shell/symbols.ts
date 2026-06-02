@@ -11,6 +11,7 @@ import type {
 } from '../index';
 
 import type { ProjectLike } from './types';
+import { shortFqdn } from '../text';
 
 // Daemon caps `limit` at u8 (255) — we used to send 500 and the
 // request died silently inside the McpBrowse catch, returning ZERO
@@ -134,11 +135,6 @@ export function mapBrowseSymbolKind(s: BrowseSymbol): ExplorerNodeKind {
     case 'macro': return 'macro';
     default: return 'unknown';
   }
-}
-
-export function shortFqdn(fqdn: string): string {
-  const idx = fqdn.lastIndexOf('::');
-  return idx >= 0 ? fqdn.slice(idx + 2) : fqdn;
 }
 
 /**

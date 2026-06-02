@@ -72,9 +72,9 @@ import {
   collectWorkspaceSymbols,
   looksLikeTest,
   rawToBrowseSymbol,
-  shortFqdn,
   toSymbolSearchResult,
 } from './symbols';
+import { shortFqdn } from '../text';
 import {
   buildModulesTree,
   buildProjectsTreeFlat,

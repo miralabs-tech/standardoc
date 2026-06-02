@@ -20,11 +20,6 @@ export function looksLikeTest(fqdn: string, file?: string | null): boolean {
   return false;
 }
 
-export function shortFqdn(fqdn: string): string {
-  const idx = fqdn.lastIndexOf('::');
-  return idx >= 0 ? fqdn.slice(idx + 2) : fqdn;
-}
-
 const KIND_CALLABLE = new Set(['function', 'fn', 'method', 'impl_fn', 'trait_fn', 'interface_method', 'getter', 'setter', 'constructor']);
 const KIND_TYPE = new Set(['struct', 'enum', 'class', 'interface', 'trait', 'type_alias', 'union']);
 const KIND_VALUE = new Set(['const', 'static', 'let', 'var', 'field', 'enum_variant', 'property', 'interface_property']);
@@ -49,12 +44,4 @@ export function visibilityTagClass(visibility: string): string {
     case 'protected': return C.tagVisProtected;
     default: return '';
   }
-}
-
-export function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }

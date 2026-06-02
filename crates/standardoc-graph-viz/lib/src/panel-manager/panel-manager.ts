@@ -22,6 +22,8 @@ import type {
   PanelPropsMap,
 } from './types';
 
+import { shortFqdn } from '../text';
+
 const PANEL_CHANGE_EVENT = 'sd-panel-change';
 
 export interface PanelManagerOptions {
@@ -103,11 +105,6 @@ function defaultTitle<K extends PanelKind>(kind: K, props: PanelPropsMap[K]): st
     return `Compare · ${shortFqdn(p.leftFqdn)} ↔ ${shortFqdn(p.rightFqdn)}`;
   }
   return kind;
-}
-
-function shortFqdn(fqdn: string): string {
-  const idx = fqdn.lastIndexOf('::');
-  return idx >= 0 ? fqdn.slice(idx + 2) : fqdn;
 }
 
 function safeDocument(): EventTarget | null {

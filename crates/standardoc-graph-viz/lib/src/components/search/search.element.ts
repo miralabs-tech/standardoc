@@ -33,6 +33,7 @@ import type {
   SymbolSearchSuggestion,
 } from './search.type';
 import s from './search.module.scss';
+import { escapeHtml } from '../../text';
 
 export const STANDARDOC_SEARCH_TAG = 'standardoc-search';
 
@@ -433,14 +434,6 @@ function bucketKind(kind: string | undefined): string {
     default:
       return 'unknown';
   }
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
 
 function escapeAttr(text: string): string {

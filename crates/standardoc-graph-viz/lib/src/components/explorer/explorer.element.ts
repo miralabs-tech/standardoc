@@ -44,7 +44,8 @@ import {
   entryBadgeLabel,
   kindIconClass,
 } from './explorer.constants';
-import { entryPointScope, findAncestorIds, shortFqdn } from './explorer.utils';
+import { entryPointScope, findAncestorIds } from './explorer.utils';
+import { shortFqdn } from '../../text';
 
 export { STANDARDOC_EXPLORER_TAG };
 
