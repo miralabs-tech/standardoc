@@ -29,6 +29,31 @@ fn summary_threshold_stays_below_default_limit() {
 }
 
 #[test]
+fn protocol_negotiation_echoes_a_known_requested_version() {
+    // A lagging client that asks for an older *known* version gets it echoed
+    // back instead of our latest (which it would reject). Regression guard for
+    // the LM Studio "protocol version not supported: 2025-11-25" failure.
+    assert_eq!(
+        negotiated_protocol_version(&ProtocolVersion::V_2025_03_26),
+        ProtocolVersion::V_2025_03_26
+    );
+    assert_eq!(
+        negotiated_protocol_version(&ProtocolVersion::V_2025_06_18),
+        ProtocolVersion::V_2025_06_18
+    );
+}
+
+#[test]
+fn protocol_negotiation_falls_back_to_latest_for_unknown_version() {
+    let unknown: ProtocolVersion = serde_json::from_value(serde_json::json!("1999-01-01")).unwrap();
+    assert_eq!(
+        negotiated_protocol_version(&unknown),
+        ProtocolVersion::default()
+    );
+    assert_eq!(ProtocolVersion::default(), ProtocolVersion::LATEST);
+}
+
+#[test]
 fn indexing_message_includes_progress_when_known() {
     let msg = indexing_in_progress_message(Some((42, 100)));
     assert!(msg.contains("42/100 files"), "got `{msg}`");

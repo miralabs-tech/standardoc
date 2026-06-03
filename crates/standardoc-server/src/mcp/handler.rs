@@ -23,8 +23,10 @@ use rmcp::ErrorData;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+    CallToolResult, Content, Implementation, InitializeRequestParams, ProtocolVersion,
+    ServerCapabilities, ServerInfo,
 };
+use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -1358,6 +1360,40 @@ impl ServerHandler for StandardocMcp {
                 .to_string(),
         );
         info
+    }
+
+    /// Override rmcp's default `initialize`, which ignores the client's
+    /// requested protocol version and always replies with
+    /// `ProtocolVersion::LATEST` — lagging MCP clients reject that outright
+    /// (e.g. LM Studio: "Server's protocol version is not supported:
+    /// 2025-11-25"). We echo the requested version when the SDK knows it, so
+    /// older clients can still connect. Standardoc only uses the `tools`
+    /// capability, available since the first protocol version, so announcing
+    /// an older version costs nothing.
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ServerInfo, ErrorData> {
+        let requested = request.protocol_version.clone();
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
+        let mut info = self.get_info();
+        info.protocol_version = negotiated_protocol_version(&requested);
+        Ok(info)
+    }
+}
+
+/// Pick the protocol version to announce back at `initialize`: echo the
+/// client's requested version when the SDK knows it, otherwise keep our latest
+/// so the client decides (MCP spec §Initialization). Split out from
+/// `initialize` so the negotiation is unit-testable without a live peer.
+fn negotiated_protocol_version(requested: &ProtocolVersion) -> ProtocolVersion {
+    if ProtocolVersion::KNOWN_VERSIONS.contains(requested) {
+        requested.clone()
+    } else {
+        ProtocolVersion::default()
     }
 }
 
