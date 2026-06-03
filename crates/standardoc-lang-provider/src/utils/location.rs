@@ -69,29 +69,6 @@ pub(crate) fn line_and_utf16_col(content: &str, byte_offset: usize) -> (u32, u32
     (line, utf16_len(&content[line_start..end]))
 }
 
-/// Converts an absolute byte offset within `content` to a `(line, col)`
-/// pair. Lines are 1-indexed, columns 0-indexed. Used by the SFC
-/// orchestrator to materialise `Site { line, col }` from the byte
-/// offsets emitted by the template parsers.
-///
-/// Out-of-range offsets are clamped to the end of the input — callers
-/// shouldn't pass them but the function is safe regardless.
-pub(crate) fn byte_offset_to_line_col(content: &str, offset: usize) -> (u32, u32) {
-    let bytes = content.as_bytes();
-    let end = offset.min(bytes.len());
-    let mut line = 1u32;
-    let mut col = 0u32;
-    for &b in &bytes[..end] {
-        if b == b'\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,23 +96,6 @@ mod tests {
         assert_eq!(loc.start_col, 0);
         assert_eq!(loc.end_line, 1);
         assert_eq!(loc.end_col, 12);
-    }
-
-    #[test]
-    fn byte_offset_to_line_col_first_line() {
-        assert_eq!(byte_offset_to_line_col("hello\nworld", 0), (1, 0));
-        assert_eq!(byte_offset_to_line_col("hello\nworld", 3), (1, 3));
-    }
-
-    #[test]
-    fn byte_offset_to_line_col_after_newline() {
-        assert_eq!(byte_offset_to_line_col("hello\nworld", 6), (2, 0));
-        assert_eq!(byte_offset_to_line_col("hello\nworld", 8), (2, 2));
-    }
-
-    #[test]
-    fn byte_offset_to_line_col_clamps_overflow_to_end() {
-        assert_eq!(byte_offset_to_line_col("ab", 100), (1, 2));
     }
 
     #[test]

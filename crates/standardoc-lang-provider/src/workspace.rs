@@ -14,7 +14,7 @@ use crate::rust::RustProvider;
 use crate::sfc::{self, SfcDocument, pad_until_byte_offset};
 use crate::template::{self, TemplateAttribute, TemplateRef};
 use crate::ts::TsProvider;
-use crate::utils::byte_offset_to_line_col;
+use crate::utils::location::line_and_utf16_col;
 
 #[derive(Debug, Default)]
 pub struct WorkspaceProvider {
@@ -322,7 +322,7 @@ fn block_outer_end(content: &str, content_end: usize) -> usize {
 /// fqdn happens to match the bare name (rare). Resolution against the
 /// SFC's import alias table is deferred — not yet wired as of beta.3.
 fn template_ref_to_edge(r: TemplateRef, content: &str, path: &str, module_fqdn: &str) -> RawEdge {
-    let (line, col) = byte_offset_to_line_col(content, r.byte_offset);
+    let (line, col) = line_and_utf16_col(content, r.byte_offset);
     let to = ResolvedOrUnresolved::Unresolved { name: r.name };
     let confidence = to.default_confidence();
     RawEdge {

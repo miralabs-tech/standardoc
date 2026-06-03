@@ -15,6 +15,6 @@ pub(crate) mod template_text;
 
 pub(crate) use fqdn::{last_segment, parent_module};
 pub(crate) use hash::hash_bytes;
-pub(crate) use location::{byte_offset_to_line_col, file_span};
+pub(crate) use location::file_span;
 pub(crate) use path_ext::strip_extension;
 pub(crate) use template_text::find_top_level_keyword;
