@@ -33,6 +33,20 @@ fn extracts_function_definition_as_fn_kind() {
 }
 
 #[test]
+fn symbol_columns_are_utf16_code_units() {
+    // `/*é*/` is 5 chars / 6 bytes / 5 UTF-16 units before `int`. Asserting
+    // 5 distinguishes UTF-16 from the byte column (6) tree-sitter reports.
+    let file = run("/*é*/int foo(void){return 0;}\n", "runtime/vm.c");
+    let s = find(&file, "lurlang::runtime::vm::foo");
+    assert_eq!(s.location.start_col, 5);
+
+    // Astral: `/*🚀*/` is 6 UTF-16 units (rocket = 2 units) but 8 bytes.
+    let astral = run("/*🚀*/int bar(void){return 0;}\n", "runtime/vm.c");
+    let b = find(&astral, "lurlang::runtime::vm::bar");
+    assert_eq!(b.location.start_col, 6);
+}
+
+#[test]
 fn extract_tags_c_main_as_binary_main_entry_point() {
     use standardoc_ir::EntryPointKind;
     let src = "int main(int argc, char** argv) { return 0; }\nvoid helper(void) {}\n";

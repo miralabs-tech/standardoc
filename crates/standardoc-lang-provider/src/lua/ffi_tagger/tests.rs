@@ -2,7 +2,7 @@ use super::*;
 
 fn run(src: &str) -> (Vec<RawSymbol>, Vec<RawFfiBinding>) {
     let ast = full_moon::parse(src).expect("parse lua");
-    extract_ffi_bindings(&ast, "pkg::test", "test.lua")
+    extract_ffi_bindings(&ast, "pkg::test", "test.lua", src)
 }
 
 #[test]

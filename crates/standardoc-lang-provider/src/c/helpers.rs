@@ -34,17 +34,27 @@ pub(crate) fn workspace_dir_name(workspace_root: &Path) -> String {
         .map_or_else(|| "workspace".into(), |s| s.to_string_lossy().into_owned())
 }
 
+/// UTF-16 column for a tree-sitter `(row, byte_column)` pair. Tree-sitter
+/// reports a node's column as a byte offset within its line, but the LSP /
+/// VSCode consumers expect UTF-16 code units, so we re-measure the prefix
+/// against the source line. `row` is 0-indexed.
+pub(crate) fn col_utf16(src: &str, row: usize, byte_col: usize) -> u32 {
+    let line = src.lines().nth(row).unwrap_or("");
+    crate::utils::location::utf16_col(line, byte_col)
+}
+
 /// Build a `SymbolLocation` from a tree-sitter `Node`. Lines 1-indexed,
-/// columns 0-indexed — matches the convention used by every other provider.
-pub(crate) fn location_from_node(file: &str, node: Node) -> SymbolLocation {
+/// columns 0-indexed in UTF-16 code units — matches the convention used by
+/// every other provider.
+pub(crate) fn location_from_node(file: &str, node: Node, src: &str) -> SymbolLocation {
     let start = node.start_position();
     let end = node.end_position();
     SymbolLocation {
         file: file.into(),
         start_line: u32::try_from(start.row + 1).unwrap_or(u32::MAX),
         end_line: u32::try_from(end.row + 1).unwrap_or(u32::MAX),
-        start_col: u32::try_from(start.column).unwrap_or(u32::MAX),
-        end_col: u32::try_from(end.column).unwrap_or(u32::MAX),
+        start_col: col_utf16(src, start.row, start.column),
+        end_col: col_utf16(src, end.row, end.column),
     }
 }
 

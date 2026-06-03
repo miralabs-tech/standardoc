@@ -1,8 +1,20 @@
 use std::path::{Path, PathBuf};
 
 use standardoc_ir::Visibility;
+use swc_core::common::Loc;
 
 use crate::walk_core::LanguagePathConventions;
+
+/// UTF-16 column (0-indexed) for a swc `Loc`. swc's `col` (`CharPos`) is
+/// already counted in UTF-16 code units — its multibyte adjustment maps
+/// 1/2/3 UTF-8 bytes to one unit and a 4-byte (astral) char to two (see
+/// `MultiByteChar::byte_to_char_diff`). That is exactly what the LSP /
+/// VSCode `Position.character` field expects. The previously stamped
+/// `col_display` is tab-expanded (display width) and therefore wrong the
+/// moment a tab precedes the symbol, which is why we read `col` instead.
+pub(crate) fn loc_utf16_col(loc: &Loc) -> u32 {
+    u32::try_from(loc.col.0).unwrap_or(u32::MAX)
+}
 
 /// Order matters: `.d.ts` must be tried before `.ts`, etc. Lock 41 §1
 /// Q9 added `.vue` and `.svelte` so SFC files compute the same module

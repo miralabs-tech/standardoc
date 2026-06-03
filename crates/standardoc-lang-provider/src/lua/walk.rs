@@ -28,6 +28,9 @@ pub(crate) struct LuaWalkContext {
     pub(crate) package_name: String,
     pub(crate) from_file_abs_path: PathBuf,
     pub(crate) package_root: PathBuf,
+    /// The full file source, used to convert full_moon's byte offsets into
+    /// UTF-16 columns when stamping locations. Set once at the top of `walk`.
+    pub(crate) content: String,
     /// Identifiers declared as `local <ident> = {}` at top level. Tracked
     /// during walk so the post-pass can decide visibility for symbols
     /// nested under one of these tables.
@@ -50,6 +53,7 @@ impl LuaWalkContext {
             package_name,
             from_file_abs_path,
             package_root,
+            content: String::new(),
             local_table_idents: HashSet::new(),
             exported_table: None,
         }
@@ -84,6 +88,7 @@ impl LuaWalkContext {
 /// module-pattern detection (looks at `Block::last_stmt`) and refines
 /// the visibility of symbols nested under the exported table.
 pub(crate) fn walk(content: &str, ast: &Ast, ctx: &mut LuaWalkContext) {
+    content.clone_into(&mut ctx.content);
     let block = ast.nodes();
 
     // P1 — symbol + edge pass.

@@ -682,6 +682,13 @@ fn self_ty_target_name(ty: &syn::Type) -> Option<String> {
     }
 }
 
+/// Build a `SymbolLocation` from a proc-macro2 `Span`. `column` is a Unicode
+/// scalar (char) count, which equals the UTF-16 code units the LSP / VSCode
+/// consumers expect for every character in the BMP. The two diverge only on
+/// astral (non-BMP) chars — emoji, CJK Ext-B — which count as two UTF-16 units
+/// but one char. proc-macro2 exposes no source text here, so unlike the TS / C
+/// / Lua providers we cannot re-measure in UTF-16; V1 accepts that residual,
+/// which is essentially never hit inside real Rust source.
 pub(crate) fn span_to_location(span: Span, path: &str) -> SymbolLocation {
     let start = span.start();
     let end = span.end();
@@ -698,6 +705,8 @@ pub(crate) fn line_from_span(span: Span) -> u32 {
     clamp_line(span.start().line)
 }
 
+/// 0-indexed start column of `span`, in UTF-16 code units for BMP text. See
+/// [`span_to_location`] for the astral-character caveat.
 pub(crate) fn col_from_span(span: Span) -> u32 {
     clamp_col(span.start().column)
 }

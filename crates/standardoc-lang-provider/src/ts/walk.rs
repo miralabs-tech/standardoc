@@ -16,7 +16,7 @@ use swc_core::ecma::ast::{
 };
 
 use super::extract_doc;
-use super::helpers::{map_access_modifier, prop_name_static};
+use super::helpers::{loc_utf16_col, map_access_modifier, prop_name_static};
 use super::lookup::build_ts_lookup;
 use super::resolver::{TsConfigPaths, resolve_import};
 use super::visit;
@@ -206,9 +206,9 @@ impl<'a> TsWalkContext<'a> {
         SymbolLocation {
             file: self.core.file_path.clone(),
             start_line: clamp_line(start.line),
-            start_col: clamp_col(start.col_display),
+            start_col: loc_utf16_col(&start),
             end_line: clamp_line(end.line),
-            end_col: clamp_col(end.col_display),
+            end_col: loc_utf16_col(&end),
         }
     }
 
@@ -217,7 +217,7 @@ impl<'a> TsWalkContext<'a> {
         Site {
             file: self.core.file_path.clone(),
             line: clamp_line(start.line),
-            col: clamp_col(start.col_display),
+            col: loc_utf16_col(&start),
         }
     }
 
@@ -898,10 +898,6 @@ pub(crate) fn render_member_expr_name(expr: &swc_core::ecma::ast::Expr) -> Strin
 fn clamp_line(n: usize) -> u32 {
     let v = u32::try_from(n).unwrap_or(u32::MAX);
     v.max(1)
-}
-
-fn clamp_col(n: usize) -> u32 {
-    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]

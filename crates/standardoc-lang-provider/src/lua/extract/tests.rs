@@ -55,6 +55,19 @@ fn global_function_extracted_as_public() {
 }
 
 #[test]
+fn symbol_columns_are_utf16_code_units() {
+    // `--[[🚀]]` is 7 chars / 10 bytes / 8 UTF-16 units (rocket = 2) before
+    // `function`. Asserting 8 distinguishes the byte-derived UTF-16 column
+    // from full_moon's char count (7) and the raw byte offset (10), and
+    // confirms the column is 0-based.
+    let src = "--[[🚀]]function greet(name) end\n";
+    let r = extract(src, "main.lua", "main.lua");
+    let sym = r.symbols.iter().find(|s| s.name == "greet").expect("greet");
+    assert_eq!(sym.location.start_line, 1);
+    assert_eq!(sym.location.start_col, 8);
+}
+
+#[test]
 fn dotted_function_decl_yields_nested_fqdn() {
     let src = "function M.foo() end\n";
     let r = extract(src, "lib.lua", "lib.lua");

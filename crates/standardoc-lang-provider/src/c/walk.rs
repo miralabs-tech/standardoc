@@ -10,7 +10,7 @@ use crate::utils::{hash_bytes, parent_module};
 use crate::walk_core::WalkContextCore;
 
 use super::helpers::{
-    declaration_is_function_prototype, declarator_name, location_from_node, node_text,
+    col_utf16, declaration_is_function_prototype, declarator_name, location_from_node, node_text,
     storage_class_is_static,
 };
 
@@ -103,7 +103,7 @@ fn emit_include(node: Node, src: &str, ctx: &mut CWalkContext) {
     let site = Site {
         file: ctx.core.file_path.clone(),
         line: u32::try_from(start.row + 1).unwrap_or(u32::MAX),
-        col: u32::try_from(start.column).unwrap_or(u32::MAX),
+        col: col_utf16(src, start.row, start.column),
     };
     let confidence = target.default_confidence();
     ctx.core.push_edge(RawEdge {
@@ -142,7 +142,7 @@ fn emit_function_definition(node: Node, src: &str, ctx: &mut CWalkContext) {
         LanguageKind::from("fn"),
         DeclKind::Function,
         visibility,
-        location_from_node(&ctx.core.file_path.clone(), node),
+        location_from_node(&ctx.core.file_path.clone(), node, src),
         body_hash,
         entry_point,
     );
@@ -202,7 +202,7 @@ fn emit_declaration(node: Node, src: &str, ctx: &mut CWalkContext) {
     } else {
         Visibility::Public
     };
-    let loc = location_from_node(&ctx.core.file_path.clone(), node);
+    let loc = location_from_node(&ctx.core.file_path.clone(), node, src);
 
     if declaration_is_function_prototype(node) {
         push_symbol(
@@ -267,7 +267,7 @@ fn emit_struct_like(
         LanguageKind::from(lang_kind),
         decl_kind,
         Visibility::Public,
-        location_from_node(&ctx.core.file_path.clone(), node),
+        location_from_node(&ctx.core.file_path.clone(), node, src),
         None,
     );
 
@@ -296,7 +296,7 @@ fn emit_aggregate_fields(body: Node, src: &str, ctx: &mut CWalkContext, parent_f
         let mut dcursor = child.walk();
         for decl in child.children_by_field_name("declarator", &mut dcursor) {
             if let Some(name) = declarator_name(decl, src) {
-                collected.push((name.to_string(), location_from_node(&file, decl)));
+                collected.push((name.to_string(), location_from_node(&file, decl, src)));
             }
         }
     }
@@ -338,7 +338,7 @@ fn emit_enumerators(body: Node, src: &str, ctx: &mut CWalkContext, parent_fqdn: 
         };
         collected.push((
             node_text(name_node, src).to_string(),
-            location_from_node(&file, child),
+            location_from_node(&file, child, src),
         ));
     }
     for (name, location) in collected {
@@ -383,7 +383,7 @@ fn emit_enum(node: Node, src: &str, ctx: &mut CWalkContext) {
         language_kind: LanguageKind::from("enum"),
         module: Some(ctx.core.file_module_fqdn.clone()),
         visibility: Visibility::Public,
-        location: location_from_node(&ctx.core.file_path, node),
+        location: location_from_node(&ctx.core.file_path, node, src),
         signature: None,
         body_hash: None,
         attributes: vec![],
@@ -429,7 +429,7 @@ fn emit_typedef(node: Node, src: &str, ctx: &mut CWalkContext) {
         LanguageKind::from(lang_kind),
         decl_kind,
         Visibility::Public,
-        location_from_node(&ctx.core.file_path.clone(), node),
+        location_from_node(&ctx.core.file_path.clone(), node, src),
         None,
     );
 
@@ -460,7 +460,7 @@ fn emit_macro_object(node: Node, src: &str, ctx: &mut CWalkContext) {
         LanguageKind::from("macro_object"),
         DeclKind::DeclarativeMacro,
         Visibility::Public,
-        location_from_node(&ctx.core.file_path.clone(), node),
+        location_from_node(&ctx.core.file_path.clone(), node, src),
         None,
     );
 }
@@ -477,7 +477,7 @@ fn emit_macro_fn(node: Node, src: &str, ctx: &mut CWalkContext) {
         LanguageKind::from("macro_fn"),
         DeclKind::DeclarativeMacro,
         Visibility::Public,
-        location_from_node(&ctx.core.file_path.clone(), node),
+        location_from_node(&ctx.core.file_path.clone(), node, src),
         None,
     );
 }

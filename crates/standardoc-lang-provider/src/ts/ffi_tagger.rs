@@ -55,7 +55,7 @@ use swc_core::ecma::ast::{
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
 
-use super::helpers::prop_name_static;
+use super::helpers::{loc_utf16_col, prop_name_static};
 
 /// Source module identifier the bun:ffi `dlopen` re-export lives in.
 const BUN_FFI_MODULE: &str = "bun:ffi";
@@ -256,9 +256,9 @@ impl FfiVisitor<'_> {
         SymbolLocation {
             file: self.file_path.to_owned(),
             start_line: clamp_u32(start.line),
-            start_col: clamp_u32(start.col_display),
+            start_col: loc_utf16_col(&start),
             end_line: clamp_u32(end.line),
-            end_col: clamp_u32(end.col_display),
+            end_col: loc_utf16_col(&end),
         }
     }
 }

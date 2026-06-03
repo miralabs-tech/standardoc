@@ -37,13 +37,15 @@
 //! a C `Export` regardless of how it is later loaded.
 
 use full_moon::ast::{Ast, Call, Expression, FunctionArgs, FunctionCall, Prefix, Suffix};
-use full_moon::tokenizer::TokenType;
+use full_moon::tokenizer::{Position, TokenType};
 use full_moon::visitors::Visitor;
 use standardoc_ir::{
     FfiAbi, FfiDirection, Kind, LanguageKind, RawFfiBinding, RawSymbol, Signature, SymbolLocation,
     Visibility,
 };
 use tree_sitter::{Node, Parser};
+
+use crate::utils::location::line_and_utf16_col;
 
 /// `require("ffi")` — the module spec we treat as the LuaJIT FFI hook.
 const REQUIRE_FFI_TARGET: &str = "ffi";
@@ -66,6 +68,7 @@ pub(crate) fn extract_ffi_bindings(
     ast: &Ast,
     module_fqdn: &str,
     file_path: &str,
+    content: &str,
 ) -> (Vec<RawSymbol>, Vec<RawFfiBinding>) {
     let aliases = collect_ffi_aliases(ast);
     if aliases.is_empty() {
@@ -75,6 +78,7 @@ pub(crate) fn extract_ffi_bindings(
         aliases,
         module_fqdn,
         file_path,
+        content,
         symbols: Vec::new(),
         bindings: Vec::new(),
         seen_names: std::collections::HashSet::new(),
@@ -187,6 +191,7 @@ struct FfiVisitor<'a> {
     aliases: Vec<String>,
     module_fqdn: &'a str,
     file_path: &'a str,
+    content: &'a str,
     symbols: Vec<RawSymbol>,
     bindings: Vec<RawFfiBinding>,
     seen_names: std::collections::HashSet<String>,
@@ -266,9 +271,8 @@ impl FfiVisitor<'_> {
     }
 
     fn fc_location(&self, fc: &FunctionCall) -> SymbolLocation {
-        let start = call_start_position(fc);
-        let line = start.map_or(1, |(l, _c)| l);
-        let col = start.map_or(0, |(_l, c)| c);
+        let (line, col) = call_start_position(fc)
+            .map_or((1, 0), |pos| line_and_utf16_col(self.content, pos.bytes()));
         SymbolLocation {
             file: self.file_path.to_owned(),
             start_line: line,
@@ -286,18 +290,11 @@ fn index_is(index: &full_moon::ast::Index, target: &str) -> bool {
     }
 }
 
-fn call_start_position(fc: &FunctionCall) -> Option<(u32, u32)> {
+fn call_start_position(fc: &FunctionCall) -> Option<Position> {
     let Prefix::Name(name) = fc.prefix() else {
         return None;
     };
-    let pos = name.token().start_position();
-    Some((u32::try_from(pos.line()).unwrap_or(1), {
-        // full_moon columns are 1-based; SymbolLocation columns are 0-
-        // based half-open per existing helpers, so subtract one when
-        // safe.
-        let c = pos.character();
-        u32::try_from(c.saturating_sub(1)).unwrap_or(0)
-    }))
+    Some(name.token().start_position())
 }
 
 /// Parse the cdef body as a C translation unit and return the names

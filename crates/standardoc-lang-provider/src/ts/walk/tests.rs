@@ -300,6 +300,18 @@ fn span_locations_are_captured() {
 }
 
 #[test]
+fn span_columns_are_utf16_code_units() {
+    // `/*😀*/` is 5 chars / 8 bytes / 6 UTF-16 units before `function`.
+    // UTF-16 = 6 distinguishes the fix from char-col (5) and byte-col (8).
+    let (symbols, _, _, _) = run("/*😀*/function foo(){}");
+    assert_eq!(symbols[0].location.start_col, 6);
+
+    // A leading tab is a single UTF-16 unit, not a display tab-stop width.
+    let (tabbed, _, _, _) = run("\tfunction foo(){}");
+    assert_eq!(tabbed[0].location.start_col, 1);
+}
+
+#[test]
 fn body_hash_changes_with_body_content() {
     let (sym_a, _, _, _) = run("export function foo() { return 1; }");
     let (sym_b, _, _, _) = run("export function foo() { return 2; }");

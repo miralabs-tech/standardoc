@@ -20,7 +20,7 @@
 use standardoc_ir::{RawCallArg, RawCallSite, Site};
 use tree_sitter::Node;
 
-use super::helpers::node_text;
+use super::helpers::{col_utf16, node_text};
 use crate::walk_core::WalkContextCore;
 
 /// Walk every named descendant of `body` and emit a `RawCallSite` for
@@ -71,7 +71,7 @@ fn emit_one(node: Node, src: &str, ctx: &mut WalkContextCore, enclosing_fqdn: &s
         site: Site {
             file: ctx.file_path.clone(),
             line: u32::try_from(start.row + 1).unwrap_or(u32::MAX),
-            col: u32::try_from(start.column).unwrap_or(u32::MAX),
+            col: col_utf16(src, start.row, start.column),
         },
     });
 }

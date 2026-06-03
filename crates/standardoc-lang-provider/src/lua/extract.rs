@@ -18,6 +18,7 @@ use super::helpers::{compute_module_path, ident_text, string_literal_text};
 use super::resolver::resolve_require;
 use super::walk::{LuaWalkContext, walk};
 use crate::builtins::global as global_builtin_registry;
+use crate::utils::location::line_and_utf16_col;
 use crate::utils::{file_span, hash_bytes, last_segment, parent_module};
 
 /// Parse a Lua source file with `full_moon`, walk it, and return an
@@ -94,8 +95,12 @@ pub(crate) fn extract_file(
     // G6: extract LuaJIT `ffi.cdef[[...]]` declarations as virtual
     // `RawSymbol` + `RawFfiBinding` pairs so cross-language `ffi_resolve`
     // can pair them with C-side exports.
-    let (ffi_symbols, ffi_bindings) =
-        super::ffi_tagger::extract_ffi_bindings(&ast, &module_fqdn, workspace_relative_path);
+    let (ffi_symbols, ffi_bindings) = super::ffi_tagger::extract_ffi_bindings(
+        &ast,
+        &module_fqdn,
+        workspace_relative_path,
+        content,
+    );
     ctx.core.symbols.extend(ffi_symbols);
 
     // G4-lua: build the AOT ModuleLookup so cross-workspace edge
@@ -158,7 +163,7 @@ pub(crate) fn extract_local_function(ctx: &mut LuaWalkContext, lf: &LocalFunctio
     }
     let fqdn = format!("{}::{}", ctx.core.file_module_fqdn, name);
     let signature = signature_from_body(lf.body(), false);
-    let location = node_location(ctx, lf, content);
+    let location = node_location(ctx, lf);
     let body_hash = body_hash_for(lf, content);
 
     let sym = RawSymbol {
@@ -196,7 +201,7 @@ pub(crate) fn extract_function_declaration(
         return;
     };
     let signature = signature_from_body(fd.body(), is_method);
-    let location = node_location(ctx, fd, content);
+    let location = node_location(ctx, fd);
     let body_hash = body_hash_for(fd, content);
     let language_kind = if is_method {
         LanguageKind::from("method")
@@ -268,7 +273,7 @@ pub(crate) fn extract_local_assignment(
                 from_fqdn: ctx.core.file_module_fqdn.clone(),
                 kind: EdgeKind::Imports,
                 to,
-                sites: vec![site_for(&ctx.core.file_path, pos)],
+                sites: vec![site_for(&ctx.core.file_path, &ctx.content, pos)],
                 attributes: vec![],
                 confidence,
                 receiver_type: None,
@@ -276,7 +281,7 @@ pub(crate) fn extract_local_assignment(
         }
 
         let fqdn = format!("{}::{}", ctx.core.file_module_fqdn, name);
-        let location = node_location(ctx, *name_token, content);
+        let location = node_location(ctx, *name_token);
         let body_hash = body_hash_for(la, content);
 
         let sym = RawSymbol {
@@ -340,7 +345,7 @@ pub(crate) fn extract_assignment(ctx: &mut LuaWalkContext, a: &Assignment, conte
         };
 
         let signature = signature_from_body(anon.body(), false);
-        let location = node_location(ctx, *var, content);
+        let location = node_location(ctx, *var);
         let body_hash = body_hash_for(*var, content);
 
         let sym = RawSymbol {
@@ -395,7 +400,7 @@ fn record_calls_in_block(
                             from_fqdn: caller_fqdn.to_string(),
                             kind: EdgeKind::Imports,
                             to,
-                            sites: vec![site_for(&ctx.core.file_path, pos)],
+                            sites: vec![site_for(&ctx.core.file_path, &ctx.content, pos)],
                             attributes: vec![],
                             confidence,
                             receiver_type: None,
@@ -448,7 +453,7 @@ fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &Functi
             from_fqdn: from_fqdn.to_string(),
             kind: EdgeKind::Imports,
             to,
-            sites: vec![site_for(&ctx.core.file_path, call_start(fc))],
+            sites: vec![site_for(&ctx.core.file_path, &ctx.content, call_start(fc))],
             attributes: vec![],
             confidence,
             receiver_type: None,
@@ -471,7 +476,7 @@ fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &Functi
             callee_text,
             args,
             receiver_chain,
-            site: site_for(&ctx.core.file_path, call_start(fc)),
+            site: site_for(&ctx.core.file_path, &ctx.content, call_start(fc)),
         });
     }
     // Stage 3e-1: consult the Lua builtin registry. Lua has no Drop /
@@ -515,7 +520,7 @@ fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &Functi
         from_fqdn: from_fqdn.to_string(),
         kind: EdgeKind::Calls,
         to,
-        sites: vec![site_for(&ctx.core.file_path, call_start(fc))],
+        sites: vec![site_for(&ctx.core.file_path, &ctx.content, call_start(fc))],
         attributes,
         confidence,
         receiver_type: None,
@@ -885,15 +890,20 @@ fn signature_from_body(body: &FunctionBody, is_method: bool) -> Signature {
 
 // --- locations / hashes ---------------------------------------------------
 
-fn node_location<N: Node>(ctx: &LuaWalkContext, node: N, _content: &str) -> SymbolLocation {
+fn node_location<N: Node>(ctx: &LuaWalkContext, node: N) -> SymbolLocation {
     let start = node.start_position().unwrap_or_default();
     let end = node.end_position().unwrap_or_default();
+    // full_moon reports `character` as a 1-based char count; we derive the
+    // 0-based UTF-16 column from the absolute byte offset instead, so the
+    // stored columns match what the LSP / VSCode consumers expect.
+    let (start_line, start_col) = line_and_utf16_col(&ctx.content, start.bytes());
+    let (end_line, end_col) = line_and_utf16_col(&ctx.content, end.bytes());
     SymbolLocation {
         file: ctx.core.file_path.clone(),
-        start_line: u32::try_from(start.line()).unwrap_or(u32::MAX),
-        end_line: u32::try_from(end.line()).unwrap_or(u32::MAX),
-        start_col: u32::try_from(start.character()).unwrap_or(u32::MAX),
-        end_col: u32::try_from(end.character()).unwrap_or(u32::MAX),
+        start_line,
+        end_line,
+        start_col,
+        end_col,
     }
 }
 
@@ -908,11 +918,12 @@ fn body_hash_for<N: Node>(node: N, content: &str) -> Option<Blake3Hash> {
     Some(hash_bytes(&content.as_bytes()[lo..hi]))
 }
 
-fn site_for(file: &str, pos: Position) -> Site {
+fn site_for(file: &str, content: &str, pos: Position) -> Site {
+    let (line, col) = line_and_utf16_col(content, pos.bytes());
     Site {
         file: file.to_string(),
-        line: u32::try_from(pos.line()).unwrap_or(u32::MAX),
-        col: u32::try_from(pos.character()).unwrap_or(u32::MAX),
+        line,
+        col,
     }
 }
 
