@@ -281,9 +281,8 @@ pub fn get_module_lookup(
 /// Persist (UPSERT) a `ModuleLookup` blob under `(workspace_id, module_fqdn)`.
 /// `workspace_id` defaults to the internal `PRIMARY_WORKSPACE_ID` sentinel
 /// (`"primary"`). This is the write-side symmetric to [`get_module_lookup`];
-/// the daemon's walk
-/// pipeline uses it after the AOT pre-pass for each module, and Stage
-/// 3b-6 tests use it to seed peer workspaces.
+/// the daemon's walk pipeline uses it after the AOT pre-pass for each module,
+/// and Stage 3b-6 tests use it to seed peer workspaces.
 pub fn put_module_lookup(
     handle: &IndexHandle,
     workspace_id: Option<&str>,

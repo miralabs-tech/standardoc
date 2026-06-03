@@ -24,6 +24,9 @@ pub struct BodySlice {
     pub end_line: u32,
     pub body: String,
     pub truncated: bool,
+    /// Total line count of the symbol's declared span (`start_line..=end_line`)
+    /// in the source file, before any `max_lines` cap or noise stripping. When
+    /// `truncated` is `true`, this exceeds the number of lines present in `body`.
     pub total_body_lines: u32,
     /// Number of leading "noise" lines (doc comments, attributes, blank
     /// lines between them) dropped by `BodyOptions::strip_attrs`. Zero

@@ -209,6 +209,9 @@ pub(super) fn build_edge(
     })
 }
 
+/// Resolve a row id → fqdn. Unlike [`lookup_id_by_fqdn`], `id` is the global
+/// `symbols` primary key (unique across every workspace), so this lookup needs
+/// no `workspace_id` scope.
 pub(super) fn lookup_fqdn_by_id(
     conn: &Connection,
     id: i64,
