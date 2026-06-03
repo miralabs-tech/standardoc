@@ -1,0 +1,173 @@
+@use '../../styles/mixins' as *;
+
+.search {
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: var(--sd-space-2, 8px);
+	min-width: 0;
+	font-family: var(--sd-font-sans, sans-serif);
+	font-size: var(--sd-text-md, 13px);
+	color: var(--sd-fg, #cccccc);
+
+	&__input {
+		flex: 1;
+		min-width: 0;
+		background: var(--sd-bg-elevated, #252526);
+		border: 1px solid var(--sd-border, #454545);
+		border-radius: var(--sd-radius-md, 6px);
+		color: var(--sd-fg, #cccccc);
+		font: inherit;
+		padding: 6px 10px;
+
+		&:focus {
+			outline: 1px solid var(--sd-accent, #3794ff);
+			outline-offset: -1px;
+			border-color: var(--sd-accent, #3794ff);
+		}
+
+		&::placeholder {
+			color: var(--sd-fg-muted, #9d9d9d);
+		}
+	}
+
+	&__shortcut {
+		flex: 0 0 auto;
+		font-size: var(--sd-text-xs, 10px);
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		color: var(--sd-fg-muted, #9d9d9d);
+		padding: 2px 6px;
+		border: 1px solid var(--sd-border, #454545);
+		border-radius: var(--sd-radius-sm, 3px);
+		pointer-events: none;
+	}
+
+	&__dropdown {
+		position: absolute;
+		top: calc(100% + 4px);
+		left: 0;
+		right: 0;
+		background: var(--sd-bg-elevated, #252526);
+		border: 1px solid var(--sd-border, #454545);
+		border-radius: var(--sd-radius-md, 6px);
+		max-height: 360px;
+		overflow: auto;
+		z-index: 1000;
+		display: none;
+		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+
+		&--open {
+			display: block;
+		}
+	}
+
+	&__status {
+		padding: var(--sd-space-2, 8px) var(--sd-space-3, 12px);
+		font-size: var(--sd-text-sm, 11px);
+		color: var(--sd-fg-muted, #9d9d9d);
+		font-style: italic;
+	}
+
+	&__list {
+		list-style: none;
+		margin: 0;
+		padding: var(--sd-space-1, 4px) 0;
+	}
+
+	&__item {
+		display: flex;
+		align-items: center;
+		gap: var(--sd-space-2, 8px);
+		padding: 4px var(--sd-space-3, 12px);
+		cursor: pointer;
+		color: var(--sd-fg, #cccccc);
+		// Default left-edge bar — kind variants below override the color.
+		// Stays transparent for `unknown` so the row still aligns visually
+		// with kind-tagged peers without showing a fake bucket.
+		border-left: 3px solid transparent;
+
+		&:hover,
+		&--active {
+			background: var(--sd-hover, #2a2d2e);
+		}
+
+		&[data-kind='callable'] { border-left-color: var(--sd-kind-callable, #4d8cff); }
+		&[data-kind='type']     { border-left-color: var(--sd-kind-type, #d4b455); }
+		&[data-kind='value']    { border-left-color: var(--sd-kind-value, #7ed18a); }
+		&[data-kind='module']   { border-left-color: var(--sd-kind-module, #b888da); }
+		&[data-kind='macro']    { border-left-color: var(--sd-kind-macro, #ef8b6f); }
+	}
+
+	&__item-name {
+		flex: 0 0 auto;
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		font-size: var(--sd-text-md, 13px);
+		color: var(--sd-fg-strong, #ffffff);
+	}
+
+	&__item-kind {
+		flex: 0 0 auto;
+		font-size: 9px;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		font-weight: 600;
+		padding: 1px 6px;
+		border-radius: var(--sd-radius-pill, 999px);
+		color: var(--sd-fg-muted, #9d9d9d);
+		background: var(--sd-bg-deep, #161616);
+		min-width: 56px;
+		text-align: center;
+		// Kind-tinted chip: same hue as the left bar, translucent fill so
+		// the row reads as a glance without screaming. Matches the chip
+		// pattern in symbol-details so the two components feel related.
+		.search__item[data-kind='callable'] & { color: var(--sd-kind-callable, #4d8cff); background: rgba(77, 140, 255, 0.12); }
+		.search__item[data-kind='type'] &     { color: var(--sd-kind-type, #d4b455);     background: rgba(212, 180, 85, 0.12); }
+		.search__item[data-kind='value'] &    { color: var(--sd-kind-value, #7ed18a);    background: rgba(126, 209, 138, 0.12); }
+		.search__item[data-kind='module'] &   { color: var(--sd-kind-module, #b888da);   background: rgba(184, 136, 218, 0.12); }
+		.search__item[data-kind='macro'] &    { color: var(--sd-kind-macro, #ef8b6f);    background: rgba(239, 139, 111, 0.12); }
+	}
+
+	&__item-fqdn {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		font-size: var(--sd-text-sm, 11px);
+		color: var(--sd-fg-muted, #9d9d9d);
+		text-align: right;
+	}
+
+	&__section-title {
+		padding: var(--sd-space-2, 8px) var(--sd-space-3, 12px) 2px;
+		font-size: 9px;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		color: var(--sd-fg-dim, #6e7681);
+		font-family: var(--sd-font-mono, ui-monospace, monospace);
+		font-weight: 600;
+	}
+
+	&__section + &__section-title {
+		border-top: 1px solid var(--sd-border-subtle, #2d2d2d);
+		margin-top: 4px;
+	}
+
+	&__tip {
+		padding: 4px var(--sd-space-3, 12px) var(--sd-space-2, 8px);
+		font-size: var(--sd-text-xs, 10px);
+		color: var(--sd-fg-muted, #9d9d9d);
+		line-height: 1.5;
+		font-family: var(--sd-font-sans, sans-serif);
+
+		code {
+			font-family: var(--sd-font-mono, ui-monospace, monospace);
+			color: var(--sd-fg, #cccccc);
+			background: var(--sd-bg-deep, #161616);
+			padding: 0 4px;
+			border-radius: var(--sd-radius-sm, 3px);
+		}
+	}
+}

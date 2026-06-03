@@ -6,7 +6,78 @@ is intentionally minimal and only buffers in-flight work between releases.
 
 ## [Unreleased]
 
-Targeting `v1.0.0-beta.3` — see [.important/en/TODO-LIST.md](.important/en/TODO-LIST.md) for the roadmap.
+## [1.0.0-beta.3]
+
+The planned axes were doc rendering + visual navigation + CLI autonomy. In
+practice, dogfood pulled the release toward **multi-workspace graphs,
+interactive visualization, a native C provider, and a deep edge-resolution
+overhaul** — while the RAG layer and the session DB were cut entirely. (Doc
+rendering slips forward.)
+
+- **Cross-workspace / multi-root graph**: symbols tagged by `workspace_id`
+  (UNIQUE relaxed to `(workspace_id, fqdn)`); link / unlink / refresh peer
+  workspaces with live add/remove + scoped watcher dispatch; AOT
+  `ModuleLookup` persistence + cross-workspace import resolver; `projects`
+  and `workspace_catalog` tables with cold-start project discovery and
+  manifest-driven re-discovery. New MCP tools: `link_workspace`,
+  `unlink_workspace`, `resolve_cross_workspace`, `list_linked_workspaces`,
+  `set_link_direction`, `refresh_peer`, `module_lookup`, `list_projects`,
+  `project_for_file`.
+- **`standardoc.sxd` workspace config** (v0.1): explicit `project` / `group`
+  / `ignore` / `mcp` / `viz` blocks **replace** mechanical detection and
+  absorb `.stdignore`; loader with `ScanFilters` back-compat. LSP-side
+  schema-aware live diagnostics + hovers; VSCode TextMate grammar +
+  language-configuration; `list_groups` MCP endpoint; `sxd-preview` CLI.
+- **Interactive graph visualization** (`standardoc-graph-viz`): WASM crate +
+  web-component shell (overview / focus-graph / explorer / symbol-details /
+  search panels); real 3D overview (orbit camera, system topology, project
+  clusters); bucketed focus layout; hide-tests / kind / visibility filters.
+  Hosted in a VSCode webview ("Open Graph Viz") and a standalone playground,
+  driven entirely through MCP.
+- **Native C provider + FFI**: `.c` / `.h` indexing with cross-file `.h`↔`.c`
+  join, struct/union fields, CALLS edges; `extern "C"` / `bun:ffi` /
+  `Deno.dlopen` / NAPI FFI taggers; CMake layout detection; Lua C-API export
+  tagging.
+- **Multi-workspace proxy**: `standardoc-mcp-proxy` consolidated into
+  `standardoc proxy` — singleton with deterministic `/ws/<id>/mcp` routing,
+  runtime register / list / unregister admin endpoints, supervisor
+  auto-spawn, and a long-lived forwarder that survives daemon restarts.
+- **Edge-resolution overhaul**: AOT `ModuleLookup` pre-pass + `BuiltinRegistry`
+  (Drop / Attribute / Edge tiers) across Rust / TS / C / Lua; trait dispatch
+  (`#[derive]` IMPLEMENTS + Into / Iterator / ToString builtin fallback);
+  global return-type registry; `receiver_type` on CALLS edges; local type
+  env, struct-field tables, closure-arg + parametric inference, pattern-
+  binding resolution; References via `Expr::Path`. `RawCallSite` persisted to
+  a `call_sites` table + `find_call_sites` MCP tool.
+- **IR evolution**: `Kind::Function` → **`Kind::Callable`** (rename),
+  `DeclKind` + `decl_kind`, `implements_trait` / `receiver_type` /
+  `flags: Vec<String>` on `RawSymbol`, `EntryPointKind` classification;
+  `BridgeKind` 1.0 vocabulary locked with validate-on-insert; `Substrate`
+  widened to 6 variants; dead `Defines` / `ExposesApi` edge variants removed.
+  New `standardoc-sourcemap` crate carrying the v1 preproc↔extractor protocol.
+- **MCP surface**: `get_code`, `get_context_summary`, `find_symbol_fqdns`,
+  `list_symbol_fqdns`, `fetch_graph`; cursor pagination on `list_symbols`;
+  `workspace_id` param + `relative_to` projection; noise reduction (silent
+  default depth, blank-line collapse, `exclude_tests`); `language` surfaced in
+  `SymbolContext`. HTTP transport hardened (stateless + `json_response`,
+  persisted session store for transparent reconnect, port reuse across
+  restarts).
+- **CLI autonomy**: `standardoc init` (agent skill + MCP-first hooks +
+  `AGENTS.md` + `.mcp.json`), `standardoc mcp --connect` (stdio↔http bridge),
+  `standardoc self-update`.
+- **Removed**: the RAG layer (`standardoc-rag`), the session DB, and the
+  usage-stats / token-savings surface — all shipped in beta.2, all cut here.
+  Standardoc bets on resolved structure over vector similarity, and stays a
+  code graph rather than an agent-memory store.
+- **Security / deps**: `rmcp` 0.16 → 1.7 (fixes GHSA-89vp-x53w-74fx — DNS
+  rebinding in the streamable-HTTP server transport); `bincode` 2.0,
+  `swc_core` 68, `reqwest` 0.13, `r2d2_sqlite` 0.34, `standarbuild-detect` 0.3.
+- **Docs**: `.important/{en,fr}` corpus rethought — value-first README,
+  trimmed comparison / quickstart, storytelling de-narrated; roadmap
+  reconciled to the beta.3 surface.
+- **Internals / CI**: ~17k LOC of inline tests extracted to sibling files;
+  clippy 85 → 0 workspace warnings; `handler.rs` split (−41%); toolchain
+  pinned to 1.95; multiple SQLite schema migrations + a v0 baseline reboot.
 
 ## [1.0.0-beta.2]
 

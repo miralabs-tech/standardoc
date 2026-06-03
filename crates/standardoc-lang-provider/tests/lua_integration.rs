@@ -29,6 +29,7 @@ fn extract_with_rockspec_uses_rockspec_package_name_in_fqdn() {
     let provider = LuaProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider
         .extract(src, "src/util.lua", &ctx)
@@ -57,6 +58,7 @@ fn extract_without_rockspec_falls_back_to_workspace_dir_name() {
     let provider = LuaProvider::new();
     let ctx = ExtractContext {
         workspace_root: &root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(src, "main.lua", &ctx).expect("extract ok");
 
@@ -75,6 +77,7 @@ fn rockspec_is_cached_across_files() {
     let provider = LuaProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
 
     let _ = provider
@@ -118,6 +121,7 @@ return M
     let provider = LuaProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(src, "src/strings.lua", &ctx).unwrap();
 
@@ -128,7 +132,7 @@ return M
         .expect("trim");
     assert_eq!(trim.fqdn, "strings::src::strings::M::trim");
     assert_eq!(trim.visibility, Visibility::Public);
-    assert_eq!(trim.kind, Kind::Function);
+    assert_eq!(trim.kind, Kind::Callable);
 
     let uppercase = extracted
         .symbols
@@ -166,6 +170,7 @@ fn require_imports_emits_unresolved_edge_for_dotted_path() {
     let provider = LuaProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(src, "main.lua", &ctx).unwrap();
 
@@ -197,6 +202,7 @@ fn unparseable_rockspec_falls_back_to_workspace_dir() {
     let provider = LuaProvider::new();
     let ctx = ExtractContext {
         workspace_root: &root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(src, "main.lua", &ctx).unwrap();
     assert_eq!(extracted.symbols[0].fqdn, "project::main");
@@ -221,6 +227,7 @@ return N
     let provider = LuaProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(src, "lib.lua", &ctx).unwrap();
 
@@ -241,6 +248,7 @@ fn nested_table_methods_get_full_fqdn_chain() {
     let provider = LuaProvider::new();
     let ctx = ExtractContext {
         workspace_root: &root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(src, "lib.lua", &ctx).unwrap();
 

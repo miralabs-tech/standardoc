@@ -3,11 +3,9 @@ import {
   formatNeighborGroup,
   formatSymbolContext,
   formatSymbolHeader,
-  formatUsageStats,
   parseToolResult,
   pickTopFqdn,
   targetLabel,
-  type UsageStatsJson,
 } from '../src/commands-render';
 import type {
   NeighborSymbolJson,
@@ -18,7 +16,7 @@ import type {
 const sampleSymbol: RawSymbolJson = {
   name: 'parse_workspace',
   fqdn: 'standardoc_core::pipeline::parse_workspace',
-  kind: 'function',
+  kind: 'callable',
   language_kind: 'rust',
   module: 'standardoc_core::pipeline',
   visibility: 'public',
@@ -62,13 +60,13 @@ describe('pickTopFqdn', () => {
 
 describe('targetLabel', () => {
   test('Resolved → fqdn', () => {
-    expect(targetLabel({ Resolved: { fqdn: 'a::b' } })).toBe('a::b');
+    expect(targetLabel({ kind: 'resolved', fqdn: 'a::b' })).toBe('a::b');
   });
   test('Unresolved → bracketed name', () => {
-    expect(targetLabel({ Unresolved: { name: 'foo' } })).toBe('<unresolved: foo>');
+    expect(targetLabel({ kind: 'unresolved', name: 'foo' })).toBe('<unresolved: foo>');
   });
   test('UnresolvedBridge → bracketed bridge+name', () => {
-    expect(targetLabel({ UnresolvedBridge: { bridge: 'tauri', name: 'cmd' } })).toBe(
+    expect(targetLabel({ kind: 'unresolved_bridge', bridge: 'tauri', name: 'cmd' })).toBe(
       '<bridge tauri: cmd>',
     );
   });
@@ -78,7 +76,7 @@ describe('formatSymbolHeader', () => {
   test('contains fqdn, kind, visibility, location', () => {
     const s = formatSymbolHeader(sampleSymbol);
     expect(s).toContain(sampleSymbol.fqdn);
-    expect(s).toContain('function');
+    expect(s).toContain('callable');
     expect(s).toContain('public');
     expect(s).toContain('crates/standardoc-core/src/pipeline/mod.rs:42');
   });
@@ -91,8 +89,8 @@ describe('formatNeighborGroup', () => {
 
   test('non-empty group lists each neighbor with edge_kind', () => {
     const ns: NeighborSymbolJson[] = [
-      { edge_kind: 'CALLS', target: { Resolved: { fqdn: 'a::b' } }, resolved_symbol: null },
-      { edge_kind: 'CALLS', target: { Unresolved: { name: 'unk' } }, resolved_symbol: null },
+      { edge_kind: 'CALLS', target: { kind: 'resolved', fqdn: 'a::b' }, resolved_symbol: null },
+      { edge_kind: 'CALLS', target: { kind: 'unresolved', name: 'unk' }, resolved_symbol: null },
     ];
     const s = formatNeighborGroup('callees', ns);
     expect(s).toContain('callees (2):');
@@ -109,11 +107,11 @@ describe('formatSymbolContext', () => {
       document_description: 'Documents the parse pipeline.',
     },
     callers: [
-      { edge_kind: 'CALLS', target: { Resolved: { fqdn: 'cli::main' } }, resolved_symbol: null },
+      { edge_kind: 'CALLS', target: { kind: 'resolved', fqdn: 'cli::main' }, resolved_symbol: null },
     ],
     callees: [],
     imports: [
-      { edge_kind: 'IMPORTS', target: { Resolved: { fqdn: 'std::sync::Arc' } }, resolved_symbol: null },
+      { edge_kind: 'IMPORTS', target: { kind: 'resolved', fqdn: 'std::sync::Arc' }, resolved_symbol: null },
     ],
     imported_by: [],
   };
@@ -140,50 +138,3 @@ describe('formatSymbolContext', () => {
   });
 });
 
-describe('formatUsageStats', () => {
-  test('zero calls — neutral message that references the period', () => {
-    const stats: UsageStatsJson = {
-      period: 'day',
-      calls: 0,
-      bytes_out_total: 0,
-      baseline_bytes_total: 0,
-      bytes_saved: 0,
-      ratio: 0,
-    };
-    const s = formatUsageStats(stats);
-    expect(s).toContain('no tool calls logged');
-    expect(s).toContain('day');
-  });
-
-  test('aggregates a non-empty period into a one-liner', () => {
-    const stats: UsageStatsJson = {
-      period: 'all',
-      calls: 12,
-      bytes_out_total: 4096,
-      baseline_bytes_total: 40_960,
-      bytes_saved: 36_864,
-      ratio: 0.1,
-    };
-    const s = formatUsageStats(stats);
-    expect(s).toContain('12 call(s)');
-    expect(s).toContain('all');
-    expect(s).toContain('4.0 KB');
-    expect(s).toContain('40.0 KB');
-    expect(s).toContain('10.0%');
-    expect(s).toContain('36.0 KB');
-  });
-
-  test('handles negative bytes_saved (response richer than raw files)', () => {
-    const stats: UsageStatsJson = {
-      period: 'week',
-      calls: 1,
-      bytes_out_total: 2048,
-      baseline_bytes_total: 1024,
-      bytes_saved: -1024,
-      ratio: 2,
-    };
-    const s = formatUsageStats(stats);
-    expect(s).toContain('-1.0 KB');
-    expect(s).toContain('200.0%');
-  });
-});

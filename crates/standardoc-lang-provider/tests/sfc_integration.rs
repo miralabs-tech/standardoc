@@ -62,6 +62,7 @@ export default { name: 'App' };
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(sfc, "src/App.vue", &ctx).expect("ok");
 
@@ -86,11 +87,43 @@ const message = 'hi';
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(sfc, "src/Hello.vue", &ctx).unwrap();
 
     let interp = refs_with_attr(&extracted.edges, "template-interpolation");
     assert!(interp.iter().any(|e| ref_name(e) == "message"));
+}
+
+fn interp_col(prefix: &str) -> u32 {
+    let sfc = format!(
+        "<template>\n  <p>{prefix}{{{{ message }}}}</p>\n</template>\n<script lang=\"ts\">\nconst message = 'hi';\n</script>\n"
+    );
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(root, "package.json", r#"{"name":"@app/web"}"#);
+    write(root, "src/Hello.vue", &sfc);
+    let provider = WorkspaceProvider::new();
+    let ctx = ExtractContext {
+        workspace_root: root,
+        cross_workspace: None,
+    };
+    let extracted = provider.extract(&sfc, "src/Hello.vue", &ctx).unwrap();
+    let interp = refs_with_attr(&extracted.edges, "template-interpolation");
+    let edge = interp
+        .iter()
+        .find(|e| ref_name(e) == "message")
+        .expect("message ref");
+    edge.sites[0].col
+}
+
+#[test]
+fn vue_template_ref_site_column_is_utf16_code_units() {
+    // `🚀` is 4 bytes but 2 UTF-16 units — exactly two ASCII chars. The
+    // interpolation column therefore matches the `ab` prefix only when the
+    // Site is stamped in UTF-16 (a byte column would differ by 2, a char
+    // column by 1).
+    assert_eq!(interp_col("🚀"), interp_col("ab"));
 }
 
 #[test]
@@ -109,6 +142,7 @@ const visible = true;
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(sfc, "src/Toggle.vue", &ctx).unwrap();
 
@@ -132,6 +166,7 @@ function handleClick() {}
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(sfc, "src/Button.vue", &ctx).unwrap();
 
@@ -155,6 +190,7 @@ import UserCard from './UserCard.vue';
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(sfc, "src/App.vue", &ctx).unwrap();
 
@@ -179,6 +215,7 @@ function increment() { /* ... */ }
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(sfc, "src/Counter.vue", &ctx).unwrap();
 
@@ -201,6 +238,7 @@ let count = 0;
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(sfc, "src/Counter.svelte", &ctx).unwrap();
 
@@ -223,6 +261,7 @@ function handleClick() {}
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(sfc, "src/Btn.svelte", &ctx).unwrap();
 
@@ -246,6 +285,7 @@ let users = [];
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(sfc, "src/List.svelte", &ctx).unwrap();
 
@@ -267,6 +307,7 @@ import Header from './Header.svelte';
     let provider = WorkspaceProvider::new();
     let ctx = ExtractContext {
         workspace_root: root,
+        cross_workspace: None,
     };
     let extracted = provider.extract(sfc, "src/App.svelte", &ctx).unwrap();
 

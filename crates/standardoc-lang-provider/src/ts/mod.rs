@@ -8,7 +8,9 @@ use swc_core::ecma::parser::Syntax;
 
 mod extract;
 mod extract_doc;
+mod ffi_tagger;
 mod helpers;
+mod lookup;
 mod resolver;
 mod visit;
 mod walk;
@@ -83,28 +85,6 @@ impl LanguageProvider for TsProvider {
     }
 }
 
-/// Walk mode threaded through the TS provider's visit layer (scaffold A
-/// surface, scaffold B impl). `Workspace` is the historical full walk —
-/// CALLS edges, body_hash, IMPLEMENTS, the works. `ExternalDts` is the
-/// stripped-down mode for `node_modules/<pkg>/*.d.ts` declarations:
-/// no bodies (declaration files have none), so no CALLS, no body_hash;
-/// IMPORTS + IMPLEMENTS + types stay (they are exactly what the agent
-/// wants for cross-package navigation).
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum TsExtractMode {
-    /// Workspace files. Full walk — every edge kind, body hashing,
-    /// EmmyLua-style JSDoc parsing (post-beta), JsxRefVisitor on bodies.
-    #[default]
-    Workspace,
-    /// External `.d.ts` (and `.ts`/`.js` source) from `node_modules`.
-    /// The walk skips body-dependent emissions: no CALLS edges, no
-    /// body_hash, no JsxRefVisitor on function bodies (declarations
-    /// have none). Doc extraction stays — `.d.ts` files routinely
-    /// carry the only authoritative JSDoc for a package.
-    ExternalDts,
-}
-
 impl TsProvider {
     /// SFC-orchestrator entry point (lock 41 §2.5). Routes through the
     /// same package/tsconfig discovery as [`Self::extract`] but lets the
@@ -137,27 +117,6 @@ impl TsProvider {
             tsconfig,
             syntax_override,
             language_override,
-        )
-    }
-}
-
-impl TsProvider {
-    /// External-`.d.ts` entry point used by `externals::npm::NpmResolver`.
-    /// Sets `TsExtractMode::ExternalDts` (crate-private) so the visit layer skips
-    /// CALLS edges + body hashing for declaration files. The path is
-    /// treated as a workspace-relative pointer into a virtual
-    /// `node_modules/<pkg>/...` tree mounted under `ctx.workspace_root`;
-    /// the package name is resolved via the package's own `package.json`
-    /// the way [`Self::extract`] does for workspace files.
-    pub fn extract_external_dts(
-        &self,
-        content: &str,
-        path: &str,
-        ctx: &ExtractContext<'_>,
-    ) -> Result<ExtractedFile, ExtractError> {
-        let _ = (content, path, ctx);
-        todo!(
-            "scaffold A — thread TsExtractMode::ExternalDts through extract_with_overrides (scaffold B impl)"
         )
     }
 }
@@ -209,6 +168,7 @@ mod tests {
         let provider = TsProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
         let extracted = provider
             .extract(src, "src/index.ts", &ctx)
@@ -234,6 +194,7 @@ mod tests {
         let provider = TsProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
         let err = provider
             .extract(src, "src/index.ts", &ctx)
@@ -258,6 +219,7 @@ mod tests {
         let provider = TsProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
         let err = provider
             .extract(src, "src/index.ts", &ctx)
@@ -282,6 +244,7 @@ mod tests {
         let provider = TsProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
 
         let _ = provider
@@ -320,6 +283,7 @@ mod tests {
         let provider = TsProvider::new();
         let ctx = ExtractContext {
             workspace_root: root,
+            cross_workspace: None,
         };
         let extracted = provider.extract(src, "src/caller.ts", &ctx).expect("ok");
 

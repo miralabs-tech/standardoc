@@ -109,7 +109,7 @@ async fn kick_off_indexing_readonly_flips_index_ready_synchronously_and_skips_wa
         "fresh handler must report index_ready=false"
     );
 
-    kick_off_indexing(&mcp, reader, provider, filters, None);
+    kick_off_indexing(&mcp, reader, provider, filters);
 
     assert!(
         index_ready.load(std::sync::atomic::Ordering::Acquire),

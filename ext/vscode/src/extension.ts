@@ -1,17 +1,25 @@
 import * as vscode from 'vscode';
 import { describeFatalConfig } from './daemon/fatal-marker';
-import { readRagSettings, watchRagSettings } from './daemon/rag-settings';
 import { DaemonSupervisor, type DaemonState } from './daemon/supervisor';
 import { LspClient } from './lsp/client';
+import { SxdLspClient } from './lsp/sxd-client';
 import { McpClient } from './mcp/client';
+import { ProxyClient } from './proxy/client';
 import { StandardocMcpServerProvider } from './mcp/serverDefinitionProvider';
 import { StatusBarController } from './statusBar';
 import { registerCommands } from './commands';
-import { maybePromptForInit, syncMcpConfigToUrl } from './init/prompt';
+import { maybePromptForInit, resolveProxyMcpUrl, syncMcpConfigToUrl } from './init/prompt';
 import { registerStdignoreHover } from './stdignore/hover';
+import { registerSxdHover } from './sxd/hover';
+import { readSxdPort } from './sxd/config-port';
 
 const MCP_PROVIDER_ID = 'standardoc.mcp';
-const DEFAULT_MCP_HTTP_PORT = 7700;
+// 0 = ephemeral: the OS assigns the daemon a free port and the proxy
+// (DEFAULT_PROXY_PORT) fronts the stable URL. The daemon and the proxy
+// must NOT share a port — the proxy forwards INTO the daemon.
+const DEFAULT_MCP_HTTP_PORT = 0;
+const DEFAULT_PROXY_BIND = '127.0.0.1';
+const DEFAULT_PROXY_PORT = 7700;
 
 export function activate(context: vscode.ExtensionContext): void {
   const folder = vscode.workspace.workspaceFolders?.[0];
@@ -23,51 +31,46 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('Standardoc');
   context.subscriptions.push(output);
 
-  const port = vscode.workspace
-    .getConfiguration('standardoc')
-    .get<number>('mcpHttpPort', DEFAULT_MCP_HTTP_PORT);
-  output.appendLine(`[mcp] http port from setting: ${port}`);
+  // Precedence: standardoc.sxd `mcp { port N }` > VSCode setting
+  // `standardoc.mcpHttpPort` > default 0 (ephemeral). Sxd wins as the
+  // workspace-authoritative source ; the setting stays as a per-user
+  // override for direct daemon access. Default 0 means the daemon binds
+  // an OS-assigned port and the proxy fronts the stable URL.
+  const sxdPort = readSxdPort(workspaceRoot, 'mcp');
+  const config = vscode.workspace.getConfiguration('standardoc');
+  const settingPort = config.get<number>('mcpHttpPort', DEFAULT_MCP_HTTP_PORT);
+  const port = sxdPort ?? settingPort;
+  const portSource = sxdPort !== null ? 'sxd' : 'setting';
+  const portLabel = port === 0 ? '0 (ephemeral)' : String(port);
+  output.appendLine(`[mcp] daemon http port=${portLabel} (source=${portSource})`);
+
+  // Proxy bind/port are machine-scoped settings, NOT workspace sxd:
+  // the proxy is a per-machine singleton and all sibling VSCode
+  // windows must converge on the same address for dedup to work.
+  // `proxy { ... }` in sxd is silently ignored (kept parseable for
+  // back-compat ; LSP surfaces a deprecation hint).
+  const proxyBind = config.get<string>('proxyBind', DEFAULT_PROXY_BIND);
+  const proxyPort = config.get<number>('proxyPort', DEFAULT_PROXY_PORT);
+  const proxyAddr = `${proxyBind}:${proxyPort}`;
+  output.appendLine(`[proxy] bind=${proxyAddr} (source=setting)`);
 
   const lsp = new LspClient(workspaceRoot, output);
+  const sxdLsp = new SxdLspClient(output);
   const mcp = new McpClient(workspaceRoot, output, port);
-  const initialRag = readRagSettings();
-  lsp.setRagSettings(initialRag);
-  mcp.setRagSettings(initialRag);
-  output.appendLine(
-    `[mcp] rag settings: enabled=${initialRag.enabled} embedder=${initialRag.embedder}`,
+  const proxy = new ProxyClient(workspaceRoot, output, proxyAddr);
+  const supervisor = new DaemonSupervisor(
+    context,
+    output,
+    { lsp, mcp, sxdLsp, proxy },
+    workspaceRoot,
   );
-  const supervisor = new DaemonSupervisor(context, output, { lsp, mcp }, workspaceRoot);
 
-  context.subscriptions.push(lsp, mcp, supervisor);
+  context.subscriptions.push(lsp, sxdLsp, mcp, proxy, supervisor);
 
   const statusBar = new StatusBarController();
   context.subscriptions.push(statusBar);
-  statusBar.update(supervisor.current(), mcp.ragSettingsSnapshot());
-  context.subscriptions.push(
-    supervisor.onDidChangeState(state => statusBar.update(state, mcp.ragSettingsSnapshot())),
-  );
-
-  // Auto-restart the daemon when RAG settings change so the supervisor
-  // picks up new spawn flags on the next child process. Debounce-free :
-  // each setting change is a single configuration event from VSCode.
-  context.subscriptions.push(
-    watchRagSettings(next => {
-      output.appendLine(
-        `[mcp] rag settings changed: enabled=${next.enabled} embedder=${next.embedder} — restarting daemon`,
-      );
-      lsp.setRagSettings(next);
-      mcp.setRagSettings(next);
-      statusBar.update(supervisor.current(), next);
-      // The daemon retries SQLite open on transient lock-release races
-      // (~1.5 s exponential backoff), so a vanilla `restart()` is enough
-      // — no extra wait needed on Windows.
-      void supervisor.restart().catch(e => {
-        output.appendLine(
-          `[mcp] rag-driven restart failed: ${e instanceof Error ? e.message : String(e)}`,
-        );
-      });
-    }),
-  );
+  statusBar.update(supervisor.current());
+  context.subscriptions.push(supervisor.onDidChangeState(state => statusBar.update(state)));
 
   // Transition-aware toast: surface actionable hints when the daemon
   // moves INTO `fatal_config` or `failed`. Permanent state lives on the
@@ -84,16 +87,17 @@ export function activate(context: vscode.ExtensionContext): void {
       } else if (state.kind === 'awaiting_binary') {
         void notifyAwaitingBinary(output);
       } else if (state.kind === 'ready') {
-        // Sync `.mcp.json` to the daemon's actual endpoint. When the
-        // configured port is already bound (e.g. a sibling VSCode window
-        // running standardoc), the daemon falls back to an ephemeral
-        // port and writes the real URL to `.standardoc/mcp.endpoint` —
-        // external consumers (claude-code CLI, Copilot Chat, ...) must
-        // see that URL in `.mcp.json` or they'd hit the dead/wrong port.
-        const actualUrl = mcp.url();
-        if (actualUrl !== null) {
-          void syncMcpConfigToUrl(workspaceRoot, output, actualUrl);
-        }
+        // Point `.mcp.json` at the PROXY route for this workspace, not the
+        // daemon's ephemeral port: the proxy URL is stable across daemon
+        // restarts AND sibling VSCode windows. Migrates already-init
+        // workspaces (spawned without the opt-in prompt) off any stale
+        // daemon-port entry. In-window consumers (webview, chat provider)
+        // keep talking to the daemon directly via `mcp.url()`.
+        void resolveProxyMcpUrl(context, workspaceRoot).then(proxyUrl => {
+          if (proxyUrl !== null) {
+            void syncMcpConfigToUrl(workspaceRoot, output, proxyUrl);
+          }
+        });
       }
     }),
   );
@@ -117,6 +121,7 @@ export function activate(context: vscode.ExtensionContext): void {
   registerMcpServerProvider(context, () => mcp.url(), output, supervisor);
 
   registerStdignoreHover(context, workspaceRoot, output);
+  registerSxdHover(context, workspaceRoot, output);
 
   output.appendLine('Standardoc extension activated.');
 

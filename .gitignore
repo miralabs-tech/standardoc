@@ -5,10 +5,13 @@ target-dev/
 *.swp
 *.swo
 .vscode/
+.target-cleanup/
+.housekeeping/
 
 # Refacto v1.0.0-beta.1: legacy crates parked here for cherry-pick during the
 # rewrite. Local-only — never committed.
 .old/
+.projects/
 
 # Standardoc runtime artifacts (created by the daemon when dogfooding the
 # tool on its own repo). User projects WILL want to commit `.standardoc/pages/`
@@ -17,7 +20,13 @@ target-dev/
 # folders inside `examples/*/` stay tracked.
 /.standardoc/
 /.standardoc-sessions/
-ext/vscode/.standardoc/
+.standarflow
+# Sub-package `.standardoc/` caches — the daemon drops a marker dir in
+# whatever directory an MCP tool runs from, so they sprout under crates/
+# and ext/. Targeted (not a bare `.standardoc/`) so `examples/*/.standardoc/`
+# stay tracked per the root-anchored rule above.
+crates/**/.standardoc/
+ext/**/.standardoc/
 sessions-export/
 .claude/
 .mcp.json
@@ -44,3 +53,9 @@ web/
 /docs/cli-reference.fr.md
 /docs/mcp-reference.md
 /docs/mcp-reference.fr.md
+
+# Local design / planning docs that should never be committed. User-maintained
+# scratchpads consumed by the AI agent across sessions ; tracked content
+# would create noise on every doc iteration without serving repo consumers.
+/UST_LUA_SPEC.md
+/SOURCEMAP_v1.md

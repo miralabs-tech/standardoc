@@ -1,0 +1,52 @@
+{
+  "name": "@standarx/standardoc-viz",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Embeddable graph-viz UI components for the standardoc workspace index.",
+  "type": "module",
+  "sideEffects": [
+    "./src/components/**/*.element.ts",
+    "./src/shell/shell.scss"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./components/toolbar": "./src/components/toolbar/index.ts",
+    "./components/hud": "./src/components/hud/index.ts",
+    "./components/panel-layout": "./src/components/panel-layout/index.ts",
+    "./components/explorer": "./src/components/explorer/index.ts",
+    "./components/symbol-details": "./src/components/symbol-details/index.ts",
+    "./components/search": "./src/components/search/index.ts",
+    "./components/overview": "./src/components/overview/index.ts",
+    "./components/focus-graph": "./src/components/focus-graph/index.ts",
+    "./components/compare-panel": "./src/components/compare-panel/index.ts",
+    "./components/panel-host": "./src/components/panel-host/index.ts",
+    "./components/legend": "./src/components/legend/index.ts",
+    "./components/select": "./src/components/select/index.ts",
+    "./profiler": "./src/profiler/index.ts",
+    "./mcp-client": "./src/mcp-client/index.ts",
+    "./focus-store": "./src/focus-store/index.ts",
+    "./view-prefs-store": "./src/view-prefs-store/index.ts",
+    "./panel-manager": "./src/panel-manager/index.ts",
+    "./shell": "./src/shell/index.ts",
+    "./styles/tokens": "./src/styles/_tokens.scss",
+    "./styles/mixins": "./src/styles/_mixins.scss"
+  },
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:e2e:update": "playwright test --update-snapshots"
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": "^1",
+    "classigo": "^2",
+    "matchigo": "^1"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1",
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.0.0",
+    "classigo": "^2",
+    "matchigo": "^1",
+    "sass": "^1.83.0",
+    "typescript": "^5.6.0"
+  }
+}

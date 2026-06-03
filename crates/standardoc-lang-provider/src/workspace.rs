@@ -1,21 +1,27 @@
 use std::path::Path;
 
 use standardoc_core::{ExtractContext, ExtractError, LanguageProvider};
-use standardoc_ir::{EdgeKind, ExtractedFile, Language, RawEdge, ResolvedOrUnresolved, Site};
+use standardoc_ir::{
+    BuiltinEntry, BuiltinTag, BuiltinTier, EdgeKind, ExtractedFile, Language, RawEdge,
+    ResolvedOrUnresolved, Site,
+};
 use swc_core::ecma::parser::{EsSyntax, Syntax, TsSyntax};
 
+use crate::builtins::global as global_builtin_registry;
+use crate::c::CProvider;
 use crate::lua::LuaProvider;
 use crate::rust::RustProvider;
 use crate::sfc::{self, SfcDocument, pad_until_byte_offset};
 use crate::template::{self, TemplateAttribute, TemplateRef};
 use crate::ts::TsProvider;
-use crate::utils::byte_offset_to_line_col;
+use crate::utils::location::line_and_utf16_col;
 
 #[derive(Debug, Default)]
 pub struct WorkspaceProvider {
     rust: RustProvider,
     ts: TsProvider,
     lua: LuaProvider,
+    c: CProvider,
 }
 
 impl WorkspaceProvider {
@@ -94,10 +100,50 @@ impl LanguageProvider for WorkspaceProvider {
             Some(Dispatch::Rust) => self.rust.extract(content, path, ctx),
             Some(Dispatch::TypeScript) => self.ts.extract(content, path, ctx),
             Some(Dispatch::Lua) => self.lua.extract(content, path, ctx),
+            Some(Dispatch::C) => self.c.extract(content, path, ctx),
             Some(Dispatch::Vue) => self.extract_sfc(content, path, ctx, Framework::Vue),
             Some(Dispatch::Svelte) => self.extract_sfc(content, path, ctx, Framework::Svelte),
             None => Err(ExtractError::UnsupportedLanguage { file: path.into() }),
         }
+    }
+
+    /// Edge-tier entries flattened across every registered language —
+    /// the cold-start seeder turns each into a synthetic `RawSymbol`
+    /// row so resolver-emitted edges to `<builtin>::<lang>::<name>`
+    /// land on a real `symbols.id` instead of unresolved canonicals.
+    ///
+    /// Trait dispatch sprint: also includes `Drop`-tier entries tagged
+    /// `Reflection` (the stdlib derive-able traits like `Clone`, `Debug`,
+    /// `Serialize`, …). They stay `Drop`-tier for the explicit
+    /// `impl Trait for X` emit policy (no IMPLEMENTS noise from manual
+    /// impls), but `rust::derive_impls` emits `IMPLEMENTS → <builtin>::
+    /// rust::<Trait>` for every `#[derive(...)]`, which needs the trait
+    /// symbol row to exist for `resolve_target` to convert the edge into
+    /// a `to_symbol_id` at insert time.
+    fn edge_builtins(&self) -> Vec<BuiltinEntry> {
+        let reg = global_builtin_registry();
+        let keep = |e: &&BuiltinEntry| {
+            e.tier == BuiltinTier::Edge
+                || (e.tier == BuiltinTier::Drop && matches!(e.tag, BuiltinTag::Reflection))
+        };
+        let mut out: Vec<BuiltinEntry> = Vec::new();
+        for entries in reg.by_language.values() {
+            out.extend(entries.iter().filter(keep).cloned());
+        }
+        out.extend(reg.user_extensions.iter().filter(keep).cloned());
+        out
+    }
+
+    /// Bug E-3 Phase 2: flatten every registered builtin method across
+    /// languages for the cold-start seeder. All methods are seeded
+    /// unconditionally (no tier) — the resolver decides when to consult
+    /// them via the `receiver_type` match.
+    fn edge_builtin_methods(&self) -> Vec<standardoc_ir::BuiltinMethodEntry> {
+        let reg = global_builtin_registry();
+        reg.methods_by_language
+            .values()
+            .flat_map(|methods| methods.iter().cloned())
+            .collect()
     }
 }
 
@@ -106,6 +152,7 @@ enum Dispatch {
     Rust,
     TypeScript,
     Lua,
+    C,
     Vue,
     Svelte,
 }
@@ -116,6 +163,7 @@ fn dispatch(path: &str) -> Option<Dispatch> {
         "rs" => Some(Dispatch::Rust),
         "ts" | "tsx" | "js" | "jsx" => Some(Dispatch::TypeScript),
         "lua" => Some(Dispatch::Lua),
+        "c" | "h" => Some(Dispatch::C),
         "vue" => Some(Dispatch::Vue),
         "svelte" => Some(Dispatch::Svelte),
         _ => None,
@@ -136,7 +184,7 @@ fn dispatch(path: &str) -> Option<Dispatch> {
 /// the prescribed order (the overwhelmingly common case); when the
 /// user writes `<script setup>` before `<script>` in source, the
 /// reordered second block's swc spans drift by the inter-block byte
-/// gap — accepted edge case (cohérent feedback_scope_graph_not_lsp).
+/// gap — accepted edge case (consistent with feedback_scope_graph_not_lsp).
 fn build_script_payload(
     content: &str,
     doc: &SfcDocument,
@@ -272,9 +320,9 @@ fn block_outer_end(content: &str, content_end: usize) -> usize {
 /// REFERENCES edge with the bare local identifier name. The
 /// `promote_unresolved_batch` pass will lift the edge if any symbol's
 /// fqdn happens to match the bare name (rare). Resolution against the
-/// SFC's import alias table is a beta.2 follow-up.
+/// SFC's import alias table is deferred — not yet wired as of beta.3.
 fn template_ref_to_edge(r: TemplateRef, content: &str, path: &str, module_fqdn: &str) -> RawEdge {
-    let (line, col) = byte_offset_to_line_col(content, r.byte_offset);
+    let (line, col) = line_and_utf16_col(content, r.byte_offset);
     let to = ResolvedOrUnresolved::Unresolved { name: r.name };
     let confidence = to.default_confidence();
     RawEdge {
@@ -288,6 +336,7 @@ fn template_ref_to_edge(r: TemplateRef, content: &str, path: &str, module_fqdn: 
         }],
         attributes: vec![template_attr_to_slug(r.attribute).to_string()],
         confidence,
+        receiver_type: None,
     }
 }
 
@@ -296,161 +345,4 @@ const fn template_attr_to_slug(attr: TemplateAttribute) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dispatch_rust_extension() {
-        assert_eq!(dispatch("src/lib.rs"), Some(Dispatch::Rust));
-        assert_eq!(dispatch("crates/foo/src/main.rs"), Some(Dispatch::Rust));
-    }
-
-    #[test]
-    fn dispatch_typescript_extensions() {
-        assert_eq!(dispatch("src/index.ts"), Some(Dispatch::TypeScript));
-        assert_eq!(dispatch("src/App.tsx"), Some(Dispatch::TypeScript));
-        assert_eq!(dispatch("scripts/build.js"), Some(Dispatch::TypeScript));
-        assert_eq!(dispatch("src/legacy.jsx"), Some(Dispatch::TypeScript));
-    }
-
-    #[test]
-    fn dispatch_lua_extension() {
-        assert_eq!(dispatch("src/utils/strings.lua"), Some(Dispatch::Lua));
-        assert_eq!(dispatch("init.lua"), Some(Dispatch::Lua));
-        assert_eq!(dispatch("client/script.lua"), Some(Dispatch::Lua));
-    }
-
-    #[test]
-    fn dispatch_lua_uppercase_extension_returns_none() {
-        // Extension matching is case-sensitive — `.LUA` is not standard
-        // and we don't want to silently accept it.
-        assert_eq!(dispatch("script.LUA"), None);
-    }
-
-    #[test]
-    fn dispatch_vue_extension() {
-        assert_eq!(dispatch("src/components/App.vue"), Some(Dispatch::Vue));
-        assert_eq!(dispatch("App.vue"), Some(Dispatch::Vue));
-    }
-
-    #[test]
-    fn dispatch_svelte_extension() {
-        assert_eq!(dispatch("src/routes/+page.svelte"), Some(Dispatch::Svelte));
-        assert_eq!(dispatch("Counter.svelte"), Some(Dispatch::Svelte));
-    }
-
-    #[test]
-    fn dispatch_vue_uppercase_extension_returns_none() {
-        // Symmetry with Lua/TS: case-sensitive extension matching.
-        assert_eq!(dispatch("App.VUE"), None);
-    }
-
-    #[test]
-    fn dispatch_svelte_uppercase_extension_returns_none() {
-        assert_eq!(dispatch("Counter.SVELTE"), None);
-    }
-
-    #[test]
-    fn dispatch_unsupported_returns_none() {
-        assert_eq!(dispatch("README.md"), None);
-        assert_eq!(dispatch("Cargo.toml"), None);
-        assert_eq!(dispatch("package.json"), None);
-        assert_eq!(dispatch("script.py"), None);
-    }
-
-    #[test]
-    fn dispatch_no_extension_returns_none() {
-        assert_eq!(dispatch("Makefile"), None);
-        assert_eq!(dispatch(""), None);
-    }
-
-    #[test]
-    fn lang_to_syntax_ts_is_typescript() {
-        assert!(matches!(lang_to_syntax("ts"), Syntax::Typescript(_)));
-    }
-
-    #[test]
-    fn lang_to_syntax_js_is_es() {
-        assert!(matches!(lang_to_syntax("js"), Syntax::Es(_)));
-    }
-
-    #[test]
-    fn lang_to_syntax_unknown_falls_back_to_js() {
-        assert!(matches!(lang_to_syntax("haskell"), Syntax::Es(_)));
-    }
-
-    // `byte_offset_to_line_col` moved to `crate::utils::location` and is
-    // covered by its own unit tests there.
-
-    #[test]
-    fn svelte_template_regions_carves_out_script_block() {
-        let src = "<h1>x</h1>\n<script>let a;</script>\n<p>y</p>";
-        let doc = sfc::extract_blocks(src);
-        let regions = svelte_template_regions(src, &doc);
-        // Two regions: before the script + after the script.
-        assert_eq!(regions.len(), 2);
-        assert!(regions.iter().any(|(s, e)| &src[*s..*e] == "<h1>x</h1>\n"));
-    }
-
-    #[test]
-    fn svelte_template_regions_no_blocks_yields_whole_source() {
-        let src = "<p>hello</p>";
-        let doc = sfc::extract_blocks(src);
-        let regions = svelte_template_regions(src, &doc);
-        assert_eq!(regions, vec![(0, src.len())]);
-    }
-
-    #[test]
-    fn build_script_payload_keeps_source_order_when_already_prescribed() {
-        // Plain <script> first, <script setup> second — already in the
-        // lock 41 §1 Q2 order. Payload must concat plain-then-setup.
-        let src = "<script>const a=1;</script>\n<script setup>const b=2;</script>";
-        let doc = sfc::extract_blocks(src);
-        let (payload, _) = build_script_payload(src, &doc, Framework::Vue);
-        let plain_pos = payload.find("const a=1;").unwrap();
-        let setup_pos = payload.find("const b=2;").unwrap();
-        assert!(plain_pos < setup_pos, "plain must appear before setup");
-    }
-
-    #[test]
-    fn build_script_payload_reorders_when_setup_appears_first_in_source() {
-        // Reverse source order: <script setup> first, plain <script>
-        // second. Lock 41 §1 Q2 enforces plain-before-setup → output
-        // payload must put `const a=1;` (plain) before `const b=2;`
-        // (setup) regardless of source order.
-        let src = "<script setup>const b=2;</script>\n<script>const a=1;</script>";
-        let doc = sfc::extract_blocks(src);
-        let (payload, _) = build_script_payload(src, &doc, Framework::Vue);
-        let plain_pos = payload.find("const a=1;").unwrap();
-        let setup_pos = payload.find("const b=2;").unwrap();
-        assert!(
-            plain_pos < setup_pos,
-            "plain must be reordered before setup even when source order says otherwise"
-        );
-    }
-
-    #[test]
-    fn build_script_payload_single_setup_only_works() {
-        // Most idiomatic Vue 3 SFC: a lone `<script setup>` block.
-        let src = "<script setup>const x=1;</script>";
-        let doc = sfc::extract_blocks(src);
-        let (payload, _) = build_script_payload(src, &doc, Framework::Vue);
-        assert!(payload.contains("const x=1;"));
-    }
-
-    #[test]
-    fn build_script_payload_preserves_byte_alignment_for_in_order_scripts() {
-        // When source order matches prescribed order, the payload's byte
-        // offset of the script content must match the source's byte
-        // offset (so swc spans align with the SFC file's coords).
-        let src = "<script>const a=1;</script>\n<script setup>const b=2;</script>";
-        let doc = sfc::extract_blocks(src);
-        let (payload, _) = build_script_payload(src, &doc, Framework::Vue);
-        let source_first = src.find("const a=1;").unwrap();
-        let source_second = src.find("const b=2;").unwrap();
-        let payload_first = payload.find("const a=1;").unwrap();
-        let payload_second = payload.find("const b=2;").unwrap();
-        assert_eq!(payload_first, source_first);
-        assert_eq!(payload_second, source_second);
-    }
-}
+mod tests;

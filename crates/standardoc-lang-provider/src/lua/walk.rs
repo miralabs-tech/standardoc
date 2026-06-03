@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use full_moon::ast::{Ast, Expression, LastStmt, Stmt, Var};
-use standardoc_ir::{RawDocument, RawEdge, RawSymbol};
+use standardoc_ir::{Language, RawCallSite, RawDocument, RawEdge, RawSymbol};
 
 use crate::walk_core::WalkContextCore;
 
@@ -28,6 +28,9 @@ pub(crate) struct LuaWalkContext {
     pub(crate) package_name: String,
     pub(crate) from_file_abs_path: PathBuf,
     pub(crate) package_root: PathBuf,
+    /// The full file source, used to convert full_moon's byte offsets into
+    /// UTF-16 columns when stamping locations. Set once at the top of `walk`.
+    pub(crate) content: String,
     /// Identifiers declared as `local <ident> = {}` at top level. Tracked
     /// during walk so the post-pass can decide visibility for symbols
     /// nested under one of these tables.
@@ -46,10 +49,11 @@ impl LuaWalkContext {
         package_root: PathBuf,
     ) -> Self {
         Self {
-            core: WalkContextCore::new(file_path, file_module_fqdn),
+            core: WalkContextCore::new(file_path, file_module_fqdn, Language::Lua),
             package_name,
             from_file_abs_path,
             package_root,
+            content: String::new(),
             local_table_idents: HashSet::new(),
             exported_table: None,
         }
@@ -67,6 +71,10 @@ impl LuaWalkContext {
         self.core.push_document(doc);
     }
 
+    pub(crate) fn push_call_site(&mut self, cs: RawCallSite) {
+        self.core.push_call_site(cs);
+    }
+
     /// Marks a top-level `local <ident> = {}` so the post-pass can decide
     /// whether fields nested under `<ident>` are public (table is returned)
     /// or private (table stays file-local).
@@ -80,6 +88,7 @@ impl LuaWalkContext {
 /// module-pattern detection (looks at `Block::last_stmt`) and refines
 /// the visibility of symbols nested under the exported table.
 pub(crate) fn walk(content: &str, ast: &Ast, ctx: &mut LuaWalkContext) {
+    content.clone_into(&mut ctx.content);
     let block = ast.nodes();
 
     // P1 — symbol + edge pass.

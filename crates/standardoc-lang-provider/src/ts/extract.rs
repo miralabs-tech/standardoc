@@ -2,7 +2,8 @@ use std::path::Path;
 
 use standardoc_core::ExtractError;
 use standardoc_ir::{
-    ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol, SourceOrigin, Visibility,
+    DeclKind, ExtractedFile, Kind, Language, LanguageKind, RawDocument, RawSymbol, SourceOrigin,
+    Visibility,
 };
 use swc_core::common::comments::SingleThreadedComments;
 use swc_core::common::{FileName, SourceMap, Spanned, sync::Lrc};
@@ -113,11 +114,15 @@ fn extract_file_inner(
     let module_fqdn = if module_path.is_empty() {
         package_name.to_string()
     } else {
-        format!("{package_name}::{}", module_path.replace('/', "::"))
+        format!("{package_name}::{module_path}")
     };
 
     let content_hash = hash_bytes(content.as_bytes());
     let module_symbol = RawSymbol {
+        decl_kind: Some(DeclKind::Module),
+        implements_trait: None,
+        receiver_type: None,
+        entry_point: None,
         name: last_segment(&module_fqdn).to_string(),
         fqdn: module_fqdn.clone(),
         kind: Kind::Module,
@@ -128,6 +133,7 @@ fn extract_file_inner(
         signature: None,
         body_hash: Some(content_hash),
         attributes: vec![],
+        flags: vec![],
     };
 
     let mut documents = Vec::new();
@@ -141,7 +147,14 @@ fn extract_file_inner(
     }
 
     let mut symbols = vec![module_symbol];
-    let (item_symbols, edges, item_documents) = walk::walk(
+    let (ffi_symbols, ffi_bindings) = super::ffi_tagger::extract_ffi_bindings(
+        &module,
+        &module_fqdn,
+        workspace_relative_path,
+        &cm,
+    );
+    symbols.extend(ffi_symbols);
+    let (item_symbols, edges, item_documents, call_sites, lookup) = walk::walk_with_lookup(
         &module,
         package_name,
         workspace_relative_path,
@@ -164,8 +177,10 @@ fn extract_file_inner(
         byte_size: u64::try_from(content.len()).unwrap_or(u64::MAX),
         symbols,
         edges,
-        call_sites: vec![],
+        call_sites,
         documents,
+        ffi_bindings,
+        module_lookup: Some(lookup),
     })
 }
 
@@ -178,14 +193,14 @@ fn syntax_for(path: &str) -> Syntax {
         "tsx" => Syntax::Typescript(TsSyntax {
             tsx: true,
             decorators: false,
-            dts: false,
+            dts: path.ends_with(".d.tsx"),
             no_early_errors: true,
             disallow_ambiguous_jsx_like: false,
         }),
         "ts" | "mts" | "cts" => Syntax::Typescript(TsSyntax {
             tsx: false,
             decorators: false,
-            dts: ext == "ts" && path.ends_with(".d.ts"),
+            dts: path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts"),
             no_early_errors: true,
             disallow_ambiguous_jsx_like: false,
         }),

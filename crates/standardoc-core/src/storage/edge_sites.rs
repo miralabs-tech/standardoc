@@ -57,7 +57,9 @@ mod tests {
                 sites: vec![],
                 attributes: vec![],
                 confidence: EdgeConfidence::Ambiguous,
+                receiver_type: None,
             },
+            "primary",
         )
         .unwrap()
     }

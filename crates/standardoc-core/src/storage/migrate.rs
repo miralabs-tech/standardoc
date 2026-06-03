@@ -2,47 +2,78 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::storage::error::StorageError;
 use crate::storage::init::run_init_schema;
+use crate::storage::schema_meta;
 
+/// Single supported schema version. Beta-era reboot — the v1→v15
+/// chain inherited from earlier iterations was consolidated into
+/// `init_v0.sql`. Bumping this constant requires either a forward
+/// migration script OR the destructive reset path in `ensure_schema`
+/// (today the latter; the index is a derived cache).
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 6;
 
-const V1_TO_V2_SQL: &str = include_str!("../../migrations/v1_to_v2.sql");
-const V2_TO_V3_SQL: &str = include_str!("../../migrations/v2_to_v3.sql");
-const V3_TO_V4_SQL: &str = include_str!("../../migrations/v3_to_v4.sql");
-const V4_TO_V5_SQL: &str = include_str!("../../migrations/v4_to_v5.sql");
-const V5_TO_V6_SQL: &str = include_str!("../../migrations/v5_to_v6.sql");
-
+/// Idempotent schema bootstrap. Behaviour by initial DB state:
+///   - empty DB                              → run `init_v0.sql`
+///   - DB at SUPPORTED_SCHEMA_VERSION        → no-op
+///   - DB at a different (older OR newer) v → DROP every object,
+///                                            re-run `init_v0.sql`
+///
+/// The reset path is destructive on purpose: this index is rebuilt
+/// from the workspace on next cold-start, so we trade write cost for
+/// zero migration-chain maintenance.
 pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), StorageError> {
     if !table_exists(conn, "schema_meta")? {
         run_init_schema(conn)?;
+        return Ok(());
     }
 
-    loop {
-        let version = read_schema_version(conn)?;
-        if version == SUPPORTED_SCHEMA_VERSION {
-            return Ok(());
-        }
-        if version > SUPPORTED_SCHEMA_VERSION {
-            return Err(StorageError::SchemaVersionTooNew {
-                db: version,
-                supported: SUPPORTED_SCHEMA_VERSION,
-            });
-        }
-        apply_upgrade(conn, version)?;
+    let version = schema_meta::read_schema_version(conn)?;
+    if version == SUPPORTED_SCHEMA_VERSION {
+        return Ok(());
     }
+
+    eprintln!(
+        "standardoc: schema version mismatch (db={version}, supported={SUPPORTED_SCHEMA_VERSION}) — destroying and rebuilding index; full reindex required on next cold-start"
+    );
+    reset_database(conn)?;
+    run_init_schema(conn)?;
+    Ok(())
 }
 
-fn apply_upgrade(conn: &Connection, from: u32) -> Result<(), StorageError> {
-    match from {
-        1 => conn.execute_batch(V1_TO_V2_SQL).map_err(StorageError::from),
-        2 => conn.execute_batch(V2_TO_V3_SQL).map_err(StorageError::from),
-        3 => conn.execute_batch(V3_TO_V4_SQL).map_err(StorageError::from),
-        4 => conn.execute_batch(V4_TO_V5_SQL).map_err(StorageError::from),
-        5 => conn.execute_batch(V5_TO_V6_SQL).map_err(StorageError::from),
-        other => Err(StorageError::InvalidSchemaMetadata {
-            key: "schema_version".into(),
-            value: format!("no upgrade path from version {other}"),
-        }),
+/// Drop every user-visible object (tables, indexes, triggers, FTS
+/// shadows). The set of objects is read from `sqlite_master` so this
+/// works against any prior schema layout.
+fn reset_database(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute("PRAGMA foreign_keys = OFF", [])?;
+
+    let objects: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT type, name FROM sqlite_master \
+             WHERE name NOT LIKE 'sqlite_%' \
+               AND type IN ('table', 'index', 'trigger', 'view') \
+             ORDER BY CASE type \
+                 WHEN 'trigger' THEN 0 \
+                 WHEN 'view'    THEN 1 \
+                 WHEN 'index'   THEN 2 \
+                 WHEN 'table'   THEN 3 END",
+        )?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for (ty, name) in objects {
+        let stmt = match ty.as_str() {
+            "table" => format!("DROP TABLE IF EXISTS \"{name}\""),
+            "index" => format!("DROP INDEX IF EXISTS \"{name}\""),
+            "trigger" => format!("DROP TRIGGER IF EXISTS \"{name}\""),
+            "view" => format!("DROP VIEW IF EXISTS \"{name}\""),
+            _ => continue,
+        };
+        conn.execute(&stmt, [])?;
     }
+
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
+    Ok(())
 }
 
 fn table_exists(conn: &Connection, name: &str) -> Result<bool, StorageError> {
@@ -56,249 +87,5 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool, StorageError> {
     Ok(row.is_some())
 }
 
-fn read_schema_version(conn: &Connection) -> Result<u32, StorageError> {
-    let raw: String = conn.query_row(
-        "SELECT value FROM schema_meta WHERE key = 'schema_version'",
-        [],
-        |row| row.get(0),
-    )?;
-    raw.parse::<u32>()
-        .map_err(|_| StorageError::InvalidSchemaMetadata {
-            key: "schema_version".into(),
-            value: raw,
-        })
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fresh_conn() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        conn
-    }
-
-    #[test]
-    fn ensure_on_fresh_db_runs_init() {
-        let conn = fresh_conn();
-        ensure_schema(&conn).unwrap();
-        let version = read_schema_version(&conn).unwrap();
-        assert_eq!(version, SUPPORTED_SCHEMA_VERSION);
-    }
-
-    #[test]
-    fn ensure_on_initialised_db_is_idempotent() {
-        let conn = fresh_conn();
-        ensure_schema(&conn).unwrap();
-        ensure_schema(&conn).unwrap();
-        ensure_schema(&conn).unwrap();
-    }
-
-    #[test]
-    fn ensure_on_newer_version_aborts() {
-        let conn = fresh_conn();
-        ensure_schema(&conn).unwrap();
-        conn.execute(
-            "UPDATE schema_meta SET value = '99' WHERE key = 'schema_version'",
-            [],
-        )
-        .unwrap();
-        let err = ensure_schema(&conn).unwrap_err();
-        assert!(matches!(
-            err,
-            StorageError::SchemaVersionTooNew {
-                db: 99,
-                supported: SUPPORTED_SCHEMA_VERSION,
-            }
-        ));
-    }
-
-    #[test]
-    fn upgrade_adds_last_modified_revision_column_to_legacy_v3_db() {
-        let conn = fresh_conn();
-        run_init_schema(&conn).unwrap();
-        conn.execute_batch(V1_TO_V2_SQL).unwrap();
-        conn.execute_batch(V2_TO_V3_SQL).unwrap();
-        let pre: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('symbols')")
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert!(
-            !pre.iter().any(|c| c == "last_modified_revision"),
-            "v3 must NOT have the last_modified_revision column"
-        );
-
-        ensure_schema(&conn).unwrap();
-
-        let post: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('symbols')")
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert!(
-            post.iter().any(|c| c == "last_modified_revision"),
-            "v3→v4 upgrade must add the last_modified_revision column"
-        );
-        assert_eq!(
-            read_schema_version(&conn).unwrap(),
-            SUPPORTED_SCHEMA_VERSION
-        );
-    }
-
-    #[test]
-    fn upgrade_seeds_external_lockfile_hash_keys_on_legacy_v4_db() {
-        let conn = fresh_conn();
-        run_init_schema(&conn).unwrap();
-        conn.execute_batch(V1_TO_V2_SQL).unwrap();
-        conn.execute_batch(V2_TO_V3_SQL).unwrap();
-        conn.execute_batch(V3_TO_V4_SQL).unwrap();
-        let pre: Vec<String> = conn
-            .prepare("SELECT key FROM schema_meta")
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        for key in [
-            "external_cargo_lockfile_hash",
-            "external_npm_lockfile_hash",
-            "external_npm_lockfile_kind",
-            "external_luarocks_hash",
-        ] {
-            assert!(
-                !pre.iter().any(|k| k == key),
-                "v4 must NOT have the {key} schema_meta row"
-            );
-        }
-
-        ensure_schema(&conn).unwrap();
-
-        let post: Vec<(String, String)> = conn
-            .prepare("SELECT key, value FROM schema_meta")
-            .unwrap()
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        for key in [
-            "external_cargo_lockfile_hash",
-            "external_npm_lockfile_hash",
-            "external_npm_lockfile_kind",
-            "external_luarocks_hash",
-        ] {
-            let row = post
-                .iter()
-                .find(|(k, _)| k == key)
-                .unwrap_or_else(|| panic!("v4→v5 must seed {key}"));
-            assert_eq!(
-                row.1, "",
-                "{key} must default to blank (unset sentinel), got `{}`",
-                row.1
-            );
-        }
-        assert_eq!(
-            read_schema_version(&conn).unwrap(),
-            SUPPORTED_SCHEMA_VERSION
-        );
-    }
-
-    #[test]
-    fn upgrade_adds_confidence_column_to_legacy_v2_db() {
-        let conn = fresh_conn();
-        run_init_schema(&conn).unwrap();
-        conn.execute_batch(V1_TO_V2_SQL).unwrap();
-        let pre: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('edges')")
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert!(
-            !pre.iter().any(|c| c == "confidence"),
-            "v2 must NOT have the confidence column"
-        );
-
-        ensure_schema(&conn).unwrap();
-
-        let post: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('edges')")
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert!(
-            post.iter().any(|c| c == "confidence"),
-            "v2→v3 upgrade must add the confidence column"
-        );
-        assert_eq!(
-            read_schema_version(&conn).unwrap(),
-            SUPPORTED_SCHEMA_VERSION
-        );
-    }
-
-    #[test]
-    fn upgrade_adds_attributes_column_to_legacy_v1_db() {
-        let conn = fresh_conn();
-        // Bootstrap the historical v1 schema directly (no `attributes` column).
-        run_init_schema(&conn).unwrap();
-        let pre: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('edges')")
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert!(
-            !pre.iter().any(|c| c == "attributes"),
-            "v1 init must NOT seed the attributes column"
-        );
-
-        ensure_schema(&conn).unwrap();
-
-        let post: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('edges')")
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert!(
-            post.iter().any(|c| c == "attributes"),
-            "v1→v2 upgrade must add the attributes column"
-        );
-        assert_eq!(
-            read_schema_version(&conn).unwrap(),
-            SUPPORTED_SCHEMA_VERSION
-        );
-    }
-
-    #[test]
-    fn ensure_on_garbage_version_errors() {
-        let conn = fresh_conn();
-        ensure_schema(&conn).unwrap();
-        conn.execute(
-            "UPDATE schema_meta SET value = 'banana' WHERE key = 'schema_version'",
-            [],
-        )
-        .unwrap();
-        let err = ensure_schema(&conn).unwrap_err();
-        assert!(matches!(err, StorageError::InvalidSchemaMetadata { .. }));
-    }
-
-    #[test]
-    fn table_exists_returns_true_after_init() {
-        let conn = fresh_conn();
-        run_init_schema(&conn).unwrap();
-        assert!(table_exists(&conn, "schema_meta").unwrap());
-        assert!(table_exists(&conn, "symbols").unwrap());
-        assert!(!table_exists(&conn, "no_such_table").unwrap());
-    }
-}
+mod tests;

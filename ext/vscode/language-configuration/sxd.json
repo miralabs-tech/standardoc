@@ -1,0 +1,52 @@
+{
+  "autoClosingPairs": [
+    {
+      "close": "}",
+      "open": "{"
+    },
+    {
+      "close": "]",
+      "open": "["
+    },
+    {
+      "close": "\"",
+      "open": "\""
+    },
+    {
+      "close": "`",
+      "open": "`"
+    }
+  ],
+  "brackets": [
+    [
+      "{",
+      "}"
+    ],
+    [
+      "[",
+      "]"
+    ]
+  ],
+  "comments": {
+    "lineComment": "#"
+  },
+  "surroundingPairs": [
+    [
+      "{",
+      "}"
+    ],
+    [
+      "[",
+      "]"
+    ],
+    [
+      "\"",
+      "\""
+    ],
+    [
+      "`",
+      "`"
+    ]
+  ],
+  "wordPattern": "[A-Za-z_][A-Za-z0-9_]*"
+}

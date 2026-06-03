@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ES2022"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
@@ -14,8 +14,13 @@
     "isolatedModules": true,
     "noEmit": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["node", "bun-types"]
+    "types": ["node", "bun-types"],
+    "paths": {
+      "@standarx/standardoc-viz": ["../../crates/standardoc-graph-viz/lib/src/index.ts"],
+      "@standarx/standardoc-viz/*": ["../../crates/standardoc-graph-viz/lib/src/*"],
+      "@viz-pkg": ["../../crates/standardoc-graph-viz/pkg/standardoc_graph_viz"]
+    }
   },
-  "include": ["src/**/*", "scripts/**/*", "tests/**/*"],
+  "include": ["src/**/*", "scripts/**/*", "tests/**/*", "build.ts"],
   "exclude": ["node_modules", "dist", ".old"]
 }

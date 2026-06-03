@@ -5,11 +5,14 @@ use rusqlite::{Connection, OptionalExtension};
 use standardoc_ir::{ExtractedFile, RawDocument, RawEdge};
 
 use crate::pipeline::diff::{DiffPlan, diff_symbols, fetch_existing_symbols};
+use crate::storage::call_sites::{delete_call_sites_by_file, insert_call_site};
 use crate::storage::documents::{DocumentInput, delete_document, upsert_document};
 use crate::storage::edge_sites::{delete_edge_sites_by_file, insert_edge_sites};
 use crate::storage::edges::{delete_edges_from, insert_edge, promote_unresolved_batch};
 use crate::storage::error::StorageError;
 use crate::storage::files::{FileInput, delete_file, upsert_file};
+use crate::storage::module_lookup::put_module_lookup;
+use crate::storage::symbol_ffi_binding::{delete_bindings_for_symbol, upsert_binding};
 use crate::storage::symbols::{
     SymbolInsertContext, delete_symbol, insert_symbol, update_symbol_positions,
 };
@@ -18,6 +21,7 @@ pub(crate) fn apply_upsert_file(
     conn: &Connection,
     extracted: &ExtractedFile,
     revision: u64,
+    workspace_id: &str,
 ) -> Result<(), StorageError> {
     let path = extracted.file.as_str();
     upsert_file_row(conn, extracted)?;
@@ -29,14 +33,108 @@ pub(crate) fn apply_upsert_file(
         is_external: extracted.is_external,
         source_origin: extracted.source_origin,
         revision,
+        workspace_id,
     };
 
     apply_deletes(conn, &plan)?;
     apply_position_updates(conn, &plan, revision)?;
     let new_or_modified_ids = apply_inserts_and_modifications(conn, &plan, ctx)?;
-    apply_edges(conn, &plan, &extracted.edges)?;
+    apply_edges(conn, &plan, &extracted.edges, workspace_id)?;
     promote_unresolved_batch(conn, &new_or_modified_ids)?;
-    apply_documents(conn, &plan, &new_or_modified_ids, &extracted.documents)?;
+    apply_documents(
+        conn,
+        &plan,
+        &new_or_modified_ids,
+        &extracted.documents,
+        workspace_id,
+    )?;
+    // IR-4-f: persist the call_sites vec populated by the extractors
+    // since IR-4-b/c/d. Delete-then-batch-insert mirrors the documents
+    // pattern — re-extraction is the common path, and a full re-write
+    // is cheaper than diffing per-call-site identity (which would need
+    // a stable id we don't currently carry on the IR side).
+    apply_call_sites(conn, path, &extracted.call_sites)?;
+    // Stage 2 — persist FFI bindings emitted by the language tagger.
+    // Delete-then-upsert pattern: drop every binding owned by any
+    // symbol touched by this batch, then insert the freshly-extracted
+    // set. Mirrors the call_sites / documents discipline so removing a
+    // binding from source actually removes the row.
+    apply_ffi_bindings(conn, &extracted.ffi_bindings, workspace_id)?;
+    // Stage 3 final-mile (R1) — persist the AOT ModuleLookup so
+    // cross-workspace queries (resolve_cross_workspace_import,
+    // list_cross_workspace_providers) can see this workspace's modules
+    // when it sits on the peer side of a link. `put_module_lookup`
+    // upserts by (workspace_id, module_fqdn) so re-extracting the same
+    // file replaces the prior payload in place. `None` for languages
+    // without an AOT pass (Lua, C, externals) — nothing to persist.
+    if let Some(lookup) = extracted.module_lookup.as_ref() {
+        put_module_lookup(conn, workspace_id, lookup)?;
+    }
+    Ok(())
+}
+
+/// Stage 2 — re-sync `symbol_ffi_binding` rows for every symbol
+/// referenced by `bindings`. For each binding, resolves
+/// `symbol_fqdn` → `symbols.id` via a point lookup; symbols that
+/// haven't materialised yet (cold_start ordering edge case) are
+/// skipped silently — the next extraction batch will pick them up.
+fn apply_ffi_bindings(
+    conn: &Connection,
+    bindings: &[standardoc_ir::RawFfiBinding],
+    workspace_id: &str,
+) -> Result<(), StorageError> {
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    // Group by symbol_id so we delete-once-then-insert-all per symbol
+    // (cheaper than N delete-one-then-insert-one and gives the right
+    // semantics: a re-extraction with zero bindings on a symbol drops
+    // its prior bindings).
+    let mut by_symbol: std::collections::HashMap<i64, Vec<&standardoc_ir::RawFfiBinding>> =
+        std::collections::HashMap::new();
+    for b in bindings {
+        let Some(id) = lookup_symbol_id_by_fqdn(conn, &b.symbol_fqdn, workspace_id)? else {
+            continue;
+        };
+        by_symbol.entry(id).or_default().push(b);
+    }
+    for (sym_id, group) in by_symbol {
+        delete_bindings_for_symbol(conn, sym_id)?;
+        for b in group {
+            upsert_binding(conn, sym_id, b)?;
+        }
+    }
+    Ok(())
+}
+
+fn lookup_symbol_id_by_fqdn(
+    conn: &Connection,
+    fqdn: &str,
+    workspace_id: &str,
+) -> Result<Option<i64>, StorageError> {
+    let id = conn
+        .query_row(
+            "SELECT id FROM symbols WHERE workspace_id = ?1 AND fqdn = ?2",
+            rusqlite::params![workspace_id, fqdn],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(id)
+}
+
+/// IR-4-f — re-sync the `call_sites` rows for `file_path` with the
+/// freshly-extracted vec. Drops every existing row keyed by the file,
+/// then inserts the new set. Idempotent: running with an empty vec
+/// against a file that previously had call_sites cleanly purges them.
+fn apply_call_sites(
+    conn: &Connection,
+    file_path: &str,
+    call_sites: &[standardoc_ir::RawCallSite],
+) -> Result<(), StorageError> {
+    delete_call_sites_by_file(conn, file_path)?;
+    for cs in call_sites {
+        insert_call_site(conn, file_path, cs)?;
+    }
     Ok(())
 }
 
@@ -118,6 +216,7 @@ fn apply_edges(
     conn: &Connection,
     plan: &DiffPlan<'_>,
     edges: &[RawEdge],
+    workspace_id: &str,
 ) -> Result<(), StorageError> {
     if edges.is_empty() {
         return Ok(());
@@ -127,10 +226,10 @@ fn apply_edges(
         if !touched.contains(edge.from_fqdn.as_str()) {
             continue;
         }
-        let Some(from_id) = lookup_symbol_id(conn, &edge.from_fqdn)? else {
+        let Some(from_id) = lookup_symbol_id_by_fqdn(conn, &edge.from_fqdn, workspace_id)? else {
             continue;
         };
-        let edge_id = insert_edge(conn, from_id, edge)?;
+        let edge_id = insert_edge(conn, from_id, edge, workspace_id)?;
         if !edge.sites.is_empty() {
             insert_edge_sites(conn, edge_id, &edge.sites)?;
         }
@@ -152,6 +251,7 @@ fn apply_documents(
     plan: &DiffPlan<'_>,
     new_or_modified_ids: &[i64],
     documents: &[RawDocument],
+    workspace_id: &str,
 ) -> Result<(), StorageError> {
     if new_or_modified_ids.is_empty() && documents.is_empty() {
         return Ok(());
@@ -168,7 +268,7 @@ fn apply_documents(
         if !touched.contains(doc.symbol_fqdn.as_str()) {
             continue;
         }
-        let Some(id) = lookup_symbol_id(conn, &doc.symbol_fqdn)? else {
+        let Some(id) = lookup_symbol_id_by_fqdn(conn, &doc.symbol_fqdn, workspace_id)? else {
             continue;
         };
         upsert_document(
@@ -194,15 +294,6 @@ fn touched_fqdns<'a>(plan: &'a DiffPlan<'_>) -> HashSet<&'a str> {
         out.insert(sym.fqdn.as_str());
     }
     out
-}
-
-fn lookup_symbol_id(conn: &Connection, fqdn: &str) -> Result<Option<i64>, StorageError> {
-    let id = conn
-        .query_row("SELECT id FROM symbols WHERE fqdn = ?1", [fqdn], |r| {
-            r.get::<_, i64>(0)
-        })
-        .optional()?;
-    Ok(id)
 }
 
 fn fetch_symbol_ids_by_file(conn: &Connection, path: &str) -> Result<Vec<i64>, StorageError> {
@@ -238,467 +329,4 @@ fn current_unix_ms() -> Result<i64, StorageError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::storage::documents::get_document;
-    use crate::storage::files::get_file;
-    use crate::storage::test_utils::fresh_conn;
-    use standardoc_ir::{
-        Blake3Hash, EdgeConfidence, EdgeKind, ExtractedFile, Kind, Language, LanguageKind,
-        RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved, Site, SourceOrigin, SymbolLocation,
-        Visibility,
-    };
-
-    fn sym(name: &str, fqdn: &str, hash_byte: u8, line: u32) -> RawSymbol {
-        RawSymbol {
-            name: name.into(),
-            fqdn: fqdn.into(),
-            kind: Kind::Function,
-            language_kind: LanguageKind::from("fn_item"),
-            module: None,
-            visibility: Visibility::Public,
-            location: SymbolLocation {
-                file: "src/main.rs".into(),
-                start_line: line,
-                end_line: line + 4,
-                start_col: 0,
-                end_col: 1,
-            },
-            signature: None,
-            body_hash: Some(Blake3Hash::new([hash_byte; 32])),
-            attributes: vec![],
-        }
-    }
-
-    fn extracted(file: &str, symbols: Vec<RawSymbol>, edges: Vec<RawEdge>) -> ExtractedFile {
-        ExtractedFile {
-            file: file.into(),
-            language: Language::Rust,
-            source_origin: SourceOrigin::Workspace,
-            is_external: false,
-            content_hash: Blake3Hash::new([0xab; 32]),
-            byte_size: 4096,
-            symbols,
-            edges,
-            call_sites: vec![],
-            documents: vec![],
-        }
-    }
-
-    fn count(conn: &Connection, sql: &str) -> i64 {
-        conn.query_row(sql, [], |r| r.get(0)).unwrap()
-    }
-
-    #[test]
-    fn upsert_file_inserts_new_symbols_and_creates_files_row() {
-        let conn = fresh_conn();
-        let ef = extracted(
-            "src/main.rs",
-            vec![
-                sym("foo", "crate::foo", 0x01, 1),
-                sym("bar", "crate::bar", 0x02, 10),
-            ],
-            vec![],
-        );
-        apply_upsert_file(&conn, &ef, 0).unwrap();
-
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM symbols"), 2);
-        let f = get_file(&conn, "src/main.rs").unwrap().unwrap();
-        assert_eq!(f.content_hash, Blake3Hash::new([0xab; 32]));
-        assert_eq!(f.last_scan_error, None);
-    }
-
-    #[test]
-    fn upsert_file_unchanged_body_only_updates_positions() {
-        let conn = fresh_conn();
-        let ef1 = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 1)],
-            vec![],
-        );
-        apply_upsert_file(&conn, &ef1, 0).unwrap();
-
-        let ef2 = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 100)],
-            vec![],
-        );
-        apply_upsert_file(&conn, &ef2, 0).unwrap();
-
-        let (start_line, name): (i64, String) = conn
-            .query_row(
-                "SELECT start_line, name FROM symbols WHERE fqdn = 'crate::foo'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(start_line, 100);
-        assert_eq!(name, "foo");
-    }
-
-    #[test]
-    fn upsert_file_modified_body_replaces_outgoing_edges() {
-        let conn = fresh_conn();
-        let edge = RawEdge {
-            from_fqdn: "crate::foo".into(),
-            kind: EdgeKind::Calls,
-            to: ResolvedOrUnresolved::Unresolved {
-                name: "old_target".into(),
-            },
-            sites: vec![Site {
-                file: "src/main.rs".into(),
-                line: 2,
-                col: 4,
-            }],
-            attributes: vec![],
-            confidence: EdgeConfidence::Ambiguous,
-        };
-        let ef1 = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 1)],
-            vec![edge],
-        );
-        apply_upsert_file(&conn, &ef1, 0).unwrap();
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM edges"), 1);
-
-        let new_edge = RawEdge {
-            from_fqdn: "crate::foo".into(),
-            kind: EdgeKind::Calls,
-            to: ResolvedOrUnresolved::Unresolved {
-                name: "new_target".into(),
-            },
-            sites: vec![],
-            attributes: vec![],
-            confidence: EdgeConfidence::Ambiguous,
-        };
-        let ef2 = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0xee, 1)],
-            vec![new_edge],
-        );
-        apply_upsert_file(&conn, &ef2, 0).unwrap();
-
-        let to_unresolved: String = conn
-            .query_row("SELECT to_unresolved FROM edges", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(to_unresolved, "new_target");
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM edges"), 1);
-    }
-
-    #[test]
-    fn upsert_file_disappeared_symbol_is_deleted() {
-        let conn = fresh_conn();
-        let ef1 = extracted(
-            "src/main.rs",
-            vec![
-                sym("foo", "crate::foo", 0x01, 1),
-                sym("bar", "crate::bar", 0x02, 10),
-            ],
-            vec![],
-        );
-        apply_upsert_file(&conn, &ef1, 0).unwrap();
-
-        let ef2 = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 1)],
-            vec![],
-        );
-        apply_upsert_file(&conn, &ef2, 0).unwrap();
-
-        let count_remaining = count(&conn, "SELECT COUNT(*) FROM symbols");
-        assert_eq!(count_remaining, 1);
-        let remaining_fqdn: String = conn
-            .query_row("SELECT fqdn FROM symbols", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(remaining_fqdn, "crate::foo");
-    }
-
-    #[test]
-    fn upsert_file_promote_unresolved_within_batch() {
-        let conn = fresh_conn();
-        let edge = RawEdge {
-            from_fqdn: "crate::caller".into(),
-            kind: EdgeKind::Calls,
-            to: ResolvedOrUnresolved::Resolved {
-                fqdn: "crate::callee".into(),
-            },
-            sites: vec![],
-            attributes: vec![],
-            confidence: EdgeConfidence::Extracted,
-        };
-        let ef = extracted(
-            "src/main.rs",
-            vec![
-                sym("caller", "crate::caller", 0x01, 1),
-                sym("callee", "crate::callee", 0x02, 10),
-            ],
-            vec![edge],
-        );
-        apply_upsert_file(&conn, &ef, 0).unwrap();
-
-        let (to_id, to_unresolved): (Option<i64>, Option<String>) = conn
-            .query_row("SELECT to_symbol_id, to_unresolved FROM edges", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .unwrap();
-        assert!(to_id.is_some(), "in-batch promote must resolve to an id");
-        assert!(to_unresolved.is_none());
-    }
-
-    #[test]
-    fn upsert_file_skips_edges_from_unchanged_symbols() {
-        let conn = fresh_conn();
-        let edge = RawEdge {
-            from_fqdn: "crate::foo".into(),
-            kind: EdgeKind::Calls,
-            to: ResolvedOrUnresolved::Unresolved {
-                name: "target".into(),
-            },
-            sites: vec![],
-            attributes: vec![],
-            confidence: EdgeConfidence::Ambiguous,
-        };
-        let ef1 = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 1)],
-            vec![edge.clone()],
-        );
-        apply_upsert_file(&conn, &ef1, 0).unwrap();
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM edges"), 1);
-
-        let ef2 = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 50)],
-            vec![edge],
-        );
-        apply_upsert_file(&conn, &ef2, 0).unwrap();
-        assert_eq!(
-            count(&conn, "SELECT COUNT(*) FROM edges"),
-            1,
-            "edges from unchanged-body symbols must not be re-inserted"
-        );
-    }
-
-    #[test]
-    fn delete_file_removes_symbols_and_reverse_promotes_incoming_edges() {
-        let conn = fresh_conn();
-        let ef_caller = extracted(
-            "src/caller.rs",
-            vec![sym("caller", "crate::caller", 0x01, 1)],
-            vec![RawEdge {
-                from_fqdn: "crate::caller".into(),
-                kind: EdgeKind::Calls,
-                to: ResolvedOrUnresolved::Resolved {
-                    fqdn: "crate::target".into(),
-                },
-                sites: vec![],
-                attributes: vec![],
-                confidence: EdgeConfidence::Extracted,
-            }],
-        );
-        let ef_target = extracted(
-            "src/target.rs",
-            vec![sym("target", "crate::target", 0x02, 1)],
-            vec![],
-        );
-        apply_upsert_file(&conn, &ef_target, 0).unwrap();
-        apply_upsert_file(&conn, &ef_caller, 0).unwrap();
-
-        apply_delete_file(&conn, "src/target.rs").unwrap();
-
-        assert!(get_file(&conn, "src/target.rs").unwrap().is_none());
-        let to_unresolved: Option<String> = conn
-            .query_row("SELECT to_unresolved FROM edges", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(to_unresolved.as_deref(), Some("crate::target"));
-    }
-
-    #[test]
-    fn delete_file_cleans_stale_edge_sites_in_other_files() {
-        let conn = fresh_conn();
-        let ef_target = extracted(
-            "src/target.rs",
-            vec![sym("target", "crate::target", 0x02, 1)],
-            vec![],
-        );
-        let ef_caller = extracted(
-            "src/caller.rs",
-            vec![sym("caller", "crate::caller", 0x01, 1)],
-            vec![RawEdge {
-                from_fqdn: "crate::caller".into(),
-                kind: EdgeKind::Calls,
-                to: ResolvedOrUnresolved::Resolved {
-                    fqdn: "crate::target".into(),
-                },
-                sites: vec![Site {
-                    file: "src/main.rs".into(),
-                    line: 7,
-                    col: 4,
-                }],
-                attributes: vec![],
-                confidence: EdgeConfidence::Extracted,
-            }],
-        );
-        apply_upsert_file(&conn, &ef_target, 0).unwrap();
-        apply_upsert_file(&conn, &ef_caller, 0).unwrap();
-
-        apply_delete_file(&conn, "src/main.rs").unwrap();
-
-        let remaining_main_sites: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM edge_sites WHERE file_path = 'src/main.rs'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(remaining_main_sites, 0);
-    }
-
-    #[test]
-    fn record_parse_error_sets_last_scan_error_on_existing_file() {
-        let conn = fresh_conn();
-        let ef = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 1)],
-            vec![],
-        );
-        apply_upsert_file(&conn, &ef, 0).unwrap();
-
-        record_parse_error(&conn, "src/main.rs", Language::Rust, "unexpected token").unwrap();
-
-        let f = get_file(&conn, "src/main.rs").unwrap().unwrap();
-        assert_eq!(f.last_scan_error.as_deref(), Some("unexpected token"));
-        assert_eq!(
-            count(&conn, "SELECT COUNT(*) FROM symbols"),
-            1,
-            "old symbols must remain on parse error"
-        );
-    }
-
-    #[test]
-    fn record_parse_error_creates_files_row_for_unknown_path() {
-        let conn = fresh_conn();
-        record_parse_error(&conn, "src/new.rs", Language::Rust, "syntax error").unwrap();
-        let f = get_file(&conn, "src/new.rs").unwrap().unwrap();
-        assert_eq!(f.last_scan_error.as_deref(), Some("syntax error"));
-        assert_eq!(f.byte_size, 0);
-    }
-
-    fn doc_for(fqdn: &str, description: &str) -> RawDocument {
-        RawDocument {
-            symbol_fqdn: fqdn.into(),
-            description: description.into(),
-        }
-    }
-
-    fn fetch_doc_description(conn: &Connection, fqdn: &str) -> Option<String> {
-        let id: Option<i64> = conn
-            .query_row("SELECT id FROM symbols WHERE fqdn = ?1", [fqdn], |r| {
-                r.get(0)
-            })
-            .optional()
-            .unwrap();
-        let id = id?;
-        let doc = get_document(conn, id).unwrap()?;
-        doc.description
-    }
-
-    #[test]
-    fn upsert_file_persists_documents_for_inserted_symbols() {
-        let conn = fresh_conn();
-        let mut ef = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 1)],
-            vec![],
-        );
-        ef.documents = vec![doc_for("crate::foo", "Top-level helper.")];
-        apply_upsert_file(&conn, &ef, 0).unwrap();
-
-        let desc = fetch_doc_description(&conn, "crate::foo");
-        assert_eq!(desc.as_deref(), Some("Top-level helper."));
-    }
-
-    #[test]
-    fn upsert_file_replaces_documents_when_body_modified() {
-        let conn = fresh_conn();
-        let mut ef1 = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 1)],
-            vec![],
-        );
-        ef1.documents = vec![doc_for("crate::foo", "v1 description.")];
-        apply_upsert_file(&conn, &ef1, 0).unwrap();
-
-        let mut ef2 = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0xee, 1)],
-            vec![],
-        );
-        ef2.documents = vec![doc_for("crate::foo", "v2 description.")];
-        apply_upsert_file(&conn, &ef2, 0).unwrap();
-
-        assert_eq!(
-            fetch_doc_description(&conn, "crate::foo").as_deref(),
-            Some("v2 description.")
-        );
-    }
-
-    #[test]
-    fn upsert_file_removes_document_when_user_deletes_doc_comment() {
-        let conn = fresh_conn();
-        let mut ef1 = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 1)],
-            vec![],
-        );
-        ef1.documents = vec![doc_for("crate::foo", "Original.")];
-        apply_upsert_file(&conn, &ef1, 0).unwrap();
-        assert!(fetch_doc_description(&conn, "crate::foo").is_some());
-
-        // Body modified (different hash) AND no RawDocument provided → wipe the row.
-        let ef2 = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0xee, 1)],
-            vec![],
-        );
-        apply_upsert_file(&conn, &ef2, 0).unwrap();
-        assert!(fetch_doc_description(&conn, "crate::foo").is_none());
-    }
-
-    #[test]
-    fn delete_file_cascades_documents_via_fk() {
-        let conn = fresh_conn();
-        let mut ef = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 1)],
-            vec![],
-        );
-        ef.documents = vec![doc_for("crate::foo", "Doc.")];
-        apply_upsert_file(&conn, &ef, 0).unwrap();
-        assert!(fetch_doc_description(&conn, "crate::foo").is_some());
-
-        apply_delete_file(&conn, "src/main.rs").unwrap();
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, 0, "FK ON DELETE CASCADE should wipe documents");
-    }
-
-    #[test]
-    fn upsert_file_clears_last_scan_error_on_success() {
-        let conn = fresh_conn();
-        record_parse_error(&conn, "src/main.rs", Language::Rust, "syntax error").unwrap();
-        let f1 = get_file(&conn, "src/main.rs").unwrap().unwrap();
-        assert_eq!(f1.last_scan_error.as_deref(), Some("syntax error"));
-
-        let ef = extracted(
-            "src/main.rs",
-            vec![sym("foo", "crate::foo", 0x01, 1)],
-            vec![],
-        );
-        apply_upsert_file(&conn, &ef, 0).unwrap();
-
-        let f2 = get_file(&conn, "src/main.rs").unwrap().unwrap();
-        assert_eq!(f2.last_scan_error, None);
-    }
-}
+mod tests;

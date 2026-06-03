@@ -1,38 +1,54 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# `.projects/*` holds sibling repos (lur-workspace, matchigo-lua) — each
+# carries its own workspace root. `vendor/*` holds vendored copies of
+# external standarx crates (standarx-dsl until it's published on
+# crates.io). Both are excluded so cargo doesn't try to absorb them
+# into this workspace.
+exclude = [".projects/*", "vendor/*"]
 
 [workspace.package]
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 edition = "2024"
 license = "LicenseRef-FSL-1.1-MIT"
 repository = "https://github.com/miralabs-tech/standardoc"
 homepage = "https://standardoc.miralabs.tech"
 authors = ["miralabs.tech"]
-rust-version = "1.91"
+rust-version = "1.95"
 
 # External deps (blake3, notify, syn, swc_*, wasmtime, ...) get pinned here as
 # each subject starts consuming them — no spec deps day-1.
 [workspace.dependencies]
-standardoc-ir            = { version = "1.0.0-beta.2", path = "crates/standardoc-ir" }
-standardoc-bridge-sdk    = { version = "1.0.0-beta.2", path = "crates/standardoc-bridge-sdk" }
-standardoc-lang-provider = { version = "1.0.0-beta.2", path = "crates/standardoc-lang-provider" }
-standardoc-core          = { version = "1.0.0-beta.2", path = "crates/standardoc-core" }
-standardoc-rag           = { version = "1.0.0-beta.2", path = "crates/standardoc-rag" }
-standardoc-server        = { version = "1.0.0-beta.2", path = "crates/standardoc-server" }
+standardoc-ir            = { version = "1.0.0-beta.3", path = "crates/standardoc-ir" }
+standardoc-bridge-sdk    = { version = "1.0.0-beta.3", path = "crates/standardoc-bridge-sdk" }
+standardoc-lang-provider = { version = "1.0.0-beta.3", path = "crates/standardoc-lang-provider" }
+standardoc-core          = { version = "1.0.0-beta.3", path = "crates/standardoc-core" }
+standardoc-server        = { version = "1.0.0-beta.3", path = "crates/standardoc-server" }
+standardoc-graph-viz     = { version = "1.0.0-beta.3", path = "crates/standardoc-graph-viz" }
+standardoc-mcp-proxy     = { version = "1.0.0-beta.3", path = "crates/standardoc-mcp-proxy" }
+# Versioned independently of the core workspace per SOURCEMAP_v1.md §8 —
+# protocol semver tracks the wire format, not the standardoc release train.
+standardoc-sourcemap     = { version = "1.0.0", path = "crates/standardoc-sourcemap" }
 
 serde       = { version = "1.0", features = ["derive"] }
 serde_json  = "1.0"
+bincode     = { version = "2", features = ["serde"] }
+uuid        = { version = "1", features = ["v4"] }
 thiserror   = "2"
 rusqlite    = { version = "0.39", features = ["bundled-full"] }
 r2d2        = "0.8"
-r2d2_sqlite = "0.33"
+r2d2_sqlite = "0.34"
 fs4         = "1"
 tempfile    = "3"
 tokio       = { version = "1", default-features = false, features = ["sync", "rt-multi-thread", "macros", "time", "io-std", "net"] }
 tokio-util  = { version = "0.7", default-features = false }
 tower-lsp-server = "0.23"
-rmcp        = "0.16"
+rmcp        = "1.7"
+async-trait = "0.1"
+reqwest     = { version = "0.13", default-features = false, features = ["rustls", "http2", "json", "stream"] }
+http        = "1"
+bytes       = "1"
 axum        = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 schemars    = "1"
 notify      = "8"
@@ -43,17 +59,32 @@ blake3      = "1"
 syn         = { version = "2", features = ["full", "extra-traits", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote       = "1"
-swc_core    = { version = "65", features = ["ecma_parser", "ecma_ast", "ecma_visit", "common", "common_concurrent"] }
+swc_core    = { version = "68", features = ["ecma_parser", "ecma_ast", "ecma_visit", "common", "common_concurrent"] }
 full_moon   = { version = "2.2", features = ["luau", "luajit", "cfxlua"] }
+tree-sitter   = "0.26"
+tree-sitter-c = "0.24"
 clap        = { version = "4", features = ["derive"] }
 ctrlc       = "3"
 ignore      = "0.4"
 strsim      = "0.11"
-candle-core         = { version = "0.9", default-features = false }
-candle-nn           = { version = "0.9", default-features = false }
-candle-transformers = { version = "0.9", default-features = false }
-tokenizers          = { version = "0.21", default-features = false, features = ["onig"] }
-hf-hub              = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"] }
+standarbuild-detect = "0.3"
+# DSL parser for standardoc.sxd config. Pulled from the upstream
+# GitHub release until the crate lands on crates.io — pinned to the
+# v1.0.0 tag for downstream stability (semver-frozen public contract).
+standarx-dsl        = { git = "https://github.com/miralabs-tech/standarx-dsl", tag = "v1.0.0" }
+# LSP backend for the same DSL — exposed as a library so we can plug
+# our SxdSchema (semantic validation of `standardoc.sxd`) and ship a
+# single `standardoc lsp-sxd` subcommand from the daemon binary.
+standarx-dsl-lsp    = { git = "https://github.com/miralabs-tech/standarx-dsl", tag = "v1.0.0" }
+wasm-bindgen              = "0.2"
+wasm-bindgen-futures      = "0.4"
+js-sys                    = "0.3"
+web-sys                   = "0.3"
+console_error_panic_hook  = "0.1"
+serde-wasm-bindgen        = "0.6"
+wgpu                      = { version = "29", default-features = false, features = ["webgpu", "wgsl"] }
+bytemuck                  = { version = "1.18", features = ["derive"] }
+glam                      = "0.30"
 
 [profile.release]
 opt-level = 3
@@ -94,3 +125,11 @@ option_if_let_else = "allow"
 default_trait_access = "allow"
 unnecessary_struct_initialization = "allow"
 needless_collect = "allow"
+
+# Doc-list lints frequently misfire on visually-aligned bullet continuations
+# (e.g. `///   - Item one`
+#       `///                  Item two` for readability). We keep the
+# alignment intentional — clippy's "fix" hurts readability more than it
+# helps. Revisit if the lint becomes less flaky upstream.
+doc_overindented_list_items = "allow"
+doc_lazy_continuation = "allow"

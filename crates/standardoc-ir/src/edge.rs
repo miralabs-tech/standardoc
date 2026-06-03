@@ -15,6 +15,12 @@ pub struct RawEdge {
     pub attributes: Vec<String>,
     #[serde(default)]
     pub confidence: EdgeConfidence,
+    // Bug E-3 Phase 1: nominal type of the call receiver when inferable
+    // by the language extractor (e.g. "Vec", "Foo", "self_type"). Used
+    // by the resolver post-pass to disambiguate bare-ident method calls.
+    // None when not inferable or not applicable (path-form calls, non-Rust).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -61,6 +67,7 @@ impl RawEdge {
             sites,
             attributes,
             confidence,
+            receiver_type: None,
         }
     }
 }
@@ -84,6 +91,7 @@ mod tests {
             }],
             attributes: vec![],
             confidence: EdgeConfidence::Extracted,
+            receiver_type: None,
         };
         let json = serde_json::to_string(&e).unwrap();
         let back: RawEdge = serde_json::from_str(&json).unwrap();
@@ -101,6 +109,7 @@ mod tests {
             sites: vec![],
             attributes: vec![],
             confidence: EdgeConfidence::Ambiguous,
+            receiver_type: None,
         };
         let json = serde_json::to_string(&e).unwrap();
         let back: RawEdge = serde_json::from_str(&json).unwrap();
@@ -119,6 +128,7 @@ mod tests {
             sites: vec![],
             attributes: vec![],
             confidence: EdgeConfidence::Inferred,
+            receiver_type: None,
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(
@@ -140,6 +150,7 @@ mod tests {
             sites: vec![],
             attributes: vec!["template-bind".into(), "template-event".into()],
             confidence: EdgeConfidence::Extracted,
+            receiver_type: None,
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"attributes\""), "json was {json}");
@@ -178,6 +189,7 @@ mod tests {
             sites: vec![],
             attributes: vec![],
             confidence: EdgeConfidence::Inferred,
+            receiver_type: None,
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(
@@ -200,6 +212,7 @@ mod tests {
                 sites: vec![],
                 attributes: vec![],
                 confidence: conf,
+                receiver_type: None,
             };
             let json = serde_json::to_string(&e).unwrap();
             let back: RawEdge = serde_json::from_str(&json).unwrap();

@@ -5,6 +5,7 @@ use standardoc_ir::{
 
 use crate::storage::files::{FileInput, upsert_file};
 use crate::storage::migrate::ensure_schema;
+use crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
 use crate::storage::symbols::SymbolInsertContext;
 
 pub(crate) fn fresh_conn() -> Connection {
@@ -33,9 +34,13 @@ pub(crate) fn seed_file(conn: &Connection, path: &str) {
 
 pub(crate) fn sample_symbol(name: &str, fqdn: &str) -> RawSymbol {
     RawSymbol {
+        decl_kind: None,
+        implements_trait: None,
+        receiver_type: None,
+        entry_point: None,
         name: name.into(),
         fqdn: fqdn.into(),
-        kind: Kind::Function,
+        kind: Kind::Callable,
         language_kind: LanguageKind::from("fn_item"),
         module: None,
         visibility: Visibility::Public,
@@ -49,6 +54,7 @@ pub(crate) fn sample_symbol(name: &str, fqdn: &str) -> RawSymbol {
         signature: None,
         body_hash: Some(Blake3Hash::new([0xab; 32])),
         attributes: vec![],
+        flags: vec![],
     }
 }
 
@@ -59,5 +65,6 @@ pub(crate) fn symbol_ctx(file_path: &str) -> SymbolInsertContext<'_> {
         is_external: false,
         source_origin: SourceOrigin::Workspace,
         revision: 0,
+        workspace_id: PRIMARY_WORKSPACE_ID,
     }
 }

@@ -1,0 +1,299 @@
+use super::*;
+use std::fs;
+use tempfile::TempDir;
+
+fn sentinel_in(tmp: &TempDir) -> PathBuf {
+    tmp.path().join("mcp_called_this_session")
+}
+
+#[test]
+fn mark_writes_sentinel_when_tool_is_standardoc_mcp() {
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    let payload = r#"{"tool_name":"mcp__standardoc__find_symbol","cwd":"/anywhere"}"#;
+    let out = pre_tool_hook_decide("mark", payload, &sentinel);
+    assert!(out.contains(r#""marked":true"#), "out={out}");
+    assert!(sentinel.exists(), "sentinel must be written");
+}
+
+#[test]
+fn mark_skips_non_standardoc_tool() {
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    let payload = r#"{"tool_name":"Bash"}"#;
+    let out = pre_tool_hook_decide("mark", payload, &sentinel);
+    assert!(out.contains("not_standardoc_mcp_tool"), "out={out}");
+    assert!(!sentinel.exists(), "sentinel must NOT be written");
+}
+
+#[test]
+fn mark_skips_when_tool_name_missing() {
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    let out = pre_tool_hook_decide("mark", r"{}", &sentinel);
+    assert!(out.contains("not_standardoc_mcp_tool"), "out={out}");
+    assert!(!sentinel.exists());
+}
+
+#[test]
+fn mark_creates_parent_dirs() {
+    let tmp = TempDir::new().unwrap();
+    let nested = tmp.path().join("deep").join(".standardoc");
+    let sentinel = nested.join("mcp_called_this_session");
+    let payload = r#"{"tool_name":"mcp__standardoc__get_context"}"#;
+    let out = pre_tool_hook_decide("mark", payload, &sentinel);
+    assert!(out.contains(r#""marked":true"#), "out={out}");
+    assert!(sentinel.exists());
+}
+
+#[test]
+fn check_denies_when_sentinel_absent() {
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    let out = pre_tool_hook_decide("check", r"{}", &sentinel);
+    assert!(out.contains(r#""permissionDecision":"deny""#), "out={out}");
+    assert!(out.contains("MCP-first"));
+    assert!(out.contains("find_symbol"));
+}
+
+#[test]
+fn check_allows_when_sentinel_present() {
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    fs::write(&sentinel, b"").unwrap();
+    let out = pre_tool_hook_decide("check", r"{}", &sentinel);
+    assert_eq!(out, "{}");
+}
+
+#[test]
+fn check_emits_pretooluse_hook_event_name() {
+    // Claude Code requires the hookSpecificOutput.hookEventName to
+    // match the firing event, otherwise the JSON is silently
+    // ignored. Lock the wire shape.
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    let out = pre_tool_hook_decide("check", r"{}", &sentinel);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        parsed
+            .get("hookSpecificOutput")
+            .and_then(|v| v.get("hookEventName"))
+            .and_then(|v| v.as_str()),
+        Some("PreToolUse"),
+    );
+}
+
+#[test]
+fn check_allows_read_outside_workspace_even_without_sentinel() {
+    // Reading harness memory under ~/.claude (outside the project) must not
+    // be gated, even when the MCP-first sentinel is absent.
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp); // absent
+    let cwd = std::env::temp_dir().join("ws-root");
+    let outside = std::env::temp_dir().join("other-place").join("notes.md");
+    let payload = serde_json::json!({
+        "cwd": cwd.to_string_lossy(),
+        "tool_name": "Read",
+        "tool_input": { "file_path": outside.to_string_lossy() },
+    })
+    .to_string();
+    let out = pre_tool_hook_decide("check", &payload, &sentinel);
+    assert_eq!(out, "{}", "outside-workspace read must be allowed");
+}
+
+#[test]
+fn check_still_denies_read_inside_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp); // absent
+    let cwd = std::env::temp_dir().join("ws-root");
+    let inside = cwd.join("src").join("main.rs");
+    let payload = serde_json::json!({
+        "cwd": cwd.to_string_lossy(),
+        "tool_name": "Read",
+        "tool_input": { "file_path": inside.to_string_lossy() },
+    })
+    .to_string();
+    let out = pre_tool_hook_decide("check", &payload, &sentinel);
+    assert!(out.contains(r#""permissionDecision":"deny""#), "out={out}");
+}
+
+#[test]
+fn check_gates_read_of_sfc_source_files() {
+    // Vue/Svelte SFCs ARE indexed by the SFC extractor, so a Read of one is
+    // source — keep it gated toward MCP like any .ts/.rs file.
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp); // absent
+    let cwd = std::env::temp_dir().join("ws-root");
+    for name in ["App.vue", "Widget.svelte"] {
+        let inside = cwd.join("src").join(name);
+        let payload = serde_json::json!({
+            "cwd": cwd.to_string_lossy(),
+            "tool_name": "Read",
+            "tool_input": { "file_path": inside.to_string_lossy() },
+        })
+        .to_string();
+        let out = pre_tool_hook_decide("check", &payload, &sentinel);
+        assert!(
+            out.contains(r#""permissionDecision":"deny""#),
+            "{name}: out={out}"
+        );
+    }
+}
+
+#[test]
+fn check_gates_relative_path_reads() {
+    // A relative target resolves under cwd → still gated.
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    let payload = r#"{"cwd":"/proj","tool_name":"Read","tool_input":{"file_path":"src/main.rs"}}"#;
+    let out = pre_tool_hook_decide("check", payload, &sentinel);
+    assert!(out.contains(r#""permissionDecision":"deny""#), "out={out}");
+}
+
+#[test]
+fn check_gates_bash_regardless_of_path() {
+    // Bash has no single target path → keep gating (cannot prove it's outside).
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    let payload = r#"{"cwd":"/proj","tool_name":"Bash","tool_input":{"command":"cat ~/.bashrc"}}"#;
+    let out = pre_tool_hook_decide("check", payload, &sentinel);
+    assert!(out.contains(r#""permissionDecision":"deny""#), "out={out}");
+}
+
+#[test]
+fn check_allows_read_of_non_source_file_inside_workspace() {
+    // Reading a doc/config/data file Standardoc never indexes (.md/.json/.yml/
+    // .toml…) must not be gated even inside the workspace — MCP cannot answer it.
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp); // absent
+    let cwd = std::env::temp_dir().join("ws-root");
+    for name in [
+        "README.md",
+        "package.json",
+        "ci.yml",
+        "Cargo.toml",
+        "tsconfig.json",
+    ] {
+        let inside = cwd.join(name);
+        let payload = serde_json::json!({
+            "cwd": cwd.to_string_lossy(),
+            "tool_name": "Read",
+            "tool_input": { "file_path": inside.to_string_lossy() },
+        })
+        .to_string();
+        let out = pre_tool_hook_decide("check", &payload, &sentinel);
+        assert_eq!(out, "{}", "non-source read must be allowed: {name}");
+    }
+}
+
+#[test]
+fn check_allows_read_of_extensionless_file() {
+    // LICENSE / Makefile / .gitignore have no source extension → not code.
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp); // absent
+    let cwd = std::env::temp_dir().join("ws-root");
+    let inside = cwd.join("LICENSE");
+    let payload = serde_json::json!({
+        "cwd": cwd.to_string_lossy(),
+        "tool_name": "Read",
+        "tool_input": { "file_path": inside.to_string_lossy() },
+    })
+    .to_string();
+    let out = pre_tool_hook_decide("check", &payload, &sentinel);
+    assert_eq!(out, "{}", "extensionless read must be allowed");
+}
+
+#[test]
+fn check_still_gates_grep_on_non_source_target() {
+    // The non-source exemption is Read-only; Grep/Glob search trees and stay
+    // gated toward MCP even when pointed at a .md path.
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp); // absent
+    let cwd = std::env::temp_dir().join("ws-root");
+    let inside = cwd.join("notes.md");
+    let payload = serde_json::json!({
+        "cwd": cwd.to_string_lossy(),
+        "tool_name": "Grep",
+        "tool_input": { "path": inside.to_string_lossy() },
+    })
+    .to_string();
+    let out = pre_tool_hook_decide("check", &payload, &sentinel);
+    assert!(out.contains(r#""permissionDecision":"deny""#), "out={out}");
+}
+
+#[test]
+fn reset_removes_sentinel() {
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    fs::write(&sentinel, b"").unwrap();
+    let out = pre_tool_hook_decide("reset", r"{}", &sentinel);
+    assert!(out.contains(r#""reset":true"#));
+    assert!(!sentinel.exists());
+}
+
+#[test]
+fn reset_is_idempotent_when_sentinel_absent() {
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    let out = pre_tool_hook_decide("reset", r"{}", &sentinel);
+    // Must not panic; output is the reset confirmation either way.
+    assert!(out.contains(r#""reset":true"#));
+}
+
+#[test]
+fn invalid_json_does_not_panic_in_any_mode() {
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    // Mark with garbage payload — must not panic, must not write
+    // the sentinel (no tool name resolvable).
+    let out = pre_tool_hook_decide("mark", "not json", &sentinel);
+    assert!(out.contains("not_standardoc_mcp_tool"), "out={out}");
+    assert!(!sentinel.exists());
+    // Check with garbage payload — same as a missing sentinel.
+    let out = pre_tool_hook_decide("check", "not json", &sentinel);
+    assert!(out.contains(r#""permissionDecision":"deny""#));
+    // Reset with garbage payload — no-op (file already absent).
+    let out = pre_tool_hook_decide("reset", "not json", &sentinel);
+    assert!(out.contains(r#""reset":true"#));
+}
+
+#[test]
+fn unknown_mode_returns_safe_default() {
+    let tmp = TempDir::new().unwrap();
+    let sentinel = sentinel_in(&tmp);
+    let out = pre_tool_hook_decide("nope", r"{}", &sentinel);
+    assert!(out.contains("unknown_mode"));
+    // Must not implicitly deny — clap's value_parser already
+    // forbids this CLI-side, but a defence-in-depth default is
+    // "do not block the agent".
+    assert!(!out.contains(r#""permissionDecision":"deny""#));
+}
+
+#[test]
+fn resolve_sentinel_uses_payload_cwd() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().to_string_lossy().replace('\\', "/");
+    let payload = format!(r#"{{"cwd":"{cwd}"}}"#);
+    let sentinel = resolve_mcp_first_sentinel(&payload);
+    let expected = tmp.path().join(".standardoc").join(MCP_FIRST_SENTINEL);
+    assert_eq!(sentinel, expected);
+}
+
+#[test]
+fn resolve_sentinel_falls_back_to_current_dir_when_payload_lacks_cwd() {
+    // The fallback chain is cwd → CLAUDE_PROJECT_DIR → current_dir;
+    // we only assert the chain doesn't panic and produces a path
+    // ending with the sentinel name + parent `.standardoc`.
+    let sentinel = resolve_mcp_first_sentinel(r"{}");
+    assert_eq!(
+        sentinel.file_name().and_then(|s| s.to_str()),
+        Some(MCP_FIRST_SENTINEL),
+    );
+    assert_eq!(
+        sentinel
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str()),
+        Some(".standardoc"),
+    );
+}

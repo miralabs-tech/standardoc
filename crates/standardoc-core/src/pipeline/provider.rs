@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use standardoc_ir::ExtractedFile;
+use standardoc_ir::{BuiltinEntry, BuiltinMethodEntry, CrossWorkspaceResolver, ExtractedFile};
 
 pub trait LanguageProvider: Send + Sync {
     fn extract(
@@ -9,11 +9,64 @@ pub trait LanguageProvider: Send + Sync {
         path: &str,
         ctx: &ExtractContext<'_>,
     ) -> Result<ExtractedFile, ExtractError>;
+
+    /// Workspace-level pre-pass invoked once by `cold_start` and once
+    /// per watcher debounce window before any per-file `extract` call.
+    /// Providers that need a workspace-global view (cross-file type
+    /// flow, symbol-table seeds, ...) populate their state here from
+    /// the same workspace-relative path list `extract` will later be
+    /// driven with.
+    ///
+    /// Default is no-op — providers that don't need workspace-wide
+    /// state see no behavioural change.
+    fn workspace_prepare(&self, _workspace_root: &Path, _rel_paths: &[String]) {}
+
+    /// Stage 3e-1: builtin entries the pipeline should eagerly seed at
+    /// cold-start so the synthetic FQDNs emitted by tier-aware resolvers
+    /// (`<builtin>::ts::Math`, `<builtin>::lua::print`, …) resolve to a
+    /// real row in `symbols`. Default returns empty — providers that
+    /// expose a `BuiltinRegistry` override to surface their Edge-tier
+    /// entries. Drop / Attribute tiers do NOT seed: they never produce
+    /// edges in the first place, so a DB row would be unreachable.
+    fn edge_builtins(&self) -> Vec<BuiltinEntry> {
+        Vec::new()
+    }
+
+    /// Bug E-3 Phase 2: builtin method entries to seed alongside
+    /// `edge_builtins`. Always seeded (no tier filter) — the
+    /// receiver-type resolver only consults them when the extractor's
+    /// inferred `receiver_type` matches one of the registered parent
+    /// types, so unseeded methods can't produce ghost edges.
+    fn edge_builtin_methods(&self) -> Vec<BuiltinMethodEntry> {
+        Vec::new()
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Per-extract context handed to every [`LanguageProvider::extract`]
+/// call. Kept `Copy` so providers can fan it out cheaply — the
+/// `cross_workspace` slot is a borrowed trait object, not an owned
+/// handle, so the resolver's cache lives for the whole extract pass.
+#[derive(Clone, Copy)]
 pub struct ExtractContext<'a> {
     pub workspace_root: &'a Path,
+    /// Stage 3 R3 — when `Some`, providers consult this resolver to
+    /// strengthen imports that target a peer workspace. `None` for
+    /// tests and entry points that don't have an `IndexHandle`
+    /// (mocks, parsing-only paths). Visitors must tolerate `None`
+    /// (fall through to local-unresolved).
+    pub cross_workspace: Option<&'a (dyn CrossWorkspaceResolver + 'a)>,
+}
+
+impl std::fmt::Debug for ExtractContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtractContext")
+            .field("workspace_root", &self.workspace_root)
+            .field(
+                "cross_workspace",
+                &self.cross_workspace.map(|_| "<resolver>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +89,7 @@ pub(crate) mod mock {
     use super::{ExtractContext, ExtractError, ExtractedFile, LanguageProvider};
 
     #[derive(Debug, Clone)]
+    #[allow(clippy::large_enum_variant)]
     pub(crate) enum MockResponse {
         Ok(ExtractedFile),
         ParseError(String),
@@ -101,6 +155,8 @@ mod tests {
             edges: vec![],
             call_sites: vec![],
             documents: vec![],
+            ffi_bindings: vec![],
+            module_lookup: None,
         }
     }
 
@@ -114,6 +170,7 @@ mod tests {
         let root = PathBuf::from("/ws");
         let ctx = ExtractContext {
             workspace_root: &root,
+            cross_workspace: None,
         };
         let out = provider.extract("", "src/lib.rs", &ctx).unwrap();
         assert_eq!(out.file, "src/lib.rs");
@@ -125,6 +182,7 @@ mod tests {
         let root = PathBuf::from("/ws");
         let ctx = ExtractContext {
             workspace_root: &root,
+            cross_workspace: None,
         };
         let err = provider.extract("", "nope.rs", &ctx).unwrap_err();
         assert!(matches!(err, ExtractError::UnsupportedLanguage { .. }));
@@ -140,6 +198,7 @@ mod tests {
         let root = PathBuf::from("/ws");
         let ctx = ExtractContext {
             workspace_root: &root,
+            cross_workspace: None,
         };
         let err = provider.extract("", "src/bad.rs", &ctx).unwrap_err();
         assert!(matches!(err, ExtractError::Parse { .. }));

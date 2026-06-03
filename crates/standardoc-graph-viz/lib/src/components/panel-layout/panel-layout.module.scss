@@ -1,0 +1,205 @@
+@use '../../styles/mixins' as *;
+
+// Shell grid skeleton — 5 columns × 4 rows so resizer lanes live IN
+// the grid instead of being absolute-positioned over it. The named
+// areas match the mockup with the resizer lanes interleaved:
+//
+//   ┌────────────────────────────────────────────────────────────────┐
+//   │                       toolbar (full width)                     │
+//   ├──────────┬─┬──────────────────────────┬─┬──────────────────────┤
+//   │          │ │         overview         │ │                      │
+//   │          │ ├──────────────────────────┤ │                      │
+//   │ explorer │L│           rowR           │R│      details         │
+//   │          │R├──────────────────────────┤R│                      │
+//   │          │ │          focus           │ │                      │
+//   └──────────┴─┴──────────────────────────┴─┴──────────────────────┘
+//
+// `LR` / `RR` are the vertical resizer lanes (drag to widen / narrow
+// the side columns), `rowR` is the horizontal resizer between
+// overview and focus. Lane sizes are driven by CSS custom properties
+// that the JS element rewrites on resize / toggle.
+
+.layout {
+	display: grid;
+	grid-template-columns:
+		var(--sd-shell-left-col, 260px)
+		var(--sd-shell-gap-left, 8px)
+		1fr
+		var(--sd-shell-gap-right, 8px)
+		var(--sd-shell-right-col, 360px);
+	grid-template-rows:
+		48px
+		var(--sd-shell-row-overview, 1fr)
+		var(--sd-shell-gap-row, 8px)
+		var(--sd-shell-row-focus, 1fr);
+	grid-template-areas:
+		'toolbar  toolbar  toolbar  toolbar  toolbar'
+		'explorer leftR    overview rightR   details'
+		'explorer leftR    rowR     rightR   details'
+		'explorer leftR    focus    rightR   details';
+	width: 100%;
+	height: 100%;
+	min-height: 100vh;
+	background: var(--sd-bg-deep, #161616);
+	color: var(--sd-fg, #cccccc);
+	font-family: var(--sd-font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+	font-size: var(--sd-text-md, 13px);
+	box-sizing: border-box;
+	padding: var(--sd-shell-gap, 8px);
+
+	> [data-slot='toolbar'] {
+		grid-area: toolbar;
+	}
+	> [data-slot='explorer'] {
+		grid-area: explorer;
+		min-height: var(--sd-shell-panel-min-h, 180px);
+		overflow: hidden;
+	}
+	> [data-slot='overview'] {
+		grid-area: overview;
+		min-height: var(--sd-shell-panel-min-h, 180px);
+		overflow: hidden;
+	}
+	> [data-slot='focus'] {
+		grid-area: focus;
+		min-height: var(--sd-shell-panel-min-h, 180px);
+		overflow: hidden;
+	}
+	> [data-slot='details'] {
+		grid-area: details;
+		min-height: var(--sd-shell-panel-min-h, 180px);
+		overflow: hidden;
+	}
+
+	// Resizer lanes — render as a thin draggable strip between
+	// adjacent panels. The "hit area" is wider than the visible bar
+	// via `::before` to make the drag affordance forgiving without
+	// stealing visual space from the panels themselves.
+	> [data-role='resizer-left'] {
+		grid-area: leftR;
+	}
+	> [data-role='resizer-right'] {
+		grid-area: rightR;
+	}
+	> [data-role='resizer-row'] {
+		grid-area: rowR;
+	}
+	> [data-role^='resizer-'] {
+		position: relative;
+		background: transparent;
+		z-index: 1;
+
+		&:hover::after,
+		&:active::after {
+			background: var(--sd-accent, #3794ff);
+		}
+
+		&::after {
+			content: '';
+			position: absolute;
+			background: var(--sd-border-subtle, #2d2d2d);
+			transition: background 80ms linear;
+		}
+	}
+	> [data-role='resizer-left'],
+	> [data-role='resizer-right'] {
+		cursor: col-resize;
+		touch-action: none;
+
+		&::after {
+			top: 0;
+			bottom: 0;
+			left: 50%;
+			transform: translateX(-50%);
+			width: 1px;
+		}
+	}
+	> [data-role='resizer-row'] {
+		cursor: row-resize;
+		touch-action: none;
+
+		&::after {
+			left: 0;
+			right: 0;
+			top: 50%;
+			transform: translateY(-50%);
+			height: 1px;
+		}
+	}
+
+	// Hidden-panel modifiers — slot itself disappears AND the adjacent
+	// resizer lane collapses (no point dragging the edge of a hidden
+	// panel). Lane width / row height collapsing is handled by the
+	// element via inline CSS vars (see `#applyState`); inline styles
+	// override class-rule vars, so the SCSS just owns `display: none`.
+	&--explorer-hidden {
+		> [data-slot='explorer'],
+		> [data-role='resizer-left'] {
+			display: none;
+		}
+	}
+	&--details-hidden {
+		> [data-slot='details'],
+		> [data-role='resizer-right'] {
+			display: none;
+		}
+	}
+	&--overview-hidden {
+		> [data-slot='overview'],
+		> [data-role='resizer-row'] {
+			display: none;
+		}
+	}
+	&--focus-hidden {
+		> [data-slot='focus'],
+		> [data-role='resizer-row'] {
+			display: none;
+		}
+	}
+}
+
+// Generic panel chrome consumed by direct shell children. Components
+// that already paint their own surface (canvases, the toolbar) sit
+// inside a wrapper carrying this class; pure-DOM panels (Explorer,
+// SymbolDetails) extend or copy these tokens.
+.panel {
+	display: flex;
+	flex-direction: column;
+	background: var(--sd-panel-bg, #1e1e1e);
+	border: var(--sd-panel-border, 1px solid #2d2d2d);
+	border-radius: var(--sd-radius-md, 6px);
+	overflow: hidden;
+
+	&__header {
+		flex: 0 0 auto;
+		display: flex;
+		align-items: center;
+		gap: var(--sd-space-2, 8px);
+		height: var(--sd-panel-header-h, 32px);
+		padding: 0 var(--sd-panel-padding, 12px);
+		background: var(--sd-panel-header-bg, #252526);
+		border-bottom: 1px solid var(--sd-border-subtle, #2d2d2d);
+		font-size: var(--sd-text-sm, 11px);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--sd-fg-muted, #9d9d9d);
+	}
+
+	&__title {
+		font-weight: 600;
+		color: var(--sd-fg, #cccccc);
+		text-transform: none;
+		letter-spacing: 0;
+		font-size: var(--sd-text-md, 13px);
+	}
+
+	&__spacer {
+		flex: 1;
+	}
+
+	&__body {
+		flex: 1 1 auto;
+		overflow: auto;
+		padding: var(--sd-panel-padding, 12px);
+	}
+}

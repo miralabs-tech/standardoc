@@ -1,4 +1,5 @@
 import type {
+  DeclKindJson,
   NeighborSymbolJson,
   RawSymbolJson,
   ResolvedOrUnresolvedJson,
@@ -24,7 +25,13 @@ export function pickTopFqdn(symbols: ReadonlyArray<RawSymbolJson>): string | nul
 
 export function formatSymbolHeader(s: RawSymbolJson): string {
   const loc = `${s.location.file}:${s.location.start_line}`;
-  return `=== ${s.fqdn} ===\nkind: ${s.kind} | visibility: ${s.visibility} | ${loc}`;
+  const kindLabel = s.decl_kind ? `${s.kind} (${formatDeclKind(s.decl_kind)})` : s.kind;
+  return `=== ${s.fqdn} ===\nkind: ${kindLabel} | visibility: ${s.visibility} | ${loc}`;
+}
+
+export function formatDeclKind(d: DeclKindJson): string {
+  if (typeof d === 'string') return d;
+  return `custom:${d.custom.lang}:${d.custom.tag}`;
 }
 
 export function formatSymbolContext(ctx: SymbolContextWithNeighborsJson): string {
@@ -62,9 +69,14 @@ export function formatNeighborGroup(
 }
 
 export function targetLabel(t: ResolvedOrUnresolvedJson): string {
-  if ('Resolved' in t) return t.Resolved.fqdn;
-  if ('Unresolved' in t) return `<unresolved: ${t.Unresolved.name}>`;
-  return `<bridge ${t.UnresolvedBridge.bridge}: ${t.UnresolvedBridge.name}>`;
+  switch (t.kind) {
+    case 'resolved':
+      return t.fqdn;
+    case 'unresolved':
+      return `<unresolved: ${t.name}>`;
+    case 'unresolved_bridge':
+      return `<bridge ${t.bridge}: ${t.name}>`;
+  }
 }
 
 function indent(text: string): string {
@@ -73,33 +85,3 @@ function indent(text: string): string {
     .map(l => `  ${l}`)
     .join('\n');
 }
-
-export interface UsageStatsJson {
-  readonly period: string;
-  readonly calls: number;
-  readonly bytes_out_total: number;
-  readonly baseline_bytes_total: number;
-  readonly bytes_saved: number;
-  readonly ratio: number;
-}
-
-/**
- * Renders the aggregated usage_stats response as a one-line summary for a
- * VSCode information notification. Honest framing: baseline = sum of file
- * sizes of distinct source files referenced by responses (graph-grounded,
- * no estimation multiplier).
- */
-export function formatUsageStats(stats: UsageStatsJson): string {
-  if (stats.calls === 0) {
-    return `Standardoc — no tool calls logged yet (${stats.period}).`;
-  }
-  const savedKb = (stats.bytes_saved / 1024).toFixed(1);
-  const outKb = (stats.bytes_out_total / 1024).toFixed(1);
-  const baselineKb = (stats.baseline_bytes_total / 1024).toFixed(1);
-  const pct = (stats.ratio * 100).toFixed(1);
-  return (
-    `Standardoc — ${stats.calls} call(s) over ${stats.period}: ` +
-    `returned ${outKb} KB vs ${baselineKb} KB raw (${pct}%) → saved ${savedKb} KB of AI context.`
-  );
-}
-

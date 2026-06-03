@@ -1,6 +1,7 @@
 .old/**
 src/**
 scripts/**
+build.ts
 dist/bin/**
 node_modules/**
 .vscode/**
@@ -15,3 +16,4 @@ bun.lockb
 *.tsbuildinfo
 **/*.ts
 **/*.map
+*.env

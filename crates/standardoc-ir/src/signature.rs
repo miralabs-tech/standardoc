@@ -128,174 +128,22 @@ impl Modifiers {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SignatureMeta {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exposed_via: Option<BridgeKind>,
+    /// Bridges through which this symbol is exposed across substrate
+    /// boundaries. Multiple entries support dual-target apps
+    /// (e.g. a Tauri command also compiled to wasm — `["tauri", "wasm-bindgen"]`).
+    ///
+    /// IR-3 1.0 shape: `Vec<BridgeKind>` (was `Option<BridgeKind>` pre-3e-3).
+    /// Default is the empty vec — backward-compatible with pre-IR-3 rows
+    /// where the field was absent via `skip_serializing_if`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposed_via: Vec<BridgeKind>,
 }
 
 impl SignatureMeta {
     const fn is_default(&self) -> bool {
-        self.exposed_via.is_none()
+        self.exposed_via.is_empty()
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn full_signature_round_trip() {
-        let sig = Signature {
-            params: vec![
-                Param {
-                    name: "email".into(),
-                    ty: TypeRef::new("&str"),
-                    default: None,
-                },
-                Param {
-                    name: "limit".into(),
-                    ty: TypeRef::new("u32"),
-                    default: Some("10".into()),
-                },
-            ],
-            returns: Some(TypeRef::new("Result<User, Error>")),
-            modifiers: Modifiers {
-                is_async: true,
-                deprecated: Some("use create_user_v2".into()),
-                generic_params: vec!["T".into()],
-                where_clause: Some("T: Send".into()),
-            },
-            meta: SignatureMeta {
-                exposed_via: Some(BridgeKind::from("tauri")),
-            },
-        };
-        let json = serde_json::to_string(&sig).unwrap();
-        let back: Signature = serde_json::from_str(&json).unwrap();
-        assert_eq!(sig, back);
-    }
-
-    #[test]
-    fn async_renamed_in_json() {
-        let m = Modifiers {
-            is_async: true,
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&m).unwrap();
-        assert!(json.contains("\"async\":true"), "json was {json}");
-        assert!(!json.contains("is_async"));
-    }
-
-    #[test]
-    fn empty_signature_default() {
-        let sig = Signature::default();
-        let json = serde_json::to_string(&sig).unwrap();
-        let back: Signature = serde_json::from_str(&json).unwrap();
-        assert_eq!(sig, back);
-    }
-
-    #[test]
-    fn normalize_display_trims_and_collapses_internal_runs() {
-        assert_eq!(normalize_display("  foo   bar  "), "foo bar");
-        assert_eq!(normalize_display("a\t\tb\nc"), "a b c");
-    }
-
-    #[test]
-    fn normalize_display_preserves_typescript_union_single_spaces() {
-        assert_eq!(normalize_display("string | number"), "string | number");
-        assert_eq!(
-            normalize_display("Promise < T >"),
-            "Promise < T >",
-            "single spaces between tokens must survive — only Rust providers should pre-pass via compact_rust_tokens"
-        );
-    }
-
-    #[test]
-    fn type_ref_new_applies_normalize() {
-        let t = TypeRef::new("  Result<User, Error>  ");
-        assert_eq!(t.display, "Result<User, Error>");
-        let t = TypeRef::new("Vec\t<\tT\t>");
-        assert_eq!(t.display, "Vec < T >");
-    }
-
-    #[test]
-    fn compact_rust_tokens_empty_input_returns_empty() {
-        assert_eq!(compact_rust_tokens(""), "");
-        assert_eq!(compact_rust_tokens("   \t\n"), "");
-    }
-
-    #[test]
-    fn compact_rust_tokens_already_compact_is_idempotent() {
-        let s = "Arc<dyn Embedder>";
-        assert_eq!(compact_rust_tokens(s), s);
-    }
-
-    #[test]
-    fn compact_rust_tokens_strips_spaces_around_angle_brackets_and_double_colon() {
-        let raw =
-            "& Arc < std :: sync :: Mutex < Option < standardoc_core :: RagWatcherHandle > > >";
-        assert_eq!(
-            compact_rust_tokens(raw),
-            "&Arc<std::sync::Mutex<Option<standardoc_core::RagWatcherHandle>>>"
-        );
-    }
-
-    #[test]
-    fn compact_rust_tokens_keeps_space_after_dyn_impl_mut() {
-        assert_eq!(
-            compact_rust_tokens("Arc < dyn Embedder >"),
-            "Arc<dyn Embedder>"
-        );
-        assert_eq!(
-            compact_rust_tokens("impl Trait + Send"),
-            "impl Trait + Send"
-        );
-        assert_eq!(compact_rust_tokens("& mut Foo"), "&mut Foo");
-    }
-
-    #[test]
-    fn compact_rust_tokens_handles_comma_semicolon_colon() {
-        assert_eq!(
-            compact_rust_tokens("HashMap < String , u32 >"),
-            "HashMap<String, u32>"
-        );
-        assert_eq!(compact_rust_tokens("[ T ; N ]"), "[T; N]");
-        assert_eq!(
-            compact_rust_tokens("fn ( x : u32 ) -> u32"),
-            "fn(x: u32) -> u32"
-        );
-    }
-
-    #[test]
-    fn compact_rust_tokens_lifetime_attached_to_ident() {
-        // In current syn versions `'a` is a single token; this guards the
-        // degenerate split case where `'` and ident arrive separated.
-        assert_eq!(compact_rust_tokens("& ' a Foo"), "&'a Foo");
-        assert_eq!(compact_rust_tokens("& 'a str"), "&'a str");
-        assert_eq!(
-            compact_rust_tokens("for < 'a > Fn ( & 'a u32 )"),
-            "for<'a> Fn(&'a u32)"
-        );
-    }
-
-    #[test]
-    fn compact_rust_tokens_arrow_return_type() {
-        assert_eq!(
-            compact_rust_tokens("Result < () , Error >"),
-            "Result<(), Error>"
-        );
-        assert_eq!(
-            compact_rust_tokens("fn ( ) -> Result < u32 , Error >"),
-            "fn() -> Result<u32, Error>"
-        );
-    }
-
-    #[test]
-    fn compact_rust_tokens_preserves_string_literal_inside_attribute_value() {
-        // String literals are single Literal token trees — their internal
-        // spaces are not split by `split_whitespace` because the surrounding
-        // quotes keep the literal as a single chunk.
-        assert_eq!(
-            compact_rust_tokens(r#"name = "some description""#),
-            r#"name = "some description""#
-        );
-    }
-}
+mod tests;

@@ -1,14 +1,11 @@
 # Standardoc — VSCode extension
 
-> A code intelligence infrastructure, built on a canonical multi-language
-> IR and a living semantic graph. One graph, several daemons (LSP, MCP
-> stdio + HTTP/SSE), all your tools plugged into it. ~100 tokens per
-> agent query instead of 30k of grep + read. Local, derived from source
-> code, open-source.
+> **Your AI agent re-reads your whole codebase on every task.** Standardoc
+> indexes it once into a living map of your code — so the agent just *asks*.
+> **~100 tokens per question instead of 30k.** Local, open-source.
 >
-> Built for what breaks at scale and turns unmanageable in 6 months, not
-> for the 2-minute demo. Code understanding is a system, not a string of
-> greps.
+> This extension embeds the daemon, downloads the binary, and wires your
+> agent up in one click.
 
 ## 🆕 v1.1.0 — breaking install change
 
@@ -48,8 +45,6 @@ See the [QUICKSTART](https://github.com/miralabs-tech/standardoc/blob/main/.impo
 
 - **`standardoc.binaryPath`** — absolute path override. Takes priority over the auto-downloaded binary. Useful for local dev (`target/debug/standardoc`) and pre-release testers.
 - **`standardoc.mcpHttpPort`** — TCP port on `127.0.0.1` (default `7700`). Set to `0` for an ephemeral kernel-picked port (resolved URL is written to `.standardoc/mcp.endpoint`).
-- **`standardoc.ragEnabled`** — enable the RAG (prose retrieval) layer. Adds `chunk_refs` to `get_context` responses and exposes the `fetch_chunks` MCP tool. Daemon restarts automatically when this changes.
-- **`standardoc.ragEmbedder`** — `mock` (deterministic zero-network stub) or `candle` (local BGE-small-en-v1.5, ~130 MB downloaded on first use to `~/.cache/standardoc/models/`).
 
 ## Commands
 
@@ -71,22 +66,11 @@ Symbols
 - `Standardoc: Find symbol` — InputBox + QuickPick over `find_symbol`, opens the selected symbol at its source location.
 - `Standardoc: Get context for symbol at cursor` — runs `find_symbol` on the word under the cursor, takes the top match, renders `get_context(fqdn, depth=1)` into the output channel.
 
-RAG (prose retrieval)
-
-- `Standardoc: Toggle RAG (prose retrieval)`
-- `Standardoc: Switch RAG embedder…`
-- `Standardoc: Rebuild RAG index`
-
-Telemetry-free token savings
-
-- `Standardoc: Show token savings`
-- `Standardoc: Reset token savings…`
-
 ## AI agent skill (Claude Code)
 
 When you opt in to initialization, the extension generates a skill file at `.claude/skills/standardoc/SKILL.md`. Claude Code (CLI and IDE integrations) auto-loads skills from `.claude/skills/` and uses the `description` / `when_to_use` frontmatter to decide when to invoke them.
 
-The generated skill teaches the agent the **3-phase protocol** (`find_symbol` → `get_context` (depth=1) → `get_body` or depth=2) and pre-approves every shipped MCP tool so they run without per-call permission prompts: `find_symbol`, `find_symbols_by_pattern`, `find_similar_symbols`, `get_context`, `get_body`, `list_symbols`, `current_revision`, `check_stale`, `fetch_chunks`, `resolve_external`, `session_*`, `usage_stats`.
+The generated skill teaches the agent the **3-phase protocol** (`find_symbol` → `get_context` (depth=1) → `get_body` or depth=2) and pre-approves every shipped MCP tool so they run without per-call permission prompts: `find_symbol`, `find_symbols_by_pattern`, `find_similar_symbols`, `get_context`, `get_body`, `list_symbols`, `current_revision`, `check_stale`, `resolve_external`, plus the cross-workspace and projects surface.
 
 A `PreToolUse` hook denies `Bash` / `Read` / `Grep` / `Glob` until a Standardoc MCP tool has been called in the session — this is what the skill calls **MCP-first** and what unlocks the ~100-tokens-per-query payoff. A `SessionStart` hook wipes the sentinel each new chat.
 
@@ -134,9 +118,9 @@ Common config file locations: Claude Desktop → `claude_desktop_config.json`; C
 ## Support
 
 - **Issues** — [github.com/miralabs-tech/standardoc/issues](https://github.com/miralabs-tech/standardoc/issues) for bugs, regressions, feature requests.
-- **Discussions and roadmap** — see [SUPPORT.md](https://github.com/miralabs-tech/standardoc/blob/main/.important/en/SUPPORT.md) for triage policy, scope discipline, and current focus areas. Standardoc is maintained by a single person; the SUPPORT doc explains what is in / out of scope before 1.0.
-- **Roadmap and what's shipped** — [TODO-LIST.md](https://github.com/miralabs-tech/standardoc/blob/main/.important/en/TODO-LIST.md).
-- **Storytelling** (philosophy, short / mid / long-term vision) — [.important/en/storytelling/](https://github.com/miralabs-tech/standardoc/tree/main/.important/en/storytelling).
+  Standardoc is maintained by a single person; before 1.0, third-party PRs are held back, but feedback and ideas are very welcome.
+- **Roadmap & what's shipped** — [TODO-LIST.md](https://github.com/miralabs-tech/standardoc/blob/main/.important/en/TODO-LIST.md).
+- **Sponsor** — [StandarX on OpenCollective](https://opencollective.com/standarx).
 
 ## Local development (dogfood)
 

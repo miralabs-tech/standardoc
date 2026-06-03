@@ -1,0 +1,38 @@
+// Shared SCSS mixins. Imported per-component via `@use` to avoid
+// leaking selectors into the global cascade.
+
+@mixin button-base {
+	background: transparent;
+	color: var(--sd-fg, #cccccc);
+	border: 1px solid var(--sd-border, #454545);
+	border-radius: var(--sd-radius-sm, 3px);
+	padding: 3px 9px;
+	font: inherit;
+	cursor: pointer;
+	transition: background 90ms ease, border-color 90ms ease, color 90ms ease;
+
+	&:hover {
+		background: var(--sd-hover, #2a2d2e);
+		border-color: var(--sd-accent, #3794ff);
+	}
+
+	&:focus-visible {
+		outline: 1px solid var(--sd-accent, #3794ff);
+		outline-offset: 1px;
+	}
+
+	&:disabled,
+	&[aria-disabled='true'] {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+}
+
+@mixin badge-base {
+	padding: 2px 8px;
+	background: var(--sd-hover, #2a2d2e);
+	border-radius: var(--sd-radius-pill, 10px);
+	color: var(--sd-fg-muted, #9d9d9d);
+	font-size: 11px;
+	font-family: ui-monospace, SFMono-Regular, monospace;
+}

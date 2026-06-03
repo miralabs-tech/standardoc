@@ -129,7 +129,7 @@ impl Resolver for CargoResolver {
         // 5. Match the requested crate by name. Take the first matching
         //    package — workspaces with multiple versions of the same
         //    crate are rare day-1 and accept slight over-extraction.
-        let Some(package) = metadata.packages.iter().find(|p| p.name == crate_name) else {
+        let Some(package) = find_package(&metadata.packages, crate_name) else {
             return Ok(ResolveOutcome::NotInThisRegistry);
         };
 
@@ -179,6 +179,19 @@ impl Resolver for CargoResolver {
 fn crate_name_of_fqdn(fqdn: &str) -> Option<&str> {
     let (head, _rest) = fqdn.split_once("::")?;
     if head.is_empty() { None } else { Some(head) }
+}
+
+/// Finds the metadata package whose crate matches the fqdn's leading
+/// segment. Cargo package names keep hyphens (`wasm-bindgen`), but a
+/// crate is imported with the hyphens normalised to underscores
+/// (`wasm_bindgen::...`) — so the fqdn head never carries a hyphen.
+/// Match the normalised form so hyphenated crates resolve. (A custom
+/// `[lib] name` that differs from the normalised package name is not
+/// handled — rare enough to accept day-1.)
+fn find_package<'a>(packages: &'a [CargoPackage], crate_name: &str) -> Option<&'a CargoPackage> {
+    packages
+        .iter()
+        .find(|p| p.name == crate_name || p.name.replace('-', "_") == crate_name)
 }
 
 #[derive(Debug, Deserialize)]
@@ -239,6 +252,7 @@ fn walk_and_submit_crate(
     let mut submitted = 0usize;
     let ctx = ExtractContext {
         workspace_root: manifest_dir,
+        cross_workspace: None,
     };
 
     for entry in WalkDir::new(&src_dir).into_iter().filter_map(Result::ok) {
@@ -356,6 +370,20 @@ mod tests {
     }
 
     #[test]
+    fn find_package_matches_hyphenated_crate_via_underscore_fqdn() {
+        let packages = vec![CargoPackage {
+            name: "wasm-bindgen".into(),
+            version: "0.2.92".into(),
+            manifest_path: PathBuf::from("/x/wasm-bindgen/Cargo.toml"),
+        }];
+        // fqdn head is the underscore-normalised import identifier.
+        assert!(find_package(&packages, "wasm_bindgen").is_some());
+        // a non-hyphenated name still matches directly.
+        assert!(find_package(&packages, "wasm-bindgen").is_some());
+        assert!(find_package(&packages, "nope").is_none());
+    }
+
+    #[test]
     fn rewrite_for_external_stamps_sentinel_path_and_flags() {
         let mut extracted = ExtractedFile {
             file: "src/lib.rs".into(),
@@ -368,6 +396,8 @@ mod tests {
             edges: vec![],
             call_sites: vec![],
             documents: vec![],
+            ffi_bindings: vec![],
+            module_lookup: None,
         };
         rewrite_for_external(
             &mut extracted,

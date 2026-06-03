@@ -46,6 +46,9 @@ pub enum StorageError {
     #[error("invalid stored data: {detail}")]
     InvalidStoredData { detail: String },
 
+    #[error("bridge kind validation failed: {0}")]
+    BridgeKindInvalid(#[from] standardoc_ir::BridgeKindError),
+
     #[error("FTS5 integrity-check reported corruption: {detail}")]
     FtsCorrupted { detail: String },
 

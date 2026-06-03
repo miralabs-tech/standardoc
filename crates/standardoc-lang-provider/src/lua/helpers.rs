@@ -3,27 +3,31 @@ use std::path::{Path, PathBuf};
 use full_moon::ast::{Expression, Stmt, Var};
 use full_moon::tokenizer::{TokenReference, TokenType};
 
-use crate::utils::strip_extension;
+use crate::walk_core::LanguagePathConventions;
 
-/// Compute the dotted module portion of an FQDN from a workspace-relative
+/// Per-language conventions used by `crate::walk_core::compute_module_path`.
+/// `init` collapses to the parent directory because Lua's
+/// `require("foo")` resolves to either `foo.lua` or `foo/init.lua` — both
+/// shapes must share the same FQDN root.
+pub(crate) const LUA_CONVENTIONS: LanguagePathConventions = LanguagePathConventions {
+    extensions: &[".lua"],
+    root_aliases: &["init"],
+    strip_src_prefix: false,
+};
+
+/// Compute the `::`-joined module portion of an FQDN from a workspace-relative
 /// path (relative to the package root). Strips the `.lua` extension and
 /// collapses trailing `/init` to the parent directory (Lua module
 /// convention: `require("foo")` resolves to either `foo.lua` or
 /// `foo/init.lua`).
 ///
 /// Examples (package_relative input → output):
-/// * `"src/utils/strings.lua"` → `"src.utils.strings"`
-/// * `"src/utils/init.lua"`    → `"src.utils"`
+/// * `"src/utils/strings.lua"` → `"src::utils::strings"`
+/// * `"src/utils/init.lua"`    → `"src::utils"`
 /// * `"init.lua"`              → `""`     (file lives at package root)
 /// * `"main.lua"`              → `"main"`
 pub(crate) fn compute_module_path(package_relative: &str) -> String {
-    let stem = strip_extension(package_relative, &[".lua"]);
-    let stem = stem.strip_suffix("/init").unwrap_or(stem);
-    if stem == "init" {
-        String::new()
-    } else {
-        stem.replace('/', ".")
-    }
+    crate::walk_core::compute_module_path(&LUA_CONVENTIONS, package_relative)
 }
 
 /// Walk up from a file's parent directory looking for a `*.rockspec` file.
@@ -115,14 +119,14 @@ mod tests {
     fn compute_module_path_strips_lua_extension() {
         assert_eq!(
             compute_module_path("src/utils/strings.lua"),
-            "src.utils.strings"
+            "src::utils::strings"
         );
         assert_eq!(compute_module_path("main.lua"), "main");
     }
 
     #[test]
     fn compute_module_path_collapses_init() {
-        assert_eq!(compute_module_path("src/utils/init.lua"), "src.utils");
+        assert_eq!(compute_module_path("src/utils/init.lua"), "src::utils");
     }
 
     #[test]

@@ -15,6 +15,7 @@ use crate::pipeline::paths::{guess_language, to_workspace_relative};
 use crate::pipeline::provider::{ExtractContext, ExtractError, LanguageProvider};
 use crate::storage::error::StorageError;
 use crate::storage::handle::IndexHandle;
+use crate::storage::module_lookup::PRIMARY_WORKSPACE_ID;
 
 #[derive(Debug, Error)]
 pub enum ColdStartError {
@@ -28,6 +29,7 @@ pub enum ColdStartError {
     Walk(#[from] walkdir::Error),
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Outcome {
     Upsert {
         rel: String,
@@ -67,6 +69,28 @@ pub(crate) fn reindex_paths(
         return Ok(());
     }
     let workspace_root = handle.workspace_root().to_path_buf();
+
+    // GRTR Phase 5.a — re-run `workspace_prepare` over the full
+    // workspace candidate list whenever a `.rs` file is in the change
+    // set. The Rust provider's `GlobalReturnTypeRegistry` is a
+    // workspace-wide table: a single file change can invalidate
+    // entries for any consumer that referenced its fns. The simplest
+    // correct strategy is a full re-Pass-0 on every relevant watcher
+    // event ; an incremental side-index (Phase 5.b) is deferred until
+    // measured perf warrants it.
+    if paths.iter().any(|p| {
+        Path::new(p)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("rs"))
+    }) {
+        let candidates = crate::pipeline::cold_start::collect_candidates(&workspace_root, filters)?;
+        let rel_candidates: Vec<String> = candidates
+            .iter()
+            .filter_map(|abs| to_workspace_relative(abs, &workspace_root))
+            .collect();
+        provider.workspace_prepare(&workspace_root, &rel_candidates);
+    }
+
     let mut outcomes = Vec::with_capacity(paths.len());
     for rel in paths {
         if filters.is_skipped(rel) {
@@ -108,10 +132,18 @@ pub(crate) fn process_one(
         return Ok(None);
     };
 
-    let ctx = ExtractContext { workspace_root };
+    let resolver = crate::cross_workspace_resolver::DbCrossWorkspaceResolver::new(handle);
+    let ctx = ExtractContext {
+        workspace_root,
+        cross_workspace: Some(&resolver),
+    };
     match provider.extract(&content, &rel, &ctx) {
         Ok(mut extracted) => {
             extracted.content_hash = hash;
+            crate::pipeline::cross_workspace_post::rewrite_cross_workspace_edges(
+                &mut extracted,
+                &resolver,
+            );
             Ok(Some(Outcome::Upsert { rel, extracted }))
         }
         Err(ExtractError::Parse { detail, .. }) => {
@@ -174,7 +206,9 @@ pub(crate) fn commit_outcomes(
     let next_revision = handle.revision().saturating_add(1);
     for outcome in outcomes {
         match outcome {
-            Outcome::Upsert { extracted, .. } => apply_upsert_file(&tx, extracted, next_revision)?,
+            Outcome::Upsert { extracted, .. } => {
+                apply_upsert_file(&tx, extracted, next_revision, PRIMARY_WORKSPACE_ID)?;
+            }
             Outcome::ParseError {
                 rel,
                 language,

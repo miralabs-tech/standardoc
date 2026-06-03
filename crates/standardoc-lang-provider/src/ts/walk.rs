@@ -1,26 +1,35 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use standardoc_ir::{
-    Blake3Hash, EdgeKind, Kind, LanguageKind, Modifiers, Param, RawDocument, RawEdge, RawSymbol,
-    ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation, TypeRef, Visibility,
+    Blake3Hash, BuiltinTag, BuiltinTier, DeclKind, EdgeKind, Kind, Language, LanguageKind,
+    ModuleLookup, RawCallSite, RawDocument, RawEdge, RawSymbol, ResolvedOrUnresolved, Site,
+    SymbolLocation, Visibility,
 };
 use swc_core::common::BytePos;
 use swc_core::common::comments::SingleThreadedComments;
 use swc_core::common::errors::SourceMapper;
 use swc_core::common::{SourceMap, Span, Spanned, sync::Lrc};
 use swc_core::ecma::ast::{
-    Class, ClassDecl, ClassMember, ClassMethod, Decl, DefaultDecl, ExportDecl, ExportDefaultDecl,
-    FnDecl, ImportDecl, ImportSpecifier, MemberProp, Module, ModuleDecl, ModuleExportName,
-    ModuleItem, Param as AstParam, Pat, Stmt, TsEnumDecl, TsInterfaceDecl, TsTypeAliasDecl,
-    VarDecl, VarDeclarator,
+    Class, ClassMember, Decl, DefaultDecl, ExportDecl, ExportDefaultDecl, ImportDecl,
+    ImportSpecifier, MemberProp, Module, ModuleDecl, ModuleExportName, ModuleItem, Stmt, VarDecl,
 };
 
 use super::extract_doc;
-use super::helpers::map_access_modifier;
+use super::helpers::{loc_utf16_col, map_access_modifier, prop_name_static};
+use super::lookup::build_ts_lookup;
 use super::resolver::{TsConfigPaths, resolve_import};
 use super::visit;
+use crate::builtins::global as global_builtin_registry;
 use crate::walk_core::WalkContextCore;
+
+mod extract_items;
+
+use extract_items::{
+    build_function_signature, classify_ts_fn_entry_point, declarator_name, extract_class_decl,
+    extract_class_inner, extract_enum_decl, extract_fn_decl, extract_interface_decl,
+    extract_type_alias_decl, extract_var_decl,
+};
 
 /// Per-file walker state for the TS/JS provider.
 ///
@@ -37,6 +46,11 @@ pub(crate) struct TsWalkContext<'a> {
     pub(crate) package_root: PathBuf,
     pub(crate) tsconfig: Option<TsConfigPaths>,
     pub(crate) comments: &'a SingleThreadedComments,
+    /// Stage 3e-1b — flags accumulated from Attribute-tier builtin hits
+    /// while walking. Keyed by the source symbol's FQDN (the enclosing
+    /// function / class FQDN that owns the touched type / call / ref).
+    /// Flushed into each symbol's `flags` vec at `into_outputs`.
+    pub(crate) attribute_flags: HashMap<String, HashSet<String>>,
 }
 
 impl<'a> TsWalkContext<'a> {
@@ -52,7 +66,7 @@ impl<'a> TsWalkContext<'a> {
         comments: &'a SingleThreadedComments,
     ) -> Self {
         Self {
-            core: WalkContextCore::new(file_path, file_module_fqdn),
+            core: WalkContextCore::new(file_path, file_module_fqdn, Language::TypeScript),
             package_name,
             import_aliases: HashMap::new(),
             cm,
@@ -60,6 +74,7 @@ impl<'a> TsWalkContext<'a> {
             package_root,
             tsconfig,
             comments,
+            attribute_flags: HashMap::new(),
         }
     }
 
@@ -73,6 +88,10 @@ impl<'a> TsWalkContext<'a> {
 
     pub(crate) fn push_document(&mut self, doc: RawDocument) {
         self.core.push_document(doc);
+    }
+
+    pub(crate) fn push_call_site(&mut self, cs: RawCallSite) {
+        self.core.push_call_site(cs);
     }
 
     /// Push the symbol and, if a JSDoc block precedes `attached_pos`, also
@@ -96,22 +115,89 @@ impl<'a> TsWalkContext<'a> {
     }
 
     /// Resolve a single-ident call target through the alias-table, then through
-    /// `<current_module_fqdn>::<name>` against `defined_fqdns`. Multi-segment
+    /// `<current_module_fqdn>::<name>` against `defined_fqdns`, then through
+    /// the language's [`BuiltinRegistry`] (Stage 3a-6b chain). Multi-segment
     /// member-expression calls (`obj.method`) are handled separately by the
     /// visitor (always Unresolved by method ident, day-1).
-    pub(crate) fn resolve_call(
-        &self,
-        name: &str,
-        current_module_fqdn: &str,
-    ) -> ResolvedOrUnresolved {
+    ///
+    /// Stage 3e-1 / 3e-1b: the return type is a 3-variant
+    /// [`ResolutionOutcome`] so callers can distinguish the three skip
+    /// semantics introduced by tier classification :
+    ///
+    /// - [`ResolutionOutcome::Drop`] — structural noise (`Array`,
+    ///   `Map`, `undefined`, …). Caller silently skips ; nothing to
+    ///   record.
+    /// - [`ResolutionOutcome::Attribute(tag)`] — semantic effect on
+    ///   the *source* symbol (`Promise` → `"async"` flag, `Iterator`
+    ///   → `"iter"` flag). Caller skips the edge and registers the
+    ///   tag against the enclosing FQDN via
+    ///   [`TsWalkContext::register_attribute_flag`].
+    /// - [`ResolutionOutcome::Emit(target)`] — emit the edge.
+    ///   `target.via_builtin` is `Some(tag)` for Edge-tier builtins
+    ///   so callers can stamp `via-builtin` / `builtin-<slug>` attrs.
+    pub(crate) fn resolve_call(&self, name: &str, current_module_fqdn: &str) -> ResolutionOutcome {
         if let Some(import) = self.import_aliases.get(name) {
-            return import.target.clone();
+            return ResolutionOutcome::Emit(CallTarget::plain(import.target.clone()));
+        }
+        // Bug C: dotted name whose head is a namespace/default/named import
+        // alias (e.g. `vscode.Disposable` after `import * as vscode from
+        // 'vscode'`). Route through the alias's target and replace remaining
+        // `.` with `::` so the resolver sees `vscode::Disposable` instead of
+        // the bogus module-local fallback `<current_module>::vscode.Disposable`.
+        if let Some((head, rest)) = name.split_once('.')
+            && let Some(import) = self.import_aliases.get(head)
+        {
+            let suffix = rest.replace('.', "::");
+            let combined = match &import.target {
+                ResolvedOrUnresolved::Resolved { fqdn } => ResolvedOrUnresolved::Resolved {
+                    fqdn: format!("{fqdn}::{suffix}"),
+                },
+                ResolvedOrUnresolved::Unresolved { name } => ResolvedOrUnresolved::Unresolved {
+                    name: format!("{name}::{suffix}"),
+                },
+                ResolvedOrUnresolved::UnresolvedBridge { bridge, name } => {
+                    ResolvedOrUnresolved::UnresolvedBridge {
+                        bridge: bridge.clone(),
+                        name: format!("{name}::{suffix}"),
+                    }
+                }
+            };
+            return ResolutionOutcome::Emit(CallTarget::plain(combined));
         }
         let local = format!("{current_module_fqdn}::{name}");
         if self.core.defined_fqdns.contains(&local) {
-            return ResolvedOrUnresolved::Resolved { fqdn: local };
+            return ResolutionOutcome::Emit(CallTarget::plain(ResolvedOrUnresolved::Resolved {
+                fqdn: local,
+            }));
         }
-        ResolvedOrUnresolved::Unresolved { name: local }
+        if let Some(entry) = global_builtin_registry().lookup(name, self.core.lookup.language) {
+            return match entry.tier {
+                BuiltinTier::Drop => ResolutionOutcome::Drop,
+                BuiltinTier::Attribute => ResolutionOutcome::Attribute(entry.tag.clone()),
+                BuiltinTier::Edge => ResolutionOutcome::Emit(CallTarget {
+                    to: ResolvedOrUnresolved::Resolved {
+                        fqdn: entry.synthetic_fqdn.clone(),
+                    },
+                    via_builtin: Some(entry.tag.clone()),
+                }),
+            };
+        }
+        ResolutionOutcome::Emit(CallTarget::plain(ResolvedOrUnresolved::Unresolved {
+            name: local,
+        }))
+    }
+
+    /// Stage 3e-1b — record a builtin tag against the symbol identified
+    /// by `source_fqdn` so the post-walk flush can stamp it onto the
+    /// symbol's `flags` vec. Best-effort : callers fire-and-forget,
+    /// duplicates collapse into a `HashSet` so the same flag never lands
+    /// twice on the same symbol regardless of how many times the same
+    /// Attribute-tier builtin is touched in the symbol's body.
+    pub(crate) fn register_attribute_flag(&mut self, source_fqdn: &str, tag: &BuiltinTag) {
+        self.attribute_flags
+            .entry(source_fqdn.to_string())
+            .or_default()
+            .insert(tag.slug());
     }
 
     pub(crate) fn span_location(&self, span: Span) -> SymbolLocation {
@@ -120,9 +206,9 @@ impl<'a> TsWalkContext<'a> {
         SymbolLocation {
             file: self.core.file_path.clone(),
             start_line: clamp_line(start.line),
-            start_col: clamp_col(start.col_display),
+            start_col: loc_utf16_col(&start),
             end_line: clamp_line(end.line),
-            end_col: clamp_col(end.col_display),
+            end_col: loc_utf16_col(&end),
         }
     }
 
@@ -131,7 +217,7 @@ impl<'a> TsWalkContext<'a> {
         Site {
             file: self.core.file_path.clone(),
             line: clamp_line(start.line),
-            col: clamp_col(start.col_display),
+            col: loc_utf16_col(&start),
         }
     }
 
@@ -146,9 +232,81 @@ impl<'a> TsWalkContext<'a> {
         self.cm.span_to_snippet(span).ok()
     }
 
-    pub(crate) fn into_outputs(self) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
-        (self.core.symbols, self.core.edges, self.core.documents)
+    #[cfg(test)]
+    pub(crate) fn into_outputs(
+        self,
+    ) -> (
+        Vec<RawSymbol>,
+        Vec<RawEdge>,
+        Vec<RawDocument>,
+        Vec<RawCallSite>,
+    ) {
+        let (s, e, d, c, _) = self.into_outputs_with_lookup();
+        (s, e, d, c)
     }
+
+    /// Stage 3 final-mile (R1) — same as [`Self::into_outputs`] but also
+    /// returns the AOT [`ModuleLookup`] so the pipeline can persist it via
+    /// `put_module_lookup`. The lookup is what cross-workspace queries
+    /// consult to resolve imports against this workspace's modules.
+    pub(crate) fn into_outputs_with_lookup(
+        mut self,
+    ) -> (
+        Vec<RawSymbol>,
+        Vec<RawEdge>,
+        Vec<RawDocument>,
+        Vec<RawCallSite>,
+        ModuleLookup,
+    ) {
+        // Stage 3e-1b — flush accumulated Attribute-tier flags onto the
+        // symbols they belong to. Iteration order is stable (sorted by
+        // flag string) so the resulting `symbol.flags` vec is
+        // deterministic across runs — important for diff tools and the
+        // body_hash-driven `apply_edges` plan.
+        if !self.attribute_flags.is_empty() {
+            let mut by_fqdn: HashMap<String, Vec<String>> = HashMap::new();
+            for (fqdn, flags) in self.attribute_flags.drain() {
+                let mut sorted: Vec<String> = flags.into_iter().collect();
+                sorted.sort();
+                by_fqdn.insert(fqdn, sorted);
+            }
+            for sym in &mut self.core.symbols {
+                if let Some(extra) = by_fqdn.get(&sym.fqdn) {
+                    for f in extra {
+                        if !sym.flags.contains(f) {
+                            sym.flags.push(f.clone());
+                        }
+                    }
+                }
+            }
+        }
+        (
+            self.core.symbols,
+            self.core.edges,
+            self.core.documents,
+            self.core.call_sites,
+            self.core.lookup,
+        )
+    }
+}
+
+/// Outcome of [`TsWalkContext::resolve_call`]. Three variants reflect
+/// the three skip semantics introduced by Stage 3e-1 tier
+/// classification + 3e-1b's flag promotion :
+#[derive(Debug, Clone)]
+pub(crate) enum ResolutionOutcome {
+    /// Drop tier builtin or unmatched name with no entry to record.
+    /// Caller silently skips emission.
+    Drop,
+    /// Attribute tier builtin — caller skips the edge but registers
+    /// the carried [`BuiltinTag`] against the enclosing symbol via
+    /// [`TsWalkContext::register_attribute_flag`].
+    Attribute(BuiltinTag),
+    /// Resolvable target — caller emits the edge using the carried
+    /// [`CallTarget`]. `target.via_builtin` is `Some(tag)` for
+    /// Edge-tier builtins (so the emitter can stamp `via-builtin` /
+    /// `builtin-<slug>` attrs).
+    Emit(CallTarget),
 }
 
 /// A resolved (or unresolved-canonical) import, keyed in `import_aliases` by
@@ -158,6 +316,29 @@ pub(crate) struct ResolvedImport {
     pub(crate) target: ResolvedOrUnresolved,
 }
 
+/// Output of [`TsWalkContext::resolve_call`]. Carries the canonical edge
+/// target plus, when the resolution landed on a `BuiltinTier::Edge` builtin,
+/// the originating [`BuiltinTag`] so emitters can attach `via-builtin` /
+/// `builtin-<slug>` attributes (Rust UsesType already does this — Stage
+/// 3e-1 brings TS to parity).
+#[derive(Debug, Clone)]
+pub(crate) struct CallTarget {
+    pub(crate) to: ResolvedOrUnresolved,
+    pub(crate) via_builtin: Option<BuiltinTag>,
+}
+
+impl CallTarget {
+    /// Wrap a non-builtin resolution (import alias, defined local, or
+    /// canonical-unresolved). `via_builtin` is `None`.
+    pub(crate) const fn plain(to: ResolvedOrUnresolved) -> Self {
+        Self {
+            to,
+            via_builtin: None,
+        }
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn walk(
     module: &Module,
@@ -169,7 +350,48 @@ pub(crate) fn walk(
     package_root: &Path,
     tsconfig: Option<TsConfigPaths>,
     comments: &SingleThreadedComments,
-) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
+) -> (
+    Vec<RawSymbol>,
+    Vec<RawEdge>,
+    Vec<RawDocument>,
+    Vec<RawCallSite>,
+) {
+    let (s, e, d, c, _lookup) = walk_with_lookup(
+        module,
+        package_name,
+        file_path,
+        file_module_fqdn,
+        cm,
+        from_file_abs_path,
+        package_root,
+        tsconfig,
+        comments,
+    );
+    (s, e, d, c)
+}
+
+/// Stage 3 final-mile (R1) — same as [`walk`] but also returns the AOT
+/// [`ModuleLookup`] so callers (production `extract_file`) can stash it
+/// in [`ExtractedFile::module_lookup`] for pipeline persistence. Tests
+/// continue to use [`walk`] when they don't care about the lookup.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn walk_with_lookup(
+    module: &Module,
+    package_name: &str,
+    file_path: &str,
+    file_module_fqdn: &str,
+    cm: Lrc<SourceMap>,
+    from_file_abs_path: &Path,
+    package_root: &Path,
+    tsconfig: Option<TsConfigPaths>,
+    comments: &SingleThreadedComments,
+) -> (
+    Vec<RawSymbol>,
+    Vec<RawEdge>,
+    Vec<RawDocument>,
+    Vec<RawCallSite>,
+    ModuleLookup,
+) {
     let mut ctx = TsWalkContext::new(
         file_path.to_string(),
         package_name.to_string(),
@@ -180,9 +402,10 @@ pub(crate) fn walk(
         tsconfig,
         comments,
     );
+    ctx.core.lookup = build_ts_lookup(module, file_module_fqdn);
     walk_p1(&mut ctx, &module.body, file_module_fqdn);
     walk_p2(&mut ctx, &module.body, file_module_fqdn);
-    ctx.into_outputs()
+    ctx.into_outputs_with_lookup()
 }
 
 fn walk_p1(ctx: &mut TsWalkContext<'_>, items: &[ModuleItem], current_module: &str) {
@@ -249,6 +472,7 @@ fn process_re_export_all(
         sites: vec![ctx.span_site(item.span)],
         attributes: vec!["re-export".to_string(), "wildcard".to_string()],
         confidence,
+        receiver_type: None,
     });
 }
 
@@ -283,6 +507,7 @@ fn process_re_export_named(
             sites: vec![ctx.span_site(span)],
             attributes: vec!["re-export".to_string()],
             confidence,
+            receiver_type: None,
         });
         return;
     }
@@ -312,6 +537,7 @@ fn process_re_export_named(
                     sites: vec![ctx.span_site(span)],
                     attributes: vec!["re-export".to_string(), "namespace".to_string()],
                     confidence,
+                    receiver_type: None,
                 });
                 continue;
             }
@@ -334,6 +560,7 @@ fn process_re_export_named(
             sites: vec![ctx.span_site(span)],
             attributes: vec!["re-export".to_string()],
             confidence,
+            receiver_type: None,
         });
     }
 }
@@ -354,6 +581,12 @@ fn process_item_p2(ctx: &mut TsWalkContext<'_>, item: &ModuleItem, current_modul
         }
         ModuleItem::Stmt(Stmt::Decl(decl)) => {
             visit_decl_bodies(ctx, decl, current_module);
+        }
+        ModuleItem::Stmt(Stmt::Expr(expr_stmt)) => {
+            // Top-level expression statement (Vue 3 script-setup idiom:
+            // `onMount(() => { ... });` at module scope). No enclosing
+            // symbol — calls attribute to the module fqdn itself.
+            visit::visit_expression_for_calls(ctx, &expr_stmt.expr, current_module, current_module);
         }
         _ => {}
     }
@@ -408,14 +641,21 @@ fn visit_class_methods(
 ) {
     let class_fqdn = format!("{current_module}::{class_name}");
     for member in &class.body {
-        let ClassMember::Method(method) = member else {
-            continue;
-        };
-        let Some(method_name) = method_name_string(&method.key) else {
-            continue;
-        };
-        let method_fqdn = format!("{class_fqdn}::{method_name}");
-        visit::visit_function_body(ctx, &method.function, current_module, &method_fqdn);
+        match member {
+            ClassMember::Method(method) => {
+                let Some(method_name) = prop_name_static(&method.key) else {
+                    continue;
+                };
+                let method_fqdn = format!("{class_fqdn}::{method_name}");
+                visit::visit_function_body(ctx, &method.function, current_module, &method_fqdn);
+            }
+            ClassMember::Constructor(ctor) => {
+                // FQDN must match `extract_constructor`'s Pass-1 shape.
+                let ctor_fqdn = format!("{class_fqdn}::constructor");
+                visit::visit_constructor_body(ctx, ctor, current_module, &ctor_fqdn);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -455,11 +695,20 @@ fn process_decl(
         }
         Decl::TsTypeAlias(it) => {
             let sym = extract_type_alias_decl(ctx, it, current_module, exported);
+            let alias_fqdn = sym.fqdn.clone();
             ctx.push_symbol_with_doc(sym, outer_pos);
+            // Bug B Stage 2b: walk the alias body for `UsesType` edges
+            // (`type X = Foo | Bar` → edges from X to Foo and Bar).
+            visit::visit_for_uses(
+                ctx,
+                &it.type_ann,
+                current_module,
+                &alias_fqdn,
+                visit::TYPE_CTX_ALIAS_BODY,
+            );
         }
         Decl::TsEnum(it) => {
-            let sym = extract_enum_decl(ctx, it, current_module, exported);
-            ctx.push_symbol_with_doc(sym, outer_pos);
+            extract_enum_decl(ctx, it, current_module, exported, outer_pos);
         }
         Decl::TsModule(_) | Decl::Using(_) => {}
     }
@@ -484,11 +733,16 @@ fn process_export_default_decl(
             let span = fn_expr.function.span;
             let signature = build_function_signature(ctx, &fn_expr.function);
             let body_hash = ctx.body_hash_of(span);
+            let entry_point = classify_ts_fn_entry_point(&name, current_module);
             ctx.push_symbol_with_doc(
                 RawSymbol {
+                    decl_kind: Some(DeclKind::Function),
+                    implements_trait: None,
+                    receiver_type: None,
+                    entry_point,
                     fqdn: format!("{current_module}::{name}"),
                     name,
-                    kind: Kind::Function,
+                    kind: Kind::Callable,
                     language_kind: LanguageKind::from("function"),
                     module: Some(current_module.to_string()),
                     visibility: Visibility::Public,
@@ -496,6 +750,7 @@ fn process_export_default_decl(
                     signature: Some(signature),
                     body_hash,
                     attributes: vec![],
+                    flags: vec![],
                 },
                 outer_pos,
             );
@@ -520,6 +775,10 @@ fn process_export_default_decl(
             let name = interface.id.sym.to_string();
             ctx.push_symbol_with_doc(
                 RawSymbol {
+                    decl_kind: Some(DeclKind::Interface),
+                    implements_trait: None,
+                    receiver_type: None,
+                    entry_point: None,
                     fqdn: format!("{current_module}::{name}"),
                     name,
                     kind: Kind::Type,
@@ -530,6 +789,7 @@ fn process_export_default_decl(
                     signature: None,
                     body_hash: ctx.body_hash_of(span),
                     attributes: vec![],
+                    flags: vec![],
                 },
                 outer_pos,
             );
@@ -591,6 +851,7 @@ fn process_import(ctx: &mut TsWalkContext<'_>, item: &ImportDecl, current_module
             sites: vec![ctx.span_site(span)],
             attributes: vec![],
             confidence,
+            receiver_type: None,
         });
     }
     if item.specifiers.is_empty() {
@@ -609,550 +870,8 @@ fn process_import(ctx: &mut TsWalkContext<'_>, item: &ImportDecl, current_module
             sites: vec![ctx.span_site(span)],
             attributes: vec![],
             confidence,
+            receiver_type: None,
         });
-    }
-}
-
-fn extract_fn_decl(
-    ctx: &TsWalkContext<'_>,
-    item: &FnDecl,
-    parent_fqdn: &str,
-    exported: bool,
-) -> RawSymbol {
-    let name = item.ident.sym.to_string();
-    let fqdn = format!("{parent_fqdn}::{name}");
-    let span = item.function.span;
-    let signature = build_function_signature(ctx, &item.function);
-    RawSymbol {
-        name,
-        fqdn,
-        kind: Kind::Function,
-        language_kind: LanguageKind::from("function"),
-        module: Some(parent_fqdn.to_string()),
-        visibility: map_access_modifier(None, exported),
-        location: ctx.span_location(span),
-        signature: Some(signature),
-        body_hash: ctx.body_hash_of(span),
-        attributes: vec![],
-    }
-}
-
-fn extract_class_decl(
-    ctx: &mut TsWalkContext<'_>,
-    item: &ClassDecl,
-    parent_fqdn: &str,
-    exported: bool,
-    outer_pos: BytePos,
-) {
-    let name = item.ident.sym.to_string();
-    extract_class_inner(ctx, &name, &item.class, parent_fqdn, exported, outer_pos);
-}
-
-fn extract_class_inner(
-    ctx: &mut TsWalkContext<'_>,
-    name: &str,
-    class: &Class,
-    parent_fqdn: &str,
-    exported: bool,
-    outer_pos: BytePos,
-) {
-    let class_fqdn = format!("{parent_fqdn}::{name}");
-    let class_span = class.span;
-    ctx.push_symbol_with_doc(
-        RawSymbol {
-            name: name.to_string(),
-            fqdn: class_fqdn.clone(),
-            kind: Kind::Type,
-            language_kind: LanguageKind::from("class"),
-            module: Some(parent_fqdn.to_string()),
-            visibility: map_access_modifier(None, exported),
-            location: ctx.span_location(class_span),
-            signature: None,
-            body_hash: ctx.body_hash_of(class_span),
-            attributes: vec![],
-        },
-        outer_pos,
-    );
-
-    if let Some(super_class) = &class.super_class {
-        let span = super_class.span();
-        let to = ctx.resolve_call(&render_expr_name(super_class), parent_fqdn);
-        let confidence = to.default_confidence();
-        ctx.push_edge(RawEdge {
-            from_fqdn: class_fqdn.clone(),
-            kind: EdgeKind::Extends,
-            to,
-            sites: vec![ctx.span_site(span)],
-            attributes: vec![],
-            confidence,
-        });
-    }
-    for impl_target in &class.implements {
-        let span = impl_target.span;
-        let to = ctx.resolve_call(&render_ts_entity_name(&impl_target.expr), parent_fqdn);
-        let confidence = to.default_confidence();
-        ctx.push_edge(RawEdge {
-            from_fqdn: class_fqdn.clone(),
-            kind: EdgeKind::Implements,
-            to,
-            sites: vec![ctx.span_site(span)],
-            attributes: vec![],
-            confidence,
-        });
-    }
-
-    for member in &class.body {
-        match member {
-            ClassMember::Method(method) => {
-                if let Some(method_name) = method_name_string(&method.key) {
-                    let method_sym = extract_method(ctx, method, &class_fqdn, &method_name);
-                    ctx.push_symbol_with_doc(method_sym, method.span.lo);
-                }
-            }
-            ClassMember::PrivateMethod(pmethod) => {
-                let private_name = format!("#{}", pmethod.key.name);
-                let sym = extract_private_method(ctx, pmethod, &class_fqdn, &private_name);
-                ctx.push_symbol_with_doc(sym, pmethod.span.lo);
-            }
-            ClassMember::Constructor(ctor) => {
-                let sym = extract_constructor(ctx, ctor, &class_fqdn);
-                ctx.push_symbol_with_doc(sym, ctor.span.lo);
-            }
-            ClassMember::ClassProp(prop) => {
-                if let Some(prop_name) = method_name_string(&prop.key) {
-                    let sym = extract_class_prop(ctx, prop, &class_fqdn, &prop_name);
-                    ctx.push_symbol_with_doc(sym, prop.span.lo);
-                }
-            }
-            ClassMember::PrivateProp(pprop) => {
-                let private_name = format!("#{}", pprop.key.name);
-                let sym = extract_private_prop(ctx, pprop, &class_fqdn, &private_name);
-                ctx.push_symbol_with_doc(sym, pprop.span.lo);
-            }
-            // TsIndexSignature is a typing artifact (`[key: string]: T`) with no
-            // symbol identity. Empty / StaticBlock / AutoAccessor are skipped
-            // day-1 — additive enrichment if usage surfaces a real need.
-            _ => {}
-        }
-    }
-}
-
-fn extract_constructor(
-    ctx: &TsWalkContext<'_>,
-    ctor: &swc_core::ecma::ast::Constructor,
-    class_fqdn: &str,
-) -> RawSymbol {
-    let fqdn = format!("{class_fqdn}::constructor");
-    let span = ctor.span;
-    let raw_access = ctor.accessibility.map(|a| match a {
-        swc_core::ecma::ast::Accessibility::Public => "public",
-        swc_core::ecma::ast::Accessibility::Private => "private",
-        swc_core::ecma::ast::Accessibility::Protected => "protected",
-    });
-    let visibility = map_access_modifier(raw_access, raw_access.is_none());
-    RawSymbol {
-        name: "constructor".to_string(),
-        fqdn,
-        kind: Kind::Function,
-        language_kind: LanguageKind::from("constructor"),
-        module: Some(class_fqdn.to_string()),
-        visibility,
-        location: ctx.span_location(span),
-        signature: None,
-        body_hash: ctx.body_hash_of(span),
-        attributes: vec![],
-    }
-}
-
-fn extract_class_prop(
-    ctx: &TsWalkContext<'_>,
-    prop: &swc_core::ecma::ast::ClassProp,
-    class_fqdn: &str,
-    prop_name: &str,
-) -> RawSymbol {
-    let fqdn = format!("{class_fqdn}::{prop_name}");
-    let span = prop.span;
-    let raw_access = prop.accessibility.map(|a| match a {
-        swc_core::ecma::ast::Accessibility::Public => "public",
-        swc_core::ecma::ast::Accessibility::Private => "private",
-        swc_core::ecma::ast::Accessibility::Protected => "protected",
-    });
-    let visibility = map_access_modifier(raw_access, raw_access.is_none());
-    let language_kind = if prop.is_static {
-        LanguageKind::from("static_property")
-    } else {
-        LanguageKind::from("property")
-    };
-    RawSymbol {
-        name: prop_name.to_string(),
-        fqdn,
-        kind: Kind::Value,
-        language_kind,
-        module: Some(class_fqdn.to_string()),
-        visibility,
-        location: ctx.span_location(span),
-        signature: None,
-        body_hash: ctx.body_hash_of(span),
-        attributes: vec![],
-    }
-}
-
-fn extract_private_method(
-    ctx: &TsWalkContext<'_>,
-    method: &swc_core::ecma::ast::PrivateMethod,
-    class_fqdn: &str,
-    method_name: &str,
-) -> RawSymbol {
-    let fqdn = format!("{class_fqdn}::{method_name}");
-    let span = method.span;
-    RawSymbol {
-        name: method_name.to_string(),
-        fqdn,
-        kind: Kind::Function,
-        language_kind: LanguageKind::from("method"),
-        module: Some(class_fqdn.to_string()),
-        // ECMAScript `#name` private is always private regardless of TS accessibility.
-        visibility: Visibility::Private,
-        location: ctx.span_location(span),
-        signature: Some(build_function_signature(ctx, &method.function)),
-        body_hash: ctx.body_hash_of(span),
-        attributes: vec![],
-    }
-}
-
-fn extract_private_prop(
-    ctx: &TsWalkContext<'_>,
-    prop: &swc_core::ecma::ast::PrivateProp,
-    class_fqdn: &str,
-    prop_name: &str,
-) -> RawSymbol {
-    let fqdn = format!("{class_fqdn}::{prop_name}");
-    let span = prop.span;
-    let language_kind = if prop.is_static {
-        LanguageKind::from("static_property")
-    } else {
-        LanguageKind::from("property")
-    };
-    RawSymbol {
-        name: prop_name.to_string(),
-        fqdn,
-        kind: Kind::Value,
-        language_kind,
-        module: Some(class_fqdn.to_string()),
-        visibility: Visibility::Private,
-        location: ctx.span_location(span),
-        signature: None,
-        body_hash: ctx.body_hash_of(span),
-        attributes: vec![],
-    }
-}
-
-fn extract_method(
-    ctx: &TsWalkContext<'_>,
-    method: &ClassMethod,
-    class_fqdn: &str,
-    method_name: &str,
-) -> RawSymbol {
-    let fqdn = format!("{class_fqdn}::{method_name}");
-    let span = method.span;
-    let raw_access = method.accessibility.map(|a| match a {
-        swc_core::ecma::ast::Accessibility::Public => "public",
-        swc_core::ecma::ast::Accessibility::Private => "private",
-        swc_core::ecma::ast::Accessibility::Protected => "protected",
-    });
-    let visibility = map_access_modifier(raw_access, raw_access.is_none());
-    RawSymbol {
-        name: method_name.to_string(),
-        fqdn,
-        kind: Kind::Function,
-        language_kind: LanguageKind::from("method"),
-        module: Some(class_fqdn.to_string()),
-        visibility,
-        location: ctx.span_location(span),
-        signature: Some(build_function_signature(ctx, &method.function)),
-        body_hash: ctx.body_hash_of(span),
-        attributes: vec![],
-    }
-}
-
-fn extract_var_decl(
-    ctx: &mut TsWalkContext<'_>,
-    item: &VarDecl,
-    parent_fqdn: &str,
-    exported: bool,
-    outer_pos: BytePos,
-) {
-    for declarator in &item.decls {
-        let Some(name) = declarator_name(declarator) else {
-            continue;
-        };
-        let span = declarator.span;
-        let fqdn = format!("{parent_fqdn}::{name}");
-        let signature = signature_from_declarator(ctx, declarator);
-        let language_kind = match item.kind {
-            swc_core::ecma::ast::VarDeclKind::Const => "const",
-            swc_core::ecma::ast::VarDeclKind::Let => "let",
-            swc_core::ecma::ast::VarDeclKind::Var => "var",
-        };
-        let kind = signature.as_ref().map_or(Kind::Value, |_| Kind::Function);
-        let language_kind = if signature.is_some() {
-            LanguageKind::from("function")
-        } else {
-            LanguageKind::from(language_kind)
-        };
-        ctx.push_symbol_with_doc(
-            RawSymbol {
-                name,
-                fqdn,
-                kind,
-                language_kind,
-                module: Some(parent_fqdn.to_string()),
-                visibility: map_access_modifier(None, exported),
-                location: ctx.span_location(span),
-                signature,
-                body_hash: ctx.body_hash_of(span),
-                attributes: vec![],
-            },
-            outer_pos,
-        );
-    }
-}
-
-fn extract_interface_decl(
-    ctx: &mut TsWalkContext<'_>,
-    item: &TsInterfaceDecl,
-    parent_fqdn: &str,
-    exported: bool,
-    outer_pos: BytePos,
-) {
-    let name = item.id.sym.to_string();
-    let fqdn = format!("{parent_fqdn}::{name}");
-    let span = item.span;
-    ctx.push_symbol_with_doc(
-        RawSymbol {
-            name,
-            fqdn: fqdn.clone(),
-            kind: Kind::Type,
-            language_kind: LanguageKind::from("interface"),
-            module: Some(parent_fqdn.to_string()),
-            visibility: map_access_modifier(None, exported),
-            location: ctx.span_location(span),
-            signature: None,
-            body_hash: ctx.body_hash_of(span),
-            attributes: vec![],
-        },
-        outer_pos,
-    );
-    for ext in &item.extends {
-        let span = ext.span;
-        let to = ctx.resolve_call(&render_expr_name(&ext.expr), parent_fqdn);
-        let confidence = to.default_confidence();
-        ctx.push_edge(RawEdge {
-            from_fqdn: fqdn.clone(),
-            kind: EdgeKind::Extends,
-            to,
-            sites: vec![ctx.span_site(span)],
-            attributes: vec![],
-            confidence,
-        });
-    }
-}
-
-fn extract_type_alias_decl(
-    ctx: &TsWalkContext<'_>,
-    item: &TsTypeAliasDecl,
-    parent_fqdn: &str,
-    exported: bool,
-) -> RawSymbol {
-    let name = item.id.sym.to_string();
-    let fqdn = format!("{parent_fqdn}::{name}");
-    let span = item.span;
-    RawSymbol {
-        name,
-        fqdn,
-        kind: Kind::Type,
-        language_kind: LanguageKind::from("type_alias"),
-        module: Some(parent_fqdn.to_string()),
-        visibility: map_access_modifier(None, exported),
-        location: ctx.span_location(span),
-        signature: None,
-        body_hash: ctx.body_hash_of(span),
-        attributes: vec![],
-    }
-}
-
-fn extract_enum_decl(
-    ctx: &TsWalkContext<'_>,
-    item: &TsEnumDecl,
-    parent_fqdn: &str,
-    exported: bool,
-) -> RawSymbol {
-    let name = item.id.sym.to_string();
-    let fqdn = format!("{parent_fqdn}::{name}");
-    let span = item.span;
-    RawSymbol {
-        name,
-        fqdn,
-        kind: Kind::Type,
-        language_kind: LanguageKind::from("enum"),
-        module: Some(parent_fqdn.to_string()),
-        visibility: map_access_modifier(None, exported),
-        location: ctx.span_location(span),
-        signature: None,
-        body_hash: ctx.body_hash_of(span),
-        attributes: vec![],
-    }
-}
-
-fn build_function_signature(
-    ctx: &TsWalkContext<'_>,
-    function: &swc_core::ecma::ast::Function,
-) -> Signature {
-    let params = function
-        .params
-        .iter()
-        .map(|p| build_param(ctx, p))
-        .collect();
-    let returns = function
-        .return_type
-        .as_ref()
-        .and_then(|ann| ctx.span_snippet(ann.type_ann.span()))
-        .map(TypeRef::new);
-    let generic_params = function
-        .type_params
-        .as_ref()
-        .map(|tp| {
-            tp.params
-                .iter()
-                .map(|p| {
-                    ctx.span_snippet(p.span)
-                        .unwrap_or_else(|| p.name.sym.to_string())
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Signature {
-        params,
-        returns,
-        modifiers: Modifiers {
-            is_async: function.is_async,
-            deprecated: None,
-            generic_params,
-            where_clause: None,
-        },
-        meta: SignatureMeta::default(),
-    }
-}
-
-fn build_param(ctx: &TsWalkContext<'_>, param: &AstParam) -> Param {
-    let (name, ty, default) = render_pat(ctx, &param.pat);
-    Param { name, ty, default }
-}
-
-fn render_pat(ctx: &TsWalkContext<'_>, pat: &Pat) -> (String, TypeRef, Option<String>) {
-    match pat {
-        Pat::Ident(b) => {
-            let name = b.id.sym.to_string();
-            let ty = b
-                .type_ann
-                .as_ref()
-                .and_then(|ann| ctx.span_snippet(ann.type_ann.span()))
-                .map_or_else(|| TypeRef::new("any"), TypeRef::new);
-            (name, ty, None)
-        }
-        Pat::Assign(assign) => {
-            let (name, ty, _) = render_pat(ctx, &assign.left);
-            let default = ctx.span_snippet(assign.right.span());
-            (name, ty, default)
-        }
-        Pat::Rest(rest) => {
-            let (name, inner_ty, default) = render_pat(ctx, &rest.arg);
-            // RestPat carries its own type_ann (the array type). Prefer it
-            // over the inner Pat's annotation, which is typically absent.
-            let ty = rest
-                .type_ann
-                .as_ref()
-                .and_then(|ann| ctx.span_snippet(ann.type_ann.span()))
-                .map_or(inner_ty, TypeRef::new);
-            (format!("...{name}"), ty, default)
-        }
-        Pat::Array(_) | Pat::Object(_) => {
-            let snippet = ctx
-                .span_snippet(pat.span())
-                .unwrap_or_else(|| "_".to_string());
-            (snippet, TypeRef::new("any"), None)
-        }
-        Pat::Invalid(_) | Pat::Expr(_) => ("_".to_string(), TypeRef::new("any"), None),
-    }
-}
-
-fn signature_from_declarator(
-    ctx: &TsWalkContext<'_>,
-    declarator: &VarDeclarator,
-) -> Option<Signature> {
-    let init = declarator.init.as_ref()?;
-    match init.as_ref() {
-        swc_core::ecma::ast::Expr::Arrow(arrow) => {
-            let params: Vec<Param> = arrow
-                .params
-                .iter()
-                .map(|p| {
-                    let (name, ty, default) = render_pat(ctx, p);
-                    Param { name, ty, default }
-                })
-                .collect();
-            let returns = arrow
-                .return_type
-                .as_ref()
-                .and_then(|ann| ctx.span_snippet(ann.type_ann.span()))
-                .map(TypeRef::new);
-            let generic_params = arrow
-                .type_params
-                .as_ref()
-                .map(|tp| {
-                    tp.params
-                        .iter()
-                        .map(|p| {
-                            ctx.span_snippet(p.span)
-                                .unwrap_or_else(|| p.name.sym.to_string())
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Some(Signature {
-                params,
-                returns,
-                modifiers: Modifiers {
-                    is_async: arrow.is_async,
-                    deprecated: None,
-                    generic_params,
-                    where_clause: None,
-                },
-                meta: SignatureMeta::default(),
-            })
-        }
-        swc_core::ecma::ast::Expr::Fn(fn_expr) => {
-            Some(build_function_signature(ctx, &fn_expr.function))
-        }
-        _ => None,
-    }
-}
-
-fn declarator_name(declarator: &VarDeclarator) -> Option<String> {
-    match &declarator.name {
-        Pat::Ident(b) => Some(b.id.sym.to_string()),
-        _ => None,
-    }
-}
-
-fn method_name_string(key: &swc_core::ecma::ast::PropName) -> Option<String> {
-    match key {
-        swc_core::ecma::ast::PropName::Ident(i) => Some(i.sym.to_string()),
-        swc_core::ecma::ast::PropName::Str(s) => Some(s.value.to_string_lossy().into_owned()),
-        swc_core::ecma::ast::PropName::Num(n) => Some(n.value.to_string()),
-        swc_core::ecma::ast::PropName::Computed(_) | swc_core::ecma::ast::PropName::BigInt(_) => {
-            None
-        }
     }
 }
 
@@ -1176,382 +895,10 @@ pub(crate) fn render_member_expr_name(expr: &swc_core::ecma::ast::Expr) -> Strin
     }
 }
 
-fn render_expr_name(expr: &swc_core::ecma::ast::Expr) -> String {
-    match expr {
-        swc_core::ecma::ast::Expr::Ident(i) => i.sym.to_string(),
-        swc_core::ecma::ast::Expr::Member(_) => render_member_expr_name(expr),
-        _ => String::new(),
-    }
-}
-
-fn render_ts_entity_name(expr: &swc_core::ecma::ast::Expr) -> String {
-    render_expr_name(expr)
-}
-
 fn clamp_line(n: usize) -> u32 {
     let v = u32::try_from(n).unwrap_or(u32::MAX);
     v.max(1)
 }
 
-fn clamp_col(n: usize) -> u32 {
-    u32::try_from(n).unwrap_or(u32::MAX)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-    use swc_core::common::{BytePos, FileName, sync::Lrc};
-    use swc_core::ecma::ast::EsVersion;
-    use swc_core::ecma::parser::{Parser, StringInput, Syntax, TsSyntax, lexer::Lexer};
-
-    fn parse_ts(source: &str) -> (Lrc<SourceMap>, Module, SingleThreadedComments) {
-        let cm: Lrc<SourceMap> = Default::default();
-        let fm = cm.new_source_file(
-            Lrc::new(FileName::Custom("test.ts".into())),
-            source.to_string(),
-        );
-        let comments = SingleThreadedComments::default();
-        let lexer = Lexer::new(
-            Syntax::Typescript(TsSyntax {
-                tsx: false,
-                decorators: false,
-                dts: false,
-                no_early_errors: true,
-                disallow_ambiguous_jsx_like: false,
-            }),
-            EsVersion::EsNext,
-            StringInput::from(&*fm),
-            Some(&comments),
-        );
-        let mut parser = Parser::new_from(lexer);
-        let module = parser.parse_module().expect("parse ok");
-        (cm, module, comments)
-    }
-
-    fn run(source: &str) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
-        let (cm, module, comments) = parse_ts(source);
-        walk(
-            &module,
-            "@app",
-            "src/index.ts",
-            "src",
-            cm,
-            &PathBuf::from("/tmp/pkg/src/index.ts"),
-            &PathBuf::from("/tmp/pkg"),
-            None,
-            &comments,
-        )
-    }
-
-    #[test]
-    fn function_decl_emits_function_symbol() {
-        let (symbols, edges, _docs) = run("function foo() {}");
-        assert_eq!(symbols.len(), 1);
-        assert_eq!(symbols[0].kind, Kind::Function);
-        assert_eq!(symbols[0].fqdn, "src::foo");
-        assert_eq!(symbols[0].visibility, Visibility::Private);
-        assert!(edges.is_empty());
-    }
-
-    #[test]
-    fn export_function_decl_is_public() {
-        let (symbols, _, _) = run("export function foo() {}");
-        assert_eq!(symbols[0].visibility, Visibility::Public);
-    }
-
-    #[test]
-    fn function_signature_captures_param_types_and_return() {
-        let (symbols, _, _) =
-            run("export function add(a: number, b: number): number { return a + b; }");
-        let sig = symbols[0].signature.as_ref().unwrap();
-        assert_eq!(sig.params.len(), 2);
-        assert_eq!(sig.params[0].name, "a");
-        assert_eq!(sig.params[0].ty.display, "number");
-        assert_eq!(sig.params[1].name, "b");
-        assert_eq!(sig.returns.as_ref().unwrap().display, "number");
-    }
-
-    #[test]
-    fn async_function_modifier_set() {
-        let (symbols, _, _) = run("export async function boot() {}");
-        assert!(symbols[0].signature.as_ref().unwrap().modifiers.is_async);
-    }
-
-    #[test]
-    fn function_default_param_captured() {
-        let (symbols, _, _) = run("export function f(x: number = 7) {}");
-        let p = &symbols[0].signature.as_ref().unwrap().params[0];
-        assert_eq!(p.default.as_deref(), Some("7"));
-    }
-
-    #[test]
-    fn rest_param_prefixed_with_ellipsis() {
-        let (symbols, _, _) = run("export function f(...args: number[]) {}");
-        let p = &symbols[0].signature.as_ref().unwrap().params[0];
-        assert_eq!(p.name, "...args");
-        assert_eq!(p.ty.display, "number[]");
-    }
-
-    #[test]
-    fn generic_params_captured_as_strings() {
-        let (symbols, _, _) = run("export function id<T>(x: T): T { return x; }");
-        let g = &symbols[0]
-            .signature
-            .as_ref()
-            .unwrap()
-            .modifiers
-            .generic_params;
-        assert_eq!(g.len(), 1);
-        assert_eq!(g[0], "T");
-    }
-
-    #[test]
-    fn class_emits_type_symbol_and_methods() {
-        let (symbols, _, _) = run("export class Foo { run(): void {} }");
-        let foo = symbols.iter().find(|s| s.fqdn == "src::Foo").unwrap();
-        assert_eq!(foo.kind, Kind::Type);
-        assert_eq!(foo.language_kind.as_str(), "class");
-        let run = symbols.iter().find(|s| s.fqdn == "src::Foo::run").unwrap();
-        assert_eq!(run.kind, Kind::Function);
-        assert_eq!(run.language_kind.as_str(), "method");
-    }
-
-    #[test]
-    fn class_extends_emits_extends_edge() {
-        let (_, edges, _) = run("class Foo extends Bar {}");
-        let ext: Vec<_> = edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Extends)
-            .collect();
-        assert_eq!(ext.len(), 1);
-        assert_eq!(ext[0].from_fqdn, "src::Foo");
-        match &ext[0].to {
-            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "src::Bar"),
-            other => panic!("expected unresolved, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn class_implements_emits_implements_edge() {
-        let (_, edges, _) = run("class Foo implements IBar {}");
-        let imp: Vec<_> = edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Implements)
-            .collect();
-        assert_eq!(imp.len(), 1);
-        assert_eq!(imp[0].from_fqdn, "src::Foo");
-        match &imp[0].to {
-            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "src::IBar"),
-            other => panic!("expected unresolved, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn class_method_accessibility_maps_to_visibility() {
-        let (symbols, _, _) =
-            run("class Foo { public a() {} private b() {} protected c() {} d() {} }");
-        let a = symbols.iter().find(|s| s.fqdn == "src::Foo::a").unwrap();
-        assert_eq!(a.visibility, Visibility::Public);
-        let b = symbols.iter().find(|s| s.fqdn == "src::Foo::b").unwrap();
-        assert_eq!(b.visibility, Visibility::Private);
-        let c = symbols.iter().find(|s| s.fqdn == "src::Foo::c").unwrap();
-        assert_eq!(c.visibility, Visibility::Protected);
-        let d = symbols.iter().find(|s| s.fqdn == "src::Foo::d").unwrap();
-        assert_eq!(d.visibility, Visibility::Public);
-    }
-
-    #[test]
-    fn interface_emits_type_symbol() {
-        let (symbols, _, _) = run("export interface IFoo { x: number }");
-        assert_eq!(symbols[0].kind, Kind::Type);
-        assert_eq!(symbols[0].language_kind.as_str(), "interface");
-        assert_eq!(symbols[0].fqdn, "src::IFoo");
-    }
-
-    #[test]
-    fn interface_extends_emits_extends_edge() {
-        let (_, edges, _) = run("interface A extends B {}");
-        let ext: Vec<_> = edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Extends)
-            .collect();
-        assert_eq!(ext.len(), 1);
-        assert_eq!(ext[0].from_fqdn, "src::A");
-    }
-
-    #[test]
-    fn type_alias_emits_type_symbol() {
-        let (symbols, _, _) = run("export type Bytes = Uint8Array;");
-        assert_eq!(symbols[0].kind, Kind::Type);
-        assert_eq!(symbols[0].language_kind.as_str(), "type_alias");
-        assert_eq!(symbols[0].fqdn, "src::Bytes");
-    }
-
-    #[test]
-    fn enum_emits_type_symbol() {
-        let (symbols, _, _) = run("export enum Color { Red, Green }");
-        assert_eq!(symbols[0].kind, Kind::Type);
-        assert_eq!(symbols[0].language_kind.as_str(), "enum");
-    }
-
-    #[test]
-    fn const_var_emits_value_symbol() {
-        let (symbols, _, _) = run("export const N = 42;");
-        assert_eq!(symbols[0].kind, Kind::Value);
-        assert_eq!(symbols[0].language_kind.as_str(), "const");
-        assert_eq!(symbols[0].fqdn, "src::N");
-    }
-
-    #[test]
-    fn arrow_const_emits_function_symbol() {
-        let (symbols, _, _) = run("export const add = (a: number, b: number): number => a + b;");
-        assert_eq!(symbols[0].kind, Kind::Function);
-        assert_eq!(symbols[0].language_kind.as_str(), "function");
-        let sig = symbols[0].signature.as_ref().unwrap();
-        assert_eq!(sig.params.len(), 2);
-        assert_eq!(sig.params[0].name, "a");
-        assert_eq!(sig.returns.as_ref().unwrap().display, "number");
-    }
-
-    #[test]
-    fn import_named_emits_import_edge_and_alias() {
-        let (_, edges, _) = run("import { foo } from './helper';");
-        let imp: Vec<_> = edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Imports)
-            .collect();
-        assert_eq!(imp.len(), 1);
-    }
-
-    #[test]
-    fn import_default_emits_import_edge() {
-        let (_, edges, _) = run("import React from 'react';");
-        assert!(edges.iter().any(|e| e.kind == EdgeKind::Imports));
-    }
-
-    #[test]
-    fn import_namespace_emits_import_edge() {
-        let (_, edges, _) = run("import * as utils from './utils';");
-        assert!(edges.iter().any(|e| e.kind == EdgeKind::Imports));
-    }
-
-    #[test]
-    fn import_side_effect_emits_one_edge_no_alias() {
-        let (_, edges, _) = run("import 'polyfill';");
-        let imp: Vec<_> = edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Imports)
-            .collect();
-        assert_eq!(imp.len(), 1);
-    }
-
-    #[test]
-    fn export_default_function_named() {
-        let (symbols, _, _) = run("export default function foo() {}");
-        let foo = symbols.iter().find(|s| s.fqdn == "src::foo").unwrap();
-        assert_eq!(foo.kind, Kind::Function);
-        assert_eq!(foo.visibility, Visibility::Public);
-    }
-
-    #[test]
-    fn export_default_function_anonymous_uses_default_name() {
-        let (symbols, _, _) = run("export default function () {}");
-        assert_eq!(symbols[0].fqdn, "src::default");
-    }
-
-    #[test]
-    fn export_default_class_named() {
-        let (symbols, _, _) = run("export default class Foo {}");
-        let foo = symbols.iter().find(|s| s.fqdn == "src::Foo").unwrap();
-        assert_eq!(foo.kind, Kind::Type);
-    }
-
-    #[test]
-    fn span_locations_are_captured() {
-        let (symbols, _, _) = run("\n\nexport function foo() {}\n");
-        assert_eq!(symbols[0].location.start_line, 3);
-    }
-
-    #[test]
-    fn body_hash_changes_with_body_content() {
-        let (sym_a, _, _) = run("export function foo() { return 1; }");
-        let (sym_b, _, _) = run("export function foo() { return 2; }");
-        assert_ne!(sym_a[0].body_hash, sym_b[0].body_hash);
-    }
-
-    #[test]
-    fn resolve_call_via_alias_table() {
-        let (cm, _module, comments) = parse_ts("");
-        let mut ctx = TsWalkContext::new(
-            "src/index.ts".into(),
-            "@app".into(),
-            "src".into(),
-            cm,
-            PathBuf::new(),
-            PathBuf::new(),
-            None,
-            &comments,
-        );
-        ctx.add_import_alias(
-            "Foo".into(),
-            ResolvedImport {
-                target: ResolvedOrUnresolved::Unresolved {
-                    name: "@app::src::foo::Foo".into(),
-                },
-            },
-        );
-        match ctx.resolve_call("Foo", "src") {
-            ResolvedOrUnresolved::Unresolved { name } => {
-                assert_eq!(name, "@app::src::foo::Foo");
-            }
-            other => panic!("expected unresolved canonical via alias, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn resolve_call_module_local_resolved_when_defined() {
-        let (cm, _module, comments) = parse_ts("");
-        let mut ctx = TsWalkContext::new(
-            "src/index.ts".into(),
-            "@app".into(),
-            "src".into(),
-            cm,
-            PathBuf::new(),
-            PathBuf::new(),
-            None,
-            &comments,
-        );
-        ctx.core.defined_fqdns.insert("src::foo".into());
-        match ctx.resolve_call("foo", "src") {
-            ResolvedOrUnresolved::Resolved { fqdn } => assert_eq!(fqdn, "src::foo"),
-            other => panic!("expected resolved, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn resolve_call_falls_back_to_unresolved_module_local() {
-        let (cm, _module, comments) = parse_ts("");
-        let ctx = TsWalkContext::new(
-            "src/index.ts".into(),
-            "@app".into(),
-            "src".into(),
-            cm,
-            PathBuf::new(),
-            PathBuf::new(),
-            None,
-            &comments,
-        );
-        match ctx.resolve_call("nope", "src") {
-            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "src::nope"),
-            other => panic!("expected unresolved module-local, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn _bytepos_unused() {
-        // Touch BytePos to keep the import warning-free if test setup grows.
-        let _ = BytePos(0);
-        let _ = Span::default().lo();
-    }
-}
+mod tests;

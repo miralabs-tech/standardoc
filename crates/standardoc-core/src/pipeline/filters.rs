@@ -10,31 +10,16 @@ use std::path::{Path, PathBuf};
 
 use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
+use crate::pipeline::paths::to_workspace_relative;
+
+/// Legacy `.stdignore` filename, kept so the nested-cascade behaviour
+/// (per-subfolder excludes) survives the migration to `standardoc.sxd`.
+/// The workspace-root `.stdignore` is no longer auto-seeded — see
+/// `config::ensure_sxd_seed_at` for the new path that migrates content
+/// into `standardoc.sxd` on first cold-start.
 pub const STDIGNORE_FILENAME: &str = ".stdignore";
-
-const STDIGNORE_SEED: &str = "\
-# standardoc indexing exclusions (gitignore syntax)
-# Edit freely. Lines added here exclude paths from the workspace index.
-# Paths removed here trigger an automatic re-index of the affected subtree.
-
-# VCS / package managers
-.git/
-node_modules/
-
-# Build outputs
-target/
-dist/
-build/
-
-# Legacy / archived code (avoids cross-folder fqdn collisions)
-.old/
-*-old/
-
-# Test fixtures / generated exports
-test-export/
-";
 
 /// Aggregated `.stdignore` files from the workspace root down to the deepest
 /// subdirectory that contained one. Each layer is a separate `Gitignore`
@@ -66,7 +51,21 @@ impl GitignoreStack {
     /// Returns an empty stack when no `.stdignore` is present anywhere.
     pub fn build(workspace_root: &Path) -> Self {
         let workspace_root = workspace_root.to_path_buf();
-        let layers = collect_layers(&workspace_root);
+        let layers = collect_layers(&workspace_root, None);
+        Self {
+            layers,
+            workspace_root,
+        }
+    }
+
+    /// Bug E-3 follow-up — same as [`Self::build`] but seeds the root
+    /// layer from the supplied patterns string (the `ignore.patterns`
+    /// block of `standardoc.sxd`) instead of reading `.stdignore`.
+    /// Nested `.stdignore` files are still cascaded for back-compat
+    /// during the migration window.
+    pub fn build_with_root_patterns(workspace_root: &Path, patterns: &str) -> Self {
+        let workspace_root = workspace_root.to_path_buf();
+        let layers = collect_layers(&workspace_root, Some(patterns));
         Self {
             layers,
             workspace_root,
@@ -115,9 +114,22 @@ impl ScanFilters {
         Self { stack }
     }
 
-    /// Loads filters from a workspace root. Equivalent to
-    /// `Self::from_stack(GitignoreStack::build(workspace_root))`.
+    /// Loads filters from a workspace root.
+    ///
+    /// Bug E-3 follow-up — checks `standardoc.sxd` first ; when an
+    /// `ignore.patterns` block is present it overrides the root
+    /// `.stdignore` (nested `.stdignore` files still cascade for the
+    /// migration window). Falls back to the legacy `.stdignore`-only
+    /// path when no `.sxd` is present (or it carries no ignore block).
     pub fn load(workspace_root: &Path) -> Self {
+        if let Ok(Some(cfg)) = crate::config::load_workspace_config(workspace_root)
+            && let Some(ignore) = cfg.ignore
+        {
+            return Self::from_stack(GitignoreStack::build_with_root_patterns(
+                workspace_root,
+                &ignore.patterns,
+            ));
+        }
         Self::from_stack(GitignoreStack::build(workspace_root))
     }
 
@@ -127,17 +139,20 @@ impl ScanFilters {
     pub fn is_skipped(&self, rel_path: &str) -> bool {
         self.stack.is_ignored(rel_path)
     }
-}
 
-/// Writes the seed `.stdignore` at the workspace root when absent. Existing
-/// files (even empty ones) are preserved verbatim — we never overwrite a user's
-/// authored exclusions. Idempotent.
-pub fn ensure_stdignore_seed_at(workspace_root: &Path) -> std::io::Result<()> {
-    let path = workspace_root.join(STDIGNORE_FILENAME);
-    if path.exists() {
-        return Ok(());
+    /// Whether a directory `entry` should be pruned from a `WalkDir` walk.
+    /// `false` for the root (depth 0) and non-directory entries, so files
+    /// still reach the extension / `is_skipped` gates downstream. Shared by
+    /// `cold_start::run` and the watcher's newly-allowed re-index walk.
+    pub(crate) fn is_dir_excluded(&self, entry: &DirEntry, workspace_root: &Path) -> bool {
+        if entry.depth() == 0 || !entry.file_type().is_dir() {
+            return false;
+        }
+        let Some(rel) = to_workspace_relative(entry.path(), workspace_root) else {
+            return false;
+        };
+        self.is_skipped(&rel)
     }
-    std::fs::write(path, STDIGNORE_SEED)
 }
 
 /// Hard cap on the number of filesystem entries scanned by
@@ -247,17 +262,30 @@ pub fn preview_pattern_matches(
     })
 }
 
-fn collect_layers(workspace_root: &Path) -> Vec<Layer> {
+fn collect_layers(workspace_root: &Path, root_patterns_override: Option<&str>) -> Vec<Layer> {
     let mut layers = Vec::new();
 
     let root_file = workspace_root.join(STDIGNORE_FILENAME);
-    if root_file.is_file()
+    if let Some(patterns) = root_patterns_override {
+        if let Some(layer) = build_layer_from_patterns(workspace_root, patterns) {
+            layers.push(layer);
+        }
+    } else if root_file.is_file()
         && let Some(layer) = build_layer(workspace_root, &root_file)
     {
         layers.push(layer);
     }
 
-    let descent_filter = layers.first().map(|l| clone_matcher(&l.matcher));
+    // Independent descent-filter matcher mirroring the root layer, so the
+    // nested-`.stdignore` walk prunes the same subtrees the root excludes.
+    // `clone_matcher` only reconstructs from a physical `.stdignore`; in the
+    // sxd-patterns path there is none, so rebuild from the patterns instead —
+    // otherwise the walk descends into excluded dirs (target/, node_modules/)
+    // it is meant to skip.
+    let descent_filter = match root_patterns_override {
+        Some(patterns) => build_layer_from_patterns(workspace_root, patterns).map(|l| l.matcher),
+        None => layers.first().map(|l| clone_matcher(&l.matcher)),
+    };
     add_nested_layers(
         &mut layers,
         workspace_root,
@@ -266,6 +294,36 @@ fn collect_layers(workspace_root: &Path) -> Vec<Layer> {
     );
     layers.sort_by_key(|l| l.rooted_at.components().count());
     layers
+}
+
+/// Bug E-3 follow-up — build a root layer from a patterns string
+/// (e.g. the `ignore.patterns` block of `standardoc.sxd`). Empty or
+/// blank lines are skipped ; lines starting with `#` are treated as
+/// comments. Behaves identically to a `.stdignore` file otherwise.
+fn build_layer_from_patterns(rooted_at: &Path, patterns: &str) -> Option<Layer> {
+    let mut builder = GitignoreBuilder::new(rooted_at);
+    for line in patterns.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Err(err) = builder.add_line(None, trimmed) {
+            eprintln!(
+                "standardoc: failed to load standardoc.sxd ignore pattern `{trimmed}`: {err}"
+            );
+            return None;
+        }
+    }
+    match builder.build() {
+        Ok(matcher) => Some(Layer {
+            matcher,
+            rooted_at: rooted_at.to_path_buf(),
+        }),
+        Err(err) => {
+            eprintln!("standardoc: failed to build gitignore matcher from standardoc.sxd: {err}");
+            None
+        }
+    }
 }
 
 fn add_nested_layers(
@@ -354,198 +412,4 @@ fn native_path(rel_path: &str) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use tempfile::tempdir;
-
-    use super::*;
-
-    fn write(root: &Path, rel: &str, body: &str) {
-        let abs = root.join(rel);
-        if let Some(parent) = abs.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(abs, body).unwrap();
-    }
-
-    #[test]
-    fn is_ignored_returns_false_when_no_layer() {
-        let dir = tempdir().unwrap();
-        let stack = GitignoreStack::build(dir.path());
-        assert!(!stack.is_ignored("src/lib.rs"));
-        assert!(!stack.is_ignored("anything"));
-    }
-
-    #[test]
-    fn gitignore_stack_root_only() {
-        let dir = tempdir().unwrap();
-        write(dir.path(), ".stdignore", "target/\nbuild/\n");
-
-        let stack = GitignoreStack::build(dir.path());
-
-        assert!(stack.is_ignored("target/debug/foo.rs"));
-        assert!(stack.is_ignored("build/output.js"));
-        assert!(!stack.is_ignored("src/lib.rs"));
-    }
-
-    #[test]
-    fn gitignore_stack_nested_layers_extend_root() {
-        let dir = tempdir().unwrap();
-        write(dir.path(), ".stdignore", "target/\n");
-        write(dir.path(), "crates/.stdignore", "vendor/\n");
-
-        let stack = GitignoreStack::build(dir.path());
-
-        assert!(stack.is_ignored("target/debug.rs"));
-        assert!(stack.is_ignored("crates/vendor/lib.rs"));
-        assert!(!stack.is_ignored("crates/src/lib.rs"));
-    }
-
-    #[test]
-    fn gitignore_stack_negation_override() {
-        let dir = tempdir().unwrap();
-        write(dir.path(), ".stdignore", "build/\n");
-        write(dir.path(), "crates/.stdignore", "!build/\n");
-
-        let stack = GitignoreStack::build(dir.path());
-
-        assert!(stack.is_ignored("build/output.js"));
-        assert!(!stack.is_ignored("crates/build/output.js"));
-    }
-
-    #[test]
-    fn is_ignored_matches_glob_patterns() {
-        let dir = tempdir().unwrap();
-        write(dir.path(), ".stdignore", "*.lock\n**/generated/**\n");
-
-        let stack = GitignoreStack::build(dir.path());
-
-        assert!(stack.is_ignored("Cargo.lock"));
-        assert!(stack.is_ignored("crates/foo/generated/api.ts"));
-        assert!(!stack.is_ignored("Cargo.toml"));
-    }
-
-    #[test]
-    fn build_skips_descent_into_excluded_subtrees() {
-        let dir = tempdir().unwrap();
-        write(dir.path(), ".stdignore", "target/\n");
-        write(dir.path(), "target/.stdignore", "!debug/\n");
-
-        let stack = GitignoreStack::build(dir.path());
-
-        assert!(
-            stack.is_ignored("target/debug/foo.rs"),
-            "nested .stdignore inside an excluded subtree must not be discovered"
-        );
-    }
-
-    #[test]
-    fn ensure_stdignore_seed_writes_when_absent() {
-        let dir = tempdir().unwrap();
-        ensure_stdignore_seed_at(dir.path()).unwrap();
-
-        let path = dir.path().join(STDIGNORE_FILENAME);
-        let body = fs::read_to_string(&path).unwrap();
-        assert!(body.contains(".git/"));
-        assert!(body.contains("target/"));
-        assert!(body.contains("node_modules/"));
-        assert!(body.contains("dist/"));
-        assert!(body.contains("build/"));
-        assert!(body.contains(".old/"));
-        assert!(body.contains("*-old/"));
-        assert!(body.contains("test-export/"));
-        assert!(
-            !body.contains(".standardoc/"),
-            "seed must not include .standardoc/ (user decision lock 21 Q3)"
-        );
-    }
-
-    #[test]
-    fn ensure_stdignore_seed_preserves_existing_file() {
-        let dir = tempdir().unwrap();
-        let existing = "# my own exclusions\nfoo/\n";
-        write(dir.path(), STDIGNORE_FILENAME, existing);
-
-        ensure_stdignore_seed_at(dir.path()).unwrap();
-
-        let body = fs::read_to_string(dir.path().join(STDIGNORE_FILENAME)).unwrap();
-        assert_eq!(body, existing);
-    }
-
-    #[test]
-    fn ensure_stdignore_seed_preserves_empty_file() {
-        let dir = tempdir().unwrap();
-        write(dir.path(), STDIGNORE_FILENAME, "");
-
-        ensure_stdignore_seed_at(dir.path()).unwrap();
-
-        let body = fs::read_to_string(dir.path().join(STDIGNORE_FILENAME)).unwrap();
-        assert!(
-            body.is_empty(),
-            "an existing empty .stdignore must stay empty"
-        );
-    }
-
-    #[test]
-    fn scan_filters_load_constructs_from_workspace_root() {
-        let dir = tempdir().unwrap();
-        write(dir.path(), ".stdignore", "target/\n");
-
-        let filters = ScanFilters::load(dir.path());
-
-        assert!(filters.is_skipped("target/debug.rs"));
-        assert!(!filters.is_skipped("src/lib.rs"));
-    }
-
-    #[test]
-    fn is_ignored_handles_root_path_safely() {
-        let dir = tempdir().unwrap();
-        let stack = GitignoreStack::build(dir.path());
-        assert!(!stack.is_ignored(""));
-    }
-
-    #[test]
-    fn preview_pattern_matches_returns_paths_under_target_directory() {
-        let dir = tempdir().unwrap();
-        write(dir.path(), "src/lib.rs", "");
-        write(dir.path(), "target/debug/foo.rs", "");
-        write(dir.path(), "target/release/bar.rs", "");
-        let preview = preview_pattern_matches(dir.path(), "target/", 20).unwrap();
-        assert_eq!(preview.pattern, "target/");
-        assert!(
-            preview
-                .matches
-                .iter()
-                .any(|p| p == "target" || p == "target/debug" || p == "target/debug/foo.rs")
-        );
-        // Three entries under target/ (target dir + debug + release + 2 files)
-        // — count is whatever the walker enumerates, all of which match.
-        assert!(preview.total_count >= 3);
-        assert!(!preview.matches.iter().any(|p| p == "src/lib.rs"));
-        assert!(!preview.walk_truncated);
-    }
-
-    #[test]
-    fn preview_pattern_matches_returns_empty_for_blank_or_comment() {
-        let dir = tempdir().unwrap();
-        write(dir.path(), "src/lib.rs", "");
-        for blank in &["", "   ", "# comment line", "  # indented comment"] {
-            let preview = preview_pattern_matches(dir.path(), blank, 20).unwrap();
-            assert!(preview.matches.is_empty());
-            assert_eq!(preview.total_count, 0);
-        }
-    }
-
-    #[test]
-    fn preview_pattern_matches_truncates_at_limit_while_counting_total() {
-        let dir = tempdir().unwrap();
-        for i in 0..10 {
-            write(dir.path(), &format!("logs/file{i}.log"), "");
-        }
-        let preview = preview_pattern_matches(dir.path(), "*.log", 3).unwrap();
-        assert_eq!(preview.matches.len(), 3);
-        assert_eq!(preview.total_count, 10);
-        assert!(preview.truncated);
-    }
-}
+mod tests;

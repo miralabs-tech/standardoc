@@ -11,7 +11,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: '1.91'
+  RUST_TOOLCHAIN: '1.95'
 
 jobs:
   fmt:
@@ -81,15 +81,38 @@ jobs:
   ext:
     name: VSCode extension (TS)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ext/vscode
     steps:
       - uses: actions/checkout@v5
+      # The ext type-checks (@viz-pkg) and bundles the wasm-bindgen output of
+      # standardoc-graph-viz, so pkg/ must exist before tsc / bun build
+      # (build.ts shells out to wasm-pack). Rust + wasm-pack provide it.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          prefix-key: "v1-rust"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      # The ext tsconfig type-checks the viz lib SOURCE via the
+      # @standarx/standardoc-viz/* path alias, so the lib's own deps
+      # (classigo / matchigo / @modelcontextprotocol/sdk) must resolve from
+      # crates/standardoc-graph-viz/lib/node_modules.
       - run: bun install --frozen-lockfile
+        working-directory: crates/standardoc-graph-viz/lib
+      # Build the wasm-bindgen pkg/ so the @viz-pkg alias resolves.
+      - run: wasm-pack build crates/standardoc-graph-viz --target web --out-dir pkg --dev
+      - run: bun install --frozen-lockfile
+        working-directory: ext/vscode
       - run: bunx tsc --noEmit
+        working-directory: ext/vscode
       - run: bun test
+        working-directory: ext/vscode
       - run: bun run build
+        working-directory: ext/vscode

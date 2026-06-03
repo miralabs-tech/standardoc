@@ -1,0 +1,88 @@
+// Design tokens consumed by every lib component. Defaults mirror the
+// VSCode dark theme so the lib is usable out-of-the-box; override the
+// `--sd-*` custom properties at the host level (playground :root, or
+// VSCode webview wrapper) to retheme without touching the SCSS source.
+//
+// The fallback chain in every component is `var(--sd-foo, <hardcoded>)`
+// so the lib has zero requirement that the host inject this file — but
+// importing `@standarx/standardoc-viz/styles/tokens` once does set the
+// canonical values cleanly.
+//
+// Kind + entry-point palette values intentionally mirror the constants
+// in `crates/standardoc-graph-viz/src/palette.rs` (kind_color_hex +
+// entry_point_halo_color) so canvas-rendered and DOM-rendered surfaces
+// share one visual identity. Update both together.
+
+:root {
+	// --- Surfaces ---
+	--sd-bg: #1e1e1e;
+	--sd-bg-elevated: #252526;
+	--sd-bg-deep: #161616; // shell outer chrome (darker than panels)
+	--sd-fg: #cccccc;
+	--sd-fg-muted: #9d9d9d;
+	--sd-fg-strong: #ffffff;
+	--sd-border: #454545;
+	--sd-border-subtle: #2d2d2d;
+	--sd-accent: #3794ff;
+	--sd-accent-strong: #5aa9ff;
+	--sd-hover: #2a2d2e;
+	--sd-selection: #094771;
+	--sd-status-ok: #89d185;
+	--sd-status-warn: #cca700;
+	--sd-status-err: #f48771;
+
+	// --- Kind palette (mirrors palette.rs::kind_color_hex) ---
+	--sd-kind-module: #b180d7;
+	--sd-kind-type: #cca700;
+	--sd-kind-callable: #3794ff;
+	--sd-kind-value: #89d185;
+	--sd-kind-macro: #f48771;
+	--sd-kind-unknown: #9d9d9d;
+
+	// --- Entry-point palette (mirrors palette.rs::entry_point_halo_color) ---
+	--sd-ep-binary-main: #4a9eff;
+	--sd-ep-public-api: #f5b942;
+	--sd-ep-ffi-export: #ff8a3a;
+
+	// --- Radii ---
+	--sd-radius-sm: 3px;
+	--sd-radius-md: 6px;
+	--sd-radius-lg: 10px;
+	--sd-radius-pill: 999px;
+
+	// --- Spacing scale (4px base) ---
+	--sd-space-1: 4px;
+	--sd-space-2: 8px;
+	--sd-space-3: 12px;
+	--sd-space-4: 16px;
+	--sd-space-5: 24px;
+	--sd-space-6: 32px;
+
+	// --- Typography scale ---
+	--sd-text-xs: 10px;
+	--sd-text-sm: 11px;
+	--sd-text-md: 13px;
+	--sd-text-lg: 15px;
+	--sd-text-xl: 18px;
+	--sd-font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+	--sd-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+	// --- Shell layout (4-panel grid) ---
+	// Default template: Explorer left, Overview centre-top, Focus centre-bottom,
+	// Details right. Host can override for spawnable popup layouts.
+	--sd-shell-grid-cols: 260px 1fr 360px;
+	--sd-shell-grid-rows: 48px 1fr 1fr;
+	--sd-shell-panel-min-h: 180px;
+	--sd-shell-gap: var(--sd-space-2);
+
+	// --- Panel chrome ---
+	--sd-panel-bg: var(--sd-bg);
+	--sd-panel-header-h: 32px;
+	--sd-panel-header-bg: var(--sd-bg-elevated);
+	--sd-panel-padding: var(--sd-space-3);
+	--sd-panel-border: 1px solid var(--sd-border-subtle);
+
+	// --- Focal accents (subtle ambient tint, mockup inspiration) ---
+	--sd-glow-violet: rgba(177, 128, 215, 0.15);
+	--sd-glow-cyan: rgba(74, 158, 255, 0.12);
+}

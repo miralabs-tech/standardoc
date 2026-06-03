@@ -92,7 +92,7 @@ mod tests {
             "INSERT INTO symbols \
              (fqdn, name, kind, language_kind, language, file_path, \
               start_line, end_line, start_col, end_col) \
-             VALUES (?1, ?1, 'function', 'fn_item', 'rust', 'src/x.rs', 0, 0, 0, 0)",
+             VALUES (?1, ?1, 'callable', 'fn_item', 'rust', 'src/x.rs', 0, 0, 0, 0)",
             [fqdn],
         )
         .unwrap();

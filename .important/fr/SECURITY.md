@@ -2,7 +2,7 @@
 
 [English](../../SECURITY.md) · 📖 Français
 
-[Démarrage rapide](QUICKSTART.md) · [FAQ](FAQ.md) · [Support](SUPPORT.md)
+[Démarrage rapide](QUICKSTART.md) · [README](README.md)
 
 ## Versions supportées
 

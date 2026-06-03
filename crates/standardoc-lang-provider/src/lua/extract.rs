@@ -8,15 +8,17 @@ use full_moon::node::Node;
 use full_moon::tokenizer::{Position, TokenReference, TokenType};
 use standardoc_core::ExtractError;
 use standardoc_ir::{
-    Blake3Hash, EdgeKind, ExtractedFile, Kind, Language, LanguageKind, Modifiers, Param, RawEdge,
-    RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SourceOrigin, SymbolLocation,
-    TypeRef, Visibility,
+    Blake3Hash, BuiltinTier, DeclKind, EdgeKind, ExtractedFile, Kind, Language, LanguageKind,
+    Modifiers, Param, RawCallArg, RawCallSite, RawEdge, RawSymbol, ResolvedOrUnresolved, Signature,
+    SignatureMeta, Site, SourceOrigin, SymbolLocation, TypeRef, Visibility,
 };
 
 use super::extract_doc;
 use super::helpers::{compute_module_path, ident_text, string_literal_text};
 use super::resolver::resolve_require;
 use super::walk::{LuaWalkContext, walk};
+use crate::builtins::global as global_builtin_registry;
+use crate::utils::location::line_and_utf16_col;
 use crate::utils::{file_span, hash_bytes, last_segment, parent_module};
 
 /// Parse a Lua source file with `full_moon`, walk it, and return an
@@ -42,12 +44,16 @@ pub(crate) fn extract_file(
     let module_fqdn = if module_path.is_empty() {
         package_name.to_string()
     } else {
-        format!("{package_name}::{}", module_path.replace('.', "::"))
+        format!("{package_name}::{module_path}")
     };
 
     let content_hash = hash_bytes(content.as_bytes());
 
     let module_symbol = RawSymbol {
+        decl_kind: Some(DeclKind::Module),
+        implements_trait: None,
+        receiver_type: None,
+        entry_point: None,
         name: last_segment(&module_fqdn).to_string(),
         fqdn: module_fqdn.clone(),
         kind: Kind::Module,
@@ -58,6 +64,7 @@ pub(crate) fn extract_file(
         signature: None,
         body_hash: Some(content_hash),
         attributes: vec![],
+        flags: vec![],
     };
 
     let mut ctx = LuaWalkContext::new(
@@ -85,6 +92,24 @@ pub(crate) fn extract_file(
     // the typed pieces into the structured Signature.
     enrich_signatures_from_emmylua(&mut ctx.core.symbols, &ctx.core.documents);
 
+    // G6: extract LuaJIT `ffi.cdef[[...]]` declarations as virtual
+    // `RawSymbol` + `RawFfiBinding` pairs so cross-language `ffi_resolve`
+    // can pair them with C-side exports.
+    let (ffi_symbols, ffi_bindings) = super::ffi_tagger::extract_ffi_bindings(
+        &ast,
+        &module_fqdn,
+        workspace_relative_path,
+        content,
+    );
+    ctx.core.symbols.extend(ffi_symbols);
+
+    // G4-lua: build the AOT ModuleLookup so cross-workspace edge
+    // strengthening can resolve peer-Lua imports. Mirrors the
+    // c::lookup contract — root-scope bindings only, no scope-aware
+    // visitor needed for the resolver to do its job.
+    let module_lookup =
+        super::lookup::build_lua_lookup(&ctx.core.symbols, &ctx.core.edges, &module_fqdn);
+
     Ok(ExtractedFile {
         file: workspace_relative_path.into(),
         language: Language::Lua,
@@ -94,8 +119,14 @@ pub(crate) fn extract_file(
         byte_size: u64::try_from(content.len()).unwrap_or(u64::MAX),
         symbols: ctx.core.symbols,
         edges: ctx.core.edges,
-        call_sites: vec![],
+        call_sites: ctx.core.call_sites,
         documents: ctx.core.documents,
+        // G6 covers the Lua-side cdef extraction. C-side `lua_register`
+        // / `luaL_register` / `luaL_setfuncs` detection (the Export
+        // counterpart) is tracked separately — those emissions live on
+        // the C provider and are not part of this Lua-side extraction.
+        ffi_bindings,
+        module_lookup: Some(module_lookup),
     })
 }
 
@@ -132,13 +163,17 @@ pub(crate) fn extract_local_function(ctx: &mut LuaWalkContext, lf: &LocalFunctio
     }
     let fqdn = format!("{}::{}", ctx.core.file_module_fqdn, name);
     let signature = signature_from_body(lf.body(), false);
-    let location = node_location(ctx, lf, content);
+    let location = node_location(ctx, lf);
     let body_hash = body_hash_for(lf, content);
 
     let sym = RawSymbol {
+        decl_kind: Some(DeclKind::Function),
+        implements_trait: None,
+        receiver_type: None,
+        entry_point: None,
         name,
         fqdn: fqdn.clone(),
-        kind: Kind::Function,
+        kind: Kind::Callable,
         language_kind: LanguageKind::from("local_function"),
         module: Some(ctx.core.file_module_fqdn.clone()),
         visibility: Visibility::Private,
@@ -146,6 +181,7 @@ pub(crate) fn extract_local_function(ctx: &mut LuaWalkContext, lf: &LocalFunctio
         signature: Some(signature),
         body_hash,
         attributes: vec![],
+        flags: vec![],
     };
     ctx.push_symbol(sym);
 
@@ -165,12 +201,17 @@ pub(crate) fn extract_function_declaration(
         return;
     };
     let signature = signature_from_body(fd.body(), is_method);
-    let location = node_location(ctx, fd, content);
+    let location = node_location(ctx, fd);
     let body_hash = body_hash_for(fd, content);
     let language_kind = if is_method {
         LanguageKind::from("method")
     } else {
         LanguageKind::from("function")
+    };
+    let decl_kind = if is_method {
+        DeclKind::Method
+    } else {
+        DeclKind::Function
     };
 
     // Default Public for both shapes:
@@ -180,9 +221,13 @@ pub(crate) fn extract_function_declaration(
     let visibility = Visibility::Public;
 
     let sym = RawSymbol {
+        decl_kind: Some(decl_kind),
+        implements_trait: None,
+        receiver_type: None,
+        entry_point: None,
         name: leaf_name,
         fqdn: fqdn.clone(),
-        kind: Kind::Function,
+        kind: Kind::Callable,
         language_kind,
         module: Some(parent_module_fqdn),
         visibility,
@@ -190,6 +235,7 @@ pub(crate) fn extract_function_declaration(
         signature: Some(signature),
         body_hash,
         attributes: vec![],
+        flags: vec![],
     };
     ctx.push_symbol(sym);
 
@@ -227,17 +273,22 @@ pub(crate) fn extract_local_assignment(
                 from_fqdn: ctx.core.file_module_fqdn.clone(),
                 kind: EdgeKind::Imports,
                 to,
-                sites: vec![site_for(&ctx.core.file_path, pos)],
+                sites: vec![site_for(&ctx.core.file_path, &ctx.content, pos)],
                 attributes: vec![],
                 confidence,
+                receiver_type: None,
             });
         }
 
         let fqdn = format!("{}::{}", ctx.core.file_module_fqdn, name);
-        let location = node_location(ctx, *name_token, content);
+        let location = node_location(ctx, *name_token);
         let body_hash = body_hash_for(la, content);
 
         let sym = RawSymbol {
+            decl_kind: Some(DeclKind::Var),
+            implements_trait: None,
+            receiver_type: None,
+            entry_point: None,
             name,
             fqdn: fqdn.clone(),
             kind: Kind::Value,
@@ -248,6 +299,7 @@ pub(crate) fn extract_local_assignment(
             signature: None,
             body_hash,
             attributes: vec![],
+            flags: vec![],
         };
         ctx.push_symbol(sym);
 
@@ -293,13 +345,17 @@ pub(crate) fn extract_assignment(ctx: &mut LuaWalkContext, a: &Assignment, conte
         };
 
         let signature = signature_from_body(anon.body(), false);
-        let location = node_location(ctx, *var, content);
+        let location = node_location(ctx, *var);
         let body_hash = body_hash_for(*var, content);
 
         let sym = RawSymbol {
+            decl_kind: Some(DeclKind::Function),
+            implements_trait: None,
+            receiver_type: None,
+            entry_point: None,
             name: leaf.to_string(),
             fqdn: fqdn.clone(),
-            kind: Kind::Function,
+            kind: Kind::Callable,
             language_kind: LanguageKind::from("function"),
             module: Some(parent_fqdn),
             visibility: Visibility::Public,
@@ -307,6 +363,7 @@ pub(crate) fn extract_assignment(ctx: &mut LuaWalkContext, a: &Assignment, conte
             signature: Some(signature),
             body_hash,
             attributes: vec![],
+            flags: vec![],
         };
         ctx.push_symbol(sym);
 
@@ -343,9 +400,10 @@ fn record_calls_in_block(
                             from_fqdn: caller_fqdn.to_string(),
                             kind: EdgeKind::Imports,
                             to,
-                            sites: vec![site_for(&ctx.core.file_path, pos)],
+                            sites: vec![site_for(&ctx.core.file_path, &ctx.content, pos)],
                             attributes: vec![],
                             confidence,
+                            receiver_type: None,
                         });
                     }
                 }
@@ -362,6 +420,7 @@ fn record_calls_in_block(
                             sites: vec![],
                             attributes: vec![],
                             confidence,
+                            receiver_type: None,
                         });
                     }
                 }
@@ -394,24 +453,77 @@ fn record_call_or_require(ctx: &mut LuaWalkContext, from_fqdn: &str, fc: &Functi
             from_fqdn: from_fqdn.to_string(),
             kind: EdgeKind::Imports,
             to,
-            sites: vec![site_for(&ctx.core.file_path, call_start(fc))],
+            sites: vec![site_for(&ctx.core.file_path, &ctx.content, call_start(fc))],
             attributes: vec![],
             confidence,
+            receiver_type: None,
         });
         return;
     }
     let Some(call_name) = call_target_name(fc) else {
         return;
     };
-    let to = ResolvedOrUnresolved::Unresolved { name: call_name };
+    // IR-4-d: observational call_site — emitted alongside the Calls
+    // edge so the plugin layer sees the textual shape regardless of
+    // whether `call_name` resolved against the builtin registry or
+    // landed as Unresolved. The push happens BEFORE the Drop/Attribute
+    // tier short-circuit below (Lua has no such builtins today, but
+    // the contract should hold if any are added in the future).
+    if let Some((callee_text, receiver_chain)) = call_target_decomposed(fc) {
+        let args = args_from_function_call(fc);
+        ctx.push_call_site(RawCallSite {
+            from_fqdn: from_fqdn.to_string(),
+            callee_text,
+            args,
+            receiver_chain,
+            site: site_for(&ctx.core.file_path, &ctx.content, call_start(fc)),
+        });
+    }
+    // Stage 3e-1: consult the Lua builtin registry. Lua has no Drop /
+    // Attribute classifications today (see `builtins/lua.rs` rationale)
+    // so every match is Edge — emit a synthetic FQDN with `via-builtin`
+    // / `builtin-<slug>` attrs. We try the full dotted/colon path first
+    // (`table.insert`, `string.format`, `os.time` are explicitly
+    // enumerated as hot members), then fall back to the leftmost
+    // segment for un-enumerated members of standard-library modules
+    // (`os.tmpname()` falls back to `os`, still tagged as a stdlib
+    // touch). Locals like `myTable.foo` miss both lookups and stay
+    // `Unresolved`.
+    let registry = global_builtin_registry();
+    let entry_opt = registry.lookup(&call_name, Language::Lua).or_else(|| {
+        let leftmost = call_name.split(['.', ':']).next().unwrap_or("");
+        if leftmost.is_empty() || leftmost == call_name {
+            return None;
+        }
+        registry.lookup(leftmost, Language::Lua)
+    });
+    let (to, attributes) = match entry_opt {
+        // Reserve the tier match for forward-compat: if a Drop /
+        // Attribute Lua builtin is ever added, mirror JS/TS/Rust and
+        // skip the edge silently.
+        Some(entry) => match entry.tier {
+            BuiltinTier::Drop | BuiltinTier::Attribute => return,
+            BuiltinTier::Edge => (
+                ResolvedOrUnresolved::Resolved {
+                    fqdn: entry.synthetic_fqdn.clone(),
+                },
+                vec![
+                    "via-builtin".to_string(),
+                    format!("builtin-{}", entry.tag.slug()),
+                ],
+            ),
+        },
+        None => (ResolvedOrUnresolved::Unresolved { name: call_name }, vec![]),
+    };
     let confidence = to.default_confidence();
     ctx.push_edge(RawEdge {
         from_fqdn: from_fqdn.to_string(),
         kind: EdgeKind::Calls,
         to,
-        sites: vec![site_for(&ctx.core.file_path, call_start(fc))],
-        attributes: vec![],
+        sites: vec![site_for(&ctx.core.file_path, &ctx.content, call_start(fc))],
+        attributes,
         confidence,
+        receiver_type: None,
     });
 }
 
@@ -564,6 +676,140 @@ fn call_start(fc: &FunctionCall) -> Position {
     fc.prefix().start_position().unwrap_or_default()
 }
 
+/// IR-4-d: decompose a `FunctionCall` into `(callee_text, receiver_chain)`
+/// for the [`RawCallSite`] record. Mirrors [`call_target_name`]'s walk
+/// but splits the final segment off as the called function — the
+/// preceding segments form the receiver chain (Lua doesn't truly have
+/// methods on a function-call basis, but `obj.field.foo()` is the
+/// shape plugins care about so we expose it the same way Rust and TS do).
+///
+/// Shape per pattern:
+/// - `foo(x)`           → callee_text=`foo`,        chain=[]
+/// - `M.foo(x)`         → callee_text=`M.foo`,      chain=[`M`]
+/// - `M.a.b.foo(x)`     → callee_text=`M.a.b.foo`,  chain=[`M`,`a`,`b`]
+/// - `obj:bar(x)`       → callee_text=`obj:bar`,    chain=[`obj`]
+/// - `M.api:create(x)`  → callee_text=`M.api:create`, chain=[`M`,`api`]
+///
+/// Returns `None` for shapes [`call_target_name`] rejects (call-result
+/// callees, computed indexing, …).
+fn call_target_decomposed(fc: &FunctionCall) -> Option<(String, Vec<String>)> {
+    let head = match fc.prefix() {
+        Prefix::Name(t) => ident_text(t).to_string(),
+        _ => return None,
+    };
+    if head.is_empty() {
+        return None;
+    }
+    let mut parts = vec![head];
+    let mut method_suffix: Option<String> = None;
+    for sfx in fc.suffixes() {
+        match sfx {
+            Suffix::Index(idx) => {
+                if let Some(n) = index_dot_name(idx) {
+                    parts.push(n);
+                } else {
+                    return None;
+                }
+            }
+            Suffix::Call(call) => {
+                if let full_moon::ast::Call::MethodCall(mc) = call {
+                    method_suffix = Some(ident_text(mc.name()).to_string());
+                }
+                break;
+            }
+            _ => return None,
+        }
+    }
+    // `parts` is the dotted prefix; the final segment becomes the
+    // function name unless this is a `:method()` form (then the method
+    // is appended via `:`).
+    let (callee_text, receiver_chain) = if let Some(method) = method_suffix
+        && !method.is_empty()
+    {
+        let chain = parts.clone();
+        let prefix = parts.join(".");
+        (format!("{prefix}:{method}"), chain)
+    } else if parts.len() == 1 {
+        (parts.remove(0), Vec::new())
+    } else {
+        let func = parts.pop().expect("len > 1");
+        let chain = parts.clone();
+        (format!("{}.{}", parts.join("."), func), chain)
+    };
+    Some((callee_text, receiver_chain))
+}
+
+/// IR-4-d: extract positional args from a `FunctionCall`'s single
+/// `Suffix::Call`. Handles all three Lua argument shapes:
+/// - `foo(a, b)`     → punctuated list of expressions
+/// - `foo "literal"` → single string literal arg (special syntax)
+/// - `foo {1,2,3}`   → single table-constructor arg
+///
+/// Each arg is classified via [`arg_from_expression`]; string-literal
+/// args strip surrounding quotes and set `is_string_literal=true`.
+fn args_from_function_call(fc: &FunctionCall) -> Vec<RawCallArg> {
+    use full_moon::ast::Call as FullMoonCall;
+    use full_moon::ast::FunctionArgs;
+    let mut out = Vec::new();
+    for sfx in fc.suffixes() {
+        let Suffix::Call(call) = sfx else { continue };
+        let args = match call {
+            FullMoonCall::AnonymousCall(a) => a,
+            FullMoonCall::MethodCall(mc) => mc.args(),
+            _ => continue,
+        };
+        match args {
+            FunctionArgs::Parentheses { arguments, .. } => {
+                for expr in arguments {
+                    out.push(arg_from_expression(expr));
+                }
+            }
+            FunctionArgs::String(token) => {
+                if let TokenType::StringLiteral { literal, .. } = token.token_type() {
+                    out.push(RawCallArg {
+                        value: literal.to_string(),
+                        is_string_literal: true,
+                    });
+                }
+            }
+            FunctionArgs::TableConstructor(tbl) => {
+                out.push(RawCallArg {
+                    value: tbl.to_string(),
+                    is_string_literal: false,
+                });
+            }
+            _ => {}
+        }
+        break;
+    }
+    out
+}
+
+fn arg_from_expression(expr: &Expression) -> RawCallArg {
+    if let Some(text) = string_literal_text(expr) {
+        return RawCallArg {
+            value: text,
+            is_string_literal: true,
+        };
+    }
+    if let Expression::Var(Var::Name(t)) = expr {
+        let n = ident_text(t);
+        if !n.is_empty() {
+            return RawCallArg {
+                value: n.to_string(),
+                is_string_literal: false,
+            };
+        }
+    }
+    // Fallback: use full_moon's Display impl which prints the AST node
+    // back to source-faithful text (including any pre-trivia we don't
+    // care about — `.trim()` keeps the value compact).
+    RawCallArg {
+        value: expr.to_string().trim().to_string(),
+        is_string_literal: false,
+    }
+}
+
 // --- require detection ----------------------------------------------------
 
 fn extract_require_arg(expr: &Expression) -> Option<String> {
@@ -644,15 +890,20 @@ fn signature_from_body(body: &FunctionBody, is_method: bool) -> Signature {
 
 // --- locations / hashes ---------------------------------------------------
 
-fn node_location<N: Node>(ctx: &LuaWalkContext, node: N, _content: &str) -> SymbolLocation {
+fn node_location<N: Node>(ctx: &LuaWalkContext, node: N) -> SymbolLocation {
     let start = node.start_position().unwrap_or_default();
     let end = node.end_position().unwrap_or_default();
+    // full_moon reports `character` as a 1-based char count; we derive the
+    // 0-based UTF-16 column from the absolute byte offset instead, so the
+    // stored columns match what the LSP / VSCode consumers expect.
+    let (start_line, start_col) = line_and_utf16_col(&ctx.content, start.bytes());
+    let (end_line, end_col) = line_and_utf16_col(&ctx.content, end.bytes());
     SymbolLocation {
         file: ctx.core.file_path.clone(),
-        start_line: u32::try_from(start.line()).unwrap_or(u32::MAX),
-        end_line: u32::try_from(end.line()).unwrap_or(u32::MAX),
-        start_col: u32::try_from(start.character()).unwrap_or(u32::MAX),
-        end_col: u32::try_from(end.character()).unwrap_or(u32::MAX),
+        start_line,
+        end_line,
+        start_col,
+        end_col,
     }
 }
 
@@ -667,11 +918,12 @@ fn body_hash_for<N: Node>(node: N, content: &str) -> Option<Blake3Hash> {
     Some(hash_bytes(&content.as_bytes()[lo..hi]))
 }
 
-fn site_for(file: &str, pos: Position) -> Site {
+fn site_for(file: &str, content: &str, pos: Position) -> Site {
+    let (line, col) = line_and_utf16_col(content, pos.bytes());
     Site {
         file: file.to_string(),
-        line: u32::try_from(pos.line()).unwrap_or(u32::MAX),
-        col: u32::try_from(pos.character()).unwrap_or(u32::MAX),
+        line,
+        col,
     }
 }
 
@@ -694,305 +946,4 @@ const fn is_empty_or_table(expr: &Expression) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    fn extract(content: &str, workspace_relative: &str, package_relative: &str) -> ExtractedFile {
-        extract_file(
-            content,
-            workspace_relative,
-            "myapp",
-            package_relative,
-            &PathBuf::from(format!("/tmp/pkg/{package_relative}")),
-            &PathBuf::from("/tmp/pkg"),
-        )
-        .expect("extract ok")
-    }
-
-    #[test]
-    fn empty_file_produces_module_symbol_only() {
-        let r = extract("", "main.lua", "main.lua");
-        assert_eq!(r.symbols.len(), 1);
-        assert!(r.edges.is_empty());
-        assert_eq!(r.symbols[0].kind, Kind::Module);
-        assert_eq!(r.symbols[0].fqdn, "myapp::main");
-    }
-
-    #[test]
-    fn module_fqdn_drops_init_segment() {
-        let r = extract("", "src/utils/init.lua", "src/utils/init.lua");
-        assert_eq!(r.symbols[0].fqdn, "myapp::src::utils");
-    }
-
-    #[test]
-    fn local_function_extracted_as_private() {
-        let src = "local function helper(a, b) return a + b end\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let sym = r
-            .symbols
-            .iter()
-            .find(|s| s.name == "helper")
-            .expect("helper");
-        assert_eq!(sym.fqdn, "myapp::main::helper");
-        assert_eq!(sym.kind, Kind::Function);
-        assert_eq!(sym.visibility, Visibility::Private);
-        let sig = sym.signature.as_ref().expect("sig");
-        assert_eq!(sig.params.len(), 2);
-        assert_eq!(sig.params[0].name, "a");
-    }
-
-    #[test]
-    fn global_function_extracted_as_public() {
-        let src = "function greet(name) print(name) end\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let sym = r.symbols.iter().find(|s| s.name == "greet").expect("greet");
-        assert_eq!(sym.fqdn, "myapp::main::greet");
-        assert_eq!(sym.visibility, Visibility::Public);
-    }
-
-    #[test]
-    fn dotted_function_decl_yields_nested_fqdn() {
-        let src = "function M.foo() end\n";
-        let r = extract(src, "lib.lua", "lib.lua");
-        let sym = r.symbols.iter().find(|s| s.name == "foo").expect("foo");
-        assert_eq!(sym.fqdn, "myapp::lib::M::foo");
-        assert_eq!(sym.module.as_deref(), Some("myapp::lib::M"));
-    }
-
-    #[test]
-    fn method_decl_yields_self_first_param() {
-        let src = "function M:bar(x) end\n";
-        let r = extract(src, "lib.lua", "lib.lua");
-        let sym = r.symbols.iter().find(|s| s.name == "bar").expect("bar");
-        assert_eq!(sym.fqdn, "myapp::lib::M::bar");
-        let sig = sym.signature.as_ref().expect("sig");
-        assert_eq!(sig.params[0].name, "self");
-        assert_eq!(sig.params[1].name, "x");
-        assert_eq!(sym.language_kind.0, "method");
-    }
-
-    #[test]
-    fn local_var_extracted_as_value_private() {
-        let src = "local count = 0\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let sym = r.symbols.iter().find(|s| s.name == "count").expect("count");
-        assert_eq!(sym.fqdn, "myapp::main::count");
-        assert_eq!(sym.kind, Kind::Value);
-        assert_eq!(sym.visibility, Visibility::Private);
-    }
-
-    #[test]
-    fn empty_table_local_marks_module_candidate_then_private_without_return() {
-        let src = "local M = {}\nfunction M.foo() end\n";
-        let r = extract(src, "lib.lua", "lib.lua");
-        let foo = r.symbols.iter().find(|s| s.name == "foo").expect("foo");
-        assert_eq!(foo.visibility, Visibility::Private);
-    }
-
-    #[test]
-    fn module_pattern_promotes_to_public_when_returned() {
-        let src = "local M = {}\nfunction M.foo() end\nreturn M\n";
-        let r = extract(src, "lib.lua", "lib.lua");
-        let foo = r.symbols.iter().find(|s| s.name == "foo").expect("foo");
-        assert_eq!(foo.visibility, Visibility::Public);
-    }
-
-    #[test]
-    fn module_pattern_promotes_method_too() {
-        let src = "local M = {}\nfunction M:bar() end\nreturn M\n";
-        let r = extract(src, "lib.lua", "lib.lua");
-        let bar = r.symbols.iter().find(|s| s.name == "bar").expect("bar");
-        assert_eq!(bar.visibility, Visibility::Public);
-    }
-
-    #[test]
-    fn assignment_with_function_value_extracts_symbol() {
-        let src = "local M = {}\nM.alpha = function() end\nreturn M\n";
-        let r = extract(src, "lib.lua", "lib.lua");
-        let a = r.symbols.iter().find(|s| s.name == "alpha").expect("alpha");
-        assert_eq!(a.fqdn, "myapp::lib::M::alpha");
-        assert_eq!(a.kind, Kind::Function);
-        assert_eq!(a.visibility, Visibility::Public);
-    }
-
-    #[test]
-    fn require_with_parens_emits_imports_edge() {
-        let src = "local strings = require(\"utils.strings\")\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let imports: Vec<_> = r
-            .edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Imports)
-            .collect();
-        assert_eq!(imports.len(), 1);
-        match &imports[0].to {
-            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "utils.strings"),
-            other => panic!("expected Unresolved, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn require_with_string_arg_no_parens_emits_imports_edge() {
-        let src = "local x = require \"json\"\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let imports: Vec<_> = r
-            .edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Imports)
-            .collect();
-        assert_eq!(imports.len(), 1);
-        match &imports[0].to {
-            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "json"),
-            other => panic!("expected Unresolved, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn top_level_function_call_emits_calls_edge() {
-        let src = "doStuff()\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let calls: Vec<_> = r
-            .edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Calls)
-            .collect();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].from_fqdn, "myapp::main");
-        match &calls[0].to {
-            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "doStuff"),
-            other => panic!("expected Unresolved, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn dotted_call_recorded_with_dotted_name() {
-        let src = "M.greet(\"hi\")\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let calls: Vec<_> = r
-            .edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Calls)
-            .collect();
-        assert_eq!(calls.len(), 1);
-        match &calls[0].to {
-            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "M.greet"),
-            other => panic!("expected Unresolved, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn method_call_recorded_with_colon_name() {
-        let src = "obj:run(1)\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let calls: Vec<_> = r
-            .edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Calls)
-            .collect();
-        assert_eq!(calls.len(), 1);
-        match &calls[0].to {
-            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "obj:run"),
-            other => panic!("expected Unresolved, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn nested_call_inside_function_body_records_call_from_caller() {
-        let src = "local function caller() callee() end\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let calls: Vec<_> = r
-            .edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Calls)
-            .collect();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].from_fqdn, "myapp::main::caller");
-        match &calls[0].to {
-            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "callee"),
-            other => panic!("expected Unresolved, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn doc_block_attached_to_local_function() {
-        let src = "--- doubles its argument\nlocal function dbl(x) return x*2 end\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let doc = r
-            .documents
-            .iter()
-            .find(|d| d.symbol_fqdn == "myapp::main::dbl")
-            .expect("doc on dbl");
-        assert_eq!(doc.description, "doubles its argument");
-    }
-
-    #[test]
-    fn parse_error_returns_extract_error() {
-        let err = extract_file(
-            "local x =",
-            "broken.lua",
-            "myapp",
-            "broken.lua",
-            &PathBuf::from("/tmp/pkg/broken.lua"),
-            &PathBuf::from("/tmp/pkg"),
-        )
-        .expect_err("must fail");
-        match err {
-            ExtractError::Parse { file, .. } => assert_eq!(file, "broken.lua"),
-            other => panic!("expected Parse, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn vararg_function_yields_ellipsis_param() {
-        let src = "local function f(...) end\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let sym = r.symbols.iter().find(|s| s.name == "f").expect("f");
-        let sig = sym.signature.as_ref().expect("sig");
-        assert_eq!(sig.params[0].name, "...");
-    }
-
-    #[test]
-    fn body_hash_present_for_function() {
-        let src = "local function noop() end\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let sym = r.symbols.iter().find(|s| s.name == "noop").expect("noop");
-        assert!(sym.body_hash.is_some());
-    }
-
-    #[test]
-    fn module_symbol_body_hash_equals_content_hash() {
-        let src = "local x = 1\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let module = &r.symbols[0];
-        assert_eq!(module.body_hash, Some(r.content_hash));
-    }
-
-    #[test]
-    fn language_is_lua() {
-        let r = extract("local x = 1\n", "main.lua", "main.lua");
-        assert_eq!(r.language, Language::Lua);
-    }
-
-    #[test]
-    fn nested_table_field_function_only_supported_one_level_day_one() {
-        // `function M.sub.foo()` is two-level — fully supported.
-        let src = "function M.sub.foo() end\n";
-        let r = extract(src, "lib.lua", "lib.lua");
-        let foo = r.symbols.iter().find(|s| s.name == "foo").expect("foo");
-        assert_eq!(foo.fqdn, "myapp::lib::M::sub::foo");
-    }
-
-    #[test]
-    fn require_inside_function_body_is_recorded_against_caller() {
-        let src = "local function init() local m = require(\"sys\") end\n";
-        let r = extract(src, "main.lua", "main.lua");
-        let imports: Vec<_> = r
-            .edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Imports)
-            .collect();
-        assert_eq!(imports.len(), 1);
-        assert_eq!(imports[0].from_fqdn, "myapp::main::init");
-    }
-}
+mod tests;

@@ -40,6 +40,14 @@ describe('parseMcpConfig', () => {
     const r = parseMcpConfig('{"mcpServers": {}}');
     expect(r).toEqual({ kind: 'parsed', value: { mcpServers: {} } });
   });
+
+  test('parses JSONC with comments and trailing commas', () => {
+    const src = '{\n  // standardoc server\n  "mcpServers": { "x": {} }, /* note */\n}';
+    expect(parseMcpConfig(src)).toEqual({
+      kind: 'parsed',
+      value: { mcpServers: { x: {} } },
+    });
+  });
 });
 
 describe('mergeMcpConfig', () => {

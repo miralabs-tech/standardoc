@@ -1,16 +1,32 @@
 use std::path::{Path, PathBuf};
 
 use standardoc_ir::Visibility;
+use swc_core::common::Loc;
 
-use crate::utils::strip_extension;
+use crate::walk_core::LanguagePathConventions;
+
+/// UTF-16 column (0-indexed) for a swc `Loc`. swc's `col` (`CharPos`) is
+/// already counted in UTF-16 code units — its multibyte adjustment maps
+/// 1/2/3 UTF-8 bytes to one unit and a 4-byte (astral) char to two (see
+/// `MultiByteChar::byte_to_char_diff`). That is exactly what the LSP /
+/// VSCode `Position.character` field expects. The previously stamped
+/// `col_display` is tab-expanded (display width) and therefore wrong the
+/// moment a tab precedes the symbol, which is why we read `col` instead.
+pub(crate) fn loc_utf16_col(loc: &Loc) -> u32 {
+    u32::try_from(loc.col.0).unwrap_or(u32::MAX)
+}
 
 /// Order matters: `.d.ts` must be tried before `.ts`, etc. Lock 41 §1
 /// Q9 added `.vue` and `.svelte` so SFC files compute the same module
 /// path their script content would have under a plain TS file.
-const TS_EXTENSIONS: &[&str] = &[
-    ".d.ts", ".d.tsx", ".d.mts", ".d.cts", ".tsx", ".ts", ".jsx", ".js", ".mts", ".cts", ".mjs",
-    ".cjs", ".vue", ".svelte",
-];
+pub(crate) const TS_CONVENTIONS: LanguagePathConventions = LanguagePathConventions {
+    extensions: &[
+        ".d.ts", ".d.tsx", ".d.mts", ".d.cts", ".tsx", ".ts", ".jsx", ".js", ".mts", ".cts",
+        ".mjs", ".cjs", ".vue", ".svelte",
+    ],
+    root_aliases: &["index"],
+    strip_src_prefix: false,
+};
 
 /// Map a TS/JS access modifier to canonical IR visibility.
 ///
@@ -32,23 +48,12 @@ pub(crate) fn map_access_modifier(raw: Option<&str>, exported: bool) -> Visibili
 /// trailing `/index` to the parent directory (mirror of Rust `mod.rs`).
 ///
 /// Examples (package_relative input → output):
-/// * `"src/auth/login.ts"`   → `"src/auth/login"`
-/// * `"src/auth/index.ts"`   → `"src/auth"`
+/// * `"src/auth/login.ts"`   → `"src::auth::login"`
+/// * `"src/auth/index.ts"`   → `"src::auth"`
 /// * `"src/index.ts"`        → `"src"`
 /// * `"index.ts"`            → `""`  (file lives at package root)
 pub(crate) fn compute_module_path(package_relative: &str) -> String {
-    let stem = strip_extension(package_relative, TS_EXTENSIONS);
-    let segments: Vec<&str> = stem.split('/').filter(|s| !s.is_empty()).collect();
-    if segments.is_empty() {
-        return String::new();
-    }
-    let drop_last = segments.last().is_some_and(|s| *s == "index");
-    let useful: &[&str] = if drop_last {
-        &segments[..segments.len() - 1]
-    } else {
-        &segments[..]
-    };
-    useful.join("/")
+    crate::walk_core::compute_module_path(&TS_CONVENTIONS, package_relative)
 }
 
 /// Walk filesystem ancestors from `file_abs_path` until a `package.json` is
@@ -72,6 +77,31 @@ pub(crate) fn find_package_json(file_abs_path: &Path) -> Option<PathBuf> {
 pub(crate) fn parse_package_name(json_content: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(json_content).ok()?;
     value.get("name")?.as_str().map(str::to_string)
+}
+
+/// Static property-name extraction (`PropName` → `Option<String>`). Returns
+/// `Some(name)` for identifier, string, and numeric keys (numbers
+/// stringified); `None` for computed (`[expr]: ...`) and bigint keys. Shared
+/// by the symbol walker (method / property names) and the FFI tagger
+/// (object-literal keys).
+pub(crate) fn prop_name_static(key: &swc_core::ecma::ast::PropName) -> Option<String> {
+    use swc_core::ecma::ast::PropName;
+    match key {
+        PropName::Ident(i) => Some(i.sym.to_string()),
+        PropName::Str(s) => Some(s.value.to_string_lossy().into_owned()),
+        PropName::Num(n) => Some(n.value.to_string()),
+        PropName::Computed(_) | PropName::BigInt(_) => None,
+    }
+}
+
+/// Bug C-1 — textual name of a `TsEnumMember.id`. swc parses both
+/// `Ident(Foo)` and `Str("Foo")` flavors (TS allows `enum E { "foo bar" = 1 }`).
+pub(crate) fn ts_enum_member_id_name(id: &swc_core::ecma::ast::TsEnumMemberId) -> String {
+    use swc_core::ecma::ast::TsEnumMemberId;
+    match id {
+        TsEnumMemberId::Ident(i) => i.sym.to_string(),
+        TsEnumMemberId::Str(s) => s.value.to_string_lossy().into_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -116,12 +146,12 @@ mod tests {
 
     #[test]
     fn compute_module_path_flat_file() {
-        assert_eq!(compute_module_path("src/auth/login.ts"), "src/auth/login");
+        assert_eq!(compute_module_path("src/auth/login.ts"), "src::auth::login");
     }
 
     #[test]
     fn compute_module_path_index_collapses_to_parent() {
-        assert_eq!(compute_module_path("src/auth/index.ts"), "src/auth");
+        assert_eq!(compute_module_path("src/auth/index.ts"), "src::auth");
     }
 
     #[test]
@@ -136,36 +166,36 @@ mod tests {
 
     #[test]
     fn compute_module_path_handles_tsx_extension() {
-        assert_eq!(compute_module_path("src/App.tsx"), "src/App");
+        assert_eq!(compute_module_path("src/App.tsx"), "src::App");
     }
 
     #[test]
     fn compute_module_path_handles_jsx_extension() {
-        assert_eq!(compute_module_path("src/legacy.jsx"), "src/legacy");
+        assert_eq!(compute_module_path("src/legacy.jsx"), "src::legacy");
     }
 
     #[test]
     fn compute_module_path_handles_js_extension() {
-        assert_eq!(compute_module_path("scripts/build.js"), "scripts/build");
+        assert_eq!(compute_module_path("scripts/build.js"), "scripts::build");
     }
 
     #[test]
     fn compute_module_path_handles_d_ts_declaration() {
         assert_eq!(compute_module_path("dist/index.d.ts"), "dist");
-        assert_eq!(compute_module_path("types/api.d.ts"), "types/api");
+        assert_eq!(compute_module_path("types/api.d.ts"), "types::api");
     }
 
     #[test]
     fn compute_module_path_handles_mts_cts_mjs_cjs() {
-        assert_eq!(compute_module_path("src/a.mts"), "src/a");
-        assert_eq!(compute_module_path("src/b.cts"), "src/b");
-        assert_eq!(compute_module_path("src/c.mjs"), "src/c");
-        assert_eq!(compute_module_path("src/d.cjs"), "src/d");
+        assert_eq!(compute_module_path("src/a.mts"), "src::a");
+        assert_eq!(compute_module_path("src/b.cts"), "src::b");
+        assert_eq!(compute_module_path("src/c.mjs"), "src::c");
+        assert_eq!(compute_module_path("src/d.cjs"), "src::d");
     }
 
     #[test]
     fn compute_module_path_no_extension_kept_as_segments() {
-        assert_eq!(compute_module_path("src/no-ext"), "src/no-ext");
+        assert_eq!(compute_module_path("src/no-ext"), "src::no-ext");
     }
 
     #[test]

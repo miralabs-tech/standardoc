@@ -6,7 +6,6 @@ import {
   State,
   TransportKind,
 } from 'vscode-languageclient/node';
-import { DEFAULT_RAG_SETTINGS, ragSpawnFlags, type RagSettings } from '../daemon/rag-flags';
 
 export type LspState = 'stopped' | 'starting' | 'running';
 
@@ -14,7 +13,6 @@ export class LspClient implements vscode.Disposable {
   private client: LanguageClient | null = null;
   private stateSub: vscode.Disposable | null = null;
   private readonly emitter = new vscode.EventEmitter<LspState>();
-  private ragSettings: RagSettings = DEFAULT_RAG_SETTINGS;
 
   readonly onStateChange: vscode.Event<LspState> = this.emitter.event;
 
@@ -23,24 +21,10 @@ export class LspClient implements vscode.Disposable {
     private readonly output: vscode.OutputChannel,
   ) {}
 
-  /**
-   * Replace the in-memory RAG settings used at the next `start()`. Does
-   * NOT restart the running daemon — the caller (typically the supervisor
-   * driven by a config-change watcher) is responsible for sequencing
-   * stop → setRagSettings → spawn.
-   */
-  setRagSettings(settings: RagSettings): void {
-    this.ragSettings = settings;
-  }
-
-  ragSettingsSnapshot(): RagSettings {
-    return this.ragSettings;
-  }
-
   async start(binaryPath: string): Promise<void> {
     if (this.client) return;
 
-    const args = ['lsp', this.workspaceRoot, ...ragSpawnFlags(this.ragSettings)];
+    const args = ['lsp', this.workspaceRoot];
     this.output.appendLine(`[lsp] spawning ${binaryPath} ${args.slice(1).join(' ')}`);
     const serverOptions: ServerOptions = {
       command: binaryPath,
@@ -54,6 +38,8 @@ export class LspClient implements vscode.Disposable {
         { scheme: 'file', language: 'typescriptreact' },
         { scheme: 'file', language: 'javascript' },
         { scheme: 'file', language: 'javascriptreact' },
+        { scheme: 'file', language: 'lua' },
+        { scheme: 'file', language: 'c' },
       ],
       outputChannel: this.output,
     };

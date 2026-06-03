@@ -1,0 +1,989 @@
+use standardoc_ir::{
+    BuiltinEntry, BuiltinMethodEntry, BuiltinRegistry, BuiltinTag, BuiltinTier, Kind, Language,
+};
+
+/// Every Rust primitive int type — used as the per-type sweep target
+/// when seeding the shared `saturating_` / `wrapping_` / `checked_` /
+/// `abs` / `pow` / `min` / `max` / `clamp` / bit-counting method
+/// surface in [`register_methods`].
+const INT_TYPES: &[&str] = &[
+    "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+];
+
+/// Method names shared by every primitive int type (signed AND unsigned).
+/// Receivers at the call site carry the bare primitive name as
+/// `receiver_type`, so the 3-tier resolver lands on
+/// `<builtin>::rust::<int>::<method>` via the direct-builtin fallback.
+/// Type-specific surfaces live in [`INT_METHODS_SIGNED`] /
+/// [`INT_METHODS_UNSIGNED`] so we don't seed phantom rows (`u8::abs`,
+/// `i8::is_power_of_two`) the compiler would reject.
+const INT_METHODS: &[&str] = &[
+    "saturating_add",
+    "saturating_sub",
+    "saturating_mul",
+    "saturating_div",
+    "saturating_pow",
+    "wrapping_add",
+    "wrapping_sub",
+    "wrapping_mul",
+    "wrapping_div",
+    "wrapping_neg",
+    "wrapping_pow",
+    "checked_add",
+    "checked_sub",
+    "checked_mul",
+    "checked_div",
+    "checked_rem",
+    "checked_neg",
+    "checked_pow",
+    "pow",
+    "min",
+    "max",
+    "clamp",
+    "count_ones",
+    "count_zeros",
+    "leading_zeros",
+    "trailing_zeros",
+    "leading_ones",
+    "trailing_ones",
+    "rotate_left",
+    "rotate_right",
+    "swap_bytes",
+    "to_be",
+    "to_le",
+];
+
+/// Methods that exist only on the signed primitive int types.
+const INT_METHODS_SIGNED: &[&str] = &["abs"];
+
+/// Methods that exist only on the unsigned primitive int types.
+const INT_METHODS_UNSIGNED: &[&str] = &["is_power_of_two", "next_power_of_two"];
+
+pub(crate) fn register_all(reg: &mut BuiltinRegistry) {
+    register_types_and_macros(reg);
+    register_methods(reg);
+}
+
+fn register_types_and_macros(reg: &mut BuiltinRegistry) {
+    let add = |reg: &mut BuiltinRegistry,
+               names: &[&str],
+               kind: Kind,
+               tag: BuiltinTag,
+               tier: BuiltinTier| {
+        for name in names {
+            reg.register(BuiltinEntry::new(
+                *name,
+                Language::Rust,
+                kind,
+                tag.clone(),
+                tier,
+            ));
+        }
+    };
+
+    // Reserved markers `Self` / `self` / `_` are intentionally NOT in the
+    // registry — they're syntactic placeholders, not real symbols.
+    // Consumers handle them via a local SKIP_MARKERS const in the
+    // extraction layer.
+
+    // --- Tier::Edge --- error trait — implementing it is a semantic
+    // "this is an error type" signal worth showing in the graph.
+    add(
+        reg,
+        &["Error"],
+        Kind::Type,
+        BuiltinTag::Custom {
+            tag: "error".into(),
+        },
+        BuiltinTier::Edge,
+    );
+
+    // --- Tier::Attribute --- iter-ness / async-ness folded into source
+    // Implementing `Iterator` or returning `impl Iterator` flags the
+    // source symbol as iter-shaped; same for `Future`/`Stream` → async.
+    add(
+        reg,
+        &["Iterator", "IntoIterator", "FromIterator"],
+        Kind::Type,
+        BuiltinTag::Iter,
+        BuiltinTier::Attribute,
+    );
+    add(
+        reg,
+        &["Future", "Stream"],
+        Kind::Type,
+        BuiltinTag::Async,
+        BuiltinTier::Attribute,
+    );
+
+    // --- Tier::Drop --- structural noise, no edge, no attribute
+    // Primitive scalars — ubiquitous, the inner type info is the value.
+    add(
+        reg,
+        &[
+            "bool", "char", "str", "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32",
+            "i64", "i128", "isize", "f32", "f64",
+        ],
+        Kind::Type,
+        BuiltinTag::Memory,
+        BuiltinTier::Drop,
+    );
+    // Heap / smart pointers — wrap a payload of interest; the payload
+    // (inner type arg) is what gets recursed, the wrapper is noise.
+    add(
+        reg,
+        &[
+            "Box",
+            "Rc",
+            "Arc",
+            "Pin",
+            "Cell",
+            "RefCell",
+            "UnsafeCell",
+            "Mutex",
+            "RwLock",
+        ],
+        Kind::Type,
+        BuiltinTag::Memory,
+        BuiltinTier::Drop,
+    );
+    // Standard collections — same logic as TS Map/Set, JS Array.
+    add(
+        reg,
+        &[
+            "Vec",
+            "VecDeque",
+            "LinkedList",
+            "BinaryHeap",
+            "HashMap",
+            "HashSet",
+            "BTreeMap",
+            "BTreeSet",
+        ],
+        Kind::Type,
+        BuiltinTag::Iter,
+        BuiltinTier::Drop,
+    );
+    // Strings & paths — too ubiquitous to draw edges; the type info
+    // is captured on the symbol's signature.returns slot directly.
+    add(
+        reg,
+        &[
+            "String", "OsString", "OsStr", "PathBuf", "Path", "CString", "CStr",
+        ],
+        Kind::Type,
+        BuiltinTag::Format,
+        BuiltinTier::Drop,
+    );
+    // Sum / option containers — `Result`/`Option` permeate every Rust
+    // function signature; tracing them is pure noise. The error-or-ok
+    // shape is implicit in `signature.returns`.
+    add(
+        reg,
+        &["Option", "Result", "Cow"],
+        Kind::Type,
+        BuiltinTag::Reflection,
+        BuiltinTier::Drop,
+    );
+    add(
+        reg,
+        &["Some", "None", "Ok", "Err"],
+        Kind::Type,
+        BuiltinTag::Custom {
+            tag: "variant".into(),
+        },
+        BuiltinTier::Drop,
+    );
+    // Marker traits — auto-derived, structural.
+    add(
+        reg,
+        &["Send", "Sync", "Sized", "Unpin", "Unsize"],
+        Kind::Type,
+        BuiltinTag::Reflection,
+        BuiltinTier::Drop,
+    );
+    // Common derive / blanket traits — ubiquitous, no audit value.
+    add(
+        reg,
+        &[
+            "Drop",
+            "Clone",
+            "Copy",
+            "Default",
+            "PartialEq",
+            "Eq",
+            "PartialOrd",
+            "Ord",
+            "Hash",
+            "Debug",
+            "Display",
+            "From",
+            "Into",
+            "TryFrom",
+            "TryInto",
+            "AsRef",
+            "AsMut",
+            "Borrow",
+            "BorrowMut",
+            "ToString",
+            "ToOwned",
+        ],
+        Kind::Type,
+        BuiltinTag::Reflection,
+        BuiltinTier::Drop,
+    );
+    // Serde derive traits — external but ubiquitous. Seeded as builtins
+    // so derive-emitted `IMPLEMENTS → <builtin>::rust::Serialize` edges
+    // (see `rust::derive_impls`) land on a real `symbols.id` row. Same
+    // tier policy as stdlib reflection traits: explicit `impl Serialize
+    // for X` blocks don't emit an IMPLEMENTS edge of their own.
+    add(
+        reg,
+        &["Serialize", "Deserialize"],
+        Kind::Type,
+        BuiltinTag::Reflection,
+        BuiltinTier::Drop,
+    );
+    // Callable trait family — closure-shape, structural.
+    add(
+        reg,
+        &["Fn", "FnMut", "FnOnce"],
+        Kind::Type,
+        BuiltinTag::Custom {
+            tag: "callable".into(),
+        },
+        BuiltinTier::Drop,
+    );
+
+    // --- Tier::Drop --- declarative + compile-time macros. The macro
+    // itself is a well-known API surface, and its body can't be analyzed
+    // without macro expansion ; emitting Calls edges to them adds noise
+    // proportional to test density (~7300 test-macro CALLS pre-fix) with
+    // zero audit value. The matching `RawCallSite` row is still emitted
+    // upstream of the registry check so consumers wanting raw macro
+    // counts continue to get them.
+    add(
+        reg,
+        &[
+            // Assertions
+            "assert",
+            "assert_eq",
+            "assert_ne",
+            "debug_assert",
+            "debug_assert_eq",
+            "debug_assert_ne",
+            // Diverging
+            "panic",
+            "unimplemented",
+            "unreachable",
+            "todo",
+            // Print / debug
+            "print",
+            "println",
+            "eprint",
+            "eprintln",
+            "dbg",
+            // Format
+            "format",
+            "write",
+            "writeln",
+            // Collection
+            "vec",
+            // Pattern
+            "matches",
+            // Compile-time
+            "include_str",
+            "include_bytes",
+            "include",
+            "env",
+            "option_env",
+            "cfg",
+            "file",
+            "line",
+            "column",
+            "module_path",
+            "stringify",
+            "concat",
+        ],
+        Kind::Macro,
+        BuiltinTag::Custom {
+            tag: "macro".into(),
+        },
+        BuiltinTier::Drop,
+    );
+}
+
+/// Bug E-3 Phase 2: register a focused set of stdlib method entries
+/// for the receiver types most often seen in bare-ident unresolved
+/// CALLS edges (top 15 from the P1.0 baseline). Activated by the
+/// resolver only when Phase 1 attached a `receiver_type` matching one
+/// of these parents — so disambiguation is name + receiver, no blind
+/// suffix matching.
+fn register_methods(reg: &mut BuiltinRegistry) {
+    let add = |reg: &mut BuiltinRegistry, parent_type: &str, methods: &[&str]| {
+        for m in methods {
+            reg.register_method(BuiltinMethodEntry::new(parent_type, *m, Language::Rust));
+        }
+    };
+    // Bug E-3 Phase 3.1: bulk-register methods that share an unambiguous
+    // return type. Read by `compute_receiver_type` to walk chained calls
+    // like `x.iter().map(...).filter(...)` — each step's return becomes
+    // the next step's receiver.
+    //
+    // Bug E-3 ext P-E3.2: the `returns` string may be a parametric
+    // template (`"Iterator<T>"`) — substituted against the receiver's
+    // generic args at lookup time using rules per parent nominal
+    // (`T` = args[0]; `E` = args[1] for Result; `K` / `V` = args[0] /
+    // args[1] for maps).
+    let add_returning =
+        |reg: &mut BuiltinRegistry, parent_type: &str, returns: &str, methods: &[&str]| {
+            for m in methods {
+                reg.register_method(
+                    BuiltinMethodEntry::new(parent_type, *m, Language::Rust).with_returns(returns),
+                );
+            }
+        };
+    // Bug E-3 ext P-E3.2: register methods that take a closure arg of a
+    // single template type — used by `visit_expr_method_call` to bind
+    // each closure-input ident pat to the substituted arg type. Use
+    // [`add_full`] when both `returns` and `closure_arg` apply.
+    let add_with_closure =
+        |reg: &mut BuiltinRegistry, parent_type: &str, closure_arg: &str, methods: &[&str]| {
+            for m in methods {
+                reg.register_method(
+                    BuiltinMethodEntry::new(parent_type, *m, Language::Rust)
+                        .with_closure_arg(closure_arg),
+                );
+            }
+        };
+    let add_full = |reg: &mut BuiltinRegistry,
+                    parent_type: &str,
+                    returns: &str,
+                    closure_arg: &str,
+                    methods: &[&str]| {
+        for m in methods {
+            reg.register_method(
+                BuiltinMethodEntry::new(parent_type, *m, Language::Rust)
+                    .with_returns(returns)
+                    .with_closure_arg(closure_arg),
+            );
+        }
+    };
+
+    // Trait-dispatch methods (V1) — seeded so `<receiver_type>::<method>`
+    // lookups from `rust::derive_impls`-emitted IMPLEMENTS edges land on
+    // a real builtin symbol row at resolve time. Parent type is the
+    // trait name; synthetic fqdn becomes `<builtin>::rust::<Trait>::<method>`.
+    // `.with_trait()` stamps the entry so `seed_methods_into` flags the
+    // synthetic symbol as a `trait_method`, exposing it to the resolver's
+    // builtin-trait-method dispatch fallback (`try_resolve_via_builtin_
+    // trait_method`).
+    let add_trait = |reg: &mut BuiltinRegistry, parent_type: &str, methods: &[&str]| {
+        for m in methods {
+            reg.register_method(
+                BuiltinMethodEntry::new(parent_type, *m, Language::Rust).with_trait(),
+            );
+        }
+    };
+    // Derive-able stdlib + serde traits (mirrors `rust::derive_impls`).
+    add_trait(reg, "Clone", &["clone", "clone_from"]);
+    add_trait(reg, "Debug", &["fmt"]);
+    add_trait(reg, "Default", &["default"]);
+    add_trait(reg, "PartialEq", &["eq", "ne"]);
+    add_trait(reg, "PartialOrd", &["partial_cmp", "lt", "le", "gt", "ge"]);
+    add_trait(reg, "Ord", &["cmp", "max", "min", "clamp"]);
+    add_trait(reg, "Hash", &["hash", "hash_slice"]);
+    add_trait(reg, "Serialize", &["serialize"]);
+    add_trait(reg, "Deserialize", &["deserialize"]);
+
+    // Non-derive trait dispatch widening (V1) — these traits are never
+    // `#[derive]`-d but their methods show up massively at call sites
+    // (`str.into()`, `peekable.next()`, `x.to_string()`). The resolver's
+    // builtin-trait-method fallback finds them via the `trait_method`
+    // flag. Scope V1 = unambiguous method names (skip Display::fmt
+    // / AsRef::as_ref which clash with Debug::fmt / Option::as_ref).
+    add_trait(reg, "Into", &["into"]);
+    add_trait(reg, "From", &["from"]);
+    add_trait(reg, "TryFrom", &["try_from"]);
+    add_trait(reg, "TryInto", &["try_into"]);
+    add_trait(reg, "FromStr", &["from_str"]);
+    add_trait(reg, "ToString", &["to_string"]);
+    add_trait(reg, "IntoIterator", &["into_iter"]);
+    // NOTE: Iterator methods are already comprehensively registered
+    // below (with `returns` / `closure_arg` annotations the chain
+    // propagation relies on). Adding them here would create duplicates
+    // that win the first-match `lookup_method` lookup and lose the
+    // existing return-type wiring. The `set_trait_flag` post-pass at
+    // the end of `register_methods` stamps `is_trait=true` on the
+    // already-seeded Iterator entries.
+
+    add(
+        reg,
+        "Vec",
+        &[
+            "push",
+            "len",
+            "is_empty",
+            "clear",
+            "clone",
+            "contains",
+            "extend",
+            "sort",
+            "sort_by",
+            "sort_by_key",
+            "insert",
+            "truncate",
+            "split_off",
+            "with_capacity",
+            "capacity",
+            "reserve",
+            "dedup",
+            "concat",
+            "join",
+        ],
+    );
+    add_returning(
+        reg,
+        "Vec",
+        "Iterator<T>",
+        &["iter", "iter_mut", "into_iter", "drain"],
+    );
+    add_returning(reg, "Vec", "slice", &["as_slice", "as_mut_slice"]);
+    add_with_closure(reg, "Vec", "T", &["retain"]);
+    // Bug E-3.3: index-style methods on `Vec<T>` return the inner type
+    // (either bare `T` for infallible variants or `Option<T>` for the
+    // bounds-checked ones).
+    add_returning(reg, "Vec", "T", &["swap_remove", "remove"]);
+    add_returning(
+        reg,
+        "Vec",
+        "Option<T>",
+        &["pop", "first", "last", "get", "get_mut"],
+    );
+
+    add(
+        reg,
+        "Option",
+        &["is_some", "is_none", "is_some_and", "map_or", "map_or_else"],
+    );
+    // Bug E-3.3: unwrap / expect / fallback variants yield the inner
+    // type. Substitute via `T` against the receiver's generic args so
+    // `Option<Foo>::unwrap()` propagates as `Foo` for chained
+    // `.method()` resolution.
+    add_returning(
+        reg,
+        "Option",
+        "T",
+        &[
+            "unwrap",
+            "unwrap_or",
+            "unwrap_or_else",
+            "unwrap_or_default",
+            "expect",
+        ],
+    );
+    // Bug E-3.4.1: take/replace/cloned/copied preserve the Option
+    // wrapping (they return `Option<T>` of the inner type), so propagate
+    // parametrically — `while let Some(x) = opt.take()` then binds
+    // `x: T` through the if-let / while-let / match-arm handlers.
+    add_returning(
+        reg,
+        "Option",
+        "Option<T>",
+        &["take", "replace", "cloned", "copied"],
+    );
+    add_returning(
+        reg,
+        "Option",
+        "Option<T>",
+        &[
+            "as_ref",
+            "as_mut",
+            "as_deref",
+            "as_deref_mut",
+            "or",
+            "or_else",
+        ],
+    );
+    // Option::map / and_then / and transform the inner type (Option<U>);
+    // we can't infer U here, so drop the generic in `returns` while still
+    // binding the closure-arg from the receiver's T.
+    add_returning(reg, "Option", "Option", &["and"]);
+    add_full(reg, "Option", "Option", "T", &["map", "and_then"]);
+    // Option::filter preserves T; closure receives `&T` (stripped by
+    // [`strip_refs`] before binding).
+    add_full(reg, "Option", "Option<T>", "T", &["filter"]);
+    add_returning(reg, "Option", "Result", &["ok_or", "ok_or_else"]);
+    add_returning(reg, "Option", "Iterator<T>", &["iter"]);
+
+    add(
+        reg,
+        "Result",
+        &[
+            "is_ok",
+            "is_err",
+            "is_ok_and",
+            "is_err_and",
+            "map_or",
+            "map_or_else",
+        ],
+    );
+    // Bug E-3.3: Ok-branch unwrappers return T.
+    add_returning(
+        reg,
+        "Result",
+        "T",
+        &[
+            "unwrap",
+            "unwrap_or",
+            "unwrap_or_else",
+            "unwrap_or_default",
+            "expect",
+        ],
+    );
+    // Bug E-3.3: Err-branch unwrappers return E.
+    add_returning(reg, "Result", "E", &["unwrap_err", "expect_err"]);
+    add_returning(reg, "Result", "Result<T, E>", &["as_ref", "as_mut", "or"]);
+    // Result::map transforms the Ok branch (Result<U, E>); drop T from
+    // the parametric chain but preserve E so a follow-up `.map_err(|e|
+    // ...)` can still type its closure arg.
+    add_full(reg, "Result", "Result<_, E>", "T", &["map", "and_then"]);
+    // Result::map_err transforms the Err branch (Result<T, F>); preserve
+    // T, drop E, bind closure-arg from E.
+    add_full(reg, "Result", "Result<T, _>", "E", &["map_err", "or_else"]);
+    add_returning(reg, "Result", "Result", &["and"]);
+    add_returning(reg, "Result", "Option", &["ok", "err"]);
+
+    add(
+        reg,
+        "Iterator",
+        &[
+            "collect",
+            "count",
+            "sum",
+            "product",
+            "fold",
+            "reduce",
+            "size_hint",
+        ],
+    );
+    // Bug E-3.3: `next` yields `Option<Self::Item>`. With the receiver
+    // tracked as `Iterator<T>` (Bug E-3.2 chain), `T` substitutes to the
+    // Item type so `vec.iter().next().unwrap()` propagates `Foo`.
+    add_returning(reg, "Iterator", "Option<T>", &["next"]);
+    // Bug E-3 ext P-E3.2: split Iterator adapters by whether they
+    // preserve the Item type or substitute it via a closure.
+    //   * preserve T → `Iterator<T>` so subsequent `.find(|x| ...)` etc.
+    //     can still type the closure arg.
+    //   * transform T (map / filter_map / flat_map / scan) → drop to
+    //     bare `Iterator` because the new Item type is the closure's
+    //     return value (unknown without body inference).
+    //   * `for_each` / `any` / `all` carry no return but take a closure
+    //     over T.
+    add_returning(
+        reg,
+        "Iterator",
+        "Iterator<T>",
+        &[
+            "take",
+            "skip",
+            "enumerate",
+            "peekable",
+            "rev",
+            "cloned",
+            "copied",
+            "cycle",
+            "step_by",
+            "by_ref",
+            "flatten",
+            "zip",
+            "chain",
+        ],
+    );
+    add_full(
+        reg,
+        "Iterator",
+        "Iterator<T>",
+        "T",
+        &["filter", "take_while", "skip_while", "inspect"],
+    );
+    add_full(
+        reg,
+        "Iterator",
+        "Iterator",
+        "T",
+        &["map", "filter_map", "flat_map", "scan"],
+    );
+    add_with_closure(reg, "Iterator", "T", &["for_each", "any", "all"]);
+    add_returning(
+        reg,
+        "Iterator",
+        "Option<T>",
+        &[
+            "min",
+            "max",
+            "min_by",
+            "max_by",
+            "min_by_key",
+            "max_by_key",
+            "last",
+            "nth",
+        ],
+    );
+    add_full(reg, "Iterator", "Option<T>", "T", &["find"]);
+    add_full(reg, "Iterator", "Option", "T", &["find_map", "position"]);
+
+    add(
+        reg,
+        "String",
+        &[
+            "push",
+            "push_str",
+            "len",
+            "is_empty",
+            "as_bytes",
+            "as_mut_str",
+            "clone",
+            "into_bytes",
+            "clear",
+            "truncate",
+            "contains",
+            "starts_with",
+            "ends_with",
+            "find",
+            "rfind",
+            "capacity",
+            "with_capacity",
+            "from_utf8",
+            "from_utf8_lossy",
+            "into",
+        ],
+    );
+    add_returning(
+        reg,
+        "String",
+        "String",
+        &[
+            "to_string",
+            "replace",
+            "replacen",
+            "to_lowercase",
+            "to_uppercase",
+            "repeat",
+            "to_owned",
+        ],
+    );
+    add_returning(
+        reg,
+        "String",
+        "str",
+        &["as_str", "trim", "trim_start", "trim_end"],
+    );
+    add_returning(
+        reg,
+        "String",
+        "Iterator",
+        &[
+            "chars",
+            "bytes",
+            "lines",
+            "split",
+            "splitn",
+            "split_whitespace",
+        ],
+    );
+    add_returning(reg, "String", "Result", &["parse"]);
+
+    add(
+        reg,
+        "str",
+        &[
+            "len",
+            "is_empty",
+            "as_bytes",
+            "contains",
+            "starts_with",
+            "ends_with",
+            "find",
+            "rfind",
+            "as_ptr",
+            "is_ascii",
+            "split_at",
+        ],
+    );
+    add_returning(
+        reg,
+        "str",
+        "String",
+        &[
+            "to_string",
+            "to_owned",
+            "to_lowercase",
+            "to_uppercase",
+            "replace",
+            "replacen",
+            "repeat",
+        ],
+    );
+    add_returning(reg, "str", "str", &["trim", "trim_start", "trim_end"]);
+    add_returning(
+        reg,
+        "str",
+        "Iterator",
+        &[
+            "split",
+            "splitn",
+            "split_whitespace",
+            "chars",
+            "bytes",
+            "lines",
+            "matches",
+            "char_indices",
+        ],
+    );
+    add_returning(reg, "str", "Option", &["strip_prefix", "strip_suffix"]);
+    add_returning(reg, "str", "Result", &["parse"]);
+
+    add(
+        reg,
+        "HashMap",
+        &[
+            "insert",
+            "contains_key",
+            "len",
+            "is_empty",
+            "entry",
+            "clear",
+            "with_capacity",
+            "capacity",
+            "extend",
+            "retain",
+        ],
+    );
+    // iter / iter_mut / into_iter / drain yield `(&K, &V)` tuples —
+    // V0 cannot bind tuple destructure, so keep them bare `Iterator`.
+    add_returning(
+        reg,
+        "HashMap",
+        "Iterator",
+        &["iter", "iter_mut", "into_iter", "drain"],
+    );
+    add_returning(reg, "HashMap", "Iterator<K>", &["keys"]);
+    add_returning(reg, "HashMap", "Iterator<V>", &["values", "values_mut"]);
+    // Bug E-3.3: lookup-style methods on `HashMap<K, V>` return `Option<V>`.
+    add_returning(reg, "HashMap", "Option<V>", &["get", "get_mut", "remove"]);
+
+    add(
+        reg,
+        "BTreeMap",
+        &[
+            "insert",
+            "contains_key",
+            "len",
+            "is_empty",
+            "entry",
+            "clear",
+            "first_key_value",
+            "last_key_value",
+        ],
+    );
+    add_returning(
+        reg,
+        "BTreeMap",
+        "Iterator",
+        &["iter", "iter_mut", "into_iter", "range", "range_mut"],
+    );
+    add_returning(reg, "BTreeMap", "Iterator<K>", &["keys"]);
+    add_returning(reg, "BTreeMap", "Iterator<V>", &["values", "values_mut"]);
+    add_returning(reg, "BTreeMap", "Option<V>", &["get", "get_mut", "remove"]);
+
+    add(
+        reg,
+        "HashSet",
+        &[
+            "insert",
+            "remove",
+            "contains",
+            "len",
+            "is_empty",
+            "clear",
+            "with_capacity",
+            "extend",
+        ],
+    );
+    add_returning(
+        reg,
+        "HashSet",
+        "Iterator<T>",
+        &[
+            "iter",
+            "into_iter",
+            "drain",
+            "intersection",
+            "union",
+            "difference",
+            "symmetric_difference",
+        ],
+    );
+    add_with_closure(reg, "HashSet", "T", &["retain"]);
+
+    add(
+        reg,
+        "BTreeSet",
+        &[
+            "insert", "remove", "contains", "len", "is_empty", "clear", "first", "last",
+        ],
+    );
+    add_returning(
+        reg,
+        "BTreeSet",
+        "Iterator<T>",
+        &["iter", "into_iter", "range"],
+    );
+
+    add(
+        reg,
+        "PathBuf",
+        &[
+            "new",
+            "push",
+            "pop",
+            "set_extension",
+            "set_file_name",
+            "into_os_string",
+            "with_capacity",
+            "capacity",
+            "clear",
+            "from",
+            "to_string_lossy",
+            "to_str",
+            "exists",
+            "is_file",
+            "is_dir",
+            "starts_with",
+            "ends_with",
+            "is_absolute",
+            "is_relative",
+            "display",
+        ],
+    );
+    add_returning(reg, "PathBuf", "Path", &["as_path"]);
+    add_returning(
+        reg,
+        "PathBuf",
+        "Option",
+        &["file_name", "file_stem", "extension", "parent"],
+    );
+    add_returning(reg, "PathBuf", "Iterator", &["components", "ancestors"]);
+    add_returning(reg, "PathBuf", "PathBuf", &["join"]);
+    add_returning(
+        reg,
+        "PathBuf",
+        "Result",
+        &["canonicalize", "read_dir", "metadata", "strip_prefix"],
+    );
+
+    add(
+        reg,
+        "Path",
+        &[
+            "new",
+            "to_string_lossy",
+            "to_str",
+            "exists",
+            "is_file",
+            "is_dir",
+            "starts_with",
+            "ends_with",
+            "is_absolute",
+            "is_relative",
+            "as_os_str",
+            "display",
+        ],
+    );
+    add_returning(reg, "Path", "PathBuf", &["to_path_buf", "join"]);
+    add_returning(
+        reg,
+        "Path",
+        "Option",
+        &["file_name", "file_stem", "extension", "parent"],
+    );
+    add_returning(reg, "Path", "Iterator", &["components", "ancestors"]);
+    add_returning(
+        reg,
+        "Path",
+        "Result",
+        &["canonicalize", "read_dir", "metadata", "strip_prefix"],
+    );
+
+    // Primitive integer inherent methods — saturating / wrapping /
+    // checked arithmetic + abs / pow / min / max / clamp. Same surface
+    // across every signed and unsigned int type, so registered through
+    // a per-type sweep with one source-of-truth method list. Receiver
+    // type at the call site is the bare primitive name (e.g. `u16`),
+    // matching the `receiver_type` the extractor populates.
+    for ty in INT_TYPES {
+        add(reg, ty, INT_METHODS);
+        // `i*`/`isize` are signed, `u*`/`usize` unsigned — seed only the
+        // surface each half actually exposes (`abs` vs `is_power_of_two`).
+        if ty.starts_with('i') {
+            add(reg, ty, INT_METHODS_SIGNED);
+        } else {
+            add(reg, ty, INT_METHODS_UNSIGNED);
+        }
+    }
+
+    // `Peekable<I>` inherent — `peek` / `peek_mut` are NOT on Iterator
+    // (only `next` is, and that's covered via the builtin-trait-method
+    // dispatch step). Register the inherent surface separately so the
+    // receiver-type direct lookup (`<builtin>::rust::Peekable::peek`)
+    // hits.
+    add(
+        reg,
+        "Peekable",
+        &["peek", "peek_mut", "next_if", "next_if_eq"],
+    );
+
+    // `std::process::Command` builder — heavily used in tests and CLI
+    // glue. `output` / `status` / `spawn` return `Result`; the rest
+    // are mutators that return `&mut Self` (omitted from `returns` so
+    // chain propagation doesn't pretend to know the type).
+    add(
+        reg,
+        "Command",
+        &[
+            "new",
+            "arg",
+            "args",
+            "env",
+            "envs",
+            "env_remove",
+            "env_clear",
+            "current_dir",
+            "stdin",
+            "stdout",
+            "stderr",
+            "get_program",
+            "get_args",
+            "get_envs",
+            "get_current_dir",
+        ],
+    );
+    add_returning(reg, "Command", "Result", &["output", "status", "spawn"]);
+
+    // Trait dispatch widening — post-pass: stamp `is_trait=true` on
+    // every method whose `parent_type` is one of the comprehensively-
+    // registered builtin traits (Iterator/IntoIterator/...). Done as a
+    // sweep rather than per-call so the existing add/add_returning/
+    // add_full helpers stay slim and `with_returns`/`with_closure_arg`
+    // wiring is preserved. The flag travels into the seeded symbol's
+    // `trait_method` flag via `seed_methods_into`.
+    if let Some(methods) = reg.methods_by_language.get_mut(&Language::Rust) {
+        const TRAIT_PARENTS: &[&str] = &["Iterator"];
+        for m in methods.iter_mut() {
+            if TRAIT_PARENTS.contains(&m.parent_type.as_str()) {
+                m.is_trait = true;
+            }
+        }
+    }
+}

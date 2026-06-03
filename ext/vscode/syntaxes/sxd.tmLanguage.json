@@ -1,0 +1,148 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Standarx DSL",
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#constant"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#string-multiline-template"
+    },
+    {
+      "include": "#string-inline-template"
+    },
+    {
+      "include": "#string-plain"
+    },
+    {
+      "include": "#punctuation"
+    },
+    {
+      "include": "#identifier"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.standarx"
+    },
+    "constant": {
+      "match": "\\b(true|false|null)\\b",
+      "name": "constant.language.standarx"
+    },
+    "identifier": {
+      "match": "[A-Za-z_][A-Za-z0-9_]*",
+      "name": "variable.other.standarx"
+    },
+    "interpolation": {
+      "begin": "\\$\\{",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.interpolation.begin.standarx"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.interpolation.end.standarx"
+        }
+      },
+      "name": "meta.interpolation.standarx",
+      "patterns": [
+        {
+          "include": "#constant"
+        },
+        {
+          "include": "#number"
+        },
+        {
+          "include": "#string-plain"
+        },
+        {
+          "match": "[A-Za-z_][A-Za-z0-9_]*",
+          "name": "variable.other.standarx"
+        }
+      ]
+    },
+    "number": {
+      "patterns": [
+        {
+          "match": "-?\\b\\d+\\.\\d+([eE][+-]?\\d+)?\\b",
+          "name": "constant.numeric.float.standarx"
+        },
+        {
+          "match": "-?\\b\\d+\\b",
+          "name": "constant.numeric.integer.standarx"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "match": "[{}]",
+          "name": "punctuation.section.block.standarx"
+        },
+        {
+          "match": "[\\[\\]]",
+          "name": "punctuation.section.brackets.standarx"
+        },
+        {
+          "match": ",",
+          "name": "punctuation.separator.comma.standarx"
+        },
+        {
+          "match": "\\.",
+          "name": "punctuation.accessor.standarx"
+        }
+      ]
+    },
+    "string-escape": {
+      "match": "\\\\([\\\\\"`$nrt0]|u\\{[0-9a-fA-F]{1,6}\\})",
+      "name": "constant.character.escape.standarx"
+    },
+    "string-inline-template": {
+      "begin": "`",
+      "end": "`",
+      "name": "string.quoted.other.template.standarx",
+      "patterns": [
+        {
+          "include": "#string-escape"
+        },
+        {
+          "include": "#interpolation"
+        }
+      ]
+    },
+    "string-multiline-template": {
+      "begin": "```",
+      "end": "```",
+      "name": "string.quoted.other.template.multiline.standarx",
+      "patterns": [
+        {
+          "include": "#string-escape"
+        },
+        {
+          "include": "#interpolation"
+        }
+      ]
+    },
+    "string-plain": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.standarx",
+      "patterns": [
+        {
+          "match": "\\\\([\\\\\"`nrt0]|u\\{[0-9a-fA-F]{1,6}\\})",
+          "name": "constant.character.escape.standarx"
+        }
+      ]
+    }
+  },
+  "scopeName": "source.standarx"
+}

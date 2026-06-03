@@ -1,30 +1,30 @@
 use standardoc_ir::{
-    EdgeConfidence, EdgeKind, Kind, Language, ResolvedOrUnresolved, Signature, SourceOrigin,
+    DeclKind, EdgeConfidence, EdgeKind, EntryPointKind, Kind, Language, Signature, SourceOrigin,
     Visibility,
 };
 
 use crate::storage::error::StorageError;
 
 pub(crate) fn signature_to_json(sig: &Signature) -> Result<String, StorageError> {
+    // IR-1 1.0 vocabulary lock: validate every `exposed_via` slug before
+    // persisting the signature JSON. Refuses extractor-emitted slugs
+    // that are neither built-in nor `custom:`-prefixed, surfacing the
+    // error as `StorageError::BridgeKindInvalid` (via
+    // `From<BridgeKindError>`).
+    //
+    // IR-3: `exposed_via` is `Vec<BridgeKind>` (dual-target apps may
+    // expose the same symbol via multiple bridges, e.g. Tauri + wasm).
+    // Validation short-circuits on the first invalid slug — a second
+    // bad slug in the same vec will surface on the next walk after the
+    // first is fixed, which is the simplest contract.
+    for bridge in &sig.meta.exposed_via {
+        bridge.try_validate()?;
+    }
     Ok(serde_json::to_string(sig)?)
 }
 
 pub(crate) fn json_to_signature(s: &str) -> Result<Signature, StorageError> {
     Ok(serde_json::from_str(s)?)
-}
-
-/// Maps a `ResolvedOrUnresolved` to the `to_unresolved` SQL column when the
-/// target is not (yet) resolved. Resolved targets return `None` — the caller
-/// must then look up the symbol id from the fqdn before binding `to_symbol_id`.
-/// `UnresolvedBridge` is encoded as `"<bridge_kind>::<name>"` per bridges lock #3.
-pub(crate) fn unresolved_to_storage(target: &ResolvedOrUnresolved) -> Option<String> {
-    match target {
-        ResolvedOrUnresolved::Resolved { .. } => None,
-        ResolvedOrUnresolved::Unresolved { name } => Some(name.clone()),
-        ResolvedOrUnresolved::UnresolvedBridge { bridge, name } => {
-            Some(format!("{}::{}", bridge.as_str(), name))
-        }
-    }
 }
 
 pub(crate) const fn language_to_sql_text(lang: Language) -> &'static str {
@@ -35,6 +35,7 @@ pub(crate) const fn language_to_sql_text(lang: Language) -> &'static str {
         Language::Lua => "lua",
         Language::Vue => "vue",
         Language::Svelte => "svelte",
+        Language::C => "c",
     }
 }
 
@@ -46,6 +47,7 @@ pub(crate) fn language_from_sql_text(s: &str) -> Result<Language, StorageError> 
         "lua" => Ok(Language::Lua),
         "vue" => Ok(Language::Vue),
         "svelte" => Ok(Language::Svelte),
+        "c" => Ok(Language::C),
         other => Err(StorageError::InvalidStoredData {
             detail: format!("unknown language: {other:?}"),
         }),
@@ -54,7 +56,7 @@ pub(crate) fn language_from_sql_text(s: &str) -> Result<Language, StorageError> 
 
 pub(crate) const fn kind_to_sql_text(k: Kind) -> &'static str {
     match k {
-        Kind::Function => "function",
+        Kind::Callable => "callable",
         Kind::Type => "type",
         Kind::Value => "value",
         Kind::Module => "module",
@@ -64,13 +66,114 @@ pub(crate) const fn kind_to_sql_text(k: Kind) -> &'static str {
 
 pub(crate) fn kind_from_sql_text(s: &str) -> Result<Kind, StorageError> {
     match s {
-        "function" => Ok(Kind::Function),
+        "callable" => Ok(Kind::Callable),
         "type" => Ok(Kind::Type),
         "value" => Ok(Kind::Value),
         "module" => Ok(Kind::Module),
         "macro" => Ok(Kind::Macro),
         other => Err(StorageError::InvalidStoredData {
             detail: format!("unknown kind: {other:?}"),
+        }),
+    }
+}
+
+/// Encodes a [`DeclKind`] as a flat SQL text. Built-in variants map
+/// to their `serde(rename_all = "snake_case")` representation;
+/// `Custom { lang, tag }` becomes `"custom:<lang>:<tag>"` (lang slug
+/// mirrors [`language_to_sql_text`]). The flat shape is grep-friendly
+/// on the SQL side — no JSON braces in the column.
+pub(crate) fn decl_kind_to_sql_text(d: &DeclKind) -> String {
+    match d {
+        DeclKind::Module => "module".into(),
+        DeclKind::Namespace => "namespace".into(),
+        DeclKind::Crate => "crate".into(),
+        DeclKind::Struct => "struct".into(),
+        DeclKind::Enum => "enum".into(),
+        DeclKind::Union => "union".into(),
+        DeclKind::Class => "class".into(),
+        DeclKind::Interface => "interface".into(),
+        DeclKind::TypeAlias => "type_alias".into(),
+        DeclKind::Function => "function".into(),
+        DeclKind::Method => "method".into(),
+        DeclKind::Constructor => "constructor".into(),
+        DeclKind::Getter => "getter".into(),
+        DeclKind::Setter => "setter".into(),
+        DeclKind::Const => "const".into(),
+        DeclKind::Static => "static".into(),
+        DeclKind::Var => "var".into(),
+        DeclKind::Field => "field".into(),
+        DeclKind::EnumVariant => "enum_variant".into(),
+        DeclKind::DeclarativeMacro => "declarative_macro".into(),
+        DeclKind::ProcMacro => "proc_macro".into(),
+        DeclKind::Decorator => "decorator".into(),
+        DeclKind::Custom { lang, tag } => {
+            format!("custom:{}:{}", language_to_sql_text(*lang), tag)
+        }
+    }
+}
+
+pub(crate) fn decl_kind_from_sql_text(s: &str) -> Result<DeclKind, StorageError> {
+    match s {
+        "module" => Ok(DeclKind::Module),
+        "namespace" => Ok(DeclKind::Namespace),
+        "crate" => Ok(DeclKind::Crate),
+        "struct" => Ok(DeclKind::Struct),
+        "enum" => Ok(DeclKind::Enum),
+        "union" => Ok(DeclKind::Union),
+        "class" => Ok(DeclKind::Class),
+        "interface" => Ok(DeclKind::Interface),
+        "type_alias" => Ok(DeclKind::TypeAlias),
+        "function" => Ok(DeclKind::Function),
+        "method" => Ok(DeclKind::Method),
+        "constructor" => Ok(DeclKind::Constructor),
+        "getter" => Ok(DeclKind::Getter),
+        "setter" => Ok(DeclKind::Setter),
+        "const" => Ok(DeclKind::Const),
+        "static" => Ok(DeclKind::Static),
+        "var" => Ok(DeclKind::Var),
+        "field" => Ok(DeclKind::Field),
+        "enum_variant" => Ok(DeclKind::EnumVariant),
+        "declarative_macro" => Ok(DeclKind::DeclarativeMacro),
+        "proc_macro" => Ok(DeclKind::ProcMacro),
+        "decorator" => Ok(DeclKind::Decorator),
+        other => match other.strip_prefix("custom:") {
+            Some(rest) => {
+                let (lang_s, tag) =
+                    rest.split_once(':')
+                        .ok_or_else(|| StorageError::InvalidStoredData {
+                            detail: format!("custom decl_kind missing tag: {other:?}"),
+                        })?;
+                let lang = language_from_sql_text(lang_s)?;
+                Ok(DeclKind::Custom {
+                    lang,
+                    tag: tag.to_string(),
+                })
+            }
+            None => Err(StorageError::InvalidStoredData {
+                detail: format!("unknown decl_kind: {other:?}"),
+            }),
+        },
+    }
+}
+
+/// Phase 3 (Flow) — Encodes an [`EntryPointKind`] as flat SQL text
+/// (`binary_main` / `public_api` / `ffi_export`). Matches the SQL
+/// CHECK in `init_v0.sql`.
+pub(crate) const fn entry_point_to_sql_text(e: EntryPointKind) -> &'static str {
+    match e {
+        EntryPointKind::BinaryMain => "binary_main",
+        EntryPointKind::PublicApi => "public_api",
+        EntryPointKind::FfiExport => "ffi_export",
+    }
+}
+
+pub(crate) fn entry_point_from_sql_text(s: &str) -> Result<EntryPointKind, StorageError> {
+    match s {
+        "binary_main" => Ok(EntryPointKind::BinaryMain),
+        "public_api" => Ok(EntryPointKind::PublicApi),
+        "ffi_export" => Ok(EntryPointKind::FfiExport),
+        other => Err(StorageError::InvalidStoredData {
+            detail: format!("unknown entry_point: {other:?}"),
         }),
     }
 }
@@ -124,9 +227,7 @@ pub(crate) const fn edge_kind_to_sql_text(k: EdgeKind) -> &'static str {
         EdgeKind::Extends => "EXTENDS",
         EdgeKind::Implements => "IMPLEMENTS",
         EdgeKind::References => "REFERENCES",
-        EdgeKind::Defines => "DEFINES",
         EdgeKind::UsesType => "USES_TYPE",
-        EdgeKind::ExposesApi => "EXPOSES_API",
     }
 }
 
@@ -137,9 +238,7 @@ pub(crate) fn edge_kind_from_sql_text(s: &str) -> Result<EdgeKind, StorageError>
         "EXTENDS" => Ok(EdgeKind::Extends),
         "IMPLEMENTS" => Ok(EdgeKind::Implements),
         "REFERENCES" => Ok(EdgeKind::References),
-        "DEFINES" => Ok(EdgeKind::Defines),
         "USES_TYPE" => Ok(EdgeKind::UsesType),
-        "EXPOSES_API" => Ok(EdgeKind::ExposesApi),
         other => Err(StorageError::InvalidStoredData {
             detail: format!("unknown edge kind: {other:?}"),
         }),
@@ -166,201 +265,4 @@ pub(crate) fn edge_confidence_from_sql_text(s: &str) -> Result<EdgeConfidence, S
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use standardoc_ir::{BridgeKind, Modifiers, Param, Signature, TypeRef};
-
-    #[test]
-    fn signature_round_trip_through_json() {
-        let sig = Signature {
-            params: vec![Param {
-                name: "x".into(),
-                ty: TypeRef::new("u32"),
-                default: None,
-            }],
-            returns: Some(TypeRef::new("u32")),
-            modifiers: Modifiers {
-                is_async: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let json = signature_to_json(&sig).unwrap();
-        let back = json_to_signature(&json).unwrap();
-        assert_eq!(sig, back);
-    }
-
-    #[test]
-    fn signature_default_round_trip() {
-        let sig = Signature::default();
-        let json = signature_to_json(&sig).unwrap();
-        let back = json_to_signature(&json).unwrap();
-        assert_eq!(sig, back);
-    }
-
-    #[test]
-    fn json_to_signature_invalid_returns_json_error() {
-        let err = json_to_signature("not json").unwrap_err();
-        assert!(matches!(err, StorageError::Json(_)));
-    }
-
-    #[test]
-    fn unresolved_to_storage_resolved_returns_none() {
-        let target = ResolvedOrUnresolved::Resolved {
-            fqdn: "crate::a::foo".into(),
-        };
-        assert_eq!(unresolved_to_storage(&target), None);
-    }
-
-    #[test]
-    fn unresolved_to_storage_unresolved_returns_name() {
-        let target = ResolvedOrUnresolved::Unresolved {
-            name: "do_thing".into(),
-        };
-        assert_eq!(unresolved_to_storage(&target).as_deref(), Some("do_thing"));
-    }
-
-    #[test]
-    fn unresolved_to_storage_bridge_concatenates() {
-        let target = ResolvedOrUnresolved::UnresolvedBridge {
-            bridge: BridgeKind::from("tauri"),
-            name: "create_user".into(),
-        };
-        assert_eq!(
-            unresolved_to_storage(&target).as_deref(),
-            Some("tauri::create_user")
-        );
-    }
-
-    #[test]
-    fn language_round_trip_all_variants() {
-        for lang in [
-            Language::Rust,
-            Language::TypeScript,
-            Language::JavaScript,
-            Language::Lua,
-            Language::Vue,
-            Language::Svelte,
-        ] {
-            let s = language_to_sql_text(lang);
-            let back = language_from_sql_text(s).unwrap();
-            assert_eq!(lang, back);
-        }
-    }
-
-    #[test]
-    fn language_to_sql_text_known_lowercase() {
-        assert_eq!(language_to_sql_text(Language::Rust), "rust");
-        assert_eq!(language_to_sql_text(Language::TypeScript), "typescript");
-        assert_eq!(language_to_sql_text(Language::JavaScript), "javascript");
-        assert_eq!(language_to_sql_text(Language::Lua), "lua");
-        assert_eq!(language_to_sql_text(Language::Vue), "vue");
-        assert_eq!(language_to_sql_text(Language::Svelte), "svelte");
-    }
-
-    #[test]
-    fn language_from_sql_text_unknown_is_invalid_stored_data() {
-        let err = language_from_sql_text("banana").unwrap_err();
-        assert!(matches!(err, StorageError::InvalidStoredData { .. }));
-    }
-
-    #[test]
-    fn language_from_sql_text_uppercase_is_invalid() {
-        let err = language_from_sql_text("Rust").unwrap_err();
-        assert!(matches!(err, StorageError::InvalidStoredData { .. }));
-    }
-
-    #[test]
-    fn kind_round_trip_all_variants() {
-        for k in [
-            Kind::Function,
-            Kind::Type,
-            Kind::Value,
-            Kind::Module,
-            Kind::Macro,
-        ] {
-            let s = kind_to_sql_text(k);
-            assert_eq!(kind_from_sql_text(s).unwrap(), k);
-        }
-    }
-
-    #[test]
-    fn kind_to_sql_text_lowercase() {
-        assert_eq!(kind_to_sql_text(Kind::Function), "function");
-        assert_eq!(kind_to_sql_text(Kind::Macro), "macro");
-    }
-
-    #[test]
-    fn kind_from_sql_text_unknown_is_invalid() {
-        let err = kind_from_sql_text("class").unwrap_err();
-        assert!(matches!(err, StorageError::InvalidStoredData { .. }));
-    }
-
-    #[test]
-    fn visibility_round_trip_all_variants() {
-        for v in [
-            Visibility::Public,
-            Visibility::Private,
-            Visibility::Crate,
-            Visibility::Protected,
-        ] {
-            let s = visibility_to_sql_text(v);
-            assert_eq!(visibility_from_sql_text(s).unwrap(), v);
-        }
-    }
-
-    #[test]
-    fn visibility_from_sql_text_unknown_is_invalid() {
-        let err = visibility_from_sql_text("internal").unwrap_err();
-        assert!(matches!(err, StorageError::InvalidStoredData { .. }));
-    }
-
-    #[test]
-    fn source_origin_round_trip_all_variants() {
-        for o in [
-            SourceOrigin::Workspace,
-            SourceOrigin::CargoRegistry,
-            SourceOrigin::NodeModulesDts,
-            SourceOrigin::ManualExternal,
-        ] {
-            let s = source_origin_to_sql_text(o);
-            assert_eq!(source_origin_from_sql_text(s).unwrap(), o);
-        }
-    }
-
-    #[test]
-    fn source_origin_from_sql_text_unknown_is_invalid() {
-        let err = source_origin_from_sql_text("vendor").unwrap_err();
-        assert!(matches!(err, StorageError::InvalidStoredData { .. }));
-    }
-
-    #[test]
-    fn edge_kind_round_trip_all_variants() {
-        for k in [
-            EdgeKind::Calls,
-            EdgeKind::Imports,
-            EdgeKind::Extends,
-            EdgeKind::Implements,
-            EdgeKind::References,
-            EdgeKind::Defines,
-            EdgeKind::UsesType,
-            EdgeKind::ExposesApi,
-        ] {
-            let s = edge_kind_to_sql_text(k);
-            assert_eq!(edge_kind_from_sql_text(s).unwrap(), k);
-        }
-    }
-
-    #[test]
-    fn edge_kind_to_sql_text_screaming() {
-        assert_eq!(edge_kind_to_sql_text(EdgeKind::Calls), "CALLS");
-        assert_eq!(edge_kind_to_sql_text(EdgeKind::UsesType), "USES_TYPE");
-        assert_eq!(edge_kind_to_sql_text(EdgeKind::ExposesApi), "EXPOSES_API");
-    }
-
-    #[test]
-    fn edge_kind_from_sql_text_lowercase_is_invalid() {
-        let err = edge_kind_from_sql_text("calls").unwrap_err();
-        assert!(matches!(err, StorageError::InvalidStoredData { .. }));
-    }
-}
+mod tests;

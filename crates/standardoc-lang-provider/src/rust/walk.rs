@@ -1,35 +1,97 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use proc_macro2::Span;
-use quote::ToTokens;
 use standardoc_ir::{
-    EdgeKind, Kind, LanguageKind, Modifiers, Param, RawAttribute, RawAttributeArg, RawDocument,
-    RawEdge, RawSymbol, ResolvedOrUnresolved, Signature, SignatureMeta, Site, SymbolLocation,
-    TypeRef, Visibility, compact_rust_tokens,
+    AliasMutability, BuiltinTag, BuiltinTier, Language, ModuleLookup, RawCallSite, RawDocument,
+    RawEdge, RawSymbol, ResolvedOrUnresolved, SymbolLocation,
 };
 use syn::spanned::Spanned;
 
+use crate::builtins::global as global_builtin_registry;
 use crate::walk_core::WalkContextCore;
 
-use super::body_hash;
 use super::extract_call;
 use super::extract_doc;
+use super::extract_type;
 use super::extract_use;
-use super::visibility;
+use super::lookup as rust_lookup;
+
+mod extract_items;
+
+use extract_items::{
+    emit_derive_implements, extract_const, extract_enum, extract_fn, extract_impl,
+    extract_macro_def, extract_static, extract_struct, extract_trait, extract_type_alias,
+    extract_union,
+};
+
+/// Recover the `ModuleLookup` scope_idx for the AST node spanning `span`.
+/// Falls back to `ROOT_SCOPE` when the pre-pass didn't register the
+/// span — the caller still gets a sensible enclosing scope for
+/// `resolve_local` queries (module-level generics + imports stay
+/// reachable).
+pub(crate) fn lookup_scope_for(ctx: &WalkContext, span: Span) -> u32 {
+    let (lo, hi) = rust_lookup::scope_span_key(span);
+    ctx.core
+        .lookup
+        .scope_idx_for_span(lo, hi)
+        .unwrap_or(ModuleLookup::ROOT_SCOPE)
+}
 
 pub(crate) struct WalkContext {
     pub(crate) core: WalkContextCore,
     pub(crate) crate_name: String,
     pub(crate) alias_table: HashMap<String, String>,
+    /// Stage 3e-1b — flags accumulated from Attribute-tier builtin
+    /// hits during the walk. Keyed by the source symbol's FQDN
+    /// (the enclosing fn / struct / impl method owning the touched
+    /// trait / type / call). Flushed onto `core.symbols[*].flags`
+    /// before `walk()` returns. Mirrors the TS-side `TsWalkContext`
+    /// machinery.
+    pub(crate) attribute_flags: HashMap<String, HashSet<String>>,
+    /// Bug E-3 Phase 1: per-file `struct_fqdn → {field → nominal type}`
+    /// table populated by `push_field` during struct extraction. Read
+    /// by `visit_expr_method_call` (P1.4) to resolve `self.field.method`
+    /// when the enclosing impl's `self_type` is known.
+    pub(crate) struct_fields: super::struct_field_table::StructFieldTable,
+    /// Bug E-3 extensions Phase E-3.1: per-file `fqdn → nominal return
+    /// type` for workspace fns and impl methods extracted in this walk.
+    /// Read by `type_of_expr` to propagate types through chains like
+    /// `get_thing().method()` where `get_thing` is workspace-defined.
+    pub(crate) return_types: super::return_type_table::ReturnTypeTable,
+    /// Workspace-global return-type registry populated by Pass 0
+    /// (`workspace_prepare`). `Some` during cold-start / watcher
+    /// driven extracts ; `None` when tests call `walk` directly
+    /// without the pre-pass. Read by `type_of_expr` as a fallback
+    /// after the per-file `return_types` miss — enables cross-file
+    /// chain propagation like `let x = other_crate::get_user();
+    /// x.name()`.
+    pub(crate) global_return_types:
+        Option<std::sync::Arc<super::global_return_type_registry::GlobalReturnTypeRegistry>>,
 }
 
 impl WalkContext {
     pub(crate) fn new(file_path: &str, crate_name: &str, file_module_fqdn: String) -> Self {
         Self {
-            core: WalkContextCore::new(file_path.to_string(), file_module_fqdn),
+            core: WalkContextCore::new(file_path.to_string(), file_module_fqdn, Language::Rust),
             crate_name: crate_name.to_string(),
             alias_table: HashMap::new(),
+            attribute_flags: HashMap::new(),
+            struct_fields: super::struct_field_table::StructFieldTable::default(),
+            return_types: super::return_type_table::ReturnTypeTable::default(),
+            global_return_types: None,
         }
+    }
+
+    /// Stage 3e-1b — record a builtin tag against `source_fqdn` so the
+    /// post-walk flush stamps it onto the symbol's `flags` vec. Best-
+    /// effort : duplicates collapse into a `HashSet` so the same flag
+    /// never lands twice on the same symbol regardless of how many
+    /// times the Attribute-tier builtin is touched in the symbol body.
+    pub(crate) fn register_attribute_flag(&mut self, source_fqdn: &str, tag: &BuiltinTag) {
+        self.attribute_flags
+            .entry(source_fqdn.to_string())
+            .or_default()
+            .insert(tag.slug());
     }
 
     pub(crate) fn push_symbol(&mut self, sym: RawSymbol) {
@@ -42,6 +104,10 @@ impl WalkContext {
 
     pub(crate) fn push_document(&mut self, doc: RawDocument) {
         self.core.push_document(doc);
+    }
+
+    pub(crate) fn push_call_site(&mut self, cs: RawCallSite) {
+        self.core.push_call_site(cs);
     }
 
     /// Push the symbol and, if `attrs` carries an outer doc-comment chain,
@@ -100,10 +166,24 @@ impl WalkContext {
     /// 1. strict canonicalize (keyword + alias)
     /// 2. for a single-ident path with no alias, fall back to module-local
     ///    (`<current_module>::<ident>`)
-    /// 3. multi-segment paths with no alias are kept text-as-written (likely
-    ///    absolute/extern crate path); the pipeline `promote_unresolved` may
-    ///    still match by exact FQDN.
+    /// 3. multi-segment paths with no alias : try each ancestor module from
+    ///    `current_module` up to `file_module_fqdn` as the prefix for the
+    ///    leftmost segment ; if any composes a defined FQDN, append the
+    ///    rest. Without this, `IndexHandle::open()` called inside a test
+    ///    submodule of the same file stays unresolved despite
+    ///    `IndexHandle` being right there at the file's root scope.
+    /// 4. fall back to text-as-written ; the pipeline `promote_unresolved`
+    ///    may still match by exact FQDN.
     pub(crate) fn resolve_path(&self, path: &str, current_module: &str) -> ResolvedOrUnresolved {
+        // Verbatim FQDN already defined locally (e.g. caller passed an
+        // absolute path after `Self::xxx` → `<self_type>::xxx`
+        // substitution). Skip canonicalize / ancestor-walk and return
+        // the FQDN directly so the edge resolves to the matching symbol.
+        if self.core.defined_fqdns.contains(path) {
+            return ResolvedOrUnresolved::Resolved {
+                fqdn: path.to_string(),
+            };
+        }
         if let Some(canonical) = self.canonicalize(path, current_module) {
             return if self.core.defined_fqdns.contains(&canonical) {
                 ResolvedOrUnresolved::Resolved { fqdn: canonical }
@@ -112,17 +192,175 @@ impl WalkContext {
             };
         }
         let segments: Vec<&str> = path.split("::").filter(|s| !s.is_empty()).collect();
-        if segments.len() == 1 {
-            let module_local = format!("{current_module}::{}", segments[0]);
-            if self.core.defined_fqdns.contains(&module_local) {
-                return ResolvedOrUnresolved::Resolved { fqdn: module_local };
+        if segments.is_empty() {
+            return ResolvedOrUnresolved::Unresolved {
+                name: path.to_string(),
+            };
+        }
+        // Walk `current_module` up to the file's root looking for a
+        // defined `<probe>::<leftmost>`. Catches two related patterns :
+        //
+        // - Single-ident calls from nested `mod tests { use super::*; }`
+        //   blocks to parent-module fns/items (e.g. `walk(...)` calling
+        //   `parent::walk` from `parent::tests::test_fn`). The glob
+        //   import doesn't bind enumerated parent items into the test
+        //   scope, so the module-local fallback `<current_module>::walk`
+        //   misses ; walking up finds `parent::walk`.
+        //
+        // - Multi-segment paths like `IndexHandle::open()` where the
+        //   leftmost is a locally-defined type at the file root. Same
+        //   ancestor walk, append the remaining segments.
+        //
+        // External paths (`std::mem::take`, `serde::Deserialize`) still
+        // fall through to the text-as-written branch — no ancestor of
+        // ours owns `std` or `serde`, so the walk is a no-op for them.
+        let leftmost = segments[0];
+        let rest = if segments.len() > 1 {
+            Some(segments[1..].join("::"))
+        } else {
+            None
+        };
+        let mut probe = current_module.to_string();
+        loop {
+            let candidate = format!("{probe}::{leftmost}");
+            if self.core.defined_fqdns.contains(&candidate) {
+                let full = match &rest {
+                    Some(r) => format!("{candidate}::{r}"),
+                    None => candidate,
+                };
+                return if self.core.defined_fqdns.contains(&full) {
+                    ResolvedOrUnresolved::Resolved { fqdn: full }
+                } else {
+                    ResolvedOrUnresolved::Unresolved { name: full }
+                };
             }
-            return ResolvedOrUnresolved::Unresolved { name: module_local };
+            if probe == self.core.file_module_fqdn {
+                break;
+            }
+            match probe.rsplit_once("::") {
+                Some((parent, _)) => probe = parent.to_string(),
+                None => break,
+            }
+        }
+        // No ancestor owns the leftmost. Single-ident falls back to the
+        // module-local unresolved (preserves pre-fix shape for callers
+        // doing `let x = unknown;`) ; multi-segment falls back to
+        // text-as-written (likely an external crate path).
+        if rest.is_none() {
+            return ResolvedOrUnresolved::Unresolved {
+                name: format!("{current_module}::{leftmost}"),
+            };
         }
         ResolvedOrUnresolved::Unresolved {
             name: path.to_string(),
         }
     }
+
+    /// Stage 3e-2 — resolve a name read in value position. Pipeline mirrors
+    /// the TS-side `ts::visit::CallVisitor::resolve_name`:
+    ///
+    /// 1. Single-ident paths consult [`ModuleLookup::resolve_local`] first.
+    ///    - Hit at [`ModuleLookup::ROOT_SCOPE`] (hoisted item / import) →
+    ///      fall through to module-level resolution; root-scope locals are
+    ///      already covered by `defined_fqdns` + `alias_table`.
+    ///    - Hit at nested scope with alias → propagate the alias's
+    ///      canonical-text through module-level resolution, carrying the
+    ///      [`AliasMutability`] so the visitor can stamp `via-alias[-mutable]`.
+    ///    - Hit at nested scope without alias → [`NameResolution::Local`].
+    /// 2. Multi-segment paths (`Foo::CONST`) skip the scope walk — locals
+    ///    don't have `::`.
+    /// 3. Module-level resolution checks the leftmost segment against the
+    ///    builtin registry (Drop/Attribute/Edge tiers), then falls through
+    ///    to [`WalkContext::resolve_path`].
+    pub(crate) fn resolve_name(
+        &self,
+        path: &str,
+        scope_idx: u32,
+        current_module: &str,
+    ) -> NameResolution {
+        let segments: Vec<&str> = path.split("::").filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            return NameResolution::Drop;
+        }
+
+        if segments.len() == 1
+            && let Some(res) = self.core.lookup.resolve_local(segments[0], scope_idx)
+            && res.scope_idx != ModuleLookup::ROOT_SCOPE
+        {
+            if let (Some(alias_str), Some(m)) = (res.aliases_to.as_deref(), res.mutability) {
+                return self.resolve_module_level(alias_str, current_module, Some(m));
+            }
+            return NameResolution::Local;
+        }
+        // ROOT_SCOPE — fall through to module-level resolution.
+
+        self.resolve_module_level(path, current_module, None)
+    }
+
+    /// Stage 3e-2 helper — module-level half of [`Self::resolve_name`].
+    /// Builtin tier check on the leftmost segment, then [`Self::resolve_path`]
+    /// fallback. Wraps the outcome in [`NameResolution::Target`] preserving
+    /// the optional `alias_mut` propagated by the caller.
+    fn resolve_module_level(
+        &self,
+        path: &str,
+        current_module: &str,
+        alias_mut: Option<AliasMutability>,
+    ) -> NameResolution {
+        let leftmost = path.split("::").next().unwrap_or("");
+        if let Some(entry) = global_builtin_registry().lookup(leftmost, Language::Rust) {
+            return match entry.tier {
+                BuiltinTier::Drop => NameResolution::Drop,
+                BuiltinTier::Attribute => NameResolution::Attribute(entry.tag.clone()),
+                BuiltinTier::Edge => NameResolution::Target {
+                    to: ResolvedOrUnresolved::Resolved {
+                        fqdn: entry.synthetic_fqdn.clone(),
+                    },
+                    alias_mut,
+                    via_builtin: Some(entry.tag.clone()),
+                },
+            };
+        }
+        NameResolution::Target {
+            to: self.resolve_path(path, current_module),
+            alias_mut,
+            via_builtin: None,
+        }
+    }
+}
+
+/// Stage 3e-2 — outcome of resolving a name (single-ident or multi-segment
+/// path) read in value position against the AOT [`ModuleLookup`] scope chain
+/// plus [`WalkContext::resolve_path`] fall-through. Mirrors
+/// `ts::visit::NameResolution`. Callers pattern-match the variants to decide
+/// between emitting an edge (`Target`) or skipping (`Local` for nested-scope
+/// bindings without alias, `Drop` for tier-classified noise, `Attribute` for
+/// tier-classified source-flag promotion targets).
+#[derive(Debug, Clone)]
+pub(crate) enum NameResolution {
+    /// Builtin classified as [`BuiltinTier::Drop`] (`Vec`, `Box`, `Some`,
+    /// `Ok`, `String::from`, …). Caller silently skips emission.
+    Drop,
+    /// Nested-scope local binding (let, fn param, closure param, match arm)
+    /// without an alias. Caller skips emission — locals aren't surfaced in
+    /// the module graph by design.
+    Local,
+    /// Builtin classified as [`BuiltinTier::Attribute`] (`Iterator`,
+    /// `IntoIterator`, `Future`, `Stream`, …). Caller skips the edge but
+    /// registers the carried [`BuiltinTag`] against the enclosing FQDN via
+    /// [`WalkContext::register_attribute_flag`] so the symbol picks up
+    /// `"async"` / `"iter"` / custom UST flags in its `flags` vec.
+    Attribute(BuiltinTag),
+    /// Resolvable target — caller emits the edge with the carried `to`,
+    /// optional `alias_mut` (Some when reached through a scope alias), and
+    /// optional `via_builtin` (Some when the leftmost segment matched an
+    /// [`BuiltinTier::Edge`]-tier builtin so the emitter can stamp
+    /// `via-builtin` / `builtin-<slug>` attrs).
+    Target {
+        to: ResolvedOrUnresolved,
+        alias_mut: Option<AliasMutability>,
+        via_builtin: Option<BuiltinTag>,
+    },
 }
 
 fn join_segments(prefix: &str, rest: &str) -> String {
@@ -147,16 +385,86 @@ pub(crate) fn path_to_string(path: &syn::Path) -> String {
     out
 }
 
+#[cfg(test)]
 pub(crate) fn walk(
     parsed: &syn::File,
     module_fqdn: &str,
     file_path: &str,
     crate_name: &str,
-) -> (Vec<RawSymbol>, Vec<RawEdge>, Vec<RawDocument>) {
+) -> (
+    Vec<RawSymbol>,
+    Vec<RawEdge>,
+    Vec<RawDocument>,
+    Vec<RawCallSite>,
+) {
+    let (s, e, d, c, _lookup) = walk_with_lookup(parsed, module_fqdn, file_path, crate_name, None);
+    (s, e, d, c)
+}
+
+/// Stage 3 final-mile (R1) — same as [`walk`] but also returns the AOT
+/// [`ModuleLookup`] so callers (production `extract_file`) can stash it
+/// in [`ExtractedFile::module_lookup`] for pipeline persistence. Tests
+/// continue to use [`walk`] when they don't care about the lookup.
+///
+/// GRTR Phase 3 — `global_return_types` is the workspace-wide
+/// `GlobalReturnTypeRegistry` populated by Pass 0
+/// (`RustProvider::workspace_prepare`). `None` for tests that bypass
+/// the cold-start orchestrator ; cross-file fn-return lookups in
+/// `type_of_expr` fall back to the local `ReturnTypeTable` only.
+pub(crate) fn walk_with_lookup(
+    parsed: &syn::File,
+    module_fqdn: &str,
+    file_path: &str,
+    crate_name: &str,
+    global_return_types: Option<
+        std::sync::Arc<super::global_return_type_registry::GlobalReturnTypeRegistry>,
+    >,
+) -> (
+    Vec<RawSymbol>,
+    Vec<RawEdge>,
+    Vec<RawDocument>,
+    Vec<RawCallSite>,
+    ModuleLookup,
+) {
     let mut ctx = WalkContext::new(file_path, crate_name, module_fqdn.to_string());
+    ctx.core.lookup = super::lookup::build_rust_lookup(parsed, module_fqdn);
+    ctx.global_return_types = global_return_types;
     walk_p1(&mut ctx, &parsed.items, module_fqdn);
     walk_p2(&mut ctx, &parsed.items, module_fqdn);
-    (ctx.core.symbols, ctx.core.edges, ctx.core.documents)
+    flush_attribute_flags(&mut ctx);
+    (
+        ctx.core.symbols,
+        ctx.core.edges,
+        ctx.core.documents,
+        ctx.core.call_sites,
+        ctx.core.lookup,
+    )
+}
+
+/// Stage 3e-1b — apply Attribute-tier flags accumulated during the walk
+/// onto each affected symbol's `flags` vec. Sorted + dedup'd so the
+/// resulting order is deterministic across runs (important for the
+/// body_hash-driven `apply_edges` plan that decides re-extraction
+/// boundaries).
+fn flush_attribute_flags(ctx: &mut WalkContext) {
+    if ctx.attribute_flags.is_empty() {
+        return;
+    }
+    let mut by_fqdn: HashMap<String, Vec<String>> = HashMap::new();
+    for (fqdn, flags) in ctx.attribute_flags.drain() {
+        let mut sorted: Vec<String> = flags.into_iter().collect();
+        sorted.sort();
+        by_fqdn.insert(fqdn, sorted);
+    }
+    for sym in &mut ctx.core.symbols {
+        if let Some(extra) = by_fqdn.get(&sym.fqdn) {
+            for f in extra {
+                if !sym.flags.contains(f) {
+                    sym.flags.push(f.clone());
+                }
+            }
+        }
+    }
 }
 
 // Pass 1: items → symbols + IMPORTS (use/extern_crate) + IMPLEMENTS + alias-table.
@@ -170,33 +478,95 @@ fn process_item_p1(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
     match item {
         syn::Item::Fn(it) => {
             let path = ctx.core.file_path.clone();
+            let fn_fqdn = format!("{current_module}::{}", it.sig.ident);
+            // Bug E-3 extensions P-E3.1: record the fn's nominal return
+            // type so `type_of_expr` can propagate it through chains
+            // like `get_user().name()` where `get_user` is workspace-
+            // defined. No-op when the return is non-nominal (`()`,
+            // tuples, closures, ...).
+            if let syn::ReturnType::Type(_, ty) = &it.sig.output {
+                ctx.return_types.record(&fn_fqdn, ty);
+            }
             ctx.push_symbol_with_doc(extract_fn(it, current_module, &path), &it.attrs);
+            // Bug C-3: walk the signature for UsesType edges. Fn-level
+            // Stage 3a-8c — fn-level + module-level generics are
+            // reachable via the lookup's parent chain from the fn's
+            // own scope_idx.
+            let scope_idx = lookup_scope_for(ctx, it.span());
+            extract_type::visit_signature(ctx, &it.sig, current_module, &fn_fqdn, scope_idx);
         }
         syn::Item::Struct(it) => {
-            let path = ctx.core.file_path.clone();
-            ctx.push_symbol_with_doc(extract_struct(it, current_module, &path), &it.attrs);
+            extract_struct(ctx, it, current_module);
         }
         syn::Item::Enum(it) => {
-            let path = ctx.core.file_path.clone();
-            ctx.push_symbol_with_doc(extract_enum(it, current_module, &path), &it.attrs);
+            extract_enum(ctx, it, current_module);
         }
         syn::Item::Union(it) => {
             let path = ctx.core.file_path.clone();
+            let union_fqdn = format!("{current_module}::{}", it.ident);
             ctx.push_symbol_with_doc(extract_union(it, current_module, &path), &it.attrs);
+            emit_derive_implements(ctx, &union_fqdn, &it.attrs, &path);
+            // Bug C-3: walk each union field's type for UsesType edges.
+            let scope_idx = lookup_scope_for(ctx, it.span());
+            for field in &it.fields.named {
+                extract_type::visit_type(
+                    ctx,
+                    &field.ty,
+                    current_module,
+                    &union_fqdn,
+                    extract_type::TYPE_CTX_ANNOTATION,
+                    scope_idx,
+                );
+            }
+            extract_type::visit_generics(ctx, &it.generics, current_module, &union_fqdn, scope_idx);
         }
         syn::Item::Trait(it) => extract_trait(ctx, it, current_module),
         syn::Item::Impl(it) => extract_impl(ctx, it, current_module),
         syn::Item::Type(it) => {
             let path = ctx.core.file_path.clone();
+            let alias_fqdn = format!("{current_module}::{}", it.ident);
             ctx.push_symbol_with_doc(extract_type_alias(it, current_module, &path), &it.attrs);
+            // Bug C-3: walk the alias RHS body for UsesType edges
+            // (`type X<T> = Vec<Foo<T>>` → edge to Foo from X with
+            // type-alias-body context; `T` is filtered via the lookup).
+            let scope_idx = lookup_scope_for(ctx, it.span());
+            extract_type::visit_type(
+                ctx,
+                &it.ty,
+                current_module,
+                &alias_fqdn,
+                extract_type::TYPE_CTX_ALIAS_BODY,
+                scope_idx,
+            );
+            extract_type::visit_generics(ctx, &it.generics, current_module, &alias_fqdn, scope_idx);
         }
         syn::Item::Const(it) => {
             let path = ctx.core.file_path.clone();
+            let const_fqdn = format!("{current_module}::{}", it.ident);
             ctx.push_symbol_with_doc(extract_const(it, current_module, &path), &it.attrs);
+            // Bug C-3: walk const's type annotation (`const X: Foo = …`).
+            // Consts have no generics — module scope is the right anchor.
+            extract_type::visit_type(
+                ctx,
+                &it.ty,
+                current_module,
+                &const_fqdn,
+                extract_type::TYPE_CTX_ANNOTATION,
+                ModuleLookup::ROOT_SCOPE,
+            );
         }
         syn::Item::Static(it) => {
             let path = ctx.core.file_path.clone();
+            let static_fqdn = format!("{current_module}::{}", it.ident);
             ctx.push_symbol_with_doc(extract_static(it, current_module, &path), &it.attrs);
+            extract_type::visit_type(
+                ctx,
+                &it.ty,
+                current_module,
+                &static_fqdn,
+                extract_type::TYPE_CTX_ANNOTATION,
+                ModuleLookup::ROOT_SCOPE,
+            );
         }
         syn::Item::Macro(it) => {
             let path = ctx.core.file_path.clone();
@@ -228,7 +598,14 @@ fn process_item_p2(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
     match item {
         syn::Item::Fn(it) => {
             let fn_fqdn = format!("{current_module}::{}", it.sig.ident);
-            extract_call::visit_block(ctx, &it.block, current_module, &fn_fqdn);
+            extract_call::visit_block(
+                ctx,
+                &it.block,
+                current_module,
+                &fn_fqdn,
+                None,
+                &it.sig.inputs,
+            );
         }
         syn::Item::Impl(it) => {
             let Some(target_name) = self_ty_target_name(&it.self_ty) else {
@@ -241,7 +618,14 @@ fn process_item_p2(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
             for impl_item in &it.items {
                 if let syn::ImplItem::Fn(item_fn) = impl_item {
                     let fn_fqdn = format!("{target_fqdn}::{}", item_fn.sig.ident);
-                    extract_call::visit_block(ctx, &item_fn.block, current_module, &fn_fqdn);
+                    extract_call::visit_block(
+                        ctx,
+                        &item_fn.block,
+                        current_module,
+                        &fn_fqdn,
+                        Some(&target_fqdn),
+                        &item_fn.sig.inputs,
+                    );
                 }
             }
         }
@@ -252,7 +636,18 @@ fn process_item_p2(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
                     && let Some(block) = &item_fn.default
                 {
                     let fn_fqdn = format!("{trait_fqdn}::{}", item_fn.sig.ident);
-                    extract_call::visit_block(ctx, block, current_module, &fn_fqdn);
+                    // Trait default-method bodies see `Self` as the
+                    // implementing type (unknown at extract time), so
+                    // we leave self_type = None and let `Self::method`
+                    // remain unresolved as before.
+                    extract_call::visit_block(
+                        ctx,
+                        block,
+                        current_module,
+                        &fn_fqdn,
+                        None,
+                        &item_fn.sig.inputs,
+                    );
                 }
             }
         }
@@ -266,390 +661,12 @@ fn process_item_p2(ctx: &mut WalkContext, item: &syn::Item, current_module: &str
     }
 }
 
-fn extract_fn(item: &syn::ItemFn, parent_fqdn: &str, path: &str) -> RawSymbol {
-    let name = item.sig.ident.to_string();
-    let fqdn = format!("{parent_fqdn}::{name}");
-    let mut sig = extract_signature(&item.sig);
-    sig.modifiers.deprecated = extract_deprecated(&item.attrs);
-    RawSymbol {
-        name,
-        fqdn,
-        kind: Kind::Function,
-        language_kind: LanguageKind::from("fn"),
-        module: Some(parent_fqdn.to_string()),
-        visibility: visibility::map(&item.vis),
-        location: span_to_location(item.span(), path),
-        signature: Some(sig),
-        body_hash: Some(body_hash::hash_tokens(&item.to_token_stream())),
-        attributes: extract_attributes(&item.attrs, path),
-    }
-}
-
-fn extract_struct(item: &syn::ItemStruct, parent_fqdn: &str, path: &str) -> RawSymbol {
-    type_def_symbol(
-        item.ident.to_string(),
-        parent_fqdn,
-        path,
-        "struct",
-        &item.vis,
-        item.span(),
-        &item.to_token_stream(),
-        &item.attrs,
-    )
-}
-
-fn extract_enum(item: &syn::ItemEnum, parent_fqdn: &str, path: &str) -> RawSymbol {
-    type_def_symbol(
-        item.ident.to_string(),
-        parent_fqdn,
-        path,
-        "enum",
-        &item.vis,
-        item.span(),
-        &item.to_token_stream(),
-        &item.attrs,
-    )
-}
-
-fn extract_union(item: &syn::ItemUnion, parent_fqdn: &str, path: &str) -> RawSymbol {
-    type_def_symbol(
-        item.ident.to_string(),
-        parent_fqdn,
-        path,
-        "union",
-        &item.vis,
-        item.span(),
-        &item.to_token_stream(),
-        &item.attrs,
-    )
-}
-
-fn extract_type_alias(item: &syn::ItemType, parent_fqdn: &str, path: &str) -> RawSymbol {
-    type_def_symbol(
-        item.ident.to_string(),
-        parent_fqdn,
-        path,
-        "type_alias",
-        &item.vis,
-        item.span(),
-        &item.to_token_stream(),
-        &item.attrs,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn type_def_symbol(
-    name: String,
-    parent_fqdn: &str,
-    path: &str,
-    language_kind: &str,
-    vis: &syn::Visibility,
-    span: Span,
-    tokens: &proc_macro2::TokenStream,
-    attrs: &[syn::Attribute],
-) -> RawSymbol {
-    let fqdn = format!("{parent_fqdn}::{name}");
-    RawSymbol {
-        name,
-        fqdn,
-        kind: Kind::Type,
-        language_kind: LanguageKind::from(language_kind),
-        module: Some(parent_fqdn.to_string()),
-        visibility: visibility::map(vis),
-        location: span_to_location(span, path),
-        signature: None,
-        body_hash: Some(body_hash::hash_tokens(tokens)),
-        attributes: extract_attributes(attrs, path),
-    }
-}
-
-fn extract_trait(ctx: &mut WalkContext, item: &syn::ItemTrait, parent_fqdn: &str) {
-    let path = ctx.core.file_path.clone();
-    let name = item.ident.to_string();
-    let trait_fqdn = format!("{parent_fqdn}::{name}");
-    let trait_visibility = visibility::map(&item.vis);
-
-    ctx.push_symbol_with_doc(
-        RawSymbol {
-            name,
-            fqdn: trait_fqdn.clone(),
-            kind: Kind::Type,
-            language_kind: LanguageKind::from("trait"),
-            module: Some(parent_fqdn.to_string()),
-            visibility: trait_visibility,
-            location: span_to_location(item.span(), &path),
-            signature: None,
-            body_hash: Some(body_hash::hash_tokens(&item.to_token_stream())),
-            attributes: extract_attributes(&item.attrs, &path),
-        },
-        &item.attrs,
-    );
-
-    for trait_item in &item.items {
-        if let syn::TraitItem::Fn(item_fn) = trait_item {
-            let fn_name = item_fn.sig.ident.to_string();
-            let fn_fqdn = format!("{trait_fqdn}::{fn_name}");
-            let mut sig = extract_signature(&item_fn.sig);
-            sig.modifiers.deprecated = extract_deprecated(&item_fn.attrs);
-            ctx.push_symbol_with_doc(
-                RawSymbol {
-                    name: fn_name,
-                    fqdn: fn_fqdn,
-                    kind: Kind::Function,
-                    language_kind: LanguageKind::from("trait_fn"),
-                    module: Some(trait_fqdn.clone()),
-                    visibility: trait_visibility,
-                    location: span_to_location(item_fn.span(), &path),
-                    signature: Some(sig),
-                    body_hash: Some(body_hash::hash_tokens(&item_fn.to_token_stream())),
-                    attributes: extract_attributes(&item_fn.attrs, &path),
-                },
-                &item_fn.attrs,
-            );
-        }
-    }
-}
-
-fn extract_impl(ctx: &mut WalkContext, item: &syn::ItemImpl, parent_fqdn: &str) {
-    let path = ctx.core.file_path.clone();
-    let Some(target_name) = self_ty_target_name(&item.self_ty) else {
-        // Non-nominal self-type (`&T`, `&mut T`, `Box<T>`, tuples, ...) —
-        // methods inside are accessed via trait dispatch, not by FQDN.
-        // Emitting them with a synthetic parent path produces garbage
-        // FQDNs like `crate::& mut A::method`. Skip the whole block.
-        return;
-    };
-    let target_fqdn = format!("{parent_fqdn}::{target_name}");
-
-    if let Some((_, trait_path, _)) = &item.trait_ {
-        let trait_str = path_to_string(trait_path);
-        let span = item.span();
-        let to = ctx.resolve_path(&trait_str, parent_fqdn);
-        let confidence = to.default_confidence();
-        ctx.push_edge(RawEdge {
-            from_fqdn: target_fqdn.clone(),
-            kind: EdgeKind::Implements,
-            to,
-            sites: vec![Site {
-                file: path.clone(),
-                line: line_from_span(span),
-                col: col_from_span(span),
-            }],
-            attributes: vec![],
-            confidence,
-        });
-    }
-
-    for impl_item in &item.items {
-        if let syn::ImplItem::Fn(item_fn) = impl_item {
-            let fn_name = item_fn.sig.ident.to_string();
-            let fn_fqdn = format!("{target_fqdn}::{fn_name}");
-            let mut sig = extract_signature(&item_fn.sig);
-            sig.modifiers.deprecated = extract_deprecated(&item_fn.attrs);
-            ctx.push_symbol_with_doc(
-                RawSymbol {
-                    name: fn_name,
-                    fqdn: fn_fqdn,
-                    kind: Kind::Function,
-                    language_kind: LanguageKind::from("impl_fn"),
-                    module: Some(target_fqdn.clone()),
-                    visibility: visibility::map(&item_fn.vis),
-                    location: span_to_location(item_fn.span(), &path),
-                    signature: Some(sig),
-                    body_hash: Some(body_hash::hash_tokens(&item_fn.to_token_stream())),
-                    attributes: extract_attributes(&item_fn.attrs, &path),
-                },
-                &item_fn.attrs,
-            );
-        }
-    }
-}
-
-fn extract_const(item: &syn::ItemConst, parent_fqdn: &str, path: &str) -> RawSymbol {
-    value_def_symbol(
-        item.ident.to_string(),
-        parent_fqdn,
-        path,
-        "const",
-        &item.vis,
-        item.span(),
-        &item.to_token_stream(),
-        &item.attrs,
-    )
-}
-
-fn extract_static(item: &syn::ItemStatic, parent_fqdn: &str, path: &str) -> RawSymbol {
-    value_def_symbol(
-        item.ident.to_string(),
-        parent_fqdn,
-        path,
-        "static",
-        &item.vis,
-        item.span(),
-        &item.to_token_stream(),
-        &item.attrs,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn value_def_symbol(
-    name: String,
-    parent_fqdn: &str,
-    path: &str,
-    language_kind: &str,
-    vis: &syn::Visibility,
-    span: Span,
-    tokens: &proc_macro2::TokenStream,
-    attrs: &[syn::Attribute],
-) -> RawSymbol {
-    let fqdn = format!("{parent_fqdn}::{name}");
-    RawSymbol {
-        name,
-        fqdn,
-        kind: Kind::Value,
-        language_kind: LanguageKind::from(language_kind),
-        module: Some(parent_fqdn.to_string()),
-        visibility: visibility::map(vis),
-        location: span_to_location(span, path),
-        signature: None,
-        body_hash: Some(body_hash::hash_tokens(tokens)),
-        attributes: extract_attributes(attrs, path),
-    }
-}
-
-fn extract_macro_def(item: &syn::ItemMacro, parent_fqdn: &str, path: &str) -> Option<RawSymbol> {
-    let name = item.ident.as_ref()?.to_string();
-    let fqdn = format!("{parent_fqdn}::{name}");
-    let exported = item.attrs.iter().any(|a| a.path().is_ident("macro_export"));
-    let visibility = if exported {
-        Visibility::Public
-    } else {
-        Visibility::Private
-    };
-    Some(RawSymbol {
-        name,
-        fqdn,
-        kind: Kind::Macro,
-        language_kind: LanguageKind::from("macro_rules"),
-        module: Some(parent_fqdn.to_string()),
-        visibility,
-        location: span_to_location(item.span(), path),
-        signature: None,
-        body_hash: Some(body_hash::hash_tokens(&item.to_token_stream())),
-        attributes: extract_attributes(&item.attrs, path),
-    })
-}
-
-fn extract_signature(sig: &syn::Signature) -> Signature {
-    let params = sig.inputs.iter().map(extract_param).collect();
-    let returns = match &sig.output {
-        syn::ReturnType::Default => None,
-        syn::ReturnType::Type(_, ty) => Some(TypeRef::new(render_compact(ty))),
-    };
-    let generic_params = sig.generics.params.iter().map(render_compact).collect();
-    let where_clause = sig.generics.where_clause.as_ref().map(|wc| {
-        // `to_token_stream` includes the leading `where` keyword which we
-        // strip so consumers see just the predicates.
-        let raw = render_compact(wc);
-        match raw.strip_prefix("where ") {
-            Some(s) => s.to_string(),
-            None => raw,
-        }
-    });
-    Signature {
-        params,
-        returns,
-        modifiers: Modifiers {
-            is_async: sig.asyncness.is_some(),
-            deprecated: None,
-            generic_params,
-            where_clause,
-        },
-        meta: SignatureMeta::default(),
-    }
-}
-
-fn extract_param(arg: &syn::FnArg) -> Param {
-    match arg {
-        syn::FnArg::Receiver(recv) => {
-            let ty_str = if recv.reference.is_some() {
-                if recv.mutability.is_some() {
-                    "&mut Self"
-                } else {
-                    "&Self"
-                }
-            } else if recv.mutability.is_some() {
-                "mut Self"
-            } else {
-                "Self"
-            };
-            Param {
-                name: "self".into(),
-                ty: TypeRef::new(ty_str),
-                default: None,
-            }
-        }
-        syn::FnArg::Typed(pat_type) => Param {
-            name: render_compact(pat_type.pat.as_ref()),
-            ty: TypeRef::new(render_compact(pat_type.ty.as_ref())),
-            default: None,
-        },
-    }
-}
-
-fn extract_attributes(attrs: &[syn::Attribute], path: &str) -> Vec<RawAttribute> {
-    attrs
-        .iter()
-        .map(|attr| RawAttribute {
-            name: render_compact(attr.path()),
-            args: meta_to_args(&attr.meta),
-            site: Site {
-                file: path.into(),
-                line: line_from_span(attr.span()),
-                col: col_from_span(attr.span()),
-            },
-        })
-        .collect()
-}
-
-fn meta_to_args(meta: &syn::Meta) -> Vec<RawAttributeArg> {
-    match meta {
-        syn::Meta::Path(_) => vec![],
-        syn::Meta::List(list) => vec![RawAttributeArg {
-            key: None,
-            value: compact_rust_tokens(&list.tokens.to_string()),
-            is_string_literal: false,
-        }],
-        syn::Meta::NameValue(nv) => vec![RawAttributeArg {
-            key: None,
-            value: render_compact(&nv.value),
-            is_string_literal: false,
-        }],
-    }
-}
-
-fn extract_deprecated(attrs: &[syn::Attribute]) -> Option<String> {
-    for attr in attrs {
-        if !attr.path().is_ident("deprecated") {
-            continue;
-        }
-        return Some(match &attr.meta {
-            syn::Meta::Path(_) => String::new(),
-            syn::Meta::List(list) => compact_rust_tokens(&list.tokens.to_string()),
-            syn::Meta::NameValue(nv) => render_compact(&nv.value),
-        });
-    }
-    None
-}
-
-/// Local helper: renders a `ToTokens`-bearing AST node into the compact
-/// canonical Rust display form. The Rust provider sources every `display`
-/// / `name` string from `quote`'s pretty-printer, which inserts a space
-/// between every token tree — `compact_rust_tokens` re-collapses those
-/// spaces so the IR row payload is small.
-fn render_compact<T: ToTokens + ?Sized>(t: &T) -> String {
-    compact_rust_tokens(&t.to_token_stream().to_string())
-}
+// extract_fn / extract_struct / extract_enum / extract_union / extract_trait /
+// extract_impl / extract_type_alias / extract_const / extract_static /
+// extract_macro_def + helpers (push_field, push_struct_fields, type_def_symbol,
+// value_def_symbol, extract_signature, extract_param, extract_attributes,
+// meta_to_args, extract_deprecated, render_compact, classify_fn_entry_point)
+// moved to `walk/extract_items.rs` and re-imported above.
 
 /// Returns the trailing identifier of a `Type::Path` (e.g. `Foo` for
 /// `module::Foo<T>`), `None` when the self-type is not a nominal path
@@ -665,6 +682,13 @@ fn self_ty_target_name(ty: &syn::Type) -> Option<String> {
     }
 }
 
+/// Build a `SymbolLocation` from a proc-macro2 `Span`. `column` is a Unicode
+/// scalar (char) count, which equals the UTF-16 code units the LSP / VSCode
+/// consumers expect for every character in the BMP. The two diverge only on
+/// astral (non-BMP) chars — emoji, CJK Ext-B — which count as two UTF-16 units
+/// but one char. proc-macro2 exposes no source text here, so unlike the TS / C
+/// / Lua providers we cannot re-measure in UTF-16; V1 accepts that residual,
+/// which is essentially never hit inside real Rust source.
 pub(crate) fn span_to_location(span: Span, path: &str) -> SymbolLocation {
     let start = span.start();
     let end = span.end();
@@ -681,6 +705,8 @@ pub(crate) fn line_from_span(span: Span) -> u32 {
     clamp_line(span.start().line)
 }
 
+/// 0-indexed start column of `span`, in UTF-16 code units for BMP text. See
+/// [`span_to_location`] for the astral-character caveat.
 pub(crate) fn col_from_span(span: Span) -> u32 {
     clamp_col(span.start().column)
 }
@@ -695,418 +721,4 @@ fn clamp_col(n: usize) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parse(src: &str) -> syn::File {
-        syn::parse_file(src).expect("test source not parsable")
-    }
-
-    #[test]
-    fn walks_simple_fn_emits_function_symbol() {
-        let parsed = parse("fn foo() {}");
-        let (symbols, edges, _docs) = walk(&parsed, "mycrate", "src/lib.rs", "mycrate");
-        assert_eq!(symbols.len(), 1);
-        assert_eq!(symbols[0].kind, Kind::Function);
-        assert_eq!(symbols[0].fqdn, "mycrate::foo");
-        assert_eq!(symbols[0].name, "foo");
-        assert_eq!(symbols[0].visibility, Visibility::Private);
-        assert!(edges.is_empty());
-    }
-
-    #[test]
-    fn pub_fn_visibility_is_public() {
-        let parsed = parse("pub fn foo() {}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(symbols[0].visibility, Visibility::Public);
-    }
-
-    #[test]
-    fn fn_signature_captures_params_and_return() {
-        let parsed = parse("pub fn add(a: u32, b: u32) -> u32 { a + b }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        let sig = symbols[0].signature.as_ref().unwrap();
-        assert_eq!(sig.params.len(), 2);
-        assert_eq!(sig.params[0].name, "a");
-        assert_eq!(sig.params[0].ty.display, "u32");
-        assert_eq!(sig.params[1].name, "b");
-        assert_eq!(sig.returns.as_ref().unwrap().display, "u32");
-    }
-
-    #[test]
-    fn async_fn_modifier_set() {
-        let parsed = parse("async fn boot() {}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert!(symbols[0].signature.as_ref().unwrap().modifiers.is_async);
-    }
-
-    #[test]
-    fn deprecated_attribute_propagates_to_modifier() {
-        let parsed = parse("#[deprecated = \"use bar\"] fn foo() {}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        let dep = symbols[0]
-            .signature
-            .as_ref()
-            .unwrap()
-            .modifiers
-            .deprecated
-            .as_deref();
-        assert_eq!(dep, Some("\"use bar\""));
-    }
-
-    #[test]
-    fn self_receiver_renders_as_self_typeref() {
-        let parsed =
-            parse("impl Foo {\n  fn a(self) {}\n  fn b(&self) {}\n  fn c(&mut self) {}\n}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        let a = &symbols.iter().find(|s| s.name == "a").unwrap().signature;
-        let b = &symbols.iter().find(|s| s.name == "b").unwrap().signature;
-        let c = &symbols.iter().find(|s| s.name == "c").unwrap().signature;
-        assert_eq!(a.as_ref().unwrap().params[0].ty.display, "Self");
-        assert_eq!(b.as_ref().unwrap().params[0].ty.display, "&Self");
-        assert_eq!(c.as_ref().unwrap().params[0].ty.display, "&mut Self");
-    }
-
-    #[test]
-    fn struct_emits_type_symbol() {
-        let parsed = parse("pub struct Foo { x: u32 }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(symbols.len(), 1);
-        assert_eq!(symbols[0].kind, Kind::Type);
-        assert_eq!(symbols[0].language_kind.as_str(), "struct");
-        assert_eq!(symbols[0].fqdn, "c::Foo");
-    }
-
-    #[test]
-    fn enum_emits_type_symbol() {
-        let parsed = parse("enum E { A, B }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(symbols[0].kind, Kind::Type);
-        assert_eq!(symbols[0].language_kind.as_str(), "enum");
-    }
-
-    #[test]
-    fn trait_emits_type_and_inner_fn_symbols() {
-        let parsed = parse("pub trait T { fn foo(&self); fn bar(&self) -> u32 { 0 } }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(symbols.len(), 3);
-        assert_eq!(symbols[0].kind, Kind::Type);
-        assert_eq!(symbols[0].language_kind.as_str(), "trait");
-        assert_eq!(symbols[0].fqdn, "c::T");
-        assert_eq!(symbols[1].kind, Kind::Function);
-        assert_eq!(symbols[1].fqdn, "c::T::foo");
-        assert_eq!(symbols[1].language_kind.as_str(), "trait_fn");
-        assert_eq!(symbols[1].visibility, Visibility::Public);
-        assert_eq!(symbols[2].fqdn, "c::T::bar");
-    }
-
-    #[test]
-    fn inherent_impl_emits_method_symbols() {
-        let parsed = parse("struct Foo; impl Foo { pub fn a(&self) {} fn b(&self) {} }");
-        let (symbols, edges, _docs) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert!(edges.is_empty(), "no IMPLEMENTS for inherent impl");
-        let foo = symbols.iter().find(|s| s.fqdn == "c::Foo").unwrap();
-        assert_eq!(foo.kind, Kind::Type);
-        let a = symbols.iter().find(|s| s.fqdn == "c::Foo::a").unwrap();
-        assert_eq!(a.visibility, Visibility::Public);
-        let b = symbols.iter().find(|s| s.fqdn == "c::Foo::b").unwrap();
-        assert_eq!(b.visibility, Visibility::Private);
-    }
-
-    #[test]
-    fn trait_impl_emits_implements_edge() {
-        let parsed = parse("struct Foo; impl SomeTrait for Foo { fn run(&self) {} }");
-        let (symbols, edges, _docs) = walk(&parsed, "c", "src/lib.rs", "c");
-        let imp: Vec<_> = edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Implements)
-            .collect();
-        assert_eq!(imp.len(), 1);
-        assert_eq!(imp[0].from_fqdn, "c::Foo");
-        // No alias/local match → fallback to module-local canonical "c::SomeTrait".
-        match &imp[0].to {
-            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "c::SomeTrait"),
-            other => panic!("expected unresolved, got {other:?}"),
-        }
-        assert!(symbols.iter().any(|s| s.fqdn == "c::Foo::run"));
-    }
-
-    #[test]
-    fn impl_block_on_non_nominal_self_type_emits_nothing() {
-        // `impl<T> Iterator for &mut T` — self-type is a reference, not a
-        // Path. Methods inside are accessed via trait dispatch; concating
-        // `&mut T::method` produces garbage FQDNs.
-        let parsed = parse(
-            "impl<T> Iterator for &mut T { type Item = (); fn next(&mut self) -> Option<()> { None } }",
-        );
-        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
-
-        assert!(
-            !symbols.iter().any(|s| s.fqdn.contains('&')),
-            "no symbol should reference `&` in its fqdn, got {:?}",
-            symbols.iter().map(|s| &s.fqdn).collect::<Vec<_>>()
-        );
-        let impls: Vec<_> = edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Implements)
-            .collect();
-        assert!(
-            impls.is_empty(),
-            "impl on non-nominal self-type must emit no IMPLEMENTS edge"
-        );
-    }
-
-    #[test]
-    fn impl_block_on_tuple_self_type_emits_nothing() {
-        let parsed = parse("impl SomeTrait for (u32, u32) { fn run(&self) {} }");
-        let (symbols, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert!(symbols.is_empty(), "tuple self-type must emit no symbol");
-        assert!(edges.is_empty(), "tuple self-type must emit no edge");
-    }
-
-    #[test]
-    fn trait_impl_with_use_alias_resolves_implements_target() {
-        let parsed =
-            parse("use crate::traits::Foo; struct Bar; impl Foo for Bar { fn run(&self) {} }");
-        let (_, edges, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        let imp = edges
-            .iter()
-            .find(|e| e.kind == EdgeKind::Implements)
-            .expect("implements edge");
-        match &imp.to {
-            ResolvedOrUnresolved::Unresolved { name } => {
-                assert_eq!(name, "c::traits::Foo");
-            }
-            other => panic!("expected unresolved canonical, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn const_emits_value_symbol() {
-        let parsed = parse("const N: u32 = 0;");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(symbols[0].kind, Kind::Value);
-        assert_eq!(symbols[0].language_kind.as_str(), "const");
-        assert_eq!(symbols[0].fqdn, "c::N");
-    }
-
-    #[test]
-    fn static_emits_value_symbol() {
-        let parsed = parse("static GLOBAL: u32 = 0;");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(symbols[0].kind, Kind::Value);
-        assert_eq!(symbols[0].language_kind.as_str(), "static");
-    }
-
-    #[test]
-    fn type_alias_emits_type_symbol() {
-        let parsed = parse("pub type Bytes = Vec<u8>;");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(symbols[0].kind, Kind::Type);
-        assert_eq!(symbols[0].language_kind.as_str(), "type_alias");
-    }
-
-    #[test]
-    fn macro_rules_with_export_is_public() {
-        let parsed = parse("#[macro_export] macro_rules! say { () => {}; }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(symbols.len(), 1);
-        assert_eq!(symbols[0].kind, Kind::Macro);
-        assert_eq!(symbols[0].visibility, Visibility::Public);
-    }
-
-    #[test]
-    fn macro_rules_without_export_is_private() {
-        let parsed = parse("macro_rules! say { () => {}; }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(symbols[0].visibility, Visibility::Private);
-    }
-
-    #[test]
-    fn inline_mod_pushes_fqdn_without_emitting_module_symbol() {
-        let parsed = parse("mod inner { pub fn deep() {} }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(
-            symbols.len(),
-            1,
-            "only the deep fn — no Module symbol for inline mod"
-        );
-        assert_eq!(symbols[0].kind, Kind::Function);
-        assert_eq!(symbols[0].fqdn, "c::inner::deep");
-    }
-
-    #[test]
-    fn attributes_are_captured_with_path_name() {
-        let parsed = parse("#[derive(Debug, Clone)] pub struct X;");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(symbols[0].attributes.len(), 1);
-        assert_eq!(symbols[0].attributes[0].name, "derive");
-        assert_eq!(symbols[0].attributes[0].args.len(), 1);
-        assert_eq!(symbols[0].attributes[0].args[0].value, "Debug, Clone");
-    }
-
-    #[test]
-    fn generic_params_captured_as_strings() {
-        let parsed = parse("fn id<T>(x: T) -> T { x }");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        let g = &symbols[0]
-            .signature
-            .as_ref()
-            .unwrap()
-            .modifiers
-            .generic_params;
-        assert_eq!(g.len(), 1);
-        assert_eq!(g[0], "T");
-    }
-
-    #[test]
-    fn where_clause_captured_as_text_without_leading_keyword() {
-        let parsed = parse("fn foo<T>(x: T) where T: Send + Sync {}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        let wc = symbols[0]
-            .signature
-            .as_ref()
-            .unwrap()
-            .modifiers
-            .where_clause
-            .as_deref();
-        assert!(wc.is_some(), "where clause must be captured");
-        let text = wc.unwrap();
-        assert!(
-            !text.starts_with("where"),
-            "leading `where` must be stripped: `{text}`"
-        );
-        assert!(text.contains("Send"));
-        assert!(text.contains("Sync"));
-    }
-
-    #[test]
-    fn where_clause_is_none_when_absent() {
-        let parsed = parse("fn bar() {}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        let wc = &symbols[0]
-            .signature
-            .as_ref()
-            .unwrap()
-            .modifiers
-            .where_clause;
-        assert!(wc.is_none());
-    }
-
-    #[test]
-    fn inline_generic_bounds_remain_in_generic_params() {
-        let parsed = parse("fn foo<T: Display + Clone>(x: T) {}");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        let g = &symbols[0]
-            .signature
-            .as_ref()
-            .unwrap()
-            .modifiers
-            .generic_params;
-        assert_eq!(g.len(), 1);
-        assert!(g[0].contains("Display"), "got {g:?}");
-        assert!(g[0].contains("Clone"), "got {g:?}");
-    }
-
-    #[test]
-    fn span_locations_are_captured() {
-        // proc-macro2 with span-locations feature gives 1-based lines for parsed source.
-        let parsed = parse("\n\nfn foo() {}\n");
-        let (symbols, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
-        assert_eq!(symbols[0].location.start_line, 3);
-    }
-
-    #[test]
-    fn path_to_string_drops_whitespace_and_generics() {
-        let p: syn::Path = syn::parse_str("crate::foo::Bar").unwrap();
-        assert_eq!(path_to_string(&p), "crate::foo::Bar");
-        let p2: syn::Path = syn::parse_str("Vec::<u8>::new").unwrap();
-        assert_eq!(path_to_string(&p2), "Vec::new");
-    }
-
-    #[test]
-    fn canonicalize_crate_keyword_replaces_with_crate_name() {
-        let mut ctx = WalkContext::new("src/lib.rs", "mycrate", "mycrate".to_string());
-        ctx.alias_table.clear();
-        assert_eq!(
-            ctx.canonicalize("crate::foo::bar", "mycrate"),
-            Some("mycrate::foo::bar".to_string())
-        );
-        assert_eq!(
-            ctx.canonicalize("crate", "mycrate"),
-            Some("mycrate".to_string())
-        );
-    }
-
-    #[test]
-    fn canonicalize_self_resolves_to_current_module() {
-        let ctx = WalkContext::new("src/foo.rs", "c", "c::foo".to_string());
-        assert_eq!(
-            ctx.canonicalize("self::bar", "c::foo"),
-            Some("c::foo::bar".to_string())
-        );
-    }
-
-    #[test]
-    fn canonicalize_super_pops_one_level() {
-        let ctx = WalkContext::new("src/a/b.rs", "c", "c::a::b".to_string());
-        assert_eq!(
-            ctx.canonicalize("super::x", "c::a::b"),
-            Some("c::a::x".to_string())
-        );
-        // No parent → None.
-        assert_eq!(ctx.canonicalize("super::x", "c"), None);
-    }
-
-    #[test]
-    fn canonicalize_alias_then_remaining_segments() {
-        let mut ctx = WalkContext::new("src/lib.rs", "c", "c".to_string());
-        ctx.add_alias("HM".into(), "std::collections::HashMap".into());
-        assert_eq!(
-            ctx.canonicalize("HM::new", "c"),
-            Some("std::collections::HashMap::new".to_string())
-        );
-    }
-
-    #[test]
-    fn canonicalize_strict_returns_none_for_unaliased_single_ident() {
-        let ctx = WalkContext::new("src/lib.rs", "c", "c::foo".to_string());
-        // Strict mode: no module-local fallback. The fallback lives in resolve_path.
-        assert_eq!(ctx.canonicalize("bar", "c::foo"), None);
-    }
-
-    #[test]
-    fn canonicalize_opaque_multi_segment_without_alias_returns_none() {
-        let ctx = WalkContext::new("src/lib.rs", "c", "c".to_string());
-        assert_eq!(ctx.canonicalize("std::mem::take", "c"), None);
-    }
-
-    #[test]
-    fn resolve_path_single_ident_falls_back_to_module_local() {
-        let mut ctx = WalkContext::new("src/lib.rs", "c", "c::foo".to_string());
-        ctx.core.defined_fqdns.insert("c::foo::bar".to_string());
-        assert!(matches!(
-            ctx.resolve_path("bar", "c::foo"),
-            ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "c::foo::bar"
-        ));
-    }
-
-    #[test]
-    fn resolve_path_multi_segment_without_alias_keeps_text_as_written() {
-        let ctx = WalkContext::new("src/lib.rs", "c", "c".to_string());
-        match ctx.resolve_path("std::mem::take", "c") {
-            ResolvedOrUnresolved::Unresolved { name } => assert_eq!(name, "std::mem::take"),
-            other => panic!("expected unresolved as-written, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn resolve_path_returns_resolved_when_canonical_matches_defined_fqdn() {
-        let mut ctx = WalkContext::new("src/lib.rs", "c", "c".to_string());
-        ctx.core.defined_fqdns.insert("c::foo".to_string());
-        assert!(matches!(
-            ctx.resolve_path("self::foo", "c"),
-            ResolvedOrUnresolved::Resolved { fqdn } if fqdn == "c::foo"
-        ));
-    }
-}
+mod tests;

@@ -7,9 +7,13 @@ use standardoc_ir::{
 
 fn fixture() -> ExtractedFile {
     let create_user = RawSymbol {
+        decl_kind: None,
+        implements_trait: None,
+        receiver_type: None,
+        entry_point: None,
         name: "create_user".into(),
         fqdn: "crate::auth::create_user".into(),
-        kind: Kind::Function,
+        kind: Kind::Callable,
         language_kind: LanguageKind::from("function"),
         module: Some("auth".into()),
         visibility: Visibility::Public,
@@ -34,7 +38,7 @@ fn fixture() -> ExtractedFile {
                 where_clause: None,
             },
             meta: SignatureMeta {
-                exposed_via: Some(BridgeKind::from("tauri")),
+                exposed_via: vec![BridgeKind::from("tauri")],
             },
         }),
         body_hash: Some(Blake3Hash::new([0x42; 32])),
@@ -51,9 +55,14 @@ fn fixture() -> ExtractedFile {
                 col: 0,
             },
         }],
+        flags: vec![],
     };
 
     let module_root = RawSymbol {
+        decl_kind: None,
+        implements_trait: None,
+        receiver_type: None,
+        entry_point: None,
         name: "auth".into(),
         fqdn: "crate::auth".into(),
         kind: Kind::Module,
@@ -70,6 +79,7 @@ fn fixture() -> ExtractedFile {
         signature: None,
         body_hash: Some(Blake3Hash::new([0x01; 32])),
         attributes: vec![],
+        flags: vec![],
     };
 
     let calls_edge = RawEdge {
@@ -85,6 +95,7 @@ fn fixture() -> ExtractedFile {
         }],
         attributes: vec![],
         confidence: EdgeConfidence::Extracted,
+        receiver_type: None,
     };
 
     let unresolved_edge = RawEdge {
@@ -96,6 +107,7 @@ fn fixture() -> ExtractedFile {
         sites: vec![],
         attributes: vec![],
         confidence: EdgeConfidence::Ambiguous,
+        receiver_type: None,
     };
 
     let bridge_edge = RawEdge {
@@ -108,6 +120,7 @@ fn fixture() -> ExtractedFile {
         sites: vec![],
         attributes: vec![],
         confidence: EdgeConfidence::Inferred,
+        receiver_type: None,
     };
 
     let call_site = RawCallSite {
@@ -117,6 +130,7 @@ fn fixture() -> ExtractedFile {
             value: "create_user".into(),
             is_string_literal: true,
         }],
+        receiver_chain: vec!["tauri".into()],
         site: Site {
             file: "src/login.ts".into(),
             line: 5,
@@ -140,6 +154,8 @@ fn fixture() -> ExtractedFile {
         edges: vec![calls_edge, unresolved_edge, bridge_edge],
         call_sites: vec![call_site],
         documents: vec![doc],
+        ffi_bindings: vec![],
+        module_lookup: None,
     }
 }
 
@@ -158,7 +174,7 @@ fn keys_match_storage_conventions() {
 
     assert!(json.contains("\"language\":\"rust\""));
     assert!(json.contains("\"source_origin\":\"workspace\""));
-    assert!(json.contains("\"kind\":\"function\""));
+    assert!(json.contains("\"kind\":\"callable\""));
     assert!(json.contains("\"kind\":\"module\""));
     assert!(json.contains("\"visibility\":\"public\""));
     assert!(json.contains("\"visibility\":\"crate\""));

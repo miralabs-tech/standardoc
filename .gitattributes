@@ -1,0 +1,46 @@
+# Force LF line-endings on text files across all platforms.
+# Prevents CRLF drift on Windows (fmt-check reported 15 wrong-newline files
+# at the start of the crates-housekeeping pass 2026-05-27).
+* text=auto eol=lf
+
+# # Explicit text types (defensive — covers files Git might guess as binary).
+*.rs       text eol=lf
+*.toml     text eol=lf
+*.md       text eol=lf
+*.json     text eol=lf
+*.ts       text eol=lf
+*.tsx      text eol=lf
+*.js       text eol=lf
+*.mjs      text eol=lf
+*.cjs      text eol=lf
+*.svelte   text eol=lf
+*.vue      text eol=lf
+*.html     text eol=lf
+*.css      text eol=lf
+*.scss     text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.sh       text eol=lf
+*.lua      text eol=lf
+*.c        text eol=lf
+*.h        text eol=lf
+*.cpp      text eol=lf
+*.hpp      text eol=lf
+
+# # Windows-only scripts stay CRLF.
+*.bat      text eol=crlf
+*.cmd      text eol=crlf
+*.ps1      text eol=crlf
+
+# Binary — never touch line endings.
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.ico      binary
+*.webp     binary
+*.wasm     binary
+*.bin      binary
+*.db       binary
+*.sqlite   binary
+*.sqlite3  binary

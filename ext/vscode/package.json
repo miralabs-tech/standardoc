@@ -97,33 +97,13 @@
         "category": "Standardoc"
       },
       {
-        "command": "Standardoc.rag.toggle",
-        "title": "Toggle RAG (prose retrieval)",
-        "category": "Standardoc"
-      },
-      {
-        "command": "Standardoc.rag.switchEmbedder",
-        "title": "Switch RAG embedder…",
-        "category": "Standardoc"
-      },
-      {
-        "command": "Standardoc.rag.rebuild",
-        "title": "Rebuild RAG index",
-        "category": "Standardoc"
-      },
-      {
-        "command": "Standardoc.showTokenSavings",
-        "title": "Show token savings",
-        "category": "Standardoc"
-      },
-      {
-        "command": "Standardoc.resetTokenSavings",
-        "title": "Reset token savings…",
-        "category": "Standardoc"
-      },
-      {
         "command": "Standardoc.downloadBinary",
         "title": "Download binary",
+        "category": "Standardoc"
+      },
+      {
+        "command": "Standardoc.viz.open",
+        "title": "Open Graph Viz",
         "category": "Standardoc"
       }
     ],
@@ -138,28 +118,25 @@
         },
         "standardoc.mcpHttpPort": {
           "type": "integer",
-          "default": 7700,
+          "default": 0,
           "minimum": 0,
           "maximum": 65535,
           "scope": "resource",
-          "description": "TCP port on `127.0.0.1` where the Standardoc MCP daemon listens for streamable HTTP / SSE connections. Set to `0` to let the kernel pick a random ephemeral port (the resolved port is then written to `.standardoc/mcp.endpoint` for client discovery). When multiple Standardoc workspaces run in parallel, give each a distinct port here."
+          "description": "TCP port on `127.0.0.1` where this workspace's Standardoc MCP daemon listens. Default `0` = ephemeral (the kernel picks a free port, written to `.standardoc/mcp.endpoint`), which is recommended: external clients connect through the stable proxy (`standardoc.proxyPort`), and in-window consumers discover the port via the endpoint file. Set a fixed non-zero port only for direct daemon access without the proxy — it MUST differ from `standardoc.proxyPort`."
         },
-        "standardoc.ragEnabled": {
-          "type": "boolean",
-          "default": false,
-          "scope": "resource",
-          "description": "Enable the RAG (prose retrieval) layer. Adds `chunk_refs` to `get_context` responses and exposes the `fetch_chunks` MCP tool. The daemon restarts automatically when this changes."
-        },
-        "standardoc.ragEmbedder": {
+        "standardoc.proxyBind": {
           "type": "string",
-          "enum": ["mock", "candle"],
-          "default": "mock",
-          "scope": "resource",
-          "enumDescriptions": [
-            "Deterministic zero-network BLAKE3-derived stub. Use for development and to exercise the tool surface without a model download.",
-            "Local BGE-small-en-v1.5 (~130 MB). Downloaded on first use and cached at `~/.cache/standardoc/models/` (or platform equivalent). Override via STANDARDOC_MODELS_DIR."
-          ],
-          "description": "Embedder backend used when `standardoc.ragEnabled` is true. The daemon restarts automatically when this changes."
+          "default": "127.0.0.1",
+          "scope": "machine-overridable",
+          "description": "Bind address for the Standardoc MCP proxy — the per-machine singleton in front of every workspace's MCP daemon. All sibling VSCode windows MUST agree on this value for the singleton dedup to converge ; that's why this is machine-scoped, not workspace-scoped."
+        },
+        "standardoc.proxyPort": {
+          "type": "integer",
+          "default": 7700,
+          "minimum": 1,
+          "maximum": 65535,
+          "scope": "machine-overridable",
+          "description": "TCP port for the Standardoc MCP proxy singleton — the stable URL external MCP clients (`.mcp.json`) connect to, routed per workspace as `/ws/<id>/mcp`. The proxy forwards INTO each workspace's MCP daemon, so it must NOT share a port with a non-ephemeral `standardoc.mcpHttpPort`. Default `7700`; daemons default to ephemeral, so they never collide out of the box."
         }
       }
     },
@@ -175,6 +152,12 @@
         "aliases": ["Standardoc Ignore", "stdignore"],
         "filenames": [".stdignore"],
         "configuration": "./language-configuration/stdignore.json"
+      },
+      {
+        "id": "standardoc-sxd",
+        "aliases": ["Standardoc Config", "sxd"],
+        "extensions": [".sxd"],
+        "configuration": "./language-configuration/sxd.json"
       }
     ],
     "grammars": [
@@ -182,13 +165,18 @@
         "language": "stdignore",
         "scopeName": "source.stdignore",
         "path": "./syntaxes/stdignore.tmLanguage.json"
+      },
+      {
+        "language": "standardoc-sxd",
+        "scopeName": "source.standarx",
+        "path": "./syntaxes/sxd.tmLanguage.json"
       }
     ]
   },
   "scripts": {
-    "build": "bun build ./src/extension.ts --format=cjs --target=node --external=vscode --outdir=./dist --sourcemap=external",
-    "build:prod": "bun build ./src/extension.ts --format=cjs --target=node --external=vscode --outdir=./dist --minify --sourcemap=external",
-    "watch": "bun build ./src/extension.ts --format=cjs --target=node --external=vscode --outdir=./dist --watch --sourcemap=external",
+    "build": "bun build.ts",
+    "build:prod": "bun build.ts --production",
+    "watch": "bun build.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "package": "bun run build:prod && vsce package",
@@ -200,6 +188,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "classigo": "^2.0.0",
     "matchigo": "^1.0.2",
     "vscode-languageclient": "^9.0.1"
   },
@@ -208,6 +197,7 @@
     "@types/vscode": "^1.105.0",
     "@vscode/vsce": "^3.0.0",
     "bun-types": "^1.1.0",
+    "sass": "^1.83.0",
     "typescript": "^5.6.0"
   }
 }

@@ -1,5 +1,9 @@
 #![allow(clippy::result_large_err)]
 
+mod connect;
+mod init;
+mod self_update;
+mod sxd_schema;
 mod warn;
 
 use std::io::{self, IsTerminal, Write};
@@ -11,15 +15,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
-use standardoc_core::{
-    IndexHandle, RagPipeline, ScanFilters, SessionsHandle, StorageError, UsagePeriod, cold_start,
-    spawn_watcher,
-};
+use standardoc_core::{IndexHandle, ScanFilters, StorageError, cold_start, spawn_watcher};
 use standardoc_ir::{RawEdge, RawSymbol, ResolvedOrUnresolved};
 use standardoc_lang_provider::WorkspaceProvider;
-use standardoc_rag::embedder::{CandleBgeSmall, Embedder, MockEmbedder, resolve_models_dir};
-use standardoc_rag::store::RagStore;
-use standardoc_rag::types::EmbedModel;
 use standardoc_server::ServerError;
 use standardoc_server::query;
 
@@ -48,7 +46,7 @@ enum Command {
     /// Drop the existing index and re-build from scratch.
     Rescan { path: PathBuf },
 
-    /// Remove indexed paths that now match the workspace's `.stdignore`.
+    /// Remove indexed paths that now match the workspace's `standardoc.sxd` ignore block.
     PurgeExcluded {
         path: PathBuf,
 
@@ -65,19 +63,67 @@ enum Command {
         /// transport supported and is the default — this flag is ignored.
         #[arg(long, hide = true)]
         stdio: bool,
+    },
 
-        /// Enable the RAG (prose retrieval) layer alongside the LSP daemon.
-        /// The LSP daemon is the primary write-side in the ext VSCode setup,
-        /// so this is where the RAG cold-start + watcher belong. Same sidecar
-        /// `.standardoc/rag.db` as the MCP `--rag` path.
+    /// Run the `.sxd` LSP backend over stdio. Drives `standarx-dsl-lsp`
+    /// with our `SxdSchema` plugged in so editors get both syntactic
+    /// (from the DSL parser) and schema-aware (from standardoc.sxd's
+    /// `ignore` / `project` / `group` rules) diagnostics live as the
+    /// user edits. Stateless and workspace-agnostic — every open .sxd
+    /// document validates independently.
+    LspSxd {
+        /// Accepted for vscode-languageclient compatibility; stdio is the only
+        /// transport supported and is the default — this flag is ignored.
+        #[arg(long, hide = true)]
+        stdio: bool,
+    },
+
+    /// Long-lived HTTP proxy in front of one or more daemons. Keeps
+    /// every MCP client (Claude Code, Copilot Chat, …) connected to a
+    /// stable URL across daemon restarts / rebuilds / migrations, and
+    /// can serve multiple workspaces from a single bind address:
+    ///
+    /// ```text
+    /// /mcp                  → default (first --workspace)  (back-compat)
+    /// /ws/<id>/mcp          → that workspace's daemon
+    /// /health               → JSON status of every registered workspace
+    /// ```
+    ///
+    /// `<id>` is a deterministic blake3 short hash of the workspace's
+    /// canonical abs path — print it via `standardoc workspace-id <dir>`.
+    ///
+    /// Bind precedence: `--bind` flag > `127.0.0.1:7700`. The VSCode
+    /// extension passes `--bind` from the per-user settings
+    /// `standardoc.proxyBind` / `standardoc.proxyPort` ; workspace
+    /// `standardoc.sxd` is NOT read here (proxy is a per-machine
+    /// singleton, not a per-workspace resource — see Bug F).
+    Proxy {
+        /// Explicit `host:port` bind override. When omitted, defaults
+        /// to `127.0.0.1:7700`.
         #[arg(long)]
-        rag: bool,
+        bind: Option<String>,
 
-        /// Embedder backend used when `--rag` is set. Same semantics as the
-        /// MCP sub-command (`mock` = deterministic stub, `candle` = BGE-small
-        /// downloaded to `~/.cache/standardoc/models/` on first run).
-        #[arg(long, default_value = "mock", value_parser = ["mock", "candle"])]
-        embedder: String,
+        /// Workspace root to serve. Repeat the flag to register
+        /// multiple workspaces under one proxy instance — the first
+        /// entry becomes the default (`/mcp` path). Defaults to the
+        /// current working directory when omitted.
+        #[arg(long = "workspace", value_name = "DIR")]
+        workspaces: Vec<PathBuf>,
+
+        /// How long (in seconds) to keep retrying a request when the
+        /// upstream daemon is unreachable before returning `503`.
+        #[arg(long, default_value_t = 30)]
+        retry_window_secs: u64,
+    },
+
+    /// Print the deterministic workspace id used by the proxy's
+    /// `/ws/<id>/mcp` routing. blake3-derived from the canonical abs
+    /// path of `<dir>`, truncated to 8 hex chars. Exposed so external
+    /// scripts / chat clients can build the URL without round-tripping
+    /// through the proxy.
+    WorkspaceId {
+        #[arg(value_name = "DIR")]
+        path: PathBuf,
     },
 
     /// Run the MCP daemon. Default transport: stdio. Use `--http` to serve
@@ -106,22 +152,17 @@ enum Command {
         #[arg(long)]
         http: Option<u16>,
 
-        /// Enable the RAG (prose retrieval) layer. Boots a sidecar
-        /// `.standardoc/rag.db`, exposes the `fetch_chunks` MCP tool,
-        /// and populates `chunk_refs` in `get_context` responses. Off
-        /// by default — opt-in keeps the embedding model download
-        /// (~130 MB on first run with `--embedder candle`) under user
-        /// control.
-        #[arg(long)]
-        rag: bool,
+        /// Run as the stdio↔http bridge: ensure a warm, watcher-backed daemon
+        /// for the workspace and relay JSON-RPC to it over stdio. This is the
+        /// entry `standardoc init` wires into `.mcp.json` for a Claude Code
+        /// CLI user without the VSCode extension. Conflicts with `--http`.
+        #[arg(long, conflicts_with = "http")]
+        connect: bool,
 
-        /// Embedder backend used when `--rag` is set. `mock` ships a
-        /// deterministic zero-network BLAKE3-derived stub (tests,
-        /// development, exercising the tool surface without DLing a
-        /// model). `candle` loads BGE-small-en-v1.5 from
-        /// `~/.cache/standardoc/models/`, downloading it on first run.
-        #[arg(long, default_value = "mock", value_parser = ["mock", "candle"])]
-        embedder: String,
+        /// Daemon port the `--connect` bridge probes/spawns (default 7700).
+        /// Ignored without `--connect`.
+        #[arg(long, requires = "connect")]
+        port: Option<u16>,
     },
 
     /// Print the on-disk schema version of the workspace index, the schema
@@ -131,28 +172,17 @@ enum Command {
     /// daemons.
     SchemaVersion { path: PathBuf },
 
-    /// Wipe rows from the workspace's `usage_stats` telemetry table. Used to
-    /// baseline the token-savings counter before a measurement run. Does NOT
-    /// touch the index — the daemon may stay up.
-    ResetUsage {
-        path: PathBuf,
-
-        /// Window to wipe. `today` (last 24 h), `week` (last 7 d), or `all`.
-        #[arg(long, value_parser = ["today", "day", "week", "all"])]
-        period: String,
-
-        /// Skip the interactive confirmation prompt.
-        #[arg(long)]
-        yes: bool,
-    },
-
-    /// Preview which workspace-relative paths a single `.stdignore`
+    /// Preview which workspace-relative paths a single gitignore-syntax
     /// pattern would match. Output is JSON on stdout
     /// (`{pattern, matches, total_count, truncated, walk_truncated}`).
-    /// Backs the VSCode extension's `.stdignore` hover provider — the
-    /// extension shells out to this sub-command so the preview uses
+    /// Backs the VSCode extension's `standardoc.sxd` hover provider —
+    /// the extension shells out to this sub-command so the preview uses
     /// the exact same `ignore` crate matcher as the daemon.
-    StdignorePreview {
+    ///
+    /// `stdignore-preview` (without the `sxd-` prefix) is kept as an
+    /// alias for back-compat with older callers.
+    #[command(alias = "stdignore-preview")]
+    SxdPreview {
         /// Workspace root to walk.
         path: PathBuf,
 
@@ -168,18 +198,6 @@ enum Command {
         limit: usize,
     },
 
-    /// Bridge the workspace sessions DB <-> a directory of `.md` memo
-    /// files. `sync-in` imports every memo under `dir` into the sessions
-    /// DB; the extended frontmatter (status, supersedes, created_at) makes
-    /// the import fidelity-complete. `sync-out` is the inverse: dump every
-    /// row to `<slug>.md` + regenerate `MEMORY.md`. `hook` is the
-    /// claude-code PostToolUse driver that auto-runs `sync-in` whenever a
-    /// `.md` under the harness memory directory is written.
-    Session {
-        #[command(subcommand)]
-        action: SessionAction,
-    },
-
     /// Claude Code hook drivers. Each sub-command reads a JSON payload from
     /// stdin (the hook event payload) and writes a JSON response on stdout
     /// (the hook decision). All sub-commands exit 0 and never abort on
@@ -189,33 +207,46 @@ enum Command {
         #[command(subcommand)]
         action: ClaudeAction,
     },
-}
 
-#[derive(Subcommand)]
-enum SessionAction {
-    /// Bulk import every `.md` memo under `dir` into the workspace sessions
-    /// DB. Frontmatter `type:` drives the `SessionKind` (feedback, user →
-    /// profile, project → lock, reference → profile, other → session);
-    /// `status`, `supersedes`, `created_at` round-trip fidelity-complete.
-    /// `MEMORY.md` is skipped. UPSERT by slug — safe to re-run.
-    SyncIn {
-        /// Workspace root (anchors `.standardoc-sessions/sessions.db`).
-        workspace: PathBuf,
-        /// Source directory of `.md` memo files (e.g. claude-code's
-        /// `~/.claude/projects/<hash>/memory`, or a `sessions-export/`
-        /// dropped from another workspace).
-        dir: PathBuf,
+    /// Initialise this workspace for an AI agent: write the Standardoc
+    /// skill (`.claude/skills/standardoc/SKILL.md`) so a Claude Code (or
+    /// other SKILL.md-aware) agent picks up the live index. Idempotent — a
+    /// skill that already matches is left untouched.
+    Init {
+        /// Workspace root to initialise. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
-    /// Dump every session row in the workspace DB to `<slug>.md` under
-    /// `dir` and (re)write `MEMORY.md` as an index. Inverse of
-    /// `sync-in`. Used for cross-machine portability.
-    SyncOut { workspace: PathBuf, dir: PathBuf },
-    /// Read a Claude Code PostToolUse hook payload from stdin, detect if a
-    /// `Write`/`Edit` touched a file under the harness memory directory,
-    /// and trigger `sync-in` automatically. Exits with `{"synced": false}`
-    /// on no-op so the hook never blocks the agent. Designed to be wired
-    /// once at workspace init.
-    Hook,
+
+    /// Atomically upgrade the running `standardoc` binary to the latest
+    /// published release. Reads the same `version.json` manifest the
+    /// VSCode extension consumes ; downloads + sha256-verifies the
+    /// archive for the current platform ; extracts via the system
+    /// `tar` tool ; swaps the binary in place (Windows: rename
+    /// current to `<name>.exe.old`, copy new in ; Unix: atomic
+    /// `rename`).
+    ///
+    /// No-op when the binary is already on the latest version unless
+    /// `--force` is passed. `--dry-run` resolves and prints what
+    /// would happen without touching the filesystem.
+    SelfUpdate {
+        /// Resolve the latest version + asset URL and stop. Does not
+        /// download or swap the binary.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Re-install the latest version even when the binary already
+        /// reports it. Useful for recovering from a corrupted install
+        /// or after a force-pushed release tag.
+        #[arg(long)]
+        force: bool,
+
+        /// Pin the update to a specific release tag (e.g. `v1.0.0-beta.3`)
+        /// instead of following `releases/latest`. Mainly for
+        /// rollbacks ; CI normally omits this.
+        #[arg(long, value_name = "TAG")]
+        version: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -333,116 +364,54 @@ fn main_inner() -> Result<(), ServerError> {
         Command::Query(args) => cmd_query(&args),
         Command::Rescan { path } => cmd_rescan(&path),
         Command::PurgeExcluded { path, yes } => cmd_purge_excluded(&path, yes),
-        Command::Lsp {
-            path,
-            stdio: _,
-            rag,
-            embedder,
-        } => cmd_lsp(&path, rag, &embedder),
+        Command::Lsp { path, stdio: _ } => cmd_lsp(&path),
+        Command::LspSxd { stdio: _ } => cmd_lsp_sxd(),
+        Command::Proxy {
+            bind,
+            workspaces,
+            retry_window_secs,
+        } => cmd_proxy(bind, workspaces, retry_window_secs),
+        Command::WorkspaceId { path } => cmd_workspace_id(&path),
         Command::Mcp {
             path,
             readonly,
             http,
-            rag,
-            embedder,
-        } => cmd_mcp(&path, readonly, http, rag, &embedder),
+            connect,
+            port,
+        } => {
+            if connect {
+                connect::run(&path, port.unwrap_or(connect::DEFAULT_PORT))
+            } else {
+                cmd_mcp(&path, readonly, http)
+            }
+        }
         Command::SchemaVersion { path } => cmd_schema_version(&path),
-        Command::ResetUsage { path, period, yes } => cmd_reset_usage(&path, &period, yes),
-        Command::StdignorePreview {
+        Command::SxdPreview {
             path,
             pattern,
             limit,
-        } => cmd_stdignore_preview(&path, &pattern, limit),
-        Command::Session { action } => match action {
-            SessionAction::SyncIn { workspace, dir } => cmd_session_sync_in(&workspace, &dir),
-            SessionAction::SyncOut { workspace, dir } => cmd_session_sync_out(&workspace, &dir),
-            SessionAction::Hook => cmd_session_hook(),
-        },
+        } => cmd_sxd_preview(&path, &pattern, limit),
         Command::Claude { action } => match action {
             ClaudeAction::PreToolHook { mode } => cmd_claude_pre_tool_hook(&mode),
         },
+        Command::Init { path } => init::run(&path),
+        Command::SelfUpdate {
+            dry_run,
+            force,
+            version,
+        } => cmd_self_update(dry_run, force, version),
     }
 }
 
-fn cmd_session_sync_in(workspace: &Path, dir: &Path) -> Result<(), ServerError> {
-    let handle = SessionsHandle::open(workspace)?;
-    let report = standardoc_core::sessions::memory_sync::import_memory_dir(&handle, dir)?;
-    println!(
-        "{}",
-        serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
-    );
+fn cmd_self_update(dry_run: bool, force: bool, version: Option<String>) -> Result<(), ServerError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(ServerError::Io)?;
+    runtime
+        .block_on(self_update::run(dry_run, force, version))
+        .map_err(|e| ServerError::Io(io::Error::other(format!("self-update: {e}"))))?;
     Ok(())
-}
-
-fn cmd_session_sync_out(workspace: &Path, dir: &Path) -> Result<(), ServerError> {
-    let handle = SessionsHandle::open(workspace)?;
-    let report = standardoc_core::sessions::memory_sync::export_memory_dir(&handle, dir)?;
-    println!(
-        "{}",
-        serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
-    );
-    Ok(())
-}
-
-/// Marker substring on the file_path that identifies a Claude harness memory
-/// write. Matches the Linux `~/.claude/projects/<hash>/memory/` and the
-/// Windows `C:\Users\<u>\.claude\projects\<hash>\memory\` layouts after the
-/// path is normalised with forward slashes.
-const MEMORY_PATH_MARKER: &str = "/.claude/projects/";
-const MEMORY_PATH_TAIL: &str = "/memory/";
-
-fn cmd_session_hook() -> Result<(), ServerError> {
-    use std::io::Read;
-    let mut raw = String::new();
-    io::stdin().read_to_string(&mut raw).ok();
-    let payload: serde_json::Value = if let Ok(v) = serde_json::from_str(&raw) {
-        v
-    } else {
-        // Malformed payload — never block the agent.
-        println!("{{\"synced\":false,\"reason\":\"invalid_json\"}}");
-        return Ok(());
-    };
-    let tool = payload
-        .get("tool_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let file_path_raw = payload
-        .get("tool_input")
-        .and_then(|v| v.get("file_path"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let cwd_raw = payload.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-    let file_path = file_path_raw.replace('\\', "/");
-    let cwd = cwd_raw.replace('\\', "/");
-    let touched_memory = matches!(tool, "Write" | "Edit" | "MultiEdit")
-        && file_path.contains(MEMORY_PATH_MARKER)
-        && file_path.contains(MEMORY_PATH_TAIL);
-    if !touched_memory {
-        println!("{{\"synced\":false,\"reason\":\"not_a_memory_write\"}}");
-        return Ok(());
-    }
-    let Some(memory_dir) = memory_dir_from_path(&file_path) else {
-        println!("{{\"synced\":false,\"reason\":\"unparsable_memory_path\"}}");
-        return Ok(());
-    };
-    if cwd.is_empty() {
-        println!("{{\"synced\":false,\"reason\":\"missing_cwd\"}}");
-        return Ok(());
-    }
-    let workspace = PathBuf::from(cwd);
-    let memory_dir = PathBuf::from(memory_dir);
-    let handle = SessionsHandle::open(&workspace)?;
-    let report = standardoc_core::sessions::memory_sync::import_memory_dir(&handle, &memory_dir)?;
-    println!(
-        "{}",
-        serde_json::json!({ "synced": true, "report": report })
-    );
-    Ok(())
-}
-
-fn memory_dir_from_path(file_path: &str) -> Option<String> {
-    let tail_idx = file_path.find(MEMORY_PATH_TAIL)?;
-    Some(file_path[..tail_idx + MEMORY_PATH_TAIL.len() - 1].to_string())
 }
 
 /// File name (under `<cwd>/.standardoc/`) used to record that the agent has
@@ -498,6 +467,14 @@ fn pre_tool_hook_decide(mode: &str, raw_payload: &str, sentinel: &Path) -> Strin
             }
         }
         "check" => {
+            // Scope the guardrail to the workspace: a Read/Grep/Glob aimed at
+            // an absolute path OUTSIDE the project (e.g. `~/.claude` memory,
+            // a sibling repo) is not code exploration of THIS workspace, and a
+            // Read of a file Standardoc does not index (docs, config, data) can
+            // never be answered by an MCP tool — gating either is pure friction.
+            if targets_outside_workspace(&payload) || targets_non_source_file(&payload) {
+                return "{}".to_string();
+            }
             if sentinel.exists() {
                 "{}".to_string()
             } else {
@@ -522,6 +499,87 @@ fn pre_tool_hook_decide(mode: &str, raw_payload: &str, sentinel: &Path) -> Strin
     }
 }
 
+/// True when the inbound tool is a path-based read (`Read`/`Grep`/`Glob`)
+/// aimed at an **absolute** path that is not under the payload `cwd`. Such a
+/// read targets something outside the workspace (harness memory under
+/// `~/.claude`, a sibling repo, …) and has nothing to do with THIS project's
+/// index, so the MCP-first guardrail must not gate it.
+///
+/// Conservative by construction: any ambiguity (missing `cwd`, relative
+/// target, `Bash`, unparseable path) returns `false` so the guardrail still
+/// fires — we only bypass when we are confident the target is outside.
+fn targets_outside_workspace(payload: &serde_json::Value) -> bool {
+    let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let tool = payload
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let input = payload.get("tool_input");
+    let target = match tool {
+        "Read" => input
+            .and_then(|i| i.get("file_path"))
+            .and_then(|v| v.as_str()),
+        // Grep/Glob default to cwd when `path` is omitted → that's inside.
+        "Grep" | "Glob" => input.and_then(|i| i.get("path")).and_then(|v| v.as_str()),
+        _ => None,
+    };
+    let Some(target) = target else { return false };
+    if !Path::new(target).is_absolute() {
+        return false;
+    }
+    // Case- and separator-insensitive prefix check. Erring toward a false
+    // "inside" (→ keep gating) is the safe direction.
+    let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    let cwd_n = norm(cwd);
+    !cwd_n.is_empty() && !norm(target).starts_with(&cwd_n)
+}
+
+/// True when the inbound tool is a `Read` of a file Standardoc does not index
+/// as code — docs (`.md`), config / data (`.json`, `.yml`, `.toml`, `tsconfig`,
+/// lockfiles), or extensionless files (`LICENSE`, `Makefile`, `.gitignore`).
+/// The MCP-first guardrail steers CODE exploration toward the index; a file the
+/// index never sees can't be answered by an MCP tool, so gating it is pure
+/// friction.
+///
+/// Conservative, like `targets_outside_workspace`: only `Read` with a known
+/// `file_path`, and any source-looking extension returns `false` so the
+/// guardrail still fires. The source set errs generous — keeping the gate on a
+/// doubtful extension is the safe direction.
+fn targets_non_source_file(payload: &serde_json::Value) -> bool {
+    // Extensions Standardoc's extractors index as code (Rust / TS-JS +
+    // Vue/Svelte SFC / Lua / C, plus C++ cousins). Generous on purpose:
+    // erring toward "is source" keeps the guardrail firing.
+    const SOURCE_EXTS: &[&str] = &[
+        "rs", "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "lua", "c", "h", "cpp", "cc",
+        "cxx", "hpp", "hh", "vue", "svelte",
+    ];
+    let tool = payload
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if tool != "Read" {
+        return false;
+    }
+    let Some(target) = payload
+        .get("tool_input")
+        .and_then(|i| i.get("file_path"))
+        .and_then(|v| v.as_str())
+    else {
+        return false;
+    };
+    match Path::new(target)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+    {
+        // Extensionless reads (LICENSE, Makefile, .gitignore) are never code.
+        None => true,
+        Some(ext) => !SOURCE_EXTS.contains(&ext.as_str()),
+    }
+}
+
 fn cmd_schema_version(path: &Path) -> Result<(), ServerError> {
     let supported = standardoc_core::SUPPORTED_SCHEMA_VERSION;
     let db_path = path.join(".standardoc").join("index.db");
@@ -541,38 +599,78 @@ fn cmd_schema_version(path: &Path) -> Result<(), ServerError> {
     Ok(())
 }
 
-fn cmd_lsp(path: &Path, rag: bool, embedder: &str) -> Result<(), ServerError> {
+fn cmd_lsp(path: &Path) -> Result<(), ServerError> {
     let provider: Arc<dyn standardoc_core::LanguageProvider> = Arc::new(WorkspaceProvider::new());
     let handle = IndexHandle::open(path)?;
     let _ = warn::boot_binary_sweep(handle.workspace_root());
     let _ = warn::boot_lockfile_invalidation_sweep(&handle, handle.workspace_root());
     let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
 
-    let rag_pipeline = if rag {
-        Some(build_rag_pipeline(handle.workspace_root(), embedder)?)
-    } else {
-        None
-    };
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(ServerError::Io)?;
-    runtime.block_on(standardoc_server::serve_lsp(
-        handle,
-        provider,
-        filters,
-        rag_pipeline,
-    ))
+    runtime.block_on(standardoc_server::serve_lsp(handle, provider, filters))
 }
 
-fn cmd_mcp(
-    path: &Path,
-    readonly: bool,
-    http: Option<u16>,
-    rag: bool,
-    embedder: &str,
+fn cmd_lsp_sxd() -> Result<(), ServerError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(ServerError::Io)?;
+    runtime.block_on(async {
+        standarx_dsl_lsp::run_stdio_with_schemas(vec![Box::new(sxd_schema::SxdSchema)]).await;
+    });
+    Ok(())
+}
+
+fn cmd_proxy(
+    bind: Option<String>,
+    workspaces: Vec<PathBuf>,
+    retry_window_secs: u64,
 ) -> Result<(), ServerError> {
+    let workspaces = if workspaces.is_empty() {
+        vec![std::env::current_dir().map_err(ServerError::Io)?]
+    } else {
+        workspaces
+    };
+    let bind_addr = resolve_proxy_bind(bind);
+    let cfg = standardoc_mcp_proxy::ProxyConfig {
+        bind_addr,
+        workspaces,
+        upstream_retry_window: Duration::from_secs(retry_window_secs),
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(ServerError::Io)?;
+    // ProxyError is a distinct error type from ServerError — we surface
+    // it as an Io error wrapping the formatted message so the existing
+    // CLI dispatch stays uniform without adding a ServerError variant
+    // just for this one subcommand.
+    runtime
+        .block_on(standardoc_mcp_proxy::run(cfg))
+        .map_err(|e| ServerError::Io(io::Error::other(format!("proxy: {e}"))))
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_workspace_id(path: &Path) -> Result<(), ServerError> {
+    println!("{}", standardoc_mcp_proxy::workspace_id_for(path));
+    Ok(())
+}
+
+/// Resolve the proxy bind address: CLI `--bind` if passed, else
+/// `127.0.0.1:7700`. The proxy is a per-machine singleton ; sibling
+/// VSCode windows must converge on the same address for the
+/// `probe → register → exit` dedup to work, so per-workspace
+/// configuration is intentionally absent. The VSCode extension reads
+/// `standardoc.proxyBind` / `standardoc.proxyPort` and passes them
+/// here via `--bind`.
+fn resolve_proxy_bind(cli_bind: Option<String>) -> String {
+    cli_bind.unwrap_or_else(|| "127.0.0.1:7700".to_string())
+}
+
+fn cmd_mcp(path: &Path, readonly: bool, http: Option<u16>) -> Result<(), ServerError> {
     let provider: Arc<dyn standardoc_core::LanguageProvider> = Arc::new(WorkspaceProvider::new());
     let handle = if readonly {
         wait_for_db_then_open_readonly(path, READONLY_DB_WAIT)?
@@ -585,12 +683,6 @@ fn cmd_mcp(
     }
     let filters = Arc::new(RwLock::new(ScanFilters::load(handle.workspace_root())));
 
-    let rag_pipeline = if rag {
-        Some(build_rag_pipeline(handle.workspace_root(), embedder)?)
-    } else {
-        None
-    };
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -600,76 +692,11 @@ fn cmd_mcp(
         Some(port) => {
             let bind_addr = format!("127.0.0.1:{port}");
             runtime.block_on(standardoc_server::serve_mcp_http(
-                handle,
-                provider,
-                filters,
-                &bind_addr,
-                rag_pipeline,
+                handle, provider, filters, &bind_addr,
             ))
         }
-        None => runtime.block_on(standardoc_server::serve_mcp(
-            handle,
-            provider,
-            filters,
-            rag_pipeline,
-        )),
+        None => runtime.block_on(standardoc_server::serve_mcp(handle, provider, filters)),
     }
-}
-
-fn build_rag_pipeline(
-    workspace_root: &Path,
-    embedder_choice: &str,
-) -> Result<Arc<RagPipeline>, ServerError> {
-    let model = EmbedModel::bge_small_en_v1_5();
-    let store = RagStore::open(workspace_root, model)
-        .map_err(|e| ServerError::Io(io::Error::other(format!("rag store open: {e}"))))?;
-    let embedder: Arc<dyn Embedder> = match embedder_choice {
-        "mock" => Arc::new(MockEmbedder::new()),
-        "candle" => Arc::new(load_or_download_candle()?),
-        other => {
-            return Err(ServerError::Io(io::Error::other(format!(
-                "unknown --embedder choice: {other}"
-            ))));
-        }
-    };
-    Ok(Arc::new(RagPipeline::with_defaults(
-        Arc::new(store),
-        embedder,
-    )))
-}
-
-fn load_or_download_candle() -> Result<CandleBgeSmall, ServerError> {
-    let model_dir = resolve_models_dir().join("bge-small-en-v1.5");
-    if !CandleBgeSmall::is_present(&model_dir) {
-        // Structured stderr markers so the ext supervisor knows to suspend
-        // its endpoint-file timeout while the model download is in flight
-        // (130 MB on a fresh install can take a couple of seconds on a
-        // fast pipe, much longer on residential ADSL — bracketing the
-        // network phase tells the supervisor to wait it out instead of
-        // killing the daemon mid-fetch).
-        eprintln!(
-            "STDOC_RAG_DL_START: {{\"model\":\"bge-small-en-v1.5\",\"approx_bytes\":130000000,\"target\":\"{}\"}}",
-            escape_for_json(&model_dir.display().to_string()),
-        );
-        eprintln!(
-            "standardoc rag: BGE-small not found at {} — downloading (~130 MB)...",
-            model_dir.display()
-        );
-        let dl_result = CandleBgeSmall::download(&model_dir);
-        eprintln!("STDOC_RAG_DL_DONE");
-        dl_result
-            .map_err(|e| ServerError::Io(io::Error::other(format!("rag model download: {e}"))))?;
-        eprintln!("standardoc rag: model downloaded");
-    }
-    CandleBgeSmall::load(model_dir)
-        .map_err(|e| ServerError::Io(io::Error::other(format!("rag model load: {e}"))))
-}
-
-/// Minimal JSON string escaping for the marker payload above. Only
-/// quote + backslash are escaped — the model dir is filesystem-controlled
-/// and otherwise printable.
-fn escape_for_json(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 const READONLY_DB_WAIT: Duration = Duration::from_mins(1);
@@ -798,7 +825,7 @@ fn cmd_purge_excluded(path: &Path, yes_flag: bool) -> Result<(), ServerError> {
     }
 
     println!(
-        "found {} indexed path(s) matching `.stdignore`:",
+        "found {} indexed path(s) matching `standardoc.sxd` ignore block:",
         candidates.len()
     );
     for path in candidates.iter().take(PURGE_PREVIEW_LIMIT) {
@@ -818,62 +845,13 @@ fn cmd_purge_excluded(path: &Path, yes_flag: bool) -> Result<(), ServerError> {
     Ok(())
 }
 
-fn cmd_stdignore_preview(workspace: &Path, pattern: &str, limit: usize) -> Result<(), ServerError> {
+fn cmd_sxd_preview(workspace: &Path, pattern: &str, limit: usize) -> Result<(), ServerError> {
     let preview = standardoc_core::preview_pattern_matches(workspace, pattern, limit)
-        .map_err(|e| io::Error::other(format!("stdignore preview: {e}")))?;
+        .map_err(|e| io::Error::other(format!("sxd preview: {e}")))?;
     let json = serde_json::to_string(&preview)
         .map_err(|e| io::Error::other(format!("serialize preview: {e}")))?;
     println!("{json}");
     Ok(())
-}
-
-fn cmd_reset_usage(path: &Path, period: &str, yes_flag: bool) -> Result<(), ServerError> {
-    let parsed = UsagePeriod::from_str_loose(period).ok_or_else(|| {
-        io::Error::other(format!(
-            "invalid --period {period:?}: expected `today`, `week`, or `all`"
-        ))
-    })?;
-    let handle = SessionsHandle::open(path)
-        .map_err(|e| io::Error::other(format!("open sessions.db: {e}")))?;
-    let preview = handle
-        .query_usage_stats(parsed)
-        .map_err(|e| io::Error::other(format!("count rows: {e}")))?;
-    if preview.calls == 0 {
-        println!("(nothing to reset for period `{period}`)");
-        return Ok(());
-    }
-    if !confirm_destructive(
-        &format!(
-            "reset {} usage_stats row(s) for period `{period}`?",
-            preview.calls
-        ),
-        yes_flag,
-    )? {
-        println!("aborted");
-        return Ok(());
-    }
-    let deleted = handle
-        .reset_usage(parsed)
-        .map_err(|e| io::Error::other(format!("reset rows: {e}")))?;
-    println!("reset {deleted} row(s) from period `{period}`");
-    Ok(())
-}
-
-fn confirm_destructive(prompt: &str, yes_flag: bool) -> Result<bool, ServerError> {
-    if yes_flag {
-        return Ok(true);
-    }
-    if !io::stdin().is_terminal() {
-        return Err(io::Error::other(format!(
-            "non-interactive shell: pass --yes to confirm — {prompt}"
-        ))
-        .into());
-    }
-    eprint!("{prompt} [y/N] ");
-    let _ = io::stderr().flush();
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES"))
 }
 
 fn confirm_purge(count: usize, yes_flag: bool) -> Result<bool, ServerError> {
@@ -1041,211 +1019,7 @@ fn progress_loop(handle: &IndexHandle, stop: &AtomicBool, is_tty: bool) {
 }
 
 #[cfg(test)]
-mod fatal_marker_tests {
-    use super::*;
-
-    #[test]
-    fn schema_too_new_emits_machine_readable_marker() {
-        let err = ServerError::Storage(StorageError::SchemaVersionTooNew {
-            db: 99,
-            supported: 2,
-        });
-        assert_eq!(
-            fatal_marker_for(&err).as_deref(),
-            Some("STDOC_FATAL: schema_too_new db=99 supported=2"),
-        );
-    }
-
-    #[test]
-    fn unrelated_storage_error_returns_no_marker() {
-        let err = ServerError::Storage(StorageError::ReadOnlyMissingDatabase {
-            path: PathBuf::from("/tmp/nope"),
-        });
-        assert!(fatal_marker_for(&err).is_none());
-    }
-
-    #[test]
-    fn io_error_returns_no_marker() {
-        let err = ServerError::Io(io::Error::other("disk full"));
-        assert!(fatal_marker_for(&err).is_none());
-    }
-
-    #[test]
-    fn marker_format_starts_with_stable_prefix() {
-        // The supervisor parses the line by splitting on the literal
-        // `STDOC_FATAL: ` prefix — keep this contract symmetric.
-        let err = ServerError::Storage(StorageError::SchemaVersionTooNew {
-            db: 42,
-            supported: 1,
-        });
-        let marker = fatal_marker_for(&err).unwrap();
-        assert!(marker.starts_with("STDOC_FATAL: "));
-        assert!(marker.contains("db=42"));
-        assert!(marker.contains("supported=1"));
-    }
-}
+mod fatal_marker_tests;
 
 #[cfg(test)]
-mod claude_pre_tool_hook_tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    fn sentinel_in(tmp: &TempDir) -> PathBuf {
-        tmp.path().join("mcp_called_this_session")
-    }
-
-    #[test]
-    fn mark_writes_sentinel_when_tool_is_standardoc_mcp() {
-        let tmp = TempDir::new().unwrap();
-        let sentinel = sentinel_in(&tmp);
-        let payload = r#"{"tool_name":"mcp__standardoc__find_symbol","cwd":"/anywhere"}"#;
-        let out = pre_tool_hook_decide("mark", payload, &sentinel);
-        assert!(out.contains(r#""marked":true"#), "out={out}");
-        assert!(sentinel.exists(), "sentinel must be written");
-    }
-
-    #[test]
-    fn mark_skips_non_standardoc_tool() {
-        let tmp = TempDir::new().unwrap();
-        let sentinel = sentinel_in(&tmp);
-        let payload = r#"{"tool_name":"Bash"}"#;
-        let out = pre_tool_hook_decide("mark", payload, &sentinel);
-        assert!(out.contains("not_standardoc_mcp_tool"), "out={out}");
-        assert!(!sentinel.exists(), "sentinel must NOT be written");
-    }
-
-    #[test]
-    fn mark_skips_when_tool_name_missing() {
-        let tmp = TempDir::new().unwrap();
-        let sentinel = sentinel_in(&tmp);
-        let out = pre_tool_hook_decide("mark", r"{}", &sentinel);
-        assert!(out.contains("not_standardoc_mcp_tool"), "out={out}");
-        assert!(!sentinel.exists());
-    }
-
-    #[test]
-    fn mark_creates_parent_dirs() {
-        let tmp = TempDir::new().unwrap();
-        let nested = tmp.path().join("deep").join(".standardoc");
-        let sentinel = nested.join("mcp_called_this_session");
-        let payload = r#"{"tool_name":"mcp__standardoc__get_context"}"#;
-        let out = pre_tool_hook_decide("mark", payload, &sentinel);
-        assert!(out.contains(r#""marked":true"#), "out={out}");
-        assert!(sentinel.exists());
-    }
-
-    #[test]
-    fn check_denies_when_sentinel_absent() {
-        let tmp = TempDir::new().unwrap();
-        let sentinel = sentinel_in(&tmp);
-        let out = pre_tool_hook_decide("check", r"{}", &sentinel);
-        assert!(out.contains(r#""permissionDecision":"deny""#), "out={out}");
-        assert!(out.contains("MCP-first"));
-        assert!(out.contains("find_symbol"));
-    }
-
-    #[test]
-    fn check_allows_when_sentinel_present() {
-        let tmp = TempDir::new().unwrap();
-        let sentinel = sentinel_in(&tmp);
-        fs::write(&sentinel, b"").unwrap();
-        let out = pre_tool_hook_decide("check", r"{}", &sentinel);
-        assert_eq!(out, "{}");
-    }
-
-    #[test]
-    fn check_emits_pretooluse_hook_event_name() {
-        // Claude Code requires the hookSpecificOutput.hookEventName to
-        // match the firing event, otherwise the JSON is silently
-        // ignored. Lock the wire shape.
-        let tmp = TempDir::new().unwrap();
-        let sentinel = sentinel_in(&tmp);
-        let out = pre_tool_hook_decide("check", r"{}", &sentinel);
-        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(
-            parsed
-                .get("hookSpecificOutput")
-                .and_then(|v| v.get("hookEventName"))
-                .and_then(|v| v.as_str()),
-            Some("PreToolUse"),
-        );
-    }
-
-    #[test]
-    fn reset_removes_sentinel() {
-        let tmp = TempDir::new().unwrap();
-        let sentinel = sentinel_in(&tmp);
-        fs::write(&sentinel, b"").unwrap();
-        let out = pre_tool_hook_decide("reset", r"{}", &sentinel);
-        assert!(out.contains(r#""reset":true"#));
-        assert!(!sentinel.exists());
-    }
-
-    #[test]
-    fn reset_is_idempotent_when_sentinel_absent() {
-        let tmp = TempDir::new().unwrap();
-        let sentinel = sentinel_in(&tmp);
-        let out = pre_tool_hook_decide("reset", r"{}", &sentinel);
-        // Must not panic; output is the reset confirmation either way.
-        assert!(out.contains(r#""reset":true"#));
-    }
-
-    #[test]
-    fn invalid_json_does_not_panic_in_any_mode() {
-        let tmp = TempDir::new().unwrap();
-        let sentinel = sentinel_in(&tmp);
-        // Mark with garbage payload — must not panic, must not write
-        // the sentinel (no tool name resolvable).
-        let out = pre_tool_hook_decide("mark", "not json", &sentinel);
-        assert!(out.contains("not_standardoc_mcp_tool"), "out={out}");
-        assert!(!sentinel.exists());
-        // Check with garbage payload — same as a missing sentinel.
-        let out = pre_tool_hook_decide("check", "not json", &sentinel);
-        assert!(out.contains(r#""permissionDecision":"deny""#));
-        // Reset with garbage payload — no-op (file already absent).
-        let out = pre_tool_hook_decide("reset", "not json", &sentinel);
-        assert!(out.contains(r#""reset":true"#));
-    }
-
-    #[test]
-    fn unknown_mode_returns_safe_default() {
-        let tmp = TempDir::new().unwrap();
-        let sentinel = sentinel_in(&tmp);
-        let out = pre_tool_hook_decide("nope", r"{}", &sentinel);
-        assert!(out.contains("unknown_mode"));
-        // Must not implicitly deny — clap's value_parser already
-        // forbids this CLI-side, but a defence-in-depth default is
-        // "do not block the agent".
-        assert!(!out.contains(r#""permissionDecision":"deny""#));
-    }
-
-    #[test]
-    fn resolve_sentinel_uses_payload_cwd() {
-        let tmp = TempDir::new().unwrap();
-        let cwd = tmp.path().to_string_lossy().replace('\\', "/");
-        let payload = format!(r#"{{"cwd":"{cwd}"}}"#);
-        let sentinel = resolve_mcp_first_sentinel(&payload);
-        let expected = tmp.path().join(".standardoc").join(MCP_FIRST_SENTINEL);
-        assert_eq!(sentinel, expected);
-    }
-
-    #[test]
-    fn resolve_sentinel_falls_back_to_current_dir_when_payload_lacks_cwd() {
-        // The fallback chain is cwd → CLAUDE_PROJECT_DIR → current_dir;
-        // we only assert the chain doesn't panic and produces a path
-        // ending with the sentinel name + parent `.standardoc`.
-        let sentinel = resolve_mcp_first_sentinel(r"{}");
-        assert_eq!(
-            sentinel.file_name().and_then(|s| s.to_str()),
-            Some(MCP_FIRST_SENTINEL),
-        );
-        assert_eq!(
-            sentinel
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str()),
-            Some(".standardoc"),
-        );
-    }
-}
+mod claude_pre_tool_hook_tests;
