@@ -193,14 +193,14 @@ fn syntax_for(path: &str) -> Syntax {
         "tsx" => Syntax::Typescript(TsSyntax {
             tsx: true,
             decorators: false,
-            dts: false,
+            dts: path.ends_with(".d.tsx"),
             no_early_errors: true,
             disallow_ambiguous_jsx_like: false,
         }),
         "ts" | "mts" | "cts" => Syntax::Typescript(TsSyntax {
             tsx: false,
             decorators: false,
-            dts: ext == "ts" && path.ends_with(".d.ts"),
+            dts: path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts"),
             no_early_errors: true,
             disallow_ambiguous_jsx_like: false,
         }),
