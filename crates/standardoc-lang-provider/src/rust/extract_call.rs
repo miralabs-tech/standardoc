@@ -68,6 +68,40 @@ fn strip_refs(ty: &str) -> &str {
     }
 }
 
+/// Effective receiver nominal for a method call, peeling deref-transparent
+/// smart pointers. `Arc` / `Rc` / `Box` forward `.method()` to their pointee
+/// via `Deref`, so the real receiver of `Arc<RwLock<T>>::read()` is the inner
+/// `RwLock`, not `Arc`. Peel those wrappers off the parametric type before
+/// taking the nominal — UNLESS the method is one of the pointers' own
+/// inherent methods (`clone` clones the pointer itself, `strong_count`, …),
+/// where the pointer IS the receiver. Conservative: only the three pure
+/// `Deref` wrappers are peeled; `Mutex` / `RwLock` / `RefCell` keep their
+/// nominal because `lock` / `read` / `borrow` genuinely are their methods.
+fn effective_receiver_nominal<'a>(parametric: &'a str, method: &str) -> &'a str {
+    const TRANSPARENT: [&str; 3] = ["Arc", "Rc", "Box"];
+    const POINTER_METHODS: [&str; 8] = [
+        "clone",
+        "downgrade",
+        "strong_count",
+        "weak_count",
+        "get_mut",
+        "into_inner",
+        "ptr_eq",
+        "as_ref",
+    ];
+    if POINTER_METHODS.contains(&method) {
+        return nominal_of(parametric);
+    }
+    let mut cur = parametric;
+    while TRANSPARENT.contains(&nominal_of(cur)) {
+        match generic_args(cur).into_iter().next() {
+            Some(inner) => cur = inner,
+            None => break,
+        }
+    }
+    nominal_of(cur)
+}
+
 /// Bug E-3 ext P-E3.2: extract the bound ident from a closure-input
 /// pattern. Returns `None` for tuple / struct / wildcard patterns —
 /// V0 only binds simple `|x|` / `|x: T|` / `|&x|` forms. Reference
@@ -869,7 +903,7 @@ impl<'ast> Visit<'ast> for CallVisitor<'_> {
         let receiver_parametric = self.type_of_expr(&node.receiver);
         let receiver_type = receiver_parametric
             .as_deref()
-            .map(|p| nominal_of(p).to_string());
+            .map(|p| effective_receiver_nominal(p, &method).to_string());
         let callee_text = format!("{}.{}", receiver_chain.join("."), method);
         self.emit_call_site(
             callee_text,

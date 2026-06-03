@@ -903,6 +903,45 @@ fn method_calls(edges: &[standardoc_ir::RawEdge]) -> Vec<&standardoc_ir::RawEdge
 }
 
 #[test]
+fn effective_receiver_nominal_peels_transparent_pointers() {
+    use super::effective_receiver_nominal as eff;
+    // Arc<RwLock<T>>.read() — Arc is deref-transparent, read is RwLock's.
+    assert_eq!(eff("Arc<RwLock<Foo>>", "read"), "RwLock");
+    // Arc<Foo>.bar() — peel to the pointee.
+    assert_eq!(eff("Arc<Foo>", "bar"), "Foo");
+    assert_eq!(eff("Box<Foo>", "bar"), "Foo");
+    assert_eq!(eff("Rc<Foo>", "bar"), "Foo");
+    // Nested transparent wrappers peel fully.
+    assert_eq!(eff("Arc<Box<Foo>>", "bar"), "Foo");
+    // clone() clones the pointer itself — keep Arc.
+    assert_eq!(eff("Arc<Foo>", "clone"), "Arc");
+    assert_eq!(eff("Arc<Foo>", "strong_count"), "Arc");
+    // Mutex/RwLock/RefCell are NOT peeled — lock/read/borrow are theirs.
+    assert_eq!(eff("RwLock<Foo>", "read"), "RwLock");
+    assert_eq!(eff("Mutex<Foo>", "lock"), "Mutex");
+    // Plain nominal passes through.
+    assert_eq!(eff("Foo", "bar"), "Foo");
+}
+
+#[test]
+fn arc_rwlock_method_receiver_unwraps_to_inner_lock() {
+    let parsed = parse("fn caller(x: Arc<RwLock<Foo>>) { x.read(); }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    assert_eq!(mc.len(), 1);
+    assert_eq!(mc[0].receiver_type.as_deref(), Some("RwLock"));
+}
+
+#[test]
+fn arc_clone_keeps_pointer_as_receiver_type() {
+    let parsed = parse("fn caller(x: Arc<Foo>) { x.clone(); }");
+    let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
+    let mc = method_calls(&edges);
+    assert_eq!(mc.len(), 1);
+    assert_eq!(mc[0].receiver_type.as_deref(), Some("Arc"));
+}
+
+#[test]
 fn method_on_self_attaches_self_type_as_receiver_type() {
     let parsed = parse("struct F; impl F { fn run(&self) { self.helper(); } fn helper(&self) {} }");
     let (_, edges, _, _) = walk(&parsed, "c", "src/lib.rs", "c");
