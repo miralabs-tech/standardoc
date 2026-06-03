@@ -120,3 +120,11 @@ fn substitute_template_leaves_unknown_tokens() {
         "Option<usize>"
     );
 }
+
+#[test]
+fn substitute_tokens_preserves_multibyte_chars() {
+    // The byte-walk must copy a non-identifier multi-byte char whole rather
+    // than split it into Latin-1 bytes.
+    assert_eq!(substitute_tokens("Zé<T>", &[("T", "i32")]), "Zé<i32>");
+    assert_eq!(substitute_tokens("a😀b", &[]), "a😀b");
+}

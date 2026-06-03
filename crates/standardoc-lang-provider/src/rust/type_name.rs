@@ -162,8 +162,13 @@ fn substitute_tokens(s: &str, bindings: &[(&str, &str)]) -> String {
                 out.push_str(token);
             }
         } else {
-            out.push(ch as char);
-            i += 1;
+            // Copy the whole UTF-8 char rather than the raw byte, so a
+            // multi-byte char survives instead of being split into Latin-1
+            // bytes. `i` always sits on a char boundary here (the identifier
+            // branch only steps over ASCII).
+            let c = s[i..].chars().next().unwrap_or('\u{FFFD}');
+            out.push(c);
+            i += c.len_utf8();
         }
     }
     out
