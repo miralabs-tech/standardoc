@@ -2,6 +2,11 @@
 
 [English](../en/FAQ.md) · 📖 Français &nbsp;|&nbsp; ← [README](README.md) · [Démarrage rapide](QUICKSTART.md) · [Roadmap](TODO-LIST.md)
 
+> **⚠️ Archivé (2026-09-17).** Standardoc est archivé sur **v1.0.0-beta.2** ;
+> le [README](README.md) explique pourquoi. Les réponses ci-dessous ont été
+> réécrites en conséquence : rien de « prévu », « post-1.0 » ou « à la 1.0 »
+> n'arrivera.
+
 ---
 
 ## Ça remplace mon LSP ?
@@ -38,26 +43,21 @@ nombre de langages — c'est la profondeur d'AST.
 
 ## Python / Go / Java / … c'est pour quand ?
 
-Pas comme providers core built-in. Post-1.0 ils passent par le **plug-in
-layer UST + Lua** : tree-sitter parse, un plug-in Lua sandboxé mappe symboles
-/ arêtes, le core Rust valide contre l'IR — un fichier `.lua` posé dans le
-workspace, pas une PR sur le core. Voir la [roadmap](TODO-LIST.md).
+Jamais. Le projet est archivé. Le **plug-in layer UST + Lua** prévu n'a
+jamais été commencé ; les six providers listés ci-dessus sont le jeu final.
 
 ## Ça marche avec un agent autre que Claude ?
 
-Oui — c'est un serveur MCP standard (Cursor, Continue, Copilot, Aider, Goose,
-Cody, Claude Desktop / Code, …). La calibration est réglée sur Claude Code
-(Opus) ; les autres agents marchent mais varient — certains shortcut vers
-grep quand la tâche se corse. Les hooks MCP-first imposent la discipline côté
-Claude Code ; câble l'équivalent ailleurs via `standardoc claude
-pre-tool-hook`.
+Côté protocole c'est un serveur MCP standard, donc n'importe quel client
+peut se connecter. Seul Claude Code a été testé — aucune fixture, aucun run
+CI pour Cursor, Continue, Copilot ou les autres. Les hooks MCP-first qu'il
+installait pour Claude Code ont bloqué plus de travail qu'ils n'en ont aidé
+et ne sont pas recommandés.
 
 ## Ça génère de la doc (façon TypeDoc) ?
 
-Pas encore. Standardoc est un indexeur sémantique aujourd'hui. Une couche de
-rendu (`@standardoc/core` + `@standardoc/react`, nourrie directement par le
-graphe) est prévue mais a **glissé après beta.3** — voir la
-[roadmap](TODO-LIST.md).
+Non, et ça ne le fera jamais. `@standardoc/core` / `@standardoc/react`
+n'ont jamais été commencés ; Standardoc est resté un indexeur sémantique.
 
 ## Mon code part quelque part ?
 
@@ -68,18 +68,14 @@ index continue de marcher.
 
 ## Ça tient sur les gros workspaces ?
 
-AST natif + SQLite + FTS5 + watcher incrémental — cold start en secondes sur
-un repo moyen (Standardoc s'indexe lui-même en quelques secondes). Les
-benchmarks de scale publiés (1M+ LOC ; cold start / delta watcher / latence
-query p99) arrivent à 1.0, tournent en CI — pas de « ça scale, faites-nous
-confiance ».
+Inconnu. Ça n'a tourné que sur ce dépôt et quelques petits projets de
+l'auteur. Les benchmarks 1M+ LOC n'ont jamais été construits, donc aucun
+claim de scale à faire.
 
 ## C'est payant ? Un SaaS ?
 
-Le core est et reste **gratuit, open-source, local**. Pas de SaaS, pas
-d'abonnement, pas de cloud. Si un tier payant apparaît un jour (ex. une UI
-doc locale), il serait local-only, à vie en achat unique, et seulement sur
-demande réelle. Le core reste FSL → MIT.
+Non. Le core est **gratuit, open-source, local**, et aucun tier payant n'a
+jamais existé. La licence reste FSL → MIT.
 
 ## Pourquoi FSL-1.1-MIT et pas MIT pur ?
 
@@ -93,15 +89,13 @@ Standardoc lui-même comme ton propre produit d'indexation.
 
 ## Je peux contribuer ?
 
-Avant le freeze 1.0 : **pas de PR tierces** (l'API doit d'abord se stabiliser
-proprement). Mais issues, feedback et idées sont très bienvenus via GitHub.
-Post-1.0 s'ouvre — le plug-in layer UST + Lua est fait pour absorber les
-langages / détecteurs communautaires sans toucher au core figé.
+Le dépôt est archivé (lecture seule). Forke-le sous les termes de la
+[FSL-1.1-MIT](../../LICENSE) si tu veux le reprendre.
 
 ## Bug ou problème de sécurité ?
 
-Bugs / features : [GitHub Issues](https://github.com/miralabs-tech/standardoc/issues).
-Sécurité : ne le poste pas publiquement — suis [SECURITY.md](SECURITY.md).
+Rien ne sera corrigé. Les signalements de sécurité sont encore lus — voir
+[SECURITY.md](SECURITY.md) — mais aucun correctif ne sortira.
 
 ---
 

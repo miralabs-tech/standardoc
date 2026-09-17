@@ -4,17 +4,30 @@ Per-release notes live alongside the published release tags — see the release
 page for any tagged version to find what shipped in that version. This file
 is intentionally minimal and only buffers in-flight work between releases.
 
-## [Unreleased]
+## [Unreleased] — 1.0.0-beta.3, never published (project archived 2026-09-17)
 
-## [1.0.0-beta.3]
+Standardoc is archived on **1.0.0-beta.2**, the last compiled release.
+Everything below sits in the source on `main` (last commit `b858a9e`) and
+was never tagged, never built by the release workflow, never published as a
+binary or a VSIX. It was dogfooded on this repository and a handful of the
+author's own projects, nowhere else. Build from source if you want it.
+
+Read the bullets as "what the source contains", not as a shipped feature
+list. The cross-workspace graph, the graph visualization, the C / FFI
+taggers and the multi-workspace proxy in particular ran on one machine and
+were never validated by anyone else. Measured state on 2026-09-16/17 (A/B in
+real tokens on this repo; `sqlite3` on `.standardoc/index.db`): no token
+gain over grep, under 40 % of `CALLS` edges resolved, unresolved callers
+returned silently as none. The README banner has the details.
 
 The planned axes were doc rendering + visual navigation + CLI autonomy. In
-practice, dogfood pulled the release toward **multi-workspace graphs,
+practice, dogfood pulled the work toward **multi-workspace graphs,
 interactive visualization, a native C provider, and a deep edge-resolution
-overhaul** — while the RAG layer and the session DB were cut entirely. (Doc
-rendering slips forward.)
+overhaul** — while the RAG layer and the session DB were cut entirely. Doc
+rendering was never started.
 
-- **Cross-workspace / multi-root graph**: symbols tagged by `workspace_id`
+- **Cross-workspace / multi-root graph** *(source only, dogfood on one
+  machine)*: symbols tagged by `workspace_id`
   (UNIQUE relaxed to `(workspace_id, fqdn)`); link / unlink / refresh peer
   workspaces with live add/remove + scoped watcher dispatch; AOT
   `ModuleLookup` persistence + cross-workspace import resolver; `projects`
@@ -28,17 +41,19 @@ rendering slips forward.)
   absorb `.stdignore`; loader with `ScanFilters` back-compat. LSP-side
   schema-aware live diagnostics + hovers; VSCode TextMate grammar +
   language-configuration; `list_groups` MCP endpoint; `sxd-preview` CLI.
-- **Interactive graph visualization** (`standardoc-graph-viz`): WASM crate +
+- **Interactive graph visualization** *(source only, never packaged)*
+  (`standardoc-graph-viz`): WASM crate +
   web-component shell (overview / focus-graph / explorer / symbol-details /
   search panels); real 3D overview (orbit camera, system topology, project
   clusters); bucketed focus layout; hide-tests / kind / visibility filters.
   Hosted in a VSCode webview ("Open Graph Viz") and a standalone playground,
   driven entirely through MCP.
-- **Native C provider + FFI**: `.c` / `.h` indexing with cross-file `.h`↔`.c`
+- **Native C provider + FFI** *(source only; the FFI taggers were never
+  validated outside this repo)*: `.c` / `.h` indexing with cross-file `.h`↔`.c`
   join, struct/union fields, CALLS edges; `extern "C"` / `bun:ffi` /
   `Deno.dlopen` / NAPI FFI taggers; CMake layout detection; Lua C-API export
   tagging.
-- **Multi-workspace proxy**: `standardoc-mcp-proxy` consolidated into
+- **Multi-workspace proxy** *(source only)*: `standardoc-mcp-proxy` consolidated into
   `standardoc proxy` — singleton with deterministic `/ws/<id>/mcp` routing,
   runtime register / list / unregister admin endpoints, supervisor
   auto-spawn, and a long-lived forwarder that survives daemon restarts.

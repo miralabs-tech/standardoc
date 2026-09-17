@@ -6,17 +6,18 @@
 
 ## Versions supportées
 
-Les mises à jour de sécurité ne sont actuellement fournies que pour la
-dernière release beta supportée.
+**Aucune.** Le projet a été archivé le 2026-09-17 sur `v1.0.0-beta.2`.
+Aucune mise à jour de sécurité ne sera publiée, pour aucune version, y
+compris la dernière.
 
 | Version | Supportée |
 | ------- | --------- |
-| 1.x beta | ✅ |
-| < 1.0.0 | ❌ |
+| 1.0.0-beta.2 (dernière release) | ❌ archivée |
+| antérieures | ❌ |
 
-Les versions plus anciennes peuvent contenir des vulnérabilités
-connues, des incompatibilités de protocole ou des dépendances
-obsolètes, et ne sont plus maintenues.
+Toutes les versions peuvent contenir des vulnérabilités connues, des
+incompatibilités de protocole ou des dépendances obsolètes. À utiliser à
+tes risques.
 
 ---
 
@@ -78,23 +79,15 @@ Inclus si possible :
 - une description de l'impact
 - une preuve de concept
 
-Évite de divulguer publiquement une vulnérabilité avant qu'un correctif
-soit disponible.
+Un signalement sera lu, mais aucun correctif ne sortira : le dépôt est
+archivé.
 
 ---
 
 ## Attentes en matière de sécurité
 
-Standardoc est actuellement en développement beta actif.
-
-Pendant la phase beta :
-
-- les APIs peuvent évoluer
-- les protocoles internes peuvent changer
-- la compatibilité extension / runtime peut exiger des versions
-  alignées
-
-Il est recommandé de garder l'extension et les binaires runtime à jour.
+Standardoc est archivé. Les derniers binaires et l'extension restent
+disponibles tels que publiés ; rien n'est maintenu.
 
 Utilise toujours les distributions officielles et vérifie l'intégrité
 des binaires avant exécution.

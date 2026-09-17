@@ -1,10 +1,19 @@
 # Standardoc — VSCode extension
 
+> **⚠️ Archived (2026-09-17).** This extension is archived. The published
+> version (**1.1.0**) pins core binary **v1.0.0-beta.2** and will not be
+> updated, fixed or republished. It keeps working as long as that GitHub
+> Release stays available. The source in this folder moved on after beta.2
+> (MCP proxy, graph viz, `.sxd` config) but was never published. The
+> [project README](https://github.com/miralabs-tech/standardoc#readme)
+> explains why: measured on the project's own repo, the MCP path did not save
+> tokens over grep and missed callers silently.
+
 > **Your AI agent re-reads your whole codebase on every task.** Standardoc
-> indexes it once into a living map of your code — so the agent just *asks*.
-> **~100 tokens per question instead of 30k.** Local, open-source.
+> indexed it once into a living map of your code — so the agent could just
+> *ask*. Local, open-source.
 >
-> This extension embeds the daemon, downloads the binary, and wires your
+> This extension supervises the daemon, downloads the binary, and wires your
 > agent up in one click.
 
 ## 🆕 v1.1.0 — breaking install change
@@ -72,7 +81,7 @@ When you opt in to initialization, the extension generates a skill file at `.cla
 
 The generated skill teaches the agent the **3-phase protocol** (`find_symbol` → `get_context` (depth=1) → `get_body` or depth=2) and pre-approves every shipped MCP tool so they run without per-call permission prompts: `find_symbol`, `find_symbols_by_pattern`, `find_similar_symbols`, `get_context`, `get_body`, `list_symbols`, `current_revision`, `check_stale`, `resolve_external`, plus the cross-workspace and projects surface.
 
-A `PreToolUse` hook denies `Bash` / `Read` / `Grep` / `Glob` until a Standardoc MCP tool has been called in the session — this is what the skill calls **MCP-first** and what unlocks the ~100-tokens-per-query payoff. A `SessionStart` hook wipes the sentinel each new chat.
+A `PreToolUse` hook denies `Bash` / `Read` / `Grep` / `Glob` until a Standardoc MCP tool has been called in the session — this is what the skill calls **MCP-first**. A `SessionStart` hook wipes the sentinel each new chat. In practice the hook keys its sentinel on the working directory rather than the conversation and blocks unrelated work; removing it from `.claude/settings.json` is recommended.
 
 ## MCP from external chat clients
 
@@ -117,9 +126,8 @@ Common config file locations: Claude Desktop → `claude_desktop_config.json`; C
 
 ## Support
 
-- **Issues** — [github.com/miralabs-tech/standardoc/issues](https://github.com/miralabs-tech/standardoc/issues) for bugs, regressions, feature requests.
-  Standardoc is maintained by a single person; before 1.0, third-party PRs are held back, but feedback and ideas are very welcome.
-- **Roadmap & what's shipped** — [TODO-LIST.md](https://github.com/miralabs-tech/standardoc/blob/main/.important/en/TODO-LIST.md).
+- **The repository is archived.** No bug, regression or feature request will be handled; the extension stays as published.
+- **What was planned and what landed** — [TODO-LIST.md](https://github.com/miralabs-tech/standardoc/blob/main/.important/en/TODO-LIST.md) (historical).
 - **Sponsor** — [StandarX on OpenCollective](https://opencollective.com/standarx).
 
 ## Local development (dogfood)

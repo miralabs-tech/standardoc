@@ -2,6 +2,13 @@
 
 ← [README](README.md) · [Roadmap](TODO-LIST.md)
 
+> **⚠️ Archivé (2026-09-17).** Standardoc est archivé sur **v1.0.0-beta.2** ;
+> le [README](README.md) explique pourquoi. Cette page décrit le source
+> `main` (beta.3, jamais publiée). Le binaire et l'extension beta.2 publiés
+> n'ont **ni** `standardoc init`, `mcp --connect`, `self-update`,
+> `sxd-preview`, **ni** `standardoc.sxd` — beta.2 utilise `.stdignore` et le
+> flow d'init de l'extension. Rien ici ne sera mis à jour.
+
 De zéro à un workspace indexé que ton agent peut requêter — ~5 minutes.
 
 ---
@@ -22,7 +29,7 @@ Ouvre un projet. Standardoc demande :
 
 Clique **Initialize**. Il écrit, de façon idempotente :
 
-- **`.mcp.json`** — enregistre Standardoc comme serveur MCP (HTTP, `127.0.0.1:7700`) pour que ton agent l'atteigne.
+- **`.mcp.json`** — enregistre Standardoc comme serveur MCP (HTTP sur `127.0.0.1`, l'URL que le daemon annonce) pour que ton agent l'atteigne.
 - **`.claude/skills/standardoc/SKILL.md`** — enseigne le graphe à l'agent (MCP-first, le flow `find → context → body`).
 - **`.claude/settings.json`** — les hooks MCP-first (voir §4).
 
@@ -56,14 +63,15 @@ project "api" {
   label "API"
   paths ["crates/api" "crates/shared"]
 }
-
-mcp { port 7700 }   # port du daemon MCP  (défaut 7700)
-viz { port 3000 }   # port du graph-viz   (défaut 3000)
 ````
 
 Édite-le librement ; le ré-index prend les changements. Blocs : `ignore`,
 `project` / `group`, `mcp`, `viz`. Sans bloc `project`, Standardoc
-auto-détecte les projets cargo / npm / lua comme avant.
+auto-détecte les projets cargo / npm / lua comme avant. N'écris pas de
+`mcp { port … }` sauf besoin d'un port fixe : le port du daemon MCP doit
+différer du port du proxy de l'extension (`standardoc.proxyPort`, défaut
+`7700`), et une version précédente de cette page te disait de les mettre
+égaux.
 
 ## 4. Utiliser
 
@@ -72,11 +80,15 @@ Pose des questions normales à ton agent :
 > *« Où est `parse_workspace` défini ? Qui l'appelle ? »*
 
 Il lit la skill au boot et passe MCP-first — `find_symbol` + `get_context`
-au lieu de grep. **~100 tokens, pas 30k.** Claude Code, Cursor, Continue,
-Copilot, n'importe quel client MCP.
+au lieu de grep. Testé avec Claude Code uniquement ; les autres clients MCP
+n'ont jamais été exercés. Mesuré sur ce repo, le chemin MCP n'a pas
+économisé de tokens face à grep (bandeau du README).
 
 Pour **Claude Code**, l'init installe aussi quatre hooks
-`.claude/settings.json` qui *l'imposent* :
+`.claude/settings.json` qui *l'imposent*. Ils gênent plus qu'ils n'aident —
+le hook deny cale son sentinel sur le dossier courant, pas sur la
+conversation, et bloque du travail sans rapport — donc envisage de t'en
+passer :
 
 - **UserPromptSubmit** — rappel d'une ligne des tools MCP.
 - **PreToolUse** *(mark)* — se déclenche sur tout appel `mcp__standardoc__*` ; marque la session.

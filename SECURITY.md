@@ -4,14 +4,16 @@
 
 ## Supported Versions
 
-Security updates are currently provided only for the latest supported beta release.
+**None.** The project was archived on 2026-09-17 on `v1.0.0-beta.2`. No
+security update will be published for any version, including the last one.
 
 | Version | Supported |
 | ------- | --------- |
-| 1.x beta | ✅ |
-| < 1.0.0 | ❌ |
+| 1.0.0-beta.2 (last release) | ❌ archived |
+| earlier | ❌ |
 
-Older versions may contain known vulnerabilities, protocol incompatibilities, or outdated dependencies and are no longer maintained.
+Every version may contain known vulnerabilities, protocol incompatibilities,
+or outdated dependencies. Run it at your own risk.
 
 ---
 
@@ -70,20 +72,13 @@ Please include when possible:
 - impact description
 - proof-of-concept
 
-Please avoid publicly disclosing vulnerabilities before a fix is available.
+A report will be read, but no fix will ship: the repository is archived.
 
 ---
 
 ## Security Expectations
 
-Standardoc is currently under active beta development.
-
-During beta development:
-
-- APIs may evolve
-- internal protocols may change
-- extension/runtime compatibility may require matching versions
-
-Users are encouraged to keep both the extension and runtime binaries up to date.
+Standardoc is archived. The last binaries and the extension stay available
+as they were published; nothing is maintained.
 
 Always use official distributions and verify binary integrity before execution.

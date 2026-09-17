@@ -2,6 +2,10 @@
 
 📖 English · [Français](../fr/FAQ.md) &nbsp;|&nbsp; ← [README](../../README.md) · [Quickstart](QUICKSTART.md) · [Roadmap](TODO-LIST.md)
 
+> **⚠️ Archived (2026-09-17).** Standardoc is archived on **v1.0.0-beta.2**;
+> the [README](../../README.md) says why. Answers below were rewritten to
+> match that: nothing "planned", "post-1.0" or "at 1.0" will happen.
+
 ---
 
 ## Does it replace my LSP?
@@ -36,24 +40,20 @@ it's AST depth.
 
 ## When will Python / Go / Java / … land?
 
-Not as built-in core providers. Post-1.0 they come through the **UST + Lua
-plug-in layer**: tree-sitter parses, a sandboxed Lua plug-in maps symbols /
-edges, the Rust core validates against the IR — a `.lua` file dropped in the
-workspace, not a core PR. See the [roadmap](TODO-LIST.md).
+Never. The project is archived. The planned **UST + Lua plug-in layer** was
+never started; the six providers listed above are the final set.
 
 ## Does it work with agents other than Claude?
 
-Yes — it's a standard MCP server (Cursor, Continue, Copilot, Aider, Goose,
-Cody, Claude Desktop / Code, …). Calibration is tuned on Claude Code (Opus);
-other agents work but vary — some shortcut to grep when a task gets hard. The
-MCP-first hooks enforce the discipline on Claude Code; wire the equivalent
-elsewhere via `standardoc claude pre-tool-hook`.
+Protocol-wise it's a standard MCP server, so any client can connect. Only
+Claude Code was ever tested — no fixture, no CI run for Cursor, Continue,
+Copilot or the others. The MCP-first hooks it installed for Claude Code
+blocked more work than they helped and are not recommended.
 
 ## Does it render docs (TypeDoc-style)?
 
-Not yet. Standardoc is a semantic indexer today. A rendering layer
-(`@standardoc/core` + `@standardoc/react`, fed straight from the graph) is
-planned but **slipped past beta.3** — see the [roadmap](TODO-LIST.md).
+No, and it never will. `@standardoc/core` / `@standardoc/react` were never
+started; Standardoc stayed a semantic indexer.
 
 ## Is my code sent anywhere?
 
@@ -63,17 +63,14 @@ opt-in. If Standardoc vanished tomorrow, your index keeps working.
 
 ## How does it scale?
 
-Native AST + SQLite + FTS5 + incremental watcher — cold start in seconds on a
-medium repo (Standardoc indexes itself in a few). Published scale benchmarks
-(1M+ LOC; cold start / watcher delta / query p99) land at 1.0, run in CI — no
-"it scales, trust us".
+Unknown. It was only ever run on this repository and a few small projects of
+the author. The 1M+ LOC benchmarks were never built, so there is no scale
+claim to make.
 
 ## Is it paid? A SaaS?
 
-The core is and stays **free, open-source, local**. No SaaS, no subscription,
-no cloud. If a paid tier ever appears (e.g. a local doc UI), it'd be
-local-only, lifetime one-time, and only on real demand. The core stays
-FSL → MIT.
+No. The core is **free, open-source, local**, and no paid tier ever existed.
+The license stays FSL → MIT.
 
 ## Why FSL-1.1-MIT, not plain MIT?
 
@@ -86,15 +83,13 @@ can't resell Standardoc itself as your own indexing product.
 
 ## Can I contribute?
 
-Before the 1.0 freeze: **no third-party PRs** (the API has to stabilize
-cleanly first). But issues, feedback, and ideas are very welcome via GitHub.
-Post-1.0 opens up — the UST + Lua plug-in layer is built to absorb community
-languages / detectors without touching the frozen core.
+The repository is archived (read-only). Fork it under the
+[FSL-1.1-MIT](../../LICENSE) terms if you want to carry it on.
 
 ## Bug or security issue?
 
-Bugs / features: [GitHub Issues](https://github.com/miralabs-tech/standardoc/issues).
-Security: don't post it publicly — follow [SECURITY.md](../../SECURITY.md).
+Nothing will be fixed. Security reports are still read — see
+[SECURITY.md](../../SECURITY.md) — but no patch will ship.
 
 ---
 

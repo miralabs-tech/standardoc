@@ -2,10 +2,18 @@
 
 [English](../en/TODO-LIST.md) · 📖 Français
 
-Source de vérité de ce qui est planifié, de ce qui est en cours de
-livraison, et de ce qui est délibérément reporté.
+> **⚠️ Archivé (2026-09-17).** Plus rien dans ce fichier n'est planifié.
+> Standardoc est archivé sur **v1.0.0-beta.2** ; chaque case `[ ]` ci-dessous
+> reste vide pour de bon et chaque idée « post-1.0 » est abandonnée
+> (`@standardoc/react`, providers UST + Lua, injection PATH, scripts de
+> bootstrap, sélecteur de version, stabilisation 1.0). Le fichier est gardé
+> comme trace de ce qui était voulu et de ce qui a réellement atterri — le
+> [README](README.md) explique pourquoi le projet s'arrête.
+
+C'était la source de vérité de ce qui était planifié, en cours de
+livraison, ou délibérément reporté.
 [`CHANGELOG.md`](../../CHANGELOG.md) trace ce qui a effectivement
-shippé par release ; ce fichier-ci trace l'intention.
+shippé par release ; ce fichier-ci traçait l'intention.
 
 Convention des cases : `[x]` shippé · `[ ]` planifié · `~~barré~~`
 abandonné ou reporté vers un milestone ultérieur.
@@ -341,10 +349,11 @@ rendering + navigation visuelle + autonomie CLI ; en pratique le dogfood a
 tiré beta.3 vers **les graphes multi-workspace / multi-root, la
 visualisation interactive, un provider C natif, un proxy multi-workspace, et
 une refonte profonde de la résolution d'edges** — pendant que RAG et la
-session DB étaient coupés. **Navigation visuelle et autonomie CLI ont
-shippé ; le doc rendering a glissé** vers une beta ultérieure. La surface
-complète shippée vit dans [`CHANGELOG.md`](../../CHANGELOG.md) ; les axes
-planifiés ci-dessous sont annotés avec ce qui a atterri.
+session DB étaient coupés. **Navigation visuelle et autonomie CLI n'ont
+atterri que dans le source ; le doc rendering n'a jamais été commencé.**
+beta.3 n'a jamais été taguée ni publiée — le source est sur `main`, décrit
+dans [`CHANGELOG.md`](../../CHANGELOG.md) ; les axes planifiés ci-dessous
+sont annotés avec ce qui y a atterri.
 
 ### Couche de documentation rendering — ~~glissée après beta.3~~
 
@@ -375,19 +384,20 @@ code source → parser @doc → doc graph (SQLite) → query API framework-agnos
 - [ ] `@standardoc/vue` — mêmes composants pour Vue / VitePress / Nuxt
 - [ ] `@standardoc/svelte` — pour SvelteKit, Svelte plain
 
-### Navigation visuelle — ✅ shippée (`standardoc-graph-viz`)
+### Navigation visuelle — dans le source sur `main`, jamais publiée (`standardoc-graph-viz`)
 
 Surface le graphe comme un artefact visuel interactif pour le mainteneur
-qui review/audite son propre code. Shippée comme le crate WASM
-`standardoc-graph-viz` + shell en web-components, hébergée dans une webview
-VSCode et un playground standalone, pilotée via MCP.
+qui review/audite son propre code. Atterrie dans le source comme le crate
+WASM `standardoc-graph-viz` + shell en web-components, hébergée dans une
+webview VSCode et un playground standalone, pilotée via MCP. Dogfoodée sur
+une seule machine ; jamais packagée dans un VSIX publié.
 
 - [x] Shell graphe : overview (topologie 3D + clusters projet) / focus-graph / explorer / symbol-details / search
 - [x] Click-to-navigate (drill dans les voisins, breadcrumb retour)
 - [x] Vue compacte des enrichissements (signatures / champs / relations sans ouvrir de fichiers)
 - [x] Filter chips `kind` / `visibility` / langue + hide-tests
 
-### Self-management du CLI (`standardoc` sans VSCode) — ✅ en partie shippé
+### Self-management du CLI (`standardoc` sans VSCode) — en partie dans le source sur `main`, jamais publié
 
 - [x] `standardoc init` (skill agent + hooks MCP-first + `AGENTS.md` + `.mcp.json`) + `standardoc mcp --connect` (pont stdio↔http) — wiring agent hors-VSCode first-class
 - [x] Sub-commande `standardoc self-update` : lit `version.json` depuis les GitHub Releases, détecte la plateforme, télécharge + SHA256-vérifie le binaire correspondant, remplace l'exécutable courant (rename-on-replace Windows-aware)

@@ -2,9 +2,17 @@
 
 📖 English · [Français](../fr/TODO-LIST.md)
 
-Source of truth for what's planned, what's shipping, and what's deliberately
-deferred. [`CHANGELOG.md`](../../CHANGELOG.md) tracks what actually shipped per
-release; this file tracks intent.
+> **⚠️ Archived (2026-09-17).** Nothing in this file is planned any more.
+> Standardoc is archived on **v1.0.0-beta.2**; every `[ ]` box below stays
+> unchecked for good and every "post-1.0" idea is dropped (`@standardoc/react`,
+> UST + Lua providers, PATH injection, bootstrap scripts, version selector,
+> 1.0 stabilization). The file is kept as a record of what was intended and
+> what actually landed — the [README](../../README.md) says why the project
+> stopped.
+
+This was the source of truth for what was planned, shipping, or deliberately
+deferred. [`CHANGELOG.md`](../../CHANGELOG.md) tracks what actually shipped
+per release; this file tracked intent.
 
 Box convention: `[x]` shipped · `[ ]` planned · `~~struck~~` killed or
 deferred to a later milestone.
@@ -323,7 +331,7 @@ crates or npm packages — those land in beta.3.
 
 ## v1.0.0-beta.3 — Multi-workspace graphs · visual navigation · C provider
 
-**Theme**: pluralize graph consumers. The *plan* was doc rendering + visual navigation + CLI autonomy; in practice dogfood pulled beta.3 toward **multi-workspace / multi-root graphs, interactive visualization, a native C provider, a multi-workspace proxy, and a deep edge-resolution overhaul** — while RAG and the session DB were cut. **Visual navigation and CLI autonomy shipped; doc rendering slipped** to a later beta. The full shipped surface lives in [`CHANGELOG.md`](../../CHANGELOG.md); the planned axes below are annotated with what landed.
+**Theme**: pluralize graph consumers. The *plan* was doc rendering + visual navigation + CLI autonomy; in practice dogfood pulled beta.3 toward **multi-workspace / multi-root graphs, interactive visualization, a native C provider, a multi-workspace proxy, and a deep edge-resolution overhaul** — while RAG and the session DB were cut. **Visual navigation and CLI autonomy landed in the source only; doc rendering was never started.** beta.3 was never tagged or published — the source sits on `main`, described in [`CHANGELOG.md`](../../CHANGELOG.md); the planned axes below are annotated with what landed there.
 
 ### Documentation rendering layer — ~~slipped past beta.3~~
 
@@ -351,16 +359,16 @@ source code → @doc parser → doc graph (SQLite) → framework-agnostic query 
 - [ ] `@standardoc/vue` — same components for Vue / VitePress / Nuxt
 - [ ] `@standardoc/svelte` — for SvelteKit, plain Svelte
 
-### Visual navigation — ✅ shipped (`standardoc-graph-viz`)
+### Visual navigation — in source on `main`, never published (`standardoc-graph-viz`)
 
-Surface the graph as an interactive visual artifact for the maintainer who reviews/audits their own code. Shipped as the `standardoc-graph-viz` WASM crate + web-component shell, hosted in a VSCode webview and a standalone playground, driven through MCP.
+Surface the graph as an interactive visual artifact for the maintainer who reviews/audits their own code. Landed in the source as the `standardoc-graph-viz` WASM crate + web-component shell, hosted in a VSCode webview and a standalone playground, driven through MCP. Dogfooded on one machine; never packaged in a published VSIX.
 
 - [x] Graph shell: overview (3D topology + project clusters) / focus-graph / explorer / symbol-details / search panels
 - [x] Click-to-navigate (drill into neighbors, breadcrumb back)
 - [x] Compact enrichment view (signatures / fields / relations without opening files)
 - [x] Filter chips for `kind` / `visibility` / language + hide-tests
 
-### CLI self-management (`standardoc` without VSCode) — ✅ partly shipped
+### CLI self-management (`standardoc` without VSCode) — partly in source on `main`, never published
 
 - [x] `standardoc init` (agent skill + MCP-first hooks + `AGENTS.md` + `.mcp.json`) + `standardoc mcp --connect` stdio↔http bridge — first-class non-VSCode agent wiring
 - [x] `standardoc self-update` sub-command: reads `version.json` from GitHub Releases, detects platform, downloads + SHA256-verifies the matching binary, replaces the current executable (Windows-aware rename-on-replace)
